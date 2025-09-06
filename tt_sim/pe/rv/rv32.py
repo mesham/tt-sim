@@ -2,7 +2,7 @@ from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.register.register import Register
 from tt_sim.pe.register.register_file import RegisterFile
 from tt_sim.pe.rv.isa.i_isa import RV_I_ISA
-from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 REGISTER_NAME_MAPPING = {
     "x0": 0,
@@ -71,6 +71,7 @@ REGISTER_NAME_MAPPING = {
     "t6": 31,
     "fp": 8,
     "pc": 32,
+    "nextpc": 33,
 }
 
 
@@ -86,7 +87,7 @@ class RV32I(ProcessingElement):
 
         # 32 registers plus the PC
         registers = []
-        for i in range(33):
+        for i in range(34):
             registers.append(Register(4))
 
         self.register_file = RegisterFile(registers, REGISTER_NAME_MAPPING)
@@ -95,6 +96,11 @@ class RV32I(ProcessingElement):
     def clock_tick(self):
         if not self.active:
             return
+
+        pc = self.register_file["pc"]
+        nextpc = self.register_file["nextpc"]
+        pc_val = conv_to_uint32(pc.read())
+        nextpc.write(conv_to_bytes(pc_val + 4, signed=False))
 
         actioned = False
         for isa in self.isas:
@@ -107,9 +113,7 @@ class RV32I(ProcessingElement):
             if self.unknown_instr_is_error:
                 raise Exception("Unknown instruction")
 
-        pc = self.register_file["pc"]
-        pc_val = conv_to_int32(pc.read())
-        pc.write(conv_to_bytes(pc_val + 4))
+        pc.write(nextpc.read())
 
     def reset(self):
         self.stop()
