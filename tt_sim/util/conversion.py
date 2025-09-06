@@ -4,7 +4,7 @@ def conv_to_bytes(val, signed=False):
     elif isinstance(val, list):
         byte_data = bytearray()
         for el in val:
-            byte_data.extend(conv_to_bytes(el))
+            byte_data.extend(conv_to_bytes(el, signed=signed))
         return bytes(byte_data)
     else:
         print(type(val))
