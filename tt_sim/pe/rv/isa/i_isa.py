@@ -67,13 +67,13 @@ class RV_I_ISA(RV_ISA):
     @classmethod
     def handle_j_jal(cls, instr, register_file, device_memory):
         rd = RV_ISA.get_int(instr, 7, 11)
-        if rd == 0:
-            # As per standard, if rd omitted then rd=x1
-            rd = 1
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
-        # Address of the next instruction
-        register_file[rd].write(conv_to_bytes(pc_val + 4))
+        if rd > 0:
+            # If provided register is x0 then don't store
+            register_file[rd].write(
+                conv_to_bytes(pc_val + 4)
+            )  # Address of the next instruction
 
         offset = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "J")
         new_pc_val = pc_val + offset
@@ -84,13 +84,13 @@ class RV_I_ISA(RV_ISA):
     @classmethod
     def handle_i_jalr(cls, instr, register_file, device_memory):
         rd = RV_ISA.get_int(instr, 7, 11)
-        if rd == 0:
-            # As per standard, if rd omitted then rd=x1
-            rd = 1
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
-        # Address of the next instruction
-        register_file[rd].write(conv_to_bytes(pc_val + 4))
+        if rd > 0:
+            # If provided register is x0 then don't store
+            register_file[rd].write(
+                conv_to_bytes(pc_val + 4)
+            )  # Address of the next instruction
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
         rs1_val = conv_to_uint32(register_file[rs1].read())
@@ -156,21 +156,25 @@ class RV_I_ISA(RV_ISA):
         if type_val == 0x0:
             # lb
             byte_val = device_memory.read(tgt_mem_address, 1)
-            result = RV_I_ISA.sign_extend(byte_val, 8)
+            result = conv_to_bytes(
+                RV_I_ISA.sign_extend(conv_to_int32(byte_val), 8), signed=True
+            )
         elif type_val == 0x4:
             # lu
             byte_val = device_memory.read(tgt_mem_address, 1)
-            result = RV_I_ISA.zero_extend(byte_val, 8)
+            result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 8))
         elif type_val == 0x1:
             # lh
             byte_val = device_memory.read(tgt_mem_address, 2)
-            result = RV_I_ISA.sign_extend(byte_val, 16)
+            result = conv_to_bytes(
+                RV_I_ISA.sign_extend(conv_to_int32(byte_val), 16), signed=True
+            )
         elif type_val == 0x5:
             # lhu
             byte_val = device_memory.read(tgt_mem_address, 2)
-            result = RV_I_ISA.zero_extend(byte_val, 16)
+            result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 16))
         elif type_val == 0x2:
-            # lh
+            # lw
             result = device_memory.read(tgt_mem_address, 4)
         else:
             write_result = False
@@ -220,7 +224,7 @@ class RV_I_ISA(RV_ISA):
             or type_val == 0x7
         ):
             immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "I")
-
+            immediate_unsigned = immediate + (1 << 32)
             if type_val == 0x0:
                 # addi
                 result = rs1_val + immediate
@@ -232,13 +236,13 @@ class RV_I_ISA(RV_ISA):
                 result = 1 if rs1_val < immediate else 0
             elif type_val == 0x4:
                 # xori
-                result = rs1_val ^ immediate
+                result = rs1_val ^ immediate_unsigned
             elif type_val == 0x6:
                 # ori
-                result = rs1_val | immediate
+                result = rs1_val | immediate_unsigned
             elif type_val == 0x7:
                 # andi
-                result = rs1_val & immediate
+                result = rs1_val & immediate_unsigned
             else:
                 write_result = False
         elif type_val == 0x1 or type_val == 0x5:
