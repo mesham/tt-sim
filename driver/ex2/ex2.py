@@ -4,7 +4,7 @@ from tt_sim.device.device_memory import DeviceMemory
 from tt_sim.device.memory_map import AddressRange, MemoryMap
 from tt_sim.memory.memory import DRAM
 from tt_sim.pe.rv.rv32 import RV32I
-from tt_sim.util.conversion import conv_to_int32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
 
 # Read in binary executable (sets 10 to location 0x512)
 with open("main.bin", "rb") as file:
@@ -24,6 +24,9 @@ dm.write(0x0, data)
 
 # Create CPU
 cpu = RV32I(dm, 0x0)
+# GCC assumed sp is initalised by the preamble, we don't have that here
+# so therefore set it ourselves
+cpu.getRegisterFile()["sp"].write(conv_to_bytes(0x256))
 
 # Create a clock
 clock = Clock([cpu])
