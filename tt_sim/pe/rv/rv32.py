@@ -1,0 +1,134 @@
+from tt_sim.pe.pe import ProcessingElement
+from tt_sim.pe.register.register import Register
+from tt_sim.pe.register.register_file import RegisterFile
+from tt_sim.pe.rv.isa.i_isa import RV_I_ISA
+from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
+
+REGISTER_NAME_MAPPING = {
+    "x0": 0,
+    "x1": 1,
+    "x2": 2,
+    "x3": 3,
+    "x4": 4,
+    "x5": 5,
+    "x6": 6,
+    "x7": 7,
+    "x8": 8,
+    "x9": 9,
+    "x10": 10,
+    "x11": 11,
+    "x12": 12,
+    "x13": 13,
+    "x14": 14,
+    "x15": 15,
+    "x16": 16,
+    "x17": 17,
+    "x18": 18,
+    "x19": 19,
+    "x20": 20,
+    "x21": 21,
+    "x22": 22,
+    "x23": 23,
+    "x24": 24,
+    "x25": 25,
+    "x26": 26,
+    "x27": 27,
+    "x28": 28,
+    "x29": 29,
+    "x30": 30,
+    "x31": 31,
+    "zero": 0,
+    "ra": 1,
+    "sp": 2,
+    "gp": 3,
+    "tp": 4,
+    "t0": 5,
+    "t1": 6,
+    "t2": 7,
+    "s0": 8,
+    "s1": 9,
+    "a0": 10,
+    "a1": 11,
+    "a2": 12,
+    "a3": 13,
+    "a4": 14,
+    "a5": 15,
+    "a6": 16,
+    "a7": 17,
+    "s2": 18,
+    "s3": 19,
+    "s4": 20,
+    "s5": 21,
+    "s6": 22,
+    "s7": 23,
+    "s8": 24,
+    "s9": 25,
+    "s10": 26,
+    "s11": 27,
+    "t3": 28,
+    "t4": 29,
+    "t5": 30,
+    "t6": 31,
+    "fp": 8,
+    "pc": 32,
+}
+
+
+class RV32I(ProcessingElement):
+    def __init__(
+        self, device_memory, start_address, extensions=[], unknown_instr_is_error=False
+    ):
+        self.isas = [RV_I_ISA] + extensions
+        self.device_memory = device_memory
+        self.start_address = start_address
+        self.active = False
+        self.unknown_instructions = 0
+
+        # 32 registers plus the PC
+        registers = []
+        for i in range(33):
+            registers.append(Register(4))
+
+        self.register_file = RegisterFile(registers, REGISTER_NAME_MAPPING)
+        self.unknown_instr_is_error = unknown_instr_is_error
+
+    def clock_tick(self):
+        if not self.active:
+            return
+
+        actioned = False
+        for isa in self.isas:
+            actioned = isa.run(self.register_file, self.device_memory)
+            if actioned:
+                break
+
+        if not actioned:
+            self.unknown_instructions += 1
+            if self.unknown_instr_is_error:
+                raise Exception("Unknown instruction")
+
+        pc = self.register_file["pc"]
+        pc_val = conv_to_int32(pc.read())
+        pc.write(conv_to_bytes(pc_val + 4))
+
+    def reset(self):
+        self.stop()
+        self.start()
+
+    def start(self):
+        pc = self.register_file["pc"]
+        pc.write(conv_to_bytes(self.start_address))
+
+        sp = self.register_file["sp"]
+        sp.write(conv_to_bytes(0x256))
+
+        self.unknown_instructions = 0
+
+        self.active = True
+
+    def stop(self):
+        self.active = False
+
+
+# class RV32IM(RV32):
+#  def __init__(self):
