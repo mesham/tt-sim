@@ -1,4 +1,4 @@
-def conv_to_bytes(val, signed=True):
+def conv_to_bytes(val, signed=False):
     if isinstance(val, int):
         return val.to_bytes(4, byteorder="little", signed=signed)
     elif isinstance(val, list):

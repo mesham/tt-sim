@@ -100,7 +100,7 @@ class RV32I(ProcessingElement):
         pc = self.register_file["pc"]
         nextpc = self.register_file["nextpc"]
         pc_val = conv_to_uint32(pc.read())
-        nextpc.write(conv_to_bytes(pc_val + 4, signed=False))
+        nextpc.write(conv_to_bytes(pc_val + 4))
 
         actioned = False
         for isa in self.isas:

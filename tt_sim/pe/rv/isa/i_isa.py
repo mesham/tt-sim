@@ -54,7 +54,7 @@ class RV_I_ISA(RV_ISA):
     def handle_u_lui(cls, instr, register_file, device_memory):
         rd = RV_ISA.get_int(instr, 7, 11)
         immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "U")
-        register_file[rd].write(conv_to_bytes(immediate, signed=False))
+        register_file[rd].write(conv_to_bytes(immediate))
 
     @classmethod
     def handle_u_auipc(cls, instr, register_file, device_memory):
@@ -62,7 +62,7 @@ class RV_I_ISA(RV_ISA):
         immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "U")
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
-        register_file[rd].write(conv_to_bytes(immediate + pc_val, signed=False))
+        register_file[rd].write(conv_to_bytes(immediate + pc_val))
 
     @classmethod
     def handle_j_jal(cls, instr, register_file, device_memory):
@@ -76,7 +76,7 @@ class RV_I_ISA(RV_ISA):
         new_pc_val = pc_val + offset
 
         nextpc = register_file["nextpc"]
-        nextpc.write(conv_to_bytes(new_pc_val, signed=False))
+        nextpc.write(conv_to_bytes(new_pc_val))
 
     @classmethod
     def handle_i_jalr(cls, instr, register_file, device_memory):
@@ -84,7 +84,7 @@ class RV_I_ISA(RV_ISA):
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
         # Address of the next instruction
-        register_file[rd].write(conv_to_bytes(pc_val + 4, signed=False))
+        register_file[rd].write(conv_to_bytes(pc_val + 4))
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
         rs1_val = conv_to_uint32(register_file[rs1].read())
@@ -93,7 +93,7 @@ class RV_I_ISA(RV_ISA):
         new_pc_val = (rs1_val + offset) & ~1
 
         nextpc = register_file["nextpc"]
-        nextpc.write(conv_to_bytes(new_pc_val, signed=False))
+        nextpc.write(conv_to_bytes(new_pc_val))
 
     @classmethod
     def handle_b_branch(cls, instr, register_file, device_memory):
@@ -115,25 +115,25 @@ class RV_I_ISA(RV_ISA):
         if type_val == 0x0:
             # beq
             if rs1_val == rs2_val:
-                nextpc.write(conv_to_bytes(new_pc_val, signed=False))
+                nextpc.write(conv_to_bytes(new_pc_val))
         elif type_val == 0x1:
             # bne
             if rs1_val != rs2_val:
-                nextpc.write(conv_to_bytes(new_pc_val, signed=False))
+                nextpc.write(conv_to_bytes(new_pc_val))
         elif type_val == 0x4 or type_val == 0x6:
             # blt or blu
             if type_val == 0x6:
                 rs1_val = conv_to_int32(register_file[rs1].read())
                 rs2_val = conv_to_int32(register_file[rs2].read())
             if rs1_val < rs2_val:
-                nextpc.write(conv_to_bytes(new_pc_val, signed=False))
+                nextpc.write(conv_to_bytes(new_pc_val))
         elif type_val == 0x5 or type_val == 0x7:
             # bge or bgeu
             if type_val == 0x7:
                 rs1_val = conv_to_int32(register_file[rs1].read())
                 rs2_val = conv_to_int32(register_file[rs2].read())
             if rs1_val >= rs2_val:
-                nextpc.write(conv_to_bytes(new_pc_val, signed=False))
+                nextpc.write(conv_to_bytes(new_pc_val))
 
     @classmethod
     def handle_i_load(cls, instr, register_file, device_memory):
@@ -187,14 +187,10 @@ class RV_I_ISA(RV_ISA):
 
         if type_val == 0x0:
             # sb
-            device_memory.write(
-                tgt_mem_address, conv_to_bytes(rs2_val[0], signed=False)
-            )
+            device_memory.write(tgt_mem_address, conv_to_bytes(rs2_val[0]))
         elif type_val == 0x1:
             # sh
-            device_memory.write(
-                tgt_mem_address, conv_to_bytes(rs2_val[0:1], signed=False)
-            )
+            device_memory.write(tgt_mem_address, conv_to_bytes(rs2_val[0:1]))
         elif type_val == 0x2:
             # sw
             device_memory.write(tgt_mem_address, rs2_val)
