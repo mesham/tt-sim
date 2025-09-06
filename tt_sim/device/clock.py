@@ -2,10 +2,6 @@ class Clock:
     def __init__(self, clockables):
         self.clock_items = clockables
 
-    def reset(self):
-        for item in self.clock_items:
-            item.reset()
-
     def clock_tick(self):
         for item in self.clock_items:
             item.clock_tick()

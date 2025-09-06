@@ -1,9 +1,10 @@
 from abc import ABC, abstractmethod
 
 from tt_sim.device.clockable import Clockable
+from tt_sim.device.resetable import Resetable
 
 
-class ProcessingElement(Clockable, ABC):
+class ProcessingElement(Clockable, Resetable, ABC):
     @abstractmethod
     def start(self):
         raise NotImplementedError()

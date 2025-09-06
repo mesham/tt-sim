@@ -1,0 +1,11 @@
+class Device:
+    def __init__(self, device_memory, clocks, resets):
+        self.device_memory = device_memory
+        self.clocks = clocks
+        self.resets = resets
+
+    def run(self, num_iterations, clock_number=0):
+        self.clocks[clock_number].run(num_iterations)
+
+    def reset(self, reset_number=0):
+        self.resets[reset_number].reset()

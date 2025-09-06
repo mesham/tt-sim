@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
 
-class Clockable(ABC):
+class Resetable(ABC):
     @abstractmethod
-    def clock_tick(self):
+    def reset(self):
         raise NotImplementedError()
