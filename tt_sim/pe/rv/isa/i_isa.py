@@ -67,6 +67,9 @@ class RV_I_ISA(RV_ISA):
     @classmethod
     def handle_j_jal(cls, instr, register_file, device_memory):
         rd = RV_ISA.get_int(instr, 7, 11)
+        if rd == 0:
+            # As per standard, if rd omitted then rd=x1
+            rd = 1
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
         # Address of the next instruction
@@ -81,6 +84,9 @@ class RV_I_ISA(RV_ISA):
     @classmethod
     def handle_i_jalr(cls, instr, register_file, device_memory):
         rd = RV_ISA.get_int(instr, 7, 11)
+        if rd == 0:
+            # As per standard, if rd omitted then rd=x1
+            rd = 1
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
         # Address of the next instruction

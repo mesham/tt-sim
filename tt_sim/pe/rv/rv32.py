@@ -1,5 +1,5 @@
 from tt_sim.pe.pe import ProcessingElement
-from tt_sim.pe.register.register import Register
+from tt_sim.pe.register.register import Register, RegisterAccessMode
 from tt_sim.pe.register.register_file import RegisterFile
 from tt_sim.pe.rv.isa.i_isa import RV_I_ISA
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
@@ -87,7 +87,9 @@ class RV32I(ProcessingElement):
 
         # 32 registers plus the PC
         registers = []
-        for i in range(34):
+        # Register 0 is read only and hardcoded to zero
+        registers.append(Register(4, conv_to_bytes(0), RegisterAccessMode.R))
+        for i in range(33):
             registers.append(Register(4))
 
         self.register_file = RegisterFile(registers, REGISTER_NAME_MAPPING)
