@@ -12,3 +12,7 @@ class ProcessingElement(Clockable, Resetable, ABC):
     @abstractmethod
     def stop(self):
         raise NotImplementedError()
+
+    @abstractmethod
+    def getRegisterFile(self):
+        raise NotImplementedError()

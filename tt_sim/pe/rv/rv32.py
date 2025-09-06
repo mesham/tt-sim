@@ -119,12 +119,12 @@ class RV32I(ProcessingElement):
         self.stop()
         self.start()
 
+    def getRegisterFile(self):
+        return self.register_file
+
     def start(self):
         pc = self.register_file["pc"]
         pc.write(conv_to_bytes(self.start_address))
-
-        sp = self.register_file["sp"]
-        sp.write(conv_to_bytes(0x256))
 
         self.unknown_instructions = 0
 
