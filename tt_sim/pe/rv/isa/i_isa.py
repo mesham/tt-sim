@@ -85,7 +85,7 @@ class RV_I_ISA(RV_ISA):
         register_file[rd].write(conv_to_bytes(pc_val + 4))
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
-        rs1_val = conv_to_int32(rs1.read())
+        rs1_val = conv_to_int32(register_file[rs1].read())
         offset = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "I")
 
         new_pc_val = (rs1_val + offset) & ~1
