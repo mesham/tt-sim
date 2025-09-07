@@ -82,14 +82,14 @@ class RV32I(ProcessingElement):
     def __init__(
         self,
         start_address,
-        device_memory=None,
-        pe_memory=None,
-        extensions=[],
+        memory_spaces,
+        extensions=None,
         unknown_instr_is_error=False,
     ):
+        if extensions is None:
+            extensions = []
         self.isas = [RV_I_ISA] + extensions
-        self.device_memory = device_memory
-        self.pe_memory = pe_memory
+        assert isinstance(memory_spaces, list)
         self.start_address = start_address
         self.active = False
         self.unknown_instructions = 0
@@ -106,18 +106,14 @@ class RV32I(ProcessingElement):
 
         # Now determine the visible memory for the core, this will either be a combination of
         # global device memory and local PE memory, or one of these if the other is not supplied
-        if self.device_memory is None and self.pe_memory is None:
+        if len(memory_spaces) == 0:
             raise Exception(
-                "An RV32 core must have access to either (or both) device and/or pe memory"
+                "An RV32 core must have access to at-least one memory space"
             )
-        elif self.device_memory is not None and self.pe_memory is None:
-            self.visible_memory = self.device_memory
-        elif self.device_memory is None and self.pe_memory is not None:
-            self.visible_memory = self.pe_memory
+        elif len(memory_spaces) == 1:
+            self.visible_memory = memory_spaces[0]
         else:
-            self.visible_memory = VisibleMemory.merge(
-                self.device_memory, self.pe_memory
-            )
+            self.visible_memory = VisibleMemory.merge(*memory_spaces)
 
     def clock_tick(self):
         if not self.active:
@@ -164,15 +160,16 @@ class RV32IM(RV32I):
     def __init__(
         self,
         start_address,
-        device_memory=None,
-        pe_memory=None,
-        extensions=[],
+        memory_spaces,
+        extensions=None,
         unknown_instr_is_error=False,
     ):
+        if extensions is None:
+            extensions = []
         if RV_M_ISA not in extensions:
             extensions.append(RV_M_ISA)
         super().__init__(
-            start_address, device_memory, pe_memory, extensions, unknown_instr_is_error
+            start_address, memory_spaces, extensions, unknown_instr_is_error
         )
 
 
@@ -180,13 +177,14 @@ class RV32IM_TT(RV32IM):
     def __init__(
         self,
         start_address,
-        device_memory=None,
-        pe_memory=None,
-        extensions=[],
+        memory_spaces,
+        extensions=None,
         unknown_instr_is_error=False,
     ):
+        if extensions is None:
+            extensions = []
         if RV_TT_ISA not in extensions:
             extensions.append(RV_TT_ISA)
         super().__init__(
-            start_address, device_memory, pe_memory, extensions, unknown_instr_is_error
+            start_address, memory_spaces, extensions, unknown_instr_is_error
         )

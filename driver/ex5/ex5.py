@@ -36,7 +36,7 @@ dm.write(0x0, data)
 pem = PEMemory(pe_mem_map, "1M")
 
 # Create CPU
-cpu = RV32IM(0x0, dm, pem)
+cpu = RV32IM(0x0, [dm, pem])
 
 # Create a clock
 clock = Clock([cpu])
