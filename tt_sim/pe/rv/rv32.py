@@ -85,6 +85,7 @@ class RV32I(ProcessingElement):
         memory_spaces,
         extensions=None,
         unknown_instr_is_error=False,
+        snoop=False,
     ):
         if extensions is None:
             extensions = []
@@ -93,6 +94,7 @@ class RV32I(ProcessingElement):
         self.start_address = start_address
         self.active = False
         self.unknown_instructions = 0
+        self.snoop = snoop
 
         # 32 registers plus the PC
         registers = []
@@ -115,6 +117,15 @@ class RV32I(ProcessingElement):
         else:
             self.visible_memory = VisibleMemory.merge(*memory_spaces)
 
+    def print_snoop(self, pc, nextpc, actioned):
+        addr = conv_to_uint32(pc.read())
+        instr = self.visible_memory.read(addr, 4)
+
+        opcode_bin = RV_I_ISA.get_bits(instr, 0, 6)
+        opcode_bin.reverse()
+
+        print(opcode_bin)
+
     def clock_tick(self):
         if not self.active:
             return
@@ -124,9 +135,12 @@ class RV32I(ProcessingElement):
         pc_val = conv_to_uint32(pc.read())
         nextpc.write(conv_to_bytes(pc_val + 4))
 
+        if self.snoop:
+            print(f"[{hex(pc_val)}] ", end="")
+
         actioned = False
         for isa in self.isas:
-            actioned = isa.run(self.register_file, self.visible_memory)
+            actioned = isa.run(self.register_file, self.visible_memory, self.snoop)
             if actioned:
                 break
 
@@ -134,6 +148,15 @@ class RV32I(ProcessingElement):
             self.unknown_instructions += 1
             if self.unknown_instr_is_error:
                 raise Exception("Unknown instruction")
+            if self.snoop:
+                instr = self.visible_memory.read(pc_val, 4)
+                instr_bits = RV_I_ISA.get_bits(instr, 0, 31)
+                instr_bits.reverse()
+                binary_str = "".join(str(bit) for bit in instr_bits)
+                print(f"unknown # {binary_str}", end="")
+
+        if self.snoop:
+            print("")
 
         pc.write(nextpc.read())
 
@@ -163,13 +186,14 @@ class RV32IM(RV32I):
         memory_spaces,
         extensions=None,
         unknown_instr_is_error=False,
+        snoop=False,
     ):
         if extensions is None:
             extensions = []
         if RV_M_ISA not in extensions:
             extensions.append(RV_M_ISA)
         super().__init__(
-            start_address, memory_spaces, extensions, unknown_instr_is_error
+            start_address, memory_spaces, extensions, unknown_instr_is_error, snoop
         )
 
 
@@ -180,11 +204,12 @@ class RV32IM_TT(RV32IM):
         memory_spaces,
         extensions=None,
         unknown_instr_is_error=False,
+        snoop=False,
     ):
         if extensions is None:
             extensions = []
         if RV_TT_ISA not in extensions:
             extensions.append(RV_TT_ISA)
         super().__init__(
-            start_address, memory_spaces, extensions, unknown_instr_is_error
+            start_address, memory_spaces, extensions, unknown_instr_is_error, snoop
         )

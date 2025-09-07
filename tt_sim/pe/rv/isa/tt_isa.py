@@ -4,7 +4,7 @@ from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
 
 class RV_TT_ISA(RV_ISA):
     @classmethod
-    def run(cls, register_file, memory_space):
+    def run(cls, register_file, memory_space, snoop):
         pc = register_file["pc"]
         addr = conv_to_int32(pc.read())
         instr = memory_space.read(addr, 4)
@@ -13,7 +13,7 @@ class RV_TT_ISA(RV_ISA):
         opcode_bin.reverse()
 
         if opcode_bin[5] != 1 or opcode_bin[6] != 1:
-            # ttinsn
+            # ttinsnt
             """
             This is an encoding of the .ttinst which copies a constant into INSTRN_BUF_BASE (0xFFE40000) to send to the
             Tensix unit. As the constant is rotated left by two bits and is a maximum value of 0xC0000000u, it will
@@ -25,6 +25,7 @@ class RV_TT_ISA(RV_ISA):
 
             constant = RV_TT_ISA.rotate_right(RV_ISA.get_int(instr, 0, 31), 2)
             memory_space.write(0xFFE40000, conv_to_bytes(constant))
+            RV_ISA.print_snoop(snoop, f"ttinst {hex(constant)}")
             return True
         else:
             return False

@@ -24,6 +24,14 @@ class RV_ISA(ABC):
         return int(binary_str, 2)
 
     @classmethod
+    def print_snoop(cls, snoop, message, info_msg=None):
+        if snoop:
+            print(message, end="")
+            if info_msg is not None:
+                assert isinstance(info_msg, str)
+                print("    # " + info_msg, end="")
+
+    @classmethod
     @abstractmethod
     def run(cls, register_file, device_memory):
         raise NotImplementedError()
