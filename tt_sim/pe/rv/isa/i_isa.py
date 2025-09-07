@@ -353,7 +353,7 @@ class RV_I_ISA(RV_ISA):
             or type_val == 0x7
         ):
             immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "I")
-            immediate_unsigned = immediate + (1 << 32)
+            immediate_unsigned = immediate & 0xFFFFFFFF
 
             if type_val == 0x0:
                 # addi
@@ -366,28 +366,31 @@ class RV_I_ISA(RV_ISA):
                     rs1_val = conv_to_int32(register_file[rs1].read())
                     signed_op = True
                     snoop_str = "slti"
+                    result = 1 if rs1_val < immediate else 0
                 else:
                     snoop_str = "sltiu"
-                result = 1 if rs1_val < immediate else 0
+                    result = 1 if rs1_val < immediate_unsigned else 0
+
                 info_msg = (
                     f"{cls.get_reg_name(rd1)} = 1 if {cls.get_reg_name(rs1)} < "
-                    f"{hex(immediate_unsigned)} else 0 : {'TRUE' if result == 1 else 'FALSE'}"
+                    f"{hex(immediate if signed_op else immediate_unsigned)} else 0 : "
+                    f"{'TRUE' if result == 1 else 'FALSE'}"
                 )
             elif type_val == 0x4:
                 # xori
-                result = rs1_val ^ immediate_unsigned
+                result = rs1_val ^ immediate
                 snoop_str = "xori"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} ^ {hex(immediate_unsigned)}"
+                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} ^ {hex(immediate)}"
             elif type_val == 0x6:
                 # ori
-                result = rs1_val | immediate_unsigned
+                result = rs1_val | immediate
                 snoop_str = "ori"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} | {hex(immediate_unsigned)}"
+                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} | {hex(immediate)}"
             elif type_val == 0x7:
                 # andi
-                result = rs1_val & immediate_unsigned
+                result = rs1_val & immediate
                 snoop_str = "andi"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} & {hex(immediate_unsigned)}"
+                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} & {hex(immediate)}"
             else:
                 write_result = False
             if write_result:
