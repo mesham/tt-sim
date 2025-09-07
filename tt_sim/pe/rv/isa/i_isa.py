@@ -4,10 +4,10 @@ from tt_sim.util.conversion import conv_to_bytes, conv_to_int32, conv_to_uint32
 
 class RV_I_ISA(RV_ISA):
     @classmethod
-    def run(cls, register_file, device_memory):
+    def run(cls, register_file, memory_space):
         pc = register_file["pc"]
         addr = conv_to_int32(pc.read())
-        instr = device_memory.read(addr, 4)
+        instr = memory_space.read(addr, 4)
 
         opcode_bin = RV_ISA.get_bits(instr, 0, 6)
         opcode_bin.reverse()
@@ -15,39 +15,39 @@ class RV_I_ISA(RV_ISA):
 
         match opcode:
             case 0x37:
-                return RV_I_ISA.handle_u_lui(instr, register_file, device_memory)
+                return RV_I_ISA.handle_u_lui(instr, register_file, memory_space)
             case 0x17:
-                return RV_I_ISA.handle_u_auipc(instr, register_file, device_memory)
+                return RV_I_ISA.handle_u_auipc(instr, register_file, memory_space)
             case 0x6F:
-                return RV_I_ISA.handle_j_jal(instr, register_file, device_memory)
+                return RV_I_ISA.handle_j_jal(instr, register_file, memory_space)
             case 0x67:
-                return RV_I_ISA.handle_i_jalr(instr, register_file, device_memory)
+                return RV_I_ISA.handle_i_jalr(instr, register_file, memory_space)
             case 0x63:
-                return RV_I_ISA.handle_b_branch(instr, register_file, device_memory)
+                return RV_I_ISA.handle_b_branch(instr, register_file, memory_space)
             case 0x3:
-                return RV_I_ISA.handle_i_load(instr, register_file, device_memory)
+                return RV_I_ISA.handle_i_load(instr, register_file, memory_space)
             case 0x23:
-                return RV_I_ISA.handle_s_store(instr, register_file, device_memory)
+                return RV_I_ISA.handle_s_store(instr, register_file, memory_space)
             case 0x13:
-                return RV_I_ISA.handle_i_arith(instr, register_file, device_memory)
+                return RV_I_ISA.handle_i_arith(instr, register_file, memory_space)
             case 0x33:
-                return RV_I_ISA.handle_r_arith(instr, register_file, device_memory)
+                return RV_I_ISA.handle_r_arith(instr, register_file, memory_space)
             case 0x0F:
-                return RV_I_ISA.handle_i_fence(instr, register_file, device_memory)
+                return RV_I_ISA.handle_i_fence(instr, register_file, memory_space)
             case 0x73:
-                return RV_I_ISA.handle_i_misc(instr, register_file, device_memory)
+                return RV_I_ISA.handle_i_misc(instr, register_file, memory_space)
             case _:
                 return False
 
     @classmethod
-    def handle_u_lui(cls, instr, register_file, device_memory):
+    def handle_u_lui(cls, instr, register_file, memory_space):
         rd = RV_ISA.get_int(instr, 7, 11)
         immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "U")
         register_file[rd].write(conv_to_bytes(immediate))
         return True
 
     @classmethod
-    def handle_u_auipc(cls, instr, register_file, device_memory):
+    def handle_u_auipc(cls, instr, register_file, memory_space):
         rd = RV_ISA.get_int(instr, 7, 11)
         immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "U")
         pc = register_file["pc"]
@@ -56,7 +56,7 @@ class RV_I_ISA(RV_ISA):
         return True
 
     @classmethod
-    def handle_j_jal(cls, instr, register_file, device_memory):
+    def handle_j_jal(cls, instr, register_file, memory_space):
         rd = RV_ISA.get_int(instr, 7, 11)
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
@@ -74,7 +74,7 @@ class RV_I_ISA(RV_ISA):
         return True
 
     @classmethod
-    def handle_i_jalr(cls, instr, register_file, device_memory):
+    def handle_i_jalr(cls, instr, register_file, memory_space):
         rd = RV_ISA.get_int(instr, 7, 11)
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
@@ -95,7 +95,7 @@ class RV_I_ISA(RV_ISA):
         return True
 
     @classmethod
-    def handle_b_branch(cls, instr, register_file, device_memory):
+    def handle_b_branch(cls, instr, register_file, memory_space):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
@@ -141,7 +141,7 @@ class RV_I_ISA(RV_ISA):
             return False
 
     @classmethod
-    def handle_i_load(cls, instr, register_file, device_memory):
+    def handle_i_load(cls, instr, register_file, memory_space):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
@@ -154,27 +154,27 @@ class RV_I_ISA(RV_ISA):
         write_result = True
         if type_val == 0x0:
             # lb
-            byte_val = device_memory.read(tgt_mem_address, 1)
+            byte_val = memory_space.read(tgt_mem_address, 1)
             result = conv_to_bytes(
                 RV_I_ISA.sign_extend(conv_to_int32(byte_val), 8), signed=True
             )
         elif type_val == 0x4:
             # lu
-            byte_val = device_memory.read(tgt_mem_address, 1)
+            byte_val = memory_space.read(tgt_mem_address, 1)
             result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 8))
         elif type_val == 0x1:
             # lh
-            byte_val = device_memory.read(tgt_mem_address, 2)
+            byte_val = memory_space.read(tgt_mem_address, 2)
             result = conv_to_bytes(
                 RV_I_ISA.sign_extend(conv_to_int32(byte_val), 16), signed=True
             )
         elif type_val == 0x5:
             # lhu
-            byte_val = device_memory.read(tgt_mem_address, 2)
+            byte_val = memory_space.read(tgt_mem_address, 2)
             result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 16))
         elif type_val == 0x2:
             # lw
-            result = device_memory.read(tgt_mem_address, 4)
+            result = memory_space.read(tgt_mem_address, 4)
         else:
             write_result = False
 
@@ -185,7 +185,7 @@ class RV_I_ISA(RV_ISA):
             return False
 
     @classmethod
-    def handle_s_store(cls, instr, register_file, device_memory):
+    def handle_s_store(cls, instr, register_file, memory_space):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
@@ -199,21 +199,21 @@ class RV_I_ISA(RV_ISA):
 
         if type_val == 0x0:
             # sb
-            device_memory.write(tgt_mem_address, conv_to_bytes(rs2_val[0]))
+            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0]))
             return True
         elif type_val == 0x1:
             # sh
-            device_memory.write(tgt_mem_address, conv_to_bytes(rs2_val[0:1]))
+            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0:1]))
             return True
         elif type_val == 0x2:
             # sw
-            device_memory.write(tgt_mem_address, rs2_val)
+            memory_space.write(tgt_mem_address, rs2_val)
             return True
         else:
             return False
 
     @classmethod
-    def handle_i_arith(cls, instr, register_file, device_memory):
+    def handle_i_arith(cls, instr, register_file, memory_space):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
@@ -280,7 +280,7 @@ class RV_I_ISA(RV_ISA):
             return False
 
     @classmethod
-    def handle_r_arith(cls, instr, register_file, device_memory):
+    def handle_r_arith(cls, instr, register_file, memory_space):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
@@ -347,11 +347,11 @@ class RV_I_ISA(RV_ISA):
             return False
 
     @classmethod
-    def handle_i_fence(cls, instr, register_file, device_memory):
+    def handle_i_fence(cls, instr, register_file, memory_space):
         return True
 
     @classmethod
-    def handle_i_misc(cls, instr, register_file, device_memory):
+    def handle_i_misc(cls, instr, register_file, memory_space):
         return True
 
     @classmethod

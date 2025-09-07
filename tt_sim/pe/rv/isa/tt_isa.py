@@ -1,13 +1,13 @@
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
-from tt_sim.util.conversion import conv_to_int32, conv_to_bytes
+from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
 
 
 class RV_TT_ISA(RV_ISA):
     @classmethod
-    def run(cls, register_file, device_memory):
+    def run(cls, register_file, memory_space):
         pc = register_file["pc"]
         addr = conv_to_int32(pc.read())
-        instr = device_memory.read(addr, 4)
+        instr = memory_space.read(addr, 4)
 
         opcode_bin = RV_ISA.get_bits(instr, 0, 6)
         opcode_bin.reverse()
@@ -24,7 +24,7 @@ class RV_TT_ISA(RV_ISA):
             """
 
             constant = RV_TT_ISA.rotate_right(RV_ISA.get_int(instr, 0, 31), 2)
-            device_memory.write(0xFFE40000, conv_to_bytes(constant))
+            memory_space.write(0xFFE40000, conv_to_bytes(constant))
             return True
         else:
             return False

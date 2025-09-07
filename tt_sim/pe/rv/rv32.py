@@ -1,3 +1,4 @@
+from tt_sim.memory.memory import VisibleMemory
 from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.register.register import Register, RegisterAccessMode
 from tt_sim.pe.register.register_file import RegisterFile
@@ -79,10 +80,16 @@ REGISTER_NAME_MAPPING = {
 
 class RV32I(ProcessingElement):
     def __init__(
-        self, device_memory, start_address, extensions=[], unknown_instr_is_error=False
+        self,
+        start_address,
+        device_memory=None,
+        pe_memory=None,
+        extensions=[],
+        unknown_instr_is_error=False,
     ):
         self.isas = [RV_I_ISA] + extensions
         self.device_memory = device_memory
+        self.pe_memory = pe_memory
         self.start_address = start_address
         self.active = False
         self.unknown_instructions = 0
@@ -97,6 +104,21 @@ class RV32I(ProcessingElement):
         self.register_file = RegisterFile(registers, REGISTER_NAME_MAPPING)
         self.unknown_instr_is_error = unknown_instr_is_error
 
+        # Now determine the visible memory for the core, this will either be a combination of
+        # global device memory and local PE memory, or one of these if the other is not supplied
+        if self.device_memory is None and self.pe_memory is None:
+            raise Exception(
+                "An RV32 core must have access to either (or both) device and/or pe memory"
+            )
+        elif self.device_memory is not None and self.pe_memory is None:
+            self.visible_memory = self.device_memory
+        elif self.device_memory is None and self.pe_memory is not None:
+            self.visible_memory = self.pe_memory
+        else:
+            self.visible_memory = VisibleMemory.merge(
+                self.device_memory, self.pe_memory
+            )
+
     def clock_tick(self):
         if not self.active:
             return
@@ -108,7 +130,7 @@ class RV32I(ProcessingElement):
 
         actioned = False
         for isa in self.isas:
-            actioned = isa.run(self.register_file, self.device_memory)
+            actioned = isa.run(self.register_file, self.visible_memory)
             if actioned:
                 break
 
@@ -140,21 +162,31 @@ class RV32I(ProcessingElement):
 
 class RV32IM(RV32I):
     def __init__(
-        self, device_memory, start_address, extensions=[], unknown_instr_is_error=False
+        self,
+        start_address,
+        device_memory=None,
+        pe_memory=None,
+        extensions=[],
+        unknown_instr_is_error=False,
     ):
         if RV_M_ISA not in extensions:
             extensions.append(RV_M_ISA)
         super().__init__(
-            device_memory, start_address, extensions, unknown_instr_is_error
+            start_address, device_memory, pe_memory, extensions, unknown_instr_is_error
         )
 
 
 class RV32IM_TT(RV32IM):
     def __init__(
-        self, device_memory, start_address, extensions=[], unknown_instr_is_error=False
+        self,
+        start_address,
+        device_memory=None,
+        pe_memory=None,
+        extensions=[],
+        unknown_instr_is_error=False,
     ):
         if RV_TT_ISA not in extensions:
             extensions.append(RV_TT_ISA)
         super().__init__(
-            device_memory, start_address, extensions, unknown_instr_is_error
+            start_address, device_memory, pe_memory, extensions, unknown_instr_is_error
         )

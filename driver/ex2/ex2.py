@@ -22,7 +22,7 @@ dm = DeviceMemory(mem_map, "1M")
 dm.write(0x0, data)
 
 # Create CPU
-cpu = RV32I(dm, 0x0)
+cpu = RV32I(0x0, dm)
 # GCC assumed sp is initalised by the preamble, we don't have that here
 # so therefore set it ourselves
 cpu.getRegisterFile()["sp"].write(conv_to_bytes(0x256))

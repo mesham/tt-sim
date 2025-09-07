@@ -25,7 +25,7 @@ dm = DeviceMemory(mem_map, "2G")
 dm.write(0x0, data)
 
 # Create CPU
-cpu = RV32I(dm, 0x0)
+cpu = RV32I(0x0, dm)
 
 # Create a clock
 clock = Clock([cpu])

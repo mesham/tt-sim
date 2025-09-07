@@ -28,7 +28,7 @@ dm = DeviceMemory(mem_map, "2G")
 dm.write(0x0, data)
 
 # Create CPU
-cpu = RV32IM(dm, 0x0)
+cpu = RV32IM(0x0, dm)
 
 # Create a clock
 clock = Clock([cpu])
@@ -39,6 +39,8 @@ device = Device(dm, [clock], [cpu])
 # Reset the device and run the clock for 5000 iterations
 device.reset()
 device.run(5000)
+
+cpu.stop()
 
 # Now check the results that have been stored
 for i in range(10):
