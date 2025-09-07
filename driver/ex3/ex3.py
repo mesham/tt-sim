@@ -1,6 +1,5 @@
 from tt_sim.device.clock import Clock
-from tt_sim.device.device import Device
-from tt_sim.device.device_memory import DeviceMemory
+from tt_sim.device.device import Device, DeviceMemory
 from tt_sim.device.memory_map import AddressRange, MemoryMap
 from tt_sim.memory.memory import DRAM
 from tt_sim.pe.rv.rv32 import RV32I

@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 
-from tt_sim.device.clockable import Clockable
-from tt_sim.device.resetable import Resetable
+from tt_sim.device.clock import Clockable, Resetable
 
 
 class ProcessingElement(Clockable, Resetable, ABC):

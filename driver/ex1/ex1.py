@@ -1,4 +1,4 @@
-from tt_sim.device.device_memory import DeviceMemory
+from tt_sim.device.device import DeviceMemory
 from tt_sim.device.memory_map import AddressRange, MemoryMap
 from tt_sim.memory.memory import DRAM
 from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
