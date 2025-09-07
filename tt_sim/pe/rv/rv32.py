@@ -2,6 +2,7 @@ from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.register.register import Register, RegisterAccessMode
 from tt_sim.pe.register.register_file import RegisterFile
 from tt_sim.pe.rv.isa.i_isa import RV_I_ISA
+from tt_sim.pe.rv.isa.m_isa import RV_M_ISA
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 REGISTER_NAME_MAPPING = {
@@ -136,5 +137,12 @@ class RV32I(ProcessingElement):
         self.active = False
 
 
-# class RV32IM(RV32):
-#  def __init__(self):
+class RV32IM(RV32I):
+    def __init__(
+        self, device_memory, start_address, extensions=[], unknown_instr_is_error=False
+    ):
+        if RV_M_ISA not in extensions:
+            extensions.append(RV_M_ISA)
+        super().__init__(
+            device_memory, start_address, extensions, unknown_instr_is_error
+        )

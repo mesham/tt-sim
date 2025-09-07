@@ -1,0 +1,74 @@
+from tt_sim.pe.rv.isa.rv_isa import RV_ISA
+from tt_sim.util.conversion import conv_to_bytes, conv_to_int32, conv_to_uint32
+
+
+class RV_M_ISA(RV_ISA):
+    @classmethod
+    def run(cls, register_file, device_memory):
+        pc = register_file["pc"]
+        addr = conv_to_int32(pc.read())
+        instr = device_memory.read(addr, 4)
+
+        opcode_bin = RV_ISA.get_bits(instr, 0, 6)
+        opcode_bin.reverse()
+        opcode = RV_ISA.bits_to_int(opcode_bin)
+
+        if opcode != 0x33:
+            return False
+
+        type_val = RV_ISA.get_int(instr, 12, 14)
+
+        rs1 = RV_ISA.get_int(instr, 15, 19)
+        rs2 = RV_ISA.get_int(instr, 20, 24)
+        rd = RV_ISA.get_int(instr, 7, 11)
+
+        signed = False
+        match type_val:
+            case 0x0:
+                # mul
+                rs1_val = conv_to_uint32(register_file[rs1].read())
+                rs2_val = conv_to_uint32(register_file[rs2].read())
+                result = rs1_val * rs2_val
+            case 0x1:
+                # mulh
+                rs1_val = conv_to_int32(register_file[rs1].read())
+                rs2_val = conv_to_int32(register_file[rs2].read())
+                result = (rs1_val * rs2_val) >> 16
+                signed = True
+            case 0x2:
+                # mulhsu
+                rs1_val = conv_to_int32(register_file[rs1].read())
+                rs2_val = conv_to_uint32(register_file[rs2].read())
+                result = (rs1_val * rs2_val) >> 16
+                signed = True
+            case 0x3:
+                # mulhu
+                rs1_val = conv_to_uint32(register_file[rs1].read())
+                rs2_val = conv_to_uint32(register_file[rs2].read())
+                result = (rs1_val * rs2_val) >> 16
+            case 0x4:
+                # div
+                rs1_val = conv_to_int32(register_file[rs1].read())
+                rs2_val = conv_to_int32(register_file[rs2].read())
+                result = rs1_val / rs2_val
+                signed = True
+            case 0x5:
+                # divu
+                rs1_val = conv_to_uint32(register_file[rs1].read())
+                rs2_val = conv_to_uint32(register_file[rs2].read())
+                result = rs1_val / rs2_val
+            case 0x6:
+                # rem
+                rs1_val = conv_to_int32(register_file[rs1].read())
+                rs2_val = conv_to_int32(register_file[rs2].read())
+                result = rs1_val % rs2_val
+                signed = True
+            case 0x7:
+                # remu
+                rs1_val = conv_to_uint32(register_file[rs1].read())
+                rs2_val = conv_to_uint32(register_file[rs2].read())
+                result = rs1_val % rs2_val
+            case _:
+                return False
+
+        register_file[rd].write(conv_to_bytes(result, signed=signed))
