@@ -36,7 +36,7 @@ dm.write(0x0, data)
 pem = PEMemory(pe_mem_map, "1M")
 
 # Create CPU
-cpu = RV32IM(0x0, [dm, pem])
+cpu = RV32IM(0x0, [dm, pem], snoop=True)
 
 # Create a clock
 clock = Clock([cpu])
@@ -46,7 +46,7 @@ device = Device(dm, [clock], [cpu])
 
 # Reset the device and run the clock for 5000 iterations
 device.reset()
-device.run(5000)
+device.run(1000, print_cycle=True)
 
 # Now check the results that have been stored
 for i in range(10):
