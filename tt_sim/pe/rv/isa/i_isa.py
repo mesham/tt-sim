@@ -212,45 +212,58 @@ class RV_I_ISA(RV_ISA):
         tgt_mem_address = rs1_val + offset
 
         write_result = True
-        instr_str = None
         if type_val == 0x0:
             # lb
+            RV_ISA.print_snoop(
+                snoop,
+                f"lb x{rd}, {hex(offset)}(x{rs1})",
+                f"x[{rd}] = mem[{hex(tgt_mem_address)}]",
+            )
             byte_val = memory_space.read(tgt_mem_address, 1)
             result = conv_to_bytes(
                 RV_I_ISA.sign_extend(conv_to_int32(byte_val), 8), signed=True
             )
-            instr_str = "lb"
         elif type_val == 0x4:
             # lu
+            RV_ISA.print_snoop(
+                snoop,
+                f"lu x{rd}, {hex(offset)}(x{rs1})",
+                f"x[{rd}] = mem[{hex(tgt_mem_address)}]",
+            )
             byte_val = memory_space.read(tgt_mem_address, 1)
             result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 8))
-            instr_str = "lu"
         elif type_val == 0x1:
             # lh
+            RV_ISA.print_snoop(
+                snoop,
+                f"lh x{rd}, {hex(offset)}(x{rs1})",
+                f"x[{rd}] = mem[{hex(tgt_mem_address)}]",
+            )
             byte_val = memory_space.read(tgt_mem_address, 2)
             result = conv_to_bytes(
                 RV_I_ISA.sign_extend(conv_to_int32(byte_val), 16), signed=True
             )
-            instr_str = "lh"
         elif type_val == 0x5:
             # lhu
+            RV_ISA.print_snoop(
+                snoop,
+                f"lhu x{rd}, {hex(offset)}(x{rs1})",
+                f"x[{rd}] = mem[{hex(tgt_mem_address)}]",
+            )
             byte_val = memory_space.read(tgt_mem_address, 2)
             result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 16))
-            instr_str = "lhu"
         elif type_val == 0x2:
             # lw
+            RV_ISA.print_snoop(
+                snoop,
+                f"lw x{rd}, {hex(offset)}(x{rs1})",
+                f"x[{rd}] = mem[{hex(tgt_mem_address)}]",
+            )
             result = memory_space.read(tgt_mem_address, 4)
-            instr_str = "lw"
         else:
             write_result = False
 
         if write_result:
-            assert instr_str is not None
-            RV_ISA.print_snoop(
-                snoop,
-                f"{instr_str} x{rd}, {hex(offset)}(x{rs1})",
-                f"x[{rd}] = mem[{hex(tgt_mem_address)}]",
-            )
             register_file[rd].write(result)
             return True
         else:
