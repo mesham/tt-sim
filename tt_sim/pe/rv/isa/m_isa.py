@@ -37,7 +37,7 @@ class RV_M_ISA(RV_ISA):
                 rs2_val = conv_to_uint32(register_file[rs2].read())
                 result = rs1_val * rs2_val
                 snoop_str = "mul"
-                info_msg = f"x[{rd}] = x[{rs1}] * x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
             case 0x1:
                 # mulh
                 rs1_val = conv_to_int32(register_file[rs1].read())
@@ -45,7 +45,7 @@ class RV_M_ISA(RV_ISA):
                 result = (rs1_val * rs2_val) >> 16
                 signed = True
                 snoop_str = "mulh"
-                info_msg = f"x[{rd}] = x[{rs1}] * x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
             case 0x2:
                 # mulhsu
                 rs1_val = conv_to_int32(register_file[rs1].read())
@@ -53,14 +53,14 @@ class RV_M_ISA(RV_ISA):
                 result = (rs1_val * rs2_val) >> 16
                 signed = True
                 snoop_str = "mulhsu"
-                info_msg = f"x[{rd}] = x[{rs1}] * x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
             case 0x3:
                 # mulhu
                 rs1_val = conv_to_uint32(register_file[rs1].read())
                 rs2_val = conv_to_uint32(register_file[rs2].read())
                 result = (rs1_val * rs2_val) >> 16
                 snoop_str = "mulhu"
-                info_msg = f"x[{rd}] = x[{rs1}] * x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
             case 0x4:
                 # div
                 rs1_val = conv_to_int32(register_file[rs1].read())
@@ -68,14 +68,14 @@ class RV_M_ISA(RV_ISA):
                 result = rs1_val / rs2_val
                 signed = True
                 snoop_str = "div"
-                info_msg = f"x[{rd}] = x[{rs1}] / x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} / {cls.get_reg_name(rs2)}"
             case 0x5:
                 # divu
                 rs1_val = conv_to_uint32(register_file[rs1].read())
                 rs2_val = conv_to_uint32(register_file[rs2].read())
                 result = rs1_val / rs2_val
                 snoop_str = "divu"
-                info_msg = f"x[{rd}] = x[{rs1}] / x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} / {cls.get_reg_name(rs2)}"
             case 0x6:
                 # rem
                 rs1_val = conv_to_int32(register_file[rs1].read())
@@ -83,14 +83,14 @@ class RV_M_ISA(RV_ISA):
                 result = rs1_val % rs2_val
                 signed = True
                 snoop_str = "rem"
-                info_msg = f"x[{rd}] = x[{rs1}] % x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} % {cls.get_reg_name(rs2)}"
             case 0x7:
                 # remu
                 rs1_val = conv_to_uint32(register_file[rs1].read())
                 rs2_val = conv_to_uint32(register_file[rs2].read())
                 result = rs1_val % rs2_val
                 snoop_str = "remu"
-                info_msg = f"x[{rd}] = x[{rs1}] % x[{rs2}]"
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} % {cls.get_reg_name(rs2)}"
             case _:
                 return False
 
