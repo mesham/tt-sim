@@ -99,7 +99,7 @@ class RV32I(ProcessingElement):
         # 32 registers plus the PC
         registers = []
         # Register 0 is read only and hardcoded to zero
-        registers.append(Register(4, conv_to_bytes(0), RegisterAccessMode.R))
+        registers.append(Register(4, conv_to_bytes(0), RegisterAccessMode.R, False))
         for i in range(33):
             registers.append(Register(4))
 
