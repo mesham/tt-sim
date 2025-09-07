@@ -15,38 +15,27 @@ class RV_I_ISA(RV_ISA):
 
         match opcode:
             case 0x37:
-                RV_I_ISA.handle_u_lui(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_u_lui(instr, register_file, device_memory)
             case 0x17:
-                RV_I_ISA.handle_u_auipc(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_u_auipc(instr, register_file, device_memory)
             case 0x6F:
-                RV_I_ISA.handle_j_jal(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_j_jal(instr, register_file, device_memory)
             case 0x67:
-                RV_I_ISA.handle_i_jalr(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_i_jalr(instr, register_file, device_memory)
             case 0x63:
-                RV_I_ISA.handle_b_branch(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_b_branch(instr, register_file, device_memory)
             case 0x3:
-                RV_I_ISA.handle_i_load(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_i_load(instr, register_file, device_memory)
             case 0x23:
-                RV_I_ISA.handle_s_store(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_s_store(instr, register_file, device_memory)
             case 0x13:
-                RV_I_ISA.handle_i_arith(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_i_arith(instr, register_file, device_memory)
             case 0x33:
-                RV_I_ISA.handle_r_arith(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_r_arith(instr, register_file, device_memory)
             case 0x0F:
-                RV_I_ISA.handle_i_fence(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_i_fence(instr, register_file, device_memory)
             case 0x73:
-                RV_I_ISA.handle_i_misc(instr, register_file, device_memory)
-                return True
+                return RV_I_ISA.handle_i_misc(instr, register_file, device_memory)
             case _:
                 return False
 
@@ -55,6 +44,7 @@ class RV_I_ISA(RV_ISA):
         rd = RV_ISA.get_int(instr, 7, 11)
         immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "U")
         register_file[rd].write(conv_to_bytes(immediate))
+        return True
 
     @classmethod
     def handle_u_auipc(cls, instr, register_file, device_memory):
@@ -63,6 +53,7 @@ class RV_I_ISA(RV_ISA):
         pc = register_file["pc"]
         pc_val = conv_to_uint32(pc.read())
         register_file[rd].write(conv_to_bytes(immediate + pc_val))
+        return True
 
     @classmethod
     def handle_j_jal(cls, instr, register_file, device_memory):
@@ -80,6 +71,7 @@ class RV_I_ISA(RV_ISA):
 
         nextpc = register_file["nextpc"]
         nextpc.write(conv_to_bytes(new_pc_val))
+        return True
 
     @classmethod
     def handle_i_jalr(cls, instr, register_file, device_memory):
@@ -100,6 +92,7 @@ class RV_I_ISA(RV_ISA):
 
         nextpc = register_file["nextpc"]
         nextpc.write(conv_to_bytes(new_pc_val))
+        return True
 
     @classmethod
     def handle_b_branch(cls, instr, register_file, device_memory):
@@ -122,10 +115,12 @@ class RV_I_ISA(RV_ISA):
             # beq
             if rs1_val == rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
+            return True
         elif type_val == 0x1:
             # bne
             if rs1_val != rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
+            return True
         elif type_val == 0x4 or type_val == 0x6:
             # blt or blu
             if type_val == 0x6:
@@ -133,6 +128,7 @@ class RV_I_ISA(RV_ISA):
                 rs2_val = conv_to_int32(register_file[rs2].read())
             if rs1_val < rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
+            return True
         elif type_val == 0x5 or type_val == 0x7:
             # bge or bgeu
             if type_val == 0x7:
@@ -140,6 +136,9 @@ class RV_I_ISA(RV_ISA):
                 rs2_val = conv_to_int32(register_file[rs2].read())
             if rs1_val >= rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
+            return True
+        else:
+            return False
 
     @classmethod
     def handle_i_load(cls, instr, register_file, device_memory):
@@ -181,6 +180,9 @@ class RV_I_ISA(RV_ISA):
 
         if write_result:
             register_file[rd].write(result)
+            return True
+        else:
+            return False
 
     @classmethod
     def handle_s_store(cls, instr, register_file, device_memory):
@@ -198,12 +200,17 @@ class RV_I_ISA(RV_ISA):
         if type_val == 0x0:
             # sb
             device_memory.write(tgt_mem_address, conv_to_bytes(rs2_val[0]))
+            return True
         elif type_val == 0x1:
             # sh
             device_memory.write(tgt_mem_address, conv_to_bytes(rs2_val[0:1]))
+            return True
         elif type_val == 0x2:
             # sw
             device_memory.write(tgt_mem_address, rs2_val)
+            return True
+        else:
+            return False
 
     @classmethod
     def handle_i_arith(cls, instr, register_file, device_memory):
@@ -268,6 +275,9 @@ class RV_I_ISA(RV_ISA):
 
         if write_result:
             register_file[rd1].write(conv_to_bytes(result, signed=signed_op))
+            return True
+        else:
+            return False
 
     @classmethod
     def handle_r_arith(cls, instr, register_file, device_memory):
@@ -278,6 +288,11 @@ class RV_I_ISA(RV_ISA):
         rs2 = RV_ISA.get_int(instr, 20, 24)
         rs2_val = conv_to_uint32(register_file[rs2].read())
         rd = RV_ISA.get_int(instr, 7, 11)
+
+        # The i variant of r has a zero at location 25
+        i_variant = RV_ISA.get_int(instr, 25, 25) == 0
+        if not i_variant:
+            return False
 
         signed_op = False
         write_result = True
@@ -327,14 +342,17 @@ class RV_I_ISA(RV_ISA):
 
         if write_result:
             register_file[rd].write(conv_to_bytes(result, signed=signed_op))
+            return True
+        else:
+            return False
 
     @classmethod
     def handle_i_fence(cls, instr, register_file, device_memory):
-        pass
+        return True
 
     @classmethod
     def handle_i_misc(cls, instr, register_file, device_memory):
-        pass
+        return True
 
     @classmethod
     def sign_extend(cls, value, bit_width):
