@@ -16,6 +16,11 @@ class RV_M_ISA(RV_ISA):
         if opcode != 0x33:
             return False
 
+        # The m variant of r has a one at location 25
+        m_variant = RV_ISA.get_int(instr, 25, 25) == 1
+        if not m_variant:
+            return False
+
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
