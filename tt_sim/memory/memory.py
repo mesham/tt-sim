@@ -23,7 +23,7 @@ class MemorySpace(MemMapable, ABC):
 
         if self.safe:
             raise IndexError(
-                f"Provided address '{addr}' does not match any registered memory spaces"
+                f"Provided address '{hex(addr)}' does not match any registered memory spaces"
             )
         else:
             return None, None

@@ -6,7 +6,7 @@ class RV_M_ISA(RV_ISA):
     @classmethod
     def run(cls, register_file, memory_space, snoop):
         pc = register_file["pc"]
-        addr = conv_to_int32(pc.read())
+        addr = conv_to_uint32(pc.read())
         instr = memory_space.read(addr, 4)
 
         opcode_bin = RV_ISA.get_bits(instr, 0, 6)
