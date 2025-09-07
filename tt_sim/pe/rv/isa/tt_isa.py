@@ -1,5 +1,5 @@
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
-from tt_sim.util.conversion import conv_to_int32
+from tt_sim.util.conversion import conv_to_int32, conv_to_bytes
 
 
 class RV_TT_ISA(RV_ISA):
@@ -13,6 +13,7 @@ class RV_TT_ISA(RV_ISA):
         opcode_bin.reverse()
 
         if opcode_bin[5] != 1 or opcode_bin[6] != 1:
+            # ttinsn
             """
             This is an encoding of the .ttinst which copies a constant into INSTRN_BUF_BASE (0xFFE40000) to send to the
             Tensix unit. As the constant is rotated left by two bits and is a maximum value of 0xC0000000u, it will
@@ -23,7 +24,7 @@ class RV_TT_ISA(RV_ISA):
             """
 
             constant = RV_TT_ISA.rotate_right(RV_ISA.get_int(instr, 0, 31), 2)
-            device_memory.write(0xFFE40000, constant)
+            device_memory.write(0xFFE40000, conv_to_bytes(constant))
             return True
         else:
             return False
