@@ -87,6 +87,11 @@ class VisibleMemory(MemorySpace):
         super().__init__(memory_map, size, safe)
 
 
+class TensixMemory(MemorySpace):
+    def __init__(self, memory_map, size, safe=True):
+        super().__init__(memory_map, size, safe)
+
+
 class AddressableMemory(MemMapable):
     def __init__(self, size, alignment=None):
         self.memory = np.empty(size, dtype=np.uint8)
