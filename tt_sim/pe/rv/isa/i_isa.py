@@ -153,7 +153,7 @@ class RV_I_ISA(RV_ISA):
                 info_msg = "false"
             RV_ISA.print_snoop(
                 snoop,
-                f"beq {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs1)}, {hex(offset)}",
+                f"beq {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
                 info_msg,
             )
             return True
@@ -167,7 +167,7 @@ class RV_I_ISA(RV_ISA):
                 info_msg = "false"
             RV_ISA.print_snoop(
                 snoop,
-                f"bne {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs1)}, {hex(offset)}",
+                f"bne {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
                 info_msg,
             )
             return True
@@ -190,7 +190,7 @@ class RV_I_ISA(RV_ISA):
             assert instr_str is not None
             RV_ISA.print_snoop(
                 snoop,
-                f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs1)}, {hex(offset)}",
+                f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
                 info_msg,
             )
             return True
@@ -213,7 +213,7 @@ class RV_I_ISA(RV_ISA):
             assert instr_str is not None
             RV_ISA.print_snoop(
                 snoop,
-                f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs1)}, {hex(offset)}",
+                f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
                 info_msg,
             )
             return True
