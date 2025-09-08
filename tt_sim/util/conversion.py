@@ -1,6 +1,6 @@
-def conv_to_bytes(val, signed=False):
+def conv_to_bytes(val, width=4, signed=False):
     if isinstance(val, int):
-        return val.to_bytes(4, byteorder="little", signed=signed)
+        return val.to_bytes(width, byteorder="little", signed=signed)
     elif isinstance(val, list):
         byte_data = bytearray()
         for el in val:
@@ -52,3 +52,23 @@ def insert_bytes(target: int, source: int, num_bytes: int, bit_position: int) ->
     result = target | source_bits
 
     return result
+
+
+def get_nth_bit(value: int, n: int) -> int:
+    if n < 0 or n > 31:
+        raise ValueError("n must be between 0 and 31 for a 32-bit integer")
+    return (value >> n) & 1
+
+
+def clear_bit(value: int, position: int) -> int:
+    if position < 0 or position > 31:
+        raise ValueError("position must be between 0 and 31")
+
+    mask = ~(1 << position)
+    return value & mask
+
+
+def set_bit(value: int, position: int) -> int:
+    if position < 0 or position > 31:
+        raise ValueError("Bit position must be in [0, 31]")
+    return value | (1 << position)
