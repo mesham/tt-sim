@@ -6,8 +6,8 @@ from tt_sim.memory.memory import MemorySpace
 
 
 class PEMemory(MemorySpace):
-    def __init__(self, memory_map, size, safe=True):
-        super().__init__(memory_map, size, safe)
+    def __init__(self, memory_map, size, safe=True, snoop_addresses=None):
+        super().__init__(memory_map, size, safe, snoop_addresses)
 
 
 class ProcessingElement(Clockable, Resetable, ABC):
