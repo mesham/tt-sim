@@ -12,8 +12,8 @@ class Device:
         self.clocks = clocks
         self.resets = resets
 
-    def run(self, num_iterations, clock_number=0, print_cycle=False):
-        self.clocks[clock_number].run(num_iterations, print_cycle)
+    def run(self, num_iterations, clock_number=0):
+        self.clocks[clock_number].run(num_iterations)
 
     def reset(self, reset_number=0):
         self.resets[reset_number].reset()

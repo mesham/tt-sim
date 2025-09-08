@@ -9,7 +9,7 @@ class Resetable(ABC):
 
 class Clockable(ABC):
     @abstractmethod
-    def clock_tick(self):
+    def clock_tick(self, cycle_num):
         raise NotImplementedError()
 
 
@@ -17,12 +17,10 @@ class Clock:
     def __init__(self, clockables):
         self.clock_items = clockables
 
-    def clock_tick(self, cycle, print_cycle=False):
+    def clock_tick(self, cycle):
         for item in self.clock_items:
-            if print_cycle:
-                print(f"[{cycle}]", end="")
-            item.clock_tick()
+            item.clock_tick(cycle)
 
-    def run(self, num_iterations, print_cycle=False):
+    def run(self, num_iterations):
         for i in range(num_iterations):
-            self.clock_tick(i, print_cycle)
+            self.clock_tick(i)

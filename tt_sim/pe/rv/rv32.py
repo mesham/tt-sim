@@ -86,6 +86,7 @@ class RV32I(ProcessingElement):
         extensions=None,
         unknown_instr_is_error=False,
         snoop=False,
+        core_id=0,
     ):
         if extensions is None:
             extensions = []
@@ -95,6 +96,7 @@ class RV32I(ProcessingElement):
         self.active = False
         self.unknown_instructions = 0
         self.snoop = snoop
+        self.core_id = core_id
 
         # 32 registers plus the PC
         registers = []
@@ -126,7 +128,7 @@ class RV32I(ProcessingElement):
 
         print(opcode_bin)
 
-    def clock_tick(self):
+    def clock_tick(self, cycle_num):
         if not self.active:
             return
 
@@ -136,7 +138,7 @@ class RV32I(ProcessingElement):
         nextpc.write(conv_to_bytes(pc_val + 4))
 
         if self.snoop:
-            print(f"[{hex(pc_val)}] ", end="")
+            print(f"[{self.core_id}-> {cycle_num}][{hex(pc_val)}] ", end="")
 
         actioned = False
         for isa in self.isas:
@@ -187,13 +189,19 @@ class RV32IM(RV32I):
         extensions=None,
         unknown_instr_is_error=False,
         snoop=False,
+        core_id=0,
     ):
         if extensions is None:
             extensions = []
         if RV_M_ISA not in extensions:
             extensions.append(RV_M_ISA)
         super().__init__(
-            start_address, memory_spaces, extensions, unknown_instr_is_error, snoop
+            start_address,
+            memory_spaces,
+            extensions,
+            unknown_instr_is_error,
+            snoop,
+            core_id,
         )
 
 
@@ -205,11 +213,17 @@ class RV32IM_TT(RV32IM):
         extensions=None,
         unknown_instr_is_error=False,
         snoop=False,
+        core_id=0,
     ):
         if extensions is None:
             extensions = []
         if RV_TT_ISA not in extensions:
             extensions.append(RV_TT_ISA)
         super().__init__(
-            start_address, memory_spaces, extensions, unknown_instr_is_error, snoop
+            start_address,
+            memory_spaces,
+            extensions,
+            unknown_instr_is_error,
+            snoop,
+            core_id,
         )
