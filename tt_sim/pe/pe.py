@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 
-from tt_sim.device.clock import Clockable, Resetable
+from tt_sim.device.clock import Clockable
+from tt_sim.device.reset import Resetable
 from tt_sim.memory.memory import MemorySpace
 
 

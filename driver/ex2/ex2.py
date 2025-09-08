@@ -1,5 +1,6 @@
 from tt_sim.device.clock import Clock
 from tt_sim.device.device import Device, DeviceMemory
+from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.pe.rv.rv32 import RV32I
@@ -30,8 +31,11 @@ cpu.getRegisterFile()["sp"].write(conv_to_bytes(0x256))
 # Create a clock
 clock = Clock([cpu])
 
+# Create a reset
+reset = Reset([cpu])
+
 # Create a device
-device = Device(dm, [clock], [cpu])
+device = Device(dm, [clock], [reset])
 
 # Reset the device and run the clock for 100 iterations
 device.reset()
