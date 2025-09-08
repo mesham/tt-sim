@@ -309,7 +309,7 @@ class RV_I_ISA(RV_ISA):
                 f"sb {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
                 f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
             )
-            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0]))
+            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0], 1))
             return True
         elif type_val == 0x1:
             # sh
@@ -318,7 +318,7 @@ class RV_I_ISA(RV_ISA):
                 f"sh {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
                 f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
             )
-            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0:1]))
+            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0:1], 2))
             return True
         elif type_val == 0x2:
             # sw
