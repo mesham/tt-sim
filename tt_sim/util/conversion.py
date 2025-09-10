@@ -96,3 +96,18 @@ def set_bit(value: int, position: int) -> int:
     if position < 0 or position > 31:
         raise ValueError("Bit position must be in [0, 31]")
     return value | (1 << position)
+
+
+def extract_bits(val, n, p):
+    """
+    Extract n bits from integer x starting at position p.
+
+    Parameters:
+    - x (int): The input integer.
+    - p (int): The position to start extracting bits (0 = least significant bit).
+    - n (int): The number of bits to extract.
+
+    Returns:
+    - int: The extracted bits as a new integer.
+    """
+    return (val >> p) & ((1 << n) - 1)
