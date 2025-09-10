@@ -1,65 +1,263 @@
 from tt_sim.device.clock import Clock
-from tt_sim.device.device import Device
-from tt_sim.memory.memory import DRAM
+from tt_sim.device.device import Device, DeviceMemory
+from tt_sim.device.reset import Reset
+from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
+from tt_sim.misc.tile_ctrl import TensixTileControl
+from tt_sim.network.tt_noc import NUI, NoCOverlay
 from tt_sim.pe.pe import PEMemory
-from tt_sim.pe.rv.rv32 import RV32IM_TT
-from tt_sim.pe.tensix.tensix import TensixCoProcessor, TensixBackendConfiguration
+from tt_sim.pe.rv.babyriscv import BabyRISCV, BabyRISCVCoreType
 from tt_sim.pe.tensix.tdma import TDMA
-from tt_sim.network.tt_noc import NoCRouter
+from tt_sim.pe.tensix.tensix import (
+    TensixBackendConfiguration,
+    TensixCoProcessor,
+    TensixGPR,
+)
+from tt_sim.util.conversion import (
+    clear_bit,
+    conv_to_bytes,
+    conv_to_int32,
+)
 
-# First wormhole similar configuration, with single data mover core
+"""
+This is a single tensix core launching a kernel on brisc
+"""
 
-# Read in binary executable (sets 10 to location 0x512)
-with open("brisc_firmware.bin", "rb") as file:
-    data = file.read()
+# Read in firmware binaries
+with open("brisc_firmware_text.bin", "rb") as file:
+    brisc_text = file.read()
 
-mem_map = MemoryMap()
+with open("ncrisc_firmware_text.bin", "rb") as file:
+    ncrisc_text = file.read()
+
+with open("ncrisc_firmware_data.bin", "rb") as file:
+    ncrisc_data = file.read()
+
+with open("trisc0_firmware_text.bin", "rb") as file:
+    trisc0_text = file.read()
+
+with open("trisc1_firmware_text.bin", "rb") as file:
+    trisc1_text = file.read()
+
+with open("trisc2_firmware_text.bin", "rb") as file:
+    trisc2_text = file.read()
+
+global_mem_map = MemoryMap()
+
+ddr_bank_0 = DRAM(10 * 1024 * 1024)
+ddr_range = AddressRange(0x0, ddr_bank_0.getSize())
+global_mem_map[ddr_range] = ddr_bank_0
+
+device_mem = DeviceMemory(global_mem_map, "10M")
+
+# Create tensix specific memory
+
+tensix_mem_map = MemoryMap()
 
 # Create DRAM
 L1_mem = DRAM(1507327)
 l1_range = AddressRange(0x0, L1_mem.getSize())
-mem_map[l1_range] = L1_mem
-
-local_mem = DRAM(4096)
-local_range = AddressRange(0xFFB00000, local_mem.getSize())
-mem_map[local_range] = local_mem
+tensix_mem_map[l1_range] = L1_mem
 
 tenxix_coprocessor = TensixCoProcessor()
 tensix_range = AddressRange(0xFFE40000, tenxix_coprocessor.getSize())
-mem_map[tensix_range] = tenxix_coprocessor
+tensix_mem_map[tensix_range] = tenxix_coprocessor
 
 tenxix_coprocessor_be_config = TensixBackendConfiguration(tenxix_coprocessor)
-tensix_config_range = AddressRange(0xFFEF_0000, tenxix_coprocessor_be_config.getSize())
-mem_map[tensix_config_range] = tenxix_coprocessor_be_config
+tensix_config_range = AddressRange(0xFFEF0000, tenxix_coprocessor_be_config.getSize())
+tensix_mem_map[tensix_config_range] = tenxix_coprocessor_be_config
 
-noc1_router=NoCRouter(0, 0, 0)
+tensix_gpr = TensixGPR(tenxix_coprocessor)
+tensix_gpr_range = AddressRange(0xFFE00000, tensix_gpr.getSize())
+tensix_mem_map[tensix_gpr_range] = tensix_gpr
+
+noc1_router = NUI(0, 0, 0, L1_mem)
 noc2_range = AddressRange(0xFFB20000, noc1_router.getSize())
-mem_map[noc2_range] = noc1_router
+tensix_mem_map[noc2_range] = noc1_router
 
-noc2_router=NoCRouter(1, 0, 0)
+noc2_router = NUI(1, 0, 0, L1_mem)
 noc2_range = AddressRange(0xFFB30000, noc2_router.getSize())
-mem_map[noc2_range] = noc2_router
+tensix_mem_map[noc2_range] = noc2_router
 
-tdma=TDMA()
+noc_overlay = NoCOverlay()
+noc_overlay_range = AddressRange(0xFFB40000, noc_overlay.getSize())
+tensix_mem_map[noc_overlay_range] = noc_overlay
+
+tdma = TDMA()
 tdma_range = AddressRange(0xFFB11000, tdma.getSize())
-mem_map[tdma_range] = tdma
+tensix_mem_map[tdma_range] = tdma
 
-# Create PE memory space
-pem = PEMemory(mem_map, "10M")
+tile_ctrl = TensixTileControl()
+tile_ctrl_range = AddressRange(0xFFB12000, tile_ctrl.getSize())
+tensix_mem_map[tile_ctrl_range] = tile_ctrl
 
-# Create CPU
-cpu = RV32IM_TT(0x0, [pem], snoop=True)
+# Create global PE memory space
+tensix_mem = TensixMemory(tensix_mem_map, "10M")
+
+noc1_router.set_tile_memories({(0, 0): TileMemory(global_mem_map, "10M")})
+noc2_router.set_tile_memories({(0, 0): TileMemory(global_mem_map, "10M")})
+
+# Create brisc CPU
+brisc0_mem_map = MemoryMap()
+local_mem_brisc = DRAM(4096)
+local_mem_brisc_range = AddressRange(0xFFB00000, local_mem_brisc.getSize())
+brisc0_mem_map[local_mem_brisc_range] = local_mem_brisc
+brisc0_mem = PEMemory(brisc0_mem_map, "1M")
+
+brisc = BabyRISCV(BabyRISCVCoreType.BRISC, [tensix_mem, brisc0_mem], snoop=True)
+
+# Create ncrisc CPU
+ncrisc_mem_map = MemoryMap()
+local_mem_ncrisc = DRAM(4096)
+local_mem_ncrisc_range = AddressRange(0xFFB00000, local_mem_ncrisc.getSize())
+ncrisc_mem_map[local_mem_ncrisc_range] = local_mem_ncrisc
+ncrisc_mem = PEMemory(ncrisc_mem_map, "1M")
+
+ncrisc = BabyRISCV(BabyRISCVCoreType.NCRISC, [tensix_mem, ncrisc_mem], snoop=False)
+
+# Create trisc0 CPU
+trisc0_mem_map = MemoryMap()
+local_mem_trisc0 = DRAM(2048)
+local_mem_trisc0_range = AddressRange(0xFFB00000, local_mem_trisc0.getSize())
+trisc0_mem_map[local_mem_trisc0_range] = local_mem_trisc0
+trisc0_mem = PEMemory(trisc0_mem_map, "1M")
+
+trisc0 = BabyRISCV(BabyRISCVCoreType.TRISC0, [tensix_mem, trisc0_mem], snoop=False)
+
+# Create trisc1 CPU
+trisc1_mem_map = MemoryMap()
+local_mem_trisc1 = DRAM(2048)
+local_mem_trisc1_range = AddressRange(0xFFB00000, local_mem_trisc1.getSize())
+trisc1_mem_map[local_mem_trisc1_range] = local_mem_trisc1
+trisc1_mem = PEMemory(trisc1_mem_map, "1M")
+
+trisc1 = BabyRISCV(BabyRISCVCoreType.TRISC1, [tensix_mem, trisc1_mem], snoop=False)
+
+# Create trisc2 CPU
+trisc2_mem_map = MemoryMap()
+local_mem_trisc2 = DRAM(2048)
+local_mem_trisc2_range = AddressRange(0xFFB00000, local_mem_trisc2.getSize())
+trisc2_mem_map[local_mem_trisc2_range] = local_mem_trisc2
+trisc2_mem = PEMemory(trisc2_mem_map, "1M")
+
+trisc2 = BabyRISCV(BabyRISCVCoreType.TRISC2, [tensix_mem, trisc2_mem], snoop=False)
 
 # Create a clock
-clock = Clock([cpu])
+clock = Clock([brisc, ncrisc, trisc0, trisc1, trisc2])
+
+# Create a reset which comprises the clock and CPUs
+reset = Reset([clock, brisc, ncrisc, trisc0, trisc1, trisc2])
 
 # Create a device
-device = Device(pem, [clock], [cpu])
+device = Device(None, [clock], [reset])
 
-# Write executable into L1 memory
-pem.write(0x0, data)
+# Write executables into L1 memory
+tensix_mem.write(0x3780, brisc_text)
+tensix_mem.write(0x4D80, ncrisc_text)
+tensix_mem.write(0x5580, trisc0_text)
+tensix_mem.write(0x5B80, trisc1_text)
+tensix_mem.write(0x6180, trisc2_text)
+
+tensix_mem.write(
+    0x8190, ncrisc_data
+)  # Set the data area for ncrisc this is in L1 and then the core will grab this
+
+soft_reset = clear_bit(0xFFFFFFFF, 11)
+tensix_mem.write(0xFFB121B0, conv_to_bytes(soft_reset))
+
 
 # Reset the device and run the clock for 5000 iterations
 device.reset()
-device.run(5000, print_cycle=True)
+device.run(3100)
+
+## Write mailbox configuration
+
+# watcher_kernel_ids (uint16)
+tensix_mem.write(0x20, conv_to_bytes(0x4, 2))
+tensix_mem.write(0x22, conv_to_bytes(0x0, 2))
+tensix_mem.write(0x24, conv_to_bytes(0x0, 2))
+# ncrisc_kernel_size16 (uint16)
+tensix_mem.write(0x26, conv_to_bytes(0x0, 2))
+# kernel_config_base (uint32)
+tensix_mem.write(0x28, conv_to_bytes(0x7190))
+tensix_mem.write(0x2C, conv_to_bytes(0x3F520))
+tensix_mem.write(0x30, conv_to_bytes(0x73D0))
+# sem_offset (uint16)
+tensix_mem.write(0x34, conv_to_bytes(0x20, 2))
+tensix_mem.write(0x36, conv_to_bytes(0x0, 2))
+tensix_mem.write(0x38, conv_to_bytes(0x0, 2))
+# local_cb_offset (uint16)
+tensix_mem.write(0x3A, conv_to_bytes(0x20, 2))
+# remote_cb_offset (uint16)
+tensix_mem.write(0x3C, conv_to_bytes(0x20, 2))
+# rta_offset (3 by 2 x uint16)
+tensix_mem.write(0x3E, conv_to_bytes(0x0, 2))
+tensix_mem.write(0x40, conv_to_bytes(0x20, 2))
+tensix_mem.write(0x42, conv_to_bytes(0x0, 2))
+tensix_mem.write(0x44, conv_to_bytes(0x20, 2))
+tensix_mem.write(0x46, conv_to_bytes(0x0, 2))
+tensix_mem.write(0x48, conv_to_bytes(0x20, 2))
+# mode (uint 8)
+tensix_mem.write(0x4A, conv_to_bytes(0x1, 1))
+# padding (uint 8) hence plus one
+# kernel_text_offset (uint32)
+tensix_mem.write(0x4C, conv_to_bytes(0x20))
+tensix_mem.write(0x50, conv_to_bytes(0x0))
+tensix_mem.write(0x54, conv_to_bytes(0x0))
+tensix_mem.write(0x58, conv_to_bytes(0x0))
+tensix_mem.write(0x5C, conv_to_bytes(0x0))
+# local_cb_mask (uint32)
+tensix_mem.write(0x60, conv_to_bytes(0x0))
+# brisc_noc_id (uint8)
+tensix_mem.write(0x64, conv_to_bytes(0x0, 1))
+# brisc_noc_mode (uint8)
+tensix_mem.write(0x65, conv_to_bytes(0x0, 1))
+# min_remote_cb_start_index (uint8)
+tensix_mem.write(0x66, conv_to_bytes(0x20, 1))
+# exit_erisc_kernel (uint8)
+tensix_mem.write(0x67, conv_to_bytes(0x0, 1))
+# host_assigned_id (uint32)
+tensix_mem.write(0x68, conv_to_bytes(0x0))
+# sub_device_origin_x (uint8)
+tensix_mem.write(0x6C, conv_to_bytes(0x0, 1))
+# sub_device_origin_y (uint8)
+tensix_mem.write(0x6D, conv_to_bytes(0x0, 1))
+# enables (uint8)
+tensix_mem.write(0x6E, conv_to_bytes(0x1, 1))
+# preload (uint8)
+tensix_mem.write(0x6F, conv_to_bytes(0x0, 1))
+
+## Write go message configuration
+
+tensix_mem.write(0x2A0, conv_to_bytes(0x50, 1))
+tensix_mem.write(0x2A1, conv_to_bytes(0x73, 1))
+tensix_mem.write(0x2A2, conv_to_bytes(0x2A, 1))
+tensix_mem.write(0x2A3, conv_to_bytes(0x80, 1))
+
+## Read in kernel binary and write this into L1
+with open("brisc_kernel_text.bin", "rb") as file:
+    brisc_kernel = file.read()
+tensix_mem.write(0x71B0, brisc_kernel)
+
+## Write runtime arguments
+
+tensix_mem.write(0x7190, conv_to_bytes(0x20))
+tensix_mem.write(0x7194, conv_to_bytes(0x1C0))
+tensix_mem.write(0x7198, conv_to_bytes(0x360))
+tensix_mem.write(0x719C, conv_to_bytes(0x16DE60))
+tensix_mem.write(0x71A0, conv_to_bytes(0x16DCC0))
+tensix_mem.write(0x71A4, conv_to_bytes(0x64))
+
+## Write input data to DDR memory
+list1 = list(range(100))
+list2 = [100 - i for i in range(100)]
+device_mem.write(0x20, conv_to_bytes(list1))
+device_mem.write(0x1C0, conv_to_bytes(list2))
+
+## Run 3000 cycles to process the kernel
+device.run(3000)
+
+## Check results in DDR memory are correct
+for i in range(100):
+    val = conv_to_int32(device_mem.read(0x360 + (i * 4), 4))
+    assert val == list1[i] + list2[i]

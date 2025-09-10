@@ -15,7 +15,6 @@ class NoCOverlay(MemMapable):
         pass
 
     def read(self, addr, size):
-        print("A")
         return 0
 
     def write(self, addr, value, size=None):
