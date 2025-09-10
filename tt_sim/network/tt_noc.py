@@ -1,10 +1,11 @@
-from enum import Enum
+from enum import IntEnum
 
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.util.conversion import (
     clear_bit,
     conv_to_bytes,
     conv_to_uint32,
+    extract_bits,
     replace_bits,
 )
 
@@ -26,7 +27,7 @@ class NoCOverlay(MemMapable):
 
 class NUI(MemMapable):
     class RequestInitiator:
-        def __init__(self):
+        def __init__(self, nui):
             self.target_addr_low = 0
             self.target_addr_mid = 0
             self.ret_addr_low = 0
@@ -36,9 +37,204 @@ class NUI(MemMapable):
             self.at_len_be = 0
             self.at_data = 0
             self.cmd_ctrl = 0
+            self.nui = nui
+
+        def handle_read_transfer(self):
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+            )
+
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED
+            )
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_STARTED
+            )
+            # TODO: handle request splitting when message > 8192
+            self.cmd_ctrl = 0
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_SENT
+            )
+
+            target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
+            target_tile_y = extract_bits(self.target_addr_mid, 12, 4)
+            source_mem_space = self.nui.tile_memories[(target_tile_x, target_tile_y)]
+            self.nui.l1_memory.write(
+                self.ret_addr_low,
+                source_mem_space.read(self.target_addr_low, self.at_len_be),
+            )
+
+            print(
+                f"Read to {hex(self.ret_addr_low)} from {hex(self.target_addr_low)} size={hex(self.at_len_be)}"
+            )
+
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_RD_RESP_RECEIVED
+            )
+            # Each flit is 32 bytes, increment by this number
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_RD_DATA_WORD_RECEIVED,
+                self.at_len_be / 4,
+            )
+
+            self.nui.nui_counters.decrement(
+                NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+            )
+
+        def handle_inline_write_transfer(
+            self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
+        ):
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                )
+
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED
+            )
+
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_STARTED
+                )
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_SENT
+                )
+            else:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_STARTED
+                )
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_SENT
+                )
+            self.cmd_ctrl = 0
+
+            # Perform data copy
+            ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
+            ret_tile_y = extract_bits(self.ret_addr_mid, 12, 4)
+            tgt_mem_space = self.nui.tile_memories[(ret_tile_x, ret_tile_y)]
+            tgt_mem_space.write(
+                self.ret_addr_low,
+                self.nui.l1_memory.read(self.target_addr_low, self.at_len_be),
+            )
+
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_WR_ACK_RECEIVED
+                )
+                self.nui.nui_counters.decrement(
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                )
+
+        def handle_none_inline_write(
+            self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
+        ):
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                )
+
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
+            )
+
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED
+            )
+
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_STARTED
+                )
+            else:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_STARTED
+                )
+            self.cmd_ctrl = 0
+
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_SENT
+                )
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_DATA_WORD_SENT,
+                    self.at_len_be / 4,
+                )
+            else:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_SENT
+                )
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_DATA_WORD_SENT,
+                    self.at_len_be / 4,
+                )
+
+            # Perform data copy
+            ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
+            ret_tile_y = extract_bits(self.ret_addr_mid, 12, 4)
+            tgt_mem_space = self.nui.tile_memories[(ret_tile_x, ret_tile_y)]
+            tgt_mem_space.write(
+                self.ret_addr_low,
+                self.nui.l1_memory.read(self.target_addr_low, self.at_len_be),
+            )
+
+            print(
+                f"Write to {hex(self.ret_addr_low)} from {hex(self.target_addr_low)} size={hex(self.at_len_be)}"
+            )
+
+            self.nui.nui_counters.decrement(
+                NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
+            )
+
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_WR_ACK_RECEIVED
+                )
+                self.nui.nui_counters.decrement(
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                )
+
+        def handle_write_transfer(self):
+            # TODO: handle the other side here
+            noc_cmd_wr_be = extract_bits(self.ctrl, 1, 2)
+            noc_cmd_wr_inline = extract_bits(self.ctrl, 1, 3)
+            noc_cmd_resp_marked = extract_bits(self.ctrl, 1, 4)
+
+            if noc_cmd_wr_inline:
+                self.handle_inline_write_transfer(
+                    noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
+                )
+            else:
+                self.handle_none_inline_write(
+                    noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
+                )
+
+        def initiate(self):
+            if self.cmd_ctrl == 1:
+                # Following the protocol at
+                # https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/NoC/Counters.md
+                # however this is different as completing immediately
+                # TODO need to hook up with NOC_PACKET_TRANSACTION_ID
+
+                """
+                If reading, then target has remote memory and ret has the local memory. If writing
+                then this is the other way around (target has local, ret has remote). Therefore
+                ret is always the thing being written into. Currently we assume one end is local
+                here. But this can be improved by making the target an NUI too
+                """
+
+                mode = extract_bits(self.ctrl, 2, 0)
+                if mode == 0:
+                    self.handle_read_transfer()
+                elif mode == 1:
+                    raise NotImplementedError(
+                        "NoC does not support atomic data transfers"
+                    )
+                elif mode == 2:
+                    self.handle_write_transfer()
 
     class NUICounters:
-        class CounterNames(Enum):
+        class CounterNames(IntEnum):
             NIU_MST_ATOMIC_RESP_RECEIVED = 0
             NIU_MST_WR_ACK_RECEIVED = 1
             NIU_MST_RD_RESP_RECEIVED = 2
@@ -111,10 +307,16 @@ class NUI(MemMapable):
         def __setitem__(self, idx, value):
             self.counters[idx] = value
 
+        def increment(self, idx, val=1):
+            self.counters[idx] += val
+
+        def decrement(self, idx, val=1):
+            self.counters[idx] -= val
+
         def __delitem__(self, idx):
             del self.counters[idx]
 
-    def __init__(self, noc_number, x_coord, y_coord):
+    def __init__(self, noc_number, x_coord, y_coord, l1_memory):
         assert noc_number == 0 or noc_number == 1
         self.noc_number = noc_number
         self.x_coord = x_coord
@@ -122,12 +324,17 @@ class NUI(MemMapable):
         self.generate_NIU_and_NoC_config()
         self.generate_NoC_node_id()
         self.request_initiators = [
-            NUI.RequestInitiator(),
-            NUI.RequestInitiator(),
-            NUI.RequestInitiator(),
-            NUI.RequestInitiator(),
+            NUI.RequestInitiator(self),
+            NUI.RequestInitiator(self),
+            NUI.RequestInitiator(self),
+            NUI.RequestInitiator(self),
         ]
         self.nui_counters = NUI.NUICounters()
+        self.tile_memories = None
+        self.l1_memory = l1_memory
+
+    def set_tile_memories(self, tile_memories):
+        self.tile_memories = tile_memories
 
     def generate_NIU_and_NoC_config(self):
         # https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/NoC/MemoryMap.md#niu-and-noc-router-configuration
@@ -167,7 +374,9 @@ class NUI(MemMapable):
         )
 
     def read(self, addr, size):
-        print(f"NOC {hex(addr)}")
+        if self.tile_memories is None:
+            raise Exception("NoC endpoint must have a tile memories to operate on")
+        print(f"NOC READ: {hex(addr)}")
         if addr == 0x0138:
             return conv_to_bytes(self.noc_id_logical)
         elif addr == 0x100:
@@ -191,9 +400,9 @@ class NUI(MemMapable):
         elif addr == 0x4:
             return conv_to_bytes(self.request_initiators[0].target_addr_mid)
         elif addr == 0xC:
-            return conv_to_bytes(self.request_initiators[0].target_ret_low)
+            return conv_to_bytes(self.request_initiators[0].ret_addr_low)
         elif addr == 0x10:
-            return conv_to_bytes(self.request_initiators[0].target_ret_mid)
+            return conv_to_bytes(self.request_initiators[0].ret_addr_mid)
         elif addr == 0x18:
             return conv_to_bytes(self.request_initiators[0].packet_tag)
         elif addr == 0x1C:
@@ -209,9 +418,9 @@ class NUI(MemMapable):
         elif addr == 0x404:
             return conv_to_bytes(self.request_initiators[1].target_addr_mid)
         elif addr == 0x40C:
-            return conv_to_bytes(self.request_initiators[1].target_ret_low)
+            return conv_to_bytes(self.request_initiators[1].ret_addr_low)
         elif addr == 0x410:
-            return conv_to_bytes(self.request_initiators[1].target_ret_mid)
+            return conv_to_bytes(self.request_initiators[1].ret_addr_mid)
         elif addr == 0x418:
             return conv_to_bytes(self.request_initiators[1].packet_tag)
         elif addr == 0x41C:
@@ -227,9 +436,9 @@ class NUI(MemMapable):
         elif addr == 0x804:
             return conv_to_bytes(self.request_initiators[2].target_addr_mid)
         elif addr == 0x80C:
-            return conv_to_bytes(self.request_initiators[2].target_ret_low)
+            return conv_to_bytes(self.request_initiators[2].ret_addr_low)
         elif addr == 0x810:
-            return conv_to_bytes(self.request_initiators[2].target_ret_mid)
+            return conv_to_bytes(self.request_initiators[2].ret_addr_mid)
         elif addr == 0x818:
             return conv_to_bytes(self.request_initiators[2].packet_tag)
         elif addr == 0x81C:
@@ -245,9 +454,9 @@ class NUI(MemMapable):
         elif addr == 0xC04:
             return conv_to_bytes(self.request_initiators[3].target_addr_mid)
         elif addr == 0xC0C:
-            return conv_to_bytes(self.request_initiators[3].target_ret_low)
+            return conv_to_bytes(self.request_initiators[3].ret_addr_low)
         elif addr == 0xC10:
-            return conv_to_bytes(self.request_initiators[3].target_ret_mid)
+            return conv_to_bytes(self.request_initiators[3].ret_addr_mid)
         elif addr == 0xC18:
             return conv_to_bytes(self.request_initiators[3].packet_tag)
         elif addr == 0xC1C:
@@ -267,6 +476,9 @@ class NUI(MemMapable):
             )
 
     def write(self, addr, value, size=None):
+        if self.tile_memories is None:
+            raise Exception("NoC endpoint must have a tile memories to operate on")
+        print(f"NOC WRITE: {hex(addr)}")
         if addr == 0x0138:
             self.noc_id_logical = conv_to_uint32(value)
         elif addr == 0x100:
@@ -286,9 +498,9 @@ class NUI(MemMapable):
         elif addr == 0x4:
             self.request_initiators[0].target_addr_mid = conv_to_uint32(value)
         elif addr == 0xC:
-            self.request_initiators[0].target_ret_low = conv_to_uint32(value)
+            self.request_initiators[0].ret_addr_low = conv_to_uint32(value)
         elif addr == 0x10:
-            self.request_initiators[0].target_ret_mid = conv_to_uint32(value)
+            self.request_initiators[0].ret_addr_mid = conv_to_uint32(value)
         elif addr == 0x18:
             self.request_initiators[0].packet_tag = conv_to_uint32(value)
         elif addr == 0x1C:
@@ -299,14 +511,15 @@ class NUI(MemMapable):
             self.request_initiators[0].at_data = conv_to_uint32(value)
         elif addr == 0x28:
             self.request_initiators[0].cmd_ctrl = conv_to_uint32(value)
+            self.request_initiators[0].initiate()
         elif addr == 0x400:
             self.request_initiators[1].target_addr_low = conv_to_uint32(value)
         elif addr == 0x404:
             self.request_initiators[1].target_addr_mid = conv_to_uint32(value)
         elif addr == 0x40C:
-            self.request_initiators[1].target_ret_low = conv_to_uint32(value)
+            self.request_initiators[1].ret_addr_low = conv_to_uint32(value)
         elif addr == 0x410:
-            self.request_initiators[1].target_ret_mid = conv_to_uint32(value)
+            self.request_initiators[1].ret_addr_mid = conv_to_uint32(value)
         elif addr == 0x418:
             self.request_initiators[1].packet_tag = conv_to_uint32(value)
         elif addr == 0x41C:
@@ -317,14 +530,15 @@ class NUI(MemMapable):
             self.request_initiators[1].at_data = conv_to_uint32(value)
         elif addr == 0x428:
             self.request_initiators[1].cmd_ctrl = conv_to_uint32(value)
+            self.request_initiators[1].initiate()
         elif addr == 0x800:
             self.request_initiators[2].target_addr_low = conv_to_uint32(value)
         elif addr == 0x804:
             self.request_initiators[2].target_addr_mid = conv_to_uint32(value)
         elif addr == 0x80C:
-            self.request_initiators[2].target_ret_low = conv_to_uint32(value)
+            self.request_initiators[2].ret_addr_low = conv_to_uint32(value)
         elif addr == 0x810:
-            self.request_initiators[2].target_ret_mid = conv_to_uint32(value)
+            self.request_initiators[2].ret_addr_mid = conv_to_uint32(value)
         elif addr == 0x818:
             self.request_initiators[2].packet_tag = conv_to_uint32(value)
         elif addr == 0x81C:
@@ -335,14 +549,15 @@ class NUI(MemMapable):
             self.request_initiators[2].at_data = conv_to_uint32(value)
         elif addr == 0x828:
             self.request_initiators[2].cmd_ctrl = conv_to_uint32(value)
+            self.request_initiators[2].initiate()
         elif addr == 0xC00:
             self.request_initiators[3].target_addr_low = conv_to_uint32(value)
         elif addr == 0xC04:
             self.request_initiators[3].target_addr_mid = conv_to_uint32(value)
         elif addr == 0xC0C:
-            self.request_initiators[3].target_ret_low = conv_to_uint32(value)
+            self.request_initiators[3].ret_addr_low = conv_to_uint32(value)
         elif addr == 0xC10:
-            self.request_initiators[3].target_ret_mid = conv_to_uint32(value)
+            self.request_initiators[3].ret_addr_mid = conv_to_uint32(value)
         elif addr == 0xC18:
             self.request_initiators[3].packet_tag = conv_to_uint32(value)
         elif addr == 0xC1C:
@@ -353,6 +568,7 @@ class NUI(MemMapable):
             self.request_initiators[3].at_data = conv_to_uint32(value)
         elif addr == 0xC28:
             self.request_initiators[3].cmd_ctrl = conv_to_uint32(value)
+            self.request_initiators[3].initiate()
         else:
             raise NotImplementedError(
                 f"Writing to address {hex(addr)} not yet supported by NoC"
