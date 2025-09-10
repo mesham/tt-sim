@@ -1,5 +1,5 @@
 from tt_sim.device.clock import Clock
-from tt_sim.device.device import Device, DeviceMemory
+from tt_sim.device.device import Device
 from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
@@ -42,13 +42,16 @@ with open("trisc1_firmware_text.bin", "rb") as file:
 with open("trisc2_firmware_text.bin", "rb") as file:
     trisc2_text = file.read()
 
-global_mem_map = MemoryMap()
+dram_tile_mem_map = MemoryMap()
 
 ddr_bank_0 = DRAM(10 * 1024 * 1024)
 ddr_range = AddressRange(0x0, ddr_bank_0.getSize())
-global_mem_map[ddr_range] = ddr_bank_0
+dram_tile_mem_map[ddr_range] = ddr_bank_0
 
-device_mem = DeviceMemory(global_mem_map, "10M")
+dram_tile_mem = TileMemory(dram_tile_mem_map, "10M")
+
+dram_noc0_router = NUI(0, 0, 0, dram_tile_mem)
+dram_noc1_router = NUI(1, 9, 11, dram_tile_mem)
 
 # Create tensix specific memory
 
@@ -71,13 +74,13 @@ tensix_gpr = TensixGPR(tenxix_coprocessor)
 tensix_gpr_range = AddressRange(0xFFE00000, tensix_gpr.getSize())
 tensix_mem_map[tensix_gpr_range] = tensix_gpr
 
-noc1_router = NUI(0, 0, 0, L1_mem)
-noc2_range = AddressRange(0xFFB20000, noc1_router.getSize())
-tensix_mem_map[noc2_range] = noc1_router
+noc0_router = NUI(0, 1, 1, L1_mem, True)
+noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
+tensix_mem_map[noc0_range] = noc0_router
 
-noc2_router = NUI(1, 0, 0, L1_mem)
-noc2_range = AddressRange(0xFFB30000, noc2_router.getSize())
-tensix_mem_map[noc2_range] = noc2_router
+noc1_router = NUI(1, 8, 10, L1_mem)
+noc1_range = AddressRange(0xFFB30000, noc1_router.getSize())
+tensix_mem_map[noc1_range] = noc1_router
 
 noc_overlay = NoCOverlay()
 noc_overlay_range = AddressRange(0xFFB40000, noc_overlay.getSize())
@@ -94,8 +97,20 @@ tensix_mem_map[tile_ctrl_range] = tile_ctrl
 # Create global PE memory space
 tensix_mem = TensixMemory(tensix_mem_map, "10M")
 
-noc1_router.set_tile_memories({(0, 0): TileMemory(global_mem_map, "10M")})
-noc2_router.set_tile_memories({(0, 0): TileMemory(global_mem_map, "10M")})
+# Create NoC directory
+noc_0_directory = {
+    dram_noc0_router.get_id_pair(): dram_noc0_router,
+    noc0_router.get_id_pair(): noc0_router,
+}
+noc_1_directory = {
+    dram_noc1_router.get_id_pair(): dram_noc1_router,
+    noc1_router.get_id_pair(): noc1_router,
+}
+
+dram_noc0_router.set_noc_directory(noc_0_directory)
+dram_noc1_router.set_noc_directory(noc_1_directory)
+noc0_router.set_noc_directory(noc_0_directory)
+noc1_router.set_noc_directory(noc_1_directory)
 
 # Create brisc CPU
 brisc0_mem_map = MemoryMap()
@@ -143,7 +158,19 @@ trisc2_mem = PEMemory(trisc2_mem_map, "1M")
 trisc2 = BabyRISCV(BabyRISCVCoreType.TRISC2, [tensix_mem, trisc2_mem], snoop=False)
 
 # Create a clock
-clock = Clock([brisc, ncrisc, trisc0, trisc1, trisc2])
+clock = Clock(
+    [
+        brisc,
+        ncrisc,
+        trisc0,
+        trisc1,
+        trisc2,
+        dram_noc0_router,
+        dram_noc1_router,
+        noc0_router,
+        noc1_router,
+    ]
+)
 
 # Create a reset which comprises the clock and CPUs
 reset = Reset([clock, brisc, ncrisc, trisc0, trisc1, trisc2])
@@ -255,13 +282,13 @@ tensix_mem.write(0x71A4, conv_to_bytes(0x64))
 ## Write input data to DDR memory
 list1 = list(range(100))
 list2 = [100 - i for i in range(100)]
-device_mem.write(0x20, conv_to_bytes(list1))
-device_mem.write(0x1C0, conv_to_bytes(list2))
+dram_tile_mem.write(0x20, conv_to_bytes(list1))
+dram_tile_mem.write(0x1C0, conv_to_bytes(list2))
 
 ## Run 3000 cycles to process the kernel
 device.run(3000)
 
 ## Check results in DDR memory are correct
 for i in range(100):
-    val = conv_to_int32(device_mem.read(0x360 + (i * 4), 4))
+    val = conv_to_int32(dram_tile_mem.read(0x360 + (i * 4), 4))
     assert val == list1[i] + list2[i]

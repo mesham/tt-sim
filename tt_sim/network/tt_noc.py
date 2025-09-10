@@ -1,5 +1,6 @@
 from enum import IntEnum
 
+from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.util.conversion import (
     clear_bit,
@@ -24,7 +25,32 @@ class NoCOverlay(MemMapable):
         return 0x3FFFF
 
 
-class NUI(MemMapable):
+class NUI(MemMapable, Clockable):
+    class NoCDataRequest:
+        class DataRequestAction(IntEnum):
+            READ = 0
+            WRITE = 1
+            RESPONSE_READ = 2
+            ACK = 3
+
+        def __init__(
+            self,
+            tgt_address,
+            action,
+            data_length_bytes,
+            source,
+            request_id,
+            data=None,
+            noc_cmd_resp_marked=True,
+        ):
+            self.tgt_address = tgt_address
+            self.action = action
+            self.request_id = request_id
+            self.data_length_bytes = data_length_bytes
+            self.source = source
+            self.data = data
+            self.noc_cmd_resp_marked = noc_cmd_resp_marked
+
     class RequestInitiator:
         def __init__(self, nui):
             self.target_addr_low = 0
@@ -39,53 +65,56 @@ class NUI(MemMapable):
             self.nui = nui
 
         def handle_read_transfer(self):
-            self.nui.nui_counters.increment(
-                NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
-            )
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 10, 4)
 
             self.nui.nui_counters.increment(
-                NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED
+                [
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                    + noc_packet_transaction_id,
+                    NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED,
+                    NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_STARTED,
+                ]
             )
-            self.nui.nui_counters.increment(
-                NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_STARTED
-            )
+
             # TODO: handle request splitting when message > 8192
             self.cmd_ctrl = 0
+
+            target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
+            target_tile_y = extract_bits(self.target_addr_mid, 12, 4)
+            assert (target_tile_x, target_tile_y) in self.nui.noc_directory
+
+            read_req = NUI.NoCDataRequest(
+                self.target_addr_low,
+                NUI.NoCDataRequest.DataRequestAction.READ,
+                self.at_len_be,
+                self.nui.id_pair,
+                noc_packet_transaction_id,
+            )
+            self.nui.add_outstanding_noc_request(
+                noc_packet_transaction_id, self.ret_addr_low
+            )
+
+            self.nui.noc_directory[(target_tile_x, target_tile_y)].transmit(read_req)
             self.nui.nui_counters.increment(
                 NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_SENT
             )
 
-            target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
-            target_tile_y = extract_bits(self.target_addr_mid, 12, 4)
-            source_mem_space = self.nui.tile_memories[(target_tile_x, target_tile_y)]
-            self.nui.l1_memory.write(
-                self.ret_addr_low,
-                source_mem_space.read(self.target_addr_low, self.at_len_be),
-            )
-
-            print(
-                f"Read to {hex(self.ret_addr_low)} from {hex(self.target_addr_low)} size={hex(self.at_len_be)}"
-            )
-
-            self.nui.nui_counters.increment(
-                NUI.NUICounters.CounterNames.NIU_MST_RD_RESP_RECEIVED
-            )
-            # Each flit is 32 bytes, increment by this number
-            self.nui.nui_counters.increment(
-                NUI.NUICounters.CounterNames.NIU_MST_RD_DATA_WORD_RECEIVED,
-                self.at_len_be / 4,
-            )
-
-            self.nui.nui_counters.decrement(
-                NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
-            )
+            if self.nui.snoop:
+                print(
+                    f"[NoC {self.nui.id_pair}]: Issue read request id {read_req.request_id} to NUI "
+                    f"{(target_tile_x, target_tile_y)}, reading at {hex(read_req.tgt_address)} of size "
+                    f"{hex(read_req.data_length_bytes)}"
+                )
 
         def handle_inline_write_transfer(
             self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
         ):
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 10, 4)
+
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                    + noc_packet_transaction_id
                 )
 
             self.nui.nui_counters.increment(
@@ -94,43 +123,51 @@ class NUI(MemMapable):
 
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_STARTED
-                )
-                self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_SENT
+                    [
+                        NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_STARTED,
+                        NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_SENT,
+                    ]
                 )
             else:
                 self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_STARTED
-                )
-                self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_SENT
+                    [
+                        NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_STARTED,
+                        NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_SENT,
+                    ]
                 )
             self.cmd_ctrl = 0
 
-            # Perform data copy
+            # Send write request
             ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
             ret_tile_y = extract_bits(self.ret_addr_mid, 12, 4)
-            tgt_mem_space = self.nui.tile_memories[(ret_tile_x, ret_tile_y)]
-            tgt_mem_space.write(
-                self.ret_addr_low,
-                self.nui.l1_memory.read(self.target_addr_low, self.at_len_be),
-            )
+            assert (ret_tile_x, ret_tile_y) in self.nui.noc_directory
 
-            if noc_cmd_resp_marked:
-                self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_WR_ACK_RECEIVED
-                )
-                self.nui.nui_counters.decrement(
-                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
-                )
+            data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
+
+            write_req = NUI.NoCDataRequest(
+                self.ret_addr_low,
+                NUI.NoCDataRequest.DataRequestAction.WRITE,
+                self.at_len_be,
+                self.nui.id_pair,
+                noc_packet_transaction_id,
+                data,
+                noc_cmd_resp_marked,
+            )
+            self.nui.add_outstanding_noc_request(
+                noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
+            )
+            self.nui.noc_directory[(ret_tile_x, ret_tile_y)].transmit(write_req)
 
         def handle_none_inline_write(
             self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
         ):
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 10, 4)
+
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                    + noc_packet_transaction_id,
+                    noc_cmd_wr_be,
                 )
 
             self.nui.nui_counters.increment(
@@ -150,6 +187,27 @@ class NUI(MemMapable):
                     NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_STARTED
                 )
             self.cmd_ctrl = 0
+
+            # Send write request
+            ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
+            ret_tile_y = extract_bits(self.ret_addr_mid, 12, 4)
+            assert (ret_tile_x, ret_tile_y) in self.nui.noc_directory
+
+            data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
+
+            write_req = NUI.NoCDataRequest(
+                self.ret_addr_low,
+                NUI.NoCDataRequest.DataRequestAction.WRITE,
+                self.at_len_be,
+                self.nui.id_pair,
+                noc_packet_transaction_id,
+                data,
+                noc_cmd_resp_marked,
+            )
+            self.nui.add_outstanding_noc_request(
+                noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
+            )
+            self.nui.noc_directory[(ret_tile_x, ret_tile_y)].transmit(write_req)
 
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
@@ -167,34 +225,18 @@ class NUI(MemMapable):
                     NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_DATA_WORD_SENT,
                     self.at_len_be / 4,
                 )
-
-            # Perform data copy
-            ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
-            ret_tile_y = extract_bits(self.ret_addr_mid, 12, 4)
-            tgt_mem_space = self.nui.tile_memories[(ret_tile_x, ret_tile_y)]
-            tgt_mem_space.write(
-                self.ret_addr_low,
-                self.nui.l1_memory.read(self.target_addr_low, self.at_len_be),
-            )
-
-            print(
-                f"Write to {hex(self.ret_addr_low)} from {hex(self.target_addr_low)} size={hex(self.at_len_be)}"
-            )
-
             self.nui.nui_counters.decrement(
                 NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
             )
 
-            if noc_cmd_resp_marked:
-                self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_WR_ACK_RECEIVED
-                )
-                self.nui.nui_counters.decrement(
-                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+            if self.nui.snoop:
+                print(
+                    f"[NoC {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
+                    f"{(ret_tile_x, ret_tile_y)}, writing at {hex(write_req.tgt_address)} of size "
+                    f"{hex(write_req.data_length_bytes)}"
                 )
 
         def handle_write_transfer(self):
-            # TODO: handle the other side here
             noc_cmd_wr_be = extract_bits(self.ctrl, 1, 2)
             noc_cmd_wr_inline = extract_bits(self.ctrl, 1, 3)
             noc_cmd_resp_marked = extract_bits(self.ctrl, 1, 4)
@@ -306,20 +348,29 @@ class NUI(MemMapable):
         def __setitem__(self, idx, value):
             self.counters[idx] = value
 
-        def increment(self, idx, val=1):
-            self.counters[idx] += val
+        def increment(self, idx_to_increment, val=1):
+            if isinstance(idx_to_increment, list):
+                for idx in idx_to_increment:
+                    self.counters[idx] += val
+            else:
+                self.counters[idx_to_increment] += val
 
-        def decrement(self, idx, val=1):
-            self.counters[idx] -= val
+        def decrement(self, idx_to_decrement, val=1):
+            if isinstance(idx_to_decrement, list):
+                for idx in idx_to_decrement:
+                    self.counters[idx] -= val
+            else:
+                self.counters[idx_to_decrement] -= val
 
         def __delitem__(self, idx):
             del self.counters[idx]
 
-    def __init__(self, noc_number, x_coord, y_coord, l1_memory):
+    def __init__(self, noc_number, x_coord, y_coord, attached_memory, snoop=False):
         assert noc_number == 0 or noc_number == 1
         self.noc_number = noc_number
         self.x_coord = x_coord
         self.y_coord = y_coord
+        self.id_pair = (x_coord, y_coord)
         self.generate_NIU_and_NoC_config()
         self.generate_NoC_node_id()
         self.request_initiators = [
@@ -329,11 +380,160 @@ class NUI(MemMapable):
             NUI.RequestInitiator(self),
         ]
         self.nui_counters = NUI.NUICounters()
-        self.tile_memories = None
-        self.l1_memory = l1_memory
+        self.noc_directory = None
+        self.attached_memory = attached_memory
+        self.outstanding_noc_requests = {}
+        # Separate these out to ensure we have atleast one clock cycle
+        # between a request and it being handled (can increase)
+        self.noc_requests_to_handle = []
+        self.noc_new_requests_to_handle = []
+        self.snoop = snoop
 
-    def set_tile_memories(self, tile_memories):
-        self.tile_memories = tile_memories
+    def get_id_pair(self):
+        return self.id_pair
+
+    def add_outstanding_noc_request(self, request_id, tgt_addr):
+        self.outstanding_noc_requests[request_id] = tgt_addr
+
+    def clock_tick(self, cycle_num):
+        for noc_request in self.noc_requests_to_handle:
+            assert isinstance(noc_request, NUI.NoCDataRequest)
+            if noc_request.action == NUI.NoCDataRequest.DataRequestAction.READ:
+                if self.snoop:
+                    print(
+                        f"[NoC {self.id_pair}]: Read request id {noc_request.request_id} from NUI "
+                        f"{noc_request.source} at {hex(noc_request.tgt_address)} of size "
+                        f"{hex(noc_request.data_length_bytes)}"
+                    )
+                self.nui_counters.increment(
+                    [
+                        NUI.NUICounters.CounterNames.NIU_SLV_REQ_ACCEPTED,
+                        NUI.NUICounters.CounterNames.NIU_SLV_RD_REQ_RECEIVED,
+                    ]
+                )
+
+                data = self.attached_memory.read(
+                    noc_request.tgt_address, noc_request.data_length_bytes
+                )
+
+                self.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_SLV_RD_RESP_SENT
+                )
+
+                self.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_SLV_RD_DATA_WORD_SENT,
+                    noc_request.data_length_bytes / 4,
+                )
+
+                response = NUI.NoCDataRequest(
+                    None,
+                    NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ,
+                    noc_request.data_length_bytes,
+                    self.id_pair,
+                    noc_request.request_id,
+                    data,
+                )
+                self.noc_directory[noc_request.source].transmit(response)
+            elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.WRITE:
+                # When handle multiple 8192 size messages then will need to chunk this and slightly different
+                # as NIU_SLV_NONPOSTED_WR_REQ_RECEIVED is incremented only for the last flit
+                if self.snoop:
+                    print(
+                        f"[NoC {self.id_pair}]: Write request id {noc_request.request_id} from NUI "
+                        f"{noc_request.source} to {hex(noc_request.tgt_address)} of size "
+                        f"{hex(noc_request.data_length_bytes)}"
+                    )
+                if noc_request.noc_cmd_resp_marked:
+                    self.nui_counters.increment(
+                        [
+                            NUI.NUICounters.CounterNames.NIU_SLV_NONPOSTED_WR_REQ_STARTED,
+                            NUI.NUICounters.CounterNames.NIU_SLV_NONPOSTED_WR_DATA_WORD_RECEIVED,
+                            NUI.NUICounters.CounterNames.NIU_SLV_NONPOSTED_WR_REQ_RECEIVED,
+                        ]
+                    )
+                else:
+                    self.nui_counters.increment(
+                        [
+                            NUI.NUICounters.CounterNames.NIU_SLV_POSTED_WR_REQ_STARTED,
+                            NUI.NUICounters.CounterNames.NIU_SLV_POSTED_WR_DATA_WORD_RECEIVED,
+                            NUI.NUICounters.CounterNames.NIU_SLV_POSTED_WR_REQ_RECEIVED,
+                        ]
+                    )
+                self.attached_memory.write(noc_request.tgt_address, noc_request.data)
+
+                if noc_request.noc_cmd_resp_marked:
+                    self.nui_counters.increment(
+                        NUI.NUICounters.CounterNames.NIU_SLV_WR_ACK_SENT
+                    )
+
+                response = NUI.NoCDataRequest(
+                    None,
+                    NUI.NoCDataRequest.DataRequestAction.ACK,
+                    noc_request.data_length_bytes,
+                    self.id_pair,
+                    noc_request.request_id,
+                )
+                self.noc_directory[noc_request.source].transmit(response)
+            elif (
+                noc_request.action == NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ
+            ):
+                tgt_addr = self.outstanding_noc_requests[noc_request.request_id]
+                self.attached_memory.write(tgt_addr, noc_request.data)
+
+                if self.snoop:
+                    print(
+                        f"[NoC {self.id_pair}]: Read response id {noc_request.request_id} from NUI "
+                        f"{noc_request.source}, stored in to {hex(tgt_addr)} of size "
+                        f"{hex(noc_request.data_length_bytes)}"
+                    )
+
+                self.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_RD_RESP_RECEIVED
+                )
+                # Each flit is 32 bytes, increment by this number
+                self.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_RD_DATA_WORD_RECEIVED,
+                    noc_request.data_length_bytes / 4,
+                )
+
+                self.nui_counters.decrement(
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                    + noc_request.request_id
+                )
+                del self.outstanding_noc_requests[noc_request.request_id]
+            elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.ACK:
+                if self.snoop:
+                    print(
+                        f"[NoC {self.id_pair}]: Write acknowledge to response id "
+                        f"{noc_request.request_id} from NUI {noc_request.source}"
+                    )
+
+                self.nui_counters.decrement(
+                    NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
+                    + noc_request.request_id
+                )
+                noc_cmd_resp_marked = self.outstanding_noc_requests[
+                    noc_request.request_id
+                ][1]
+                if noc_cmd_resp_marked:
+                    self.nui_counters.increment(
+                        NUI.NUICounters.CounterNames.NIU_MST_WR_ACK_RECEIVED
+                    )
+                    self.nui_counters.decrement(
+                        NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                        + noc_request.request_id
+                    )
+                del self.outstanding_noc_requests[noc_request.request_id]
+
+        # Now copy over the new requests to the requests to handle
+        self.noc_requests_to_handle = self.noc_new_requests_to_handle
+        self.noc_new_requests_to_handle = []
+
+    def transmit(self, data_request):
+        self.noc_new_requests_to_handle.append(data_request)
+
+    def set_noc_directory(self, noc_directory):
+        self.noc_directory = noc_directory
 
     def generate_NIU_and_NoC_config(self):
         # https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/NoC/MemoryMap.md#niu-and-noc-router-configuration
@@ -373,9 +573,8 @@ class NUI(MemMapable):
         )
 
     def read(self, addr, size):
-        if self.tile_memories is None:
-            raise Exception("NoC endpoint must have a tile memories to operate on")
-        print(f"NOC READ: {hex(addr)}")
+        if self.snoop:
+            print(f"NoC read {hex(addr)}")
         if addr == 0x0138:
             return conv_to_bytes(self.noc_id_logical)
         elif addr == 0x100:
@@ -475,9 +674,8 @@ class NUI(MemMapable):
             )
 
     def write(self, addr, value, size=None):
-        if self.tile_memories is None:
-            raise Exception("NoC endpoint must have a tile memories to operate on")
-        print(f"NOC WRITE: {hex(addr)}")
+        if self.snoop:
+            print(f"NoC write {hex(addr)}")
         if addr == 0x0138:
             self.noc_id_logical = conv_to_uint32(value)
         elif addr == 0x100:
