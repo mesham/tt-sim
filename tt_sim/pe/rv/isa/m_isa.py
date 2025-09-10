@@ -96,5 +96,9 @@ class RV_M_ISA(RV_ISA):
 
         register_file[rd].write(conv_to_bytes(result, signed=signed))
         assert snoop_str is not None
-        RV_ISA.print_snoop(snoop, f"{snoop_str} x{rd}, x{rs1}, x{rs2}", info_msg)
+        RV_ISA.print_snoop(
+            snoop,
+            f"{snoop_str} x{cls.get_reg_name(rd)}, x{cls.get_reg_name(rs1)}, x{cls.get_reg_name(rs2)}",
+            info_msg,
+        )
         return True
