@@ -162,9 +162,13 @@ tensix_mem.write(
     0x8190, ncrisc_data
 )  # Set the data area for ncrisc this is in L1 and then the core will grab this
 
+
+# BRISC always starts at 0x0, as per Metalium, at 0x0 place instruction JAL 0x0, 0x3780 to jump
+# to the firmware binary
+tensix_mem.write(0x0, conv_to_bytes(0x7800306F))
+
 soft_reset = clear_bit(0xFFFFFFFF, 11)
 tensix_mem.write(0xFFB121B0, conv_to_bytes(soft_reset))
-
 
 # Reset the device and run the clock for 5000 iterations
 device.reset()
