@@ -9,6 +9,21 @@ from tt_sim.util.conversion import (
 )
 
 
+class NoCOverlay(MemMapable):
+    def __init__(self):
+        pass
+
+    def read(self, addr, size):
+        print("A")
+        return 0
+
+    def write(self, addr, value, size=None):
+        pass
+
+    def getSize(self):
+        return 0x3FFFF
+
+
 class NUI(MemMapable):
     class RequestInitiator:
         def __init__(self):
@@ -152,6 +167,7 @@ class NUI(MemMapable):
         )
 
     def read(self, addr, size):
+        print(f"NOC {hex(addr)}")
         if addr == 0x0138:
             return conv_to_bytes(self.noc_id_logical)
         elif addr == 0x100:
