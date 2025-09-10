@@ -357,7 +357,7 @@ class RV_I_ISA(RV_ISA):
 
             if type_val == 0x0:
                 # addi
-                result = rs1_val + immediate
+                result = (rs1_val + immediate) % (1 << 32)  # Overflow is ignored
                 snoop_str = "addi"
                 info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} + {hex(immediate)}"
             elif type_val == 0x2 or type_val == 0x3:
@@ -463,11 +463,11 @@ class RV_I_ISA(RV_ISA):
             is_sub = RV_ISA.get_int(instr, 30, 30) == 1
             if is_sub:
                 snoop_str = "sub"
-                result = rs1_val - rs2_val
+                result = (rs1_val - rs2_val) % (1 << 32)  # Overflow is ignored
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} - {cls.get_reg_name(rs2)}"
             else:
                 snoop_str = "add"
-                result = rs1_val + rs2_val
+                result = (rs1_val + rs2_val) % (1 << 32)  # Overflow is ignored
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} + {cls.get_reg_name(rs2)}"
         elif type_val == 0x1:
             # sll
@@ -529,13 +529,13 @@ class RV_I_ISA(RV_ISA):
             write_result = False
 
         if write_result:
-            register_file[rd].write(conv_to_bytes(result, signed=signed_op))
             assert snoop_str is not None
             RV_ISA.print_snoop(
                 snoop,
                 f"{snoop_str} {cls.get_reg_name(rd)}, {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}",
                 info_msg,
             )
+            register_file[rd].write(conv_to_bytes(result, signed=signed_op))
             return True
         else:
             return False

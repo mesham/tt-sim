@@ -35,7 +35,7 @@ class RV_M_ISA(RV_ISA):
                 # mul
                 rs1_val = conv_to_uint32(register_file[rs1].read())
                 rs2_val = conv_to_uint32(register_file[rs2].read())
-                result = rs1_val * rs2_val
+                result = (rs1_val * rs2_val) % (1 << 32)  # Overflow is ignored
                 snoop_str = "mul"
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
             case 0x1:
