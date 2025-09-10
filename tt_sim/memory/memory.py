@@ -118,6 +118,11 @@ class TensixMemory(MemorySpace):
         super().__init__(memory_map, size, safe, snoop_addresses)
 
 
+class TileMemory(MemorySpace):
+    def __init__(self, memory_map, size, safe=True, snoop_addresses=None):
+        super().__init__(memory_map, size, safe, snoop_addresses)
+
+
 class AddressableMemory(MemMapable):
     def __init__(self, size, alignment=None):
         self.memory = np.empty(size, dtype=np.uint8)
