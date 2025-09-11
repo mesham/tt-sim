@@ -1,0 +1,312 @@
+import itertools
+from abc import ABC
+
+from tt_sim.device.clock import Clock
+from tt_sim.device.device import Device, DeviceTile
+from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
+from tt_sim.memory.memory_map import AddressRange, MemoryMap
+from tt_sim.misc.tile_ctrl import TensixTileControl
+from tt_sim.network.tt_noc import NUI, NoCOverlay
+from tt_sim.pe.pe import PEMemory
+from tt_sim.pe.rv.babyriscv import BabyRISCV, BabyRISCVCoreType
+from tt_sim.pe.tensix.tdma import TDMA
+from tt_sim.pe.tensix.tensix import (
+    TensixBackendConfiguration,
+    TensixCoProcessor,
+    TensixGPR,
+)
+from tt_sim.util.conversion import (
+    clear_bit,
+    conv_to_bytes,
+    conv_to_uint32,
+    set_bit,
+)
+
+
+class TT_Device(Device):
+    def __init__(self, device_memory, dram_tiles, tensix_tiles):
+        self.dram_tiles = dram_tiles
+        self.tensix_tiles = tensix_tiles
+
+        components_to_clock = []
+        resets = []
+        self.tile_directory = {}
+        for tile in itertools.chain(dram_tiles, tensix_tiles):
+            components_to_clock += tile.get_clocks()
+            resets += tile.get_resets()
+            self.tile_directory[tile.get_coord_pair()] = tile
+
+        self.clock = Clock(components_to_clock)
+
+        super().__init__(device_memory, [self.clock], resets)
+
+    def read(self, coordinate_pair, address, size):
+        assert coordinate_pair in self.tile_directory
+        return self.tile_directory[coordinate_pair].read(address, size)
+
+    def write(self, coordinate_pair, address, value, size=None):
+        assert coordinate_pair in self.tile_directory
+        self.tile_directory[coordinate_pair].write(address, value, size)
+
+    def deassert_soft_reset(self, coordinate_pair=None, core_type=None):
+        if coordinate_pair is None:
+            for pair, value in self.tile_directory.items():
+                if isinstance(value, TensixTile):
+                    self.perform_soft_reset_change(clear_bit, pair, core_type)
+        else:
+            self.perform_soft_reset_change(clear_bit, coordinate_pair, core_type)
+
+    def assert_soft_reset(self, coordinate_pair=None, core_type=None):
+        if coordinate_pair is None:
+            for pair, value in self.tile_directory.items():
+                if isinstance(value, TensixTile):
+                    self.perform_soft_reset_change(set_bit, pair, core_type)
+        else:
+            self.perform_soft_reset_change(set_bit, coordinate_pair, core_type)
+
+    def perform_soft_reset_change(
+        self, bit_change_method, coordinate_pair, core_type=None
+    ):
+        if core_type is not None:
+            if core_type == BabyRISCVCoreType.BRISC:
+                bit = 11
+            elif core_type == BabyRISCVCoreType.NCRISC:
+                bit = 18
+            elif core_type == BabyRISCVCoreType.TRISC0:
+                bit = 12
+            elif core_type == BabyRISCVCoreType.TRISC1:
+                bit = 13
+            elif core_type == BabyRISCVCoreType.TRISC2:
+                bit = 14
+            else:
+                raise NotImplementedError()
+            existing_config = conv_to_uint32(self.read(coordinate_pair, 0xFFB121B0, 4))
+            new_config = bit_change_method(existing_config, bit)
+            if existing_config != new_config:
+                self.write(coordinate_pair, 0xFFB121B0, conv_to_bytes(new_config))
+        else:
+            existing_config = conv_to_uint32(self.read(coordinate_pair, 0xFFB121B0, 4))
+            new_config = bit_change_method(existing_config, 11)
+            new_config = bit_change_method(new_config, 18)
+            new_config = bit_change_method(new_config, 12)
+            new_config = bit_change_method(new_config, 13)
+            new_config = bit_change_method(new_config, 14)
+            if existing_config != new_config:
+                self.write(coordinate_pair, 0xFFB121B0, conv_to_bytes(new_config))
+
+
+class Wormhole(TT_Device):
+    def __init__(self):
+        dram_tile = DRAMTile(16, 16)
+        tensix_tile = TensixTile(18, 18, True)
+
+        # For now don't provide any memory, in future this will be the memory
+        # map of the PCIe endpoing
+        super().__init__(None, [dram_tile], [tensix_tile])
+
+
+class TTDeviceTile(DeviceTile, ABC):
+    def __init__(self, coord_x, coord_y, noc0_router, noc1_router):
+        if coord_x <= 15 or coord_y <= 15 or coord_x >= 26 or coord_y >= 26:
+            raise Exception(
+                f"Tensix tile coordinates should be the unified coordinate system "
+                f"(16 to 25), whereas ({coord_x}, {coord_y}) provided"
+            )
+        super().__init__(coord_x, coord_y, noc0_router, noc1_router)
+
+
+class DRAMTile(TTDeviceTile):
+    def __init__(self, coord_x, coord_y, safe=True, snoop_addresses=None):
+        dram_tile_mem_map = MemoryMap()
+
+        self.ddr_bank_0 = DRAM(10 * 1024 * 1024)
+        ddr_range = AddressRange(0x0, self.ddr_bank_0.getSize())
+        dram_tile_mem_map[ddr_range] = self.ddr_bank_0
+
+        self.ddr_bank_1 = DRAM(10 * 1024 * 1024)
+        ddr_range = AddressRange(0x0_4000_0000, self.ddr_bank_1.getSize())
+        dram_tile_mem_map[ddr_range] = self.ddr_bank_1
+
+        self.dram_memory = TileMemory(dram_tile_mem_map, "10M", safe, snoop_addresses)
+
+        r0 = NUI(0, 0, 0, self.dram_memory)
+        r1 = NUI(1, 9, 11, self.dram_memory)
+
+        super().__init__(coord_x, coord_y, r0, r1)
+
+    def get_clocks(self):
+        return []
+
+    def get_resets(self):
+        return []
+
+    def read(self, address, size):
+        return self.dram_memory.read(address, size)
+
+    def write(self, address, value, size=None):
+        return self.dram_memory(address, value, size)
+
+    def getSize(self):
+        # Dummy value for now
+        return 0xFFFF
+
+
+class TensixTile(TTDeviceTile):
+    def __init__(
+        self,
+        coord_x,
+        coord_y,
+        brisc_snoop=False,
+        ncrisc_snoop=False,
+        trisc0_snoop=False,
+        trisc1_snoop=False,
+        trisc2_snoop=False,
+        noc0_snoop=False,
+        noc1_snoop=False,
+    ):
+        tensix_mem_map = MemoryMap()
+
+        # Create DRAM
+        self.L1_mem = DRAM(1507327)
+        l1_range = AddressRange(0x0, self.L1_mem.getSize())
+        tensix_mem_map[l1_range] = self.L1_mem
+
+        self.tenxix_coprocessor = TensixCoProcessor()
+        tensix_range = AddressRange(0xFFE40000, self.tenxix_coprocessor.getSize())
+        tensix_mem_map[tensix_range] = self.tenxix_coprocessor
+
+        self.tenxix_coprocessor_be_config = TensixBackendConfiguration(
+            self.tenxix_coprocessor
+        )
+        tensix_config_range = AddressRange(
+            0xFFEF0000, self.tenxix_coprocessor_be_config.getSize()
+        )
+        tensix_mem_map[tensix_config_range] = self.tenxix_coprocessor_be_config
+
+        self.tensix_gpr = TensixGPR(self.tenxix_coprocessor)
+        tensix_gpr_range = AddressRange(0xFFE00000, self.tensix_gpr.getSize())
+        tensix_mem_map[tensix_gpr_range] = self.tensix_gpr
+
+        noc0_router = NUI(0, 1, 1, self.L1_mem, noc0_snoop)
+        noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
+        tensix_mem_map[noc0_range] = noc0_router
+
+        noc1_router = NUI(1, 8, 10, self.L1_mem, noc1_snoop)
+        noc1_range = AddressRange(0xFFB30000, noc1_router.getSize())
+        tensix_mem_map[noc1_range] = noc1_router
+
+        self.noc_overlay = NoCOverlay()
+        noc_overlay_range = AddressRange(0xFFB40000, self.noc_overlay.getSize())
+        tensix_mem_map[noc_overlay_range] = self.noc_overlay
+
+        self.tdma = TDMA()
+        tdma_range = AddressRange(0xFFB11000, self.tdma.getSize())
+        tensix_mem_map[tdma_range] = self.tdma
+
+        self.tile_ctrl = TensixTileControl()
+        tile_ctrl_range = AddressRange(0xFFB12000, self.tile_ctrl.getSize())
+        tensix_mem_map[tile_ctrl_range] = self.tile_ctrl
+
+        self.tensix_mem = TensixMemory(tensix_mem_map, "10M")
+
+        # Create brisc CPU
+        self.local_mem_brisc = DRAM(4096)
+        local_mem_brisc_range = AddressRange(0xFFB00000, self.local_mem_brisc.getSize())
+        brisc0_mem_map = MemoryMap()
+        brisc0_mem_map[local_mem_brisc_range] = self.local_mem_brisc
+        self.brisc0_mem = PEMemory(brisc0_mem_map, "1M")
+
+        self.brisc = BabyRISCV(
+            BabyRISCVCoreType.BRISC,
+            [self.tensix_mem, self.brisc0_mem],
+            snoop=brisc_snoop,
+        )
+
+        # Create ncrisc CPU
+        self.local_mem_ncrisc = DRAM(4096)
+        local_mem_ncrisc_range = AddressRange(
+            0xFFB00000, self.local_mem_ncrisc.getSize()
+        )
+        ncrisc_mem_map = MemoryMap()
+        ncrisc_mem_map[local_mem_ncrisc_range] = self.local_mem_ncrisc
+        self.ncrisc_mem = PEMemory(ncrisc_mem_map, "1M")
+
+        self.ncrisc = BabyRISCV(
+            BabyRISCVCoreType.NCRISC,
+            [self.tensix_mem, self.ncrisc_mem],
+            snoop=ncrisc_snoop,
+        )
+
+        # Create trisc0 CPU
+        self.local_mem_trisc0 = DRAM(2048)
+        local_mem_trisc0_range = AddressRange(
+            0xFFB00000, self.local_mem_trisc0.getSize()
+        )
+        trisc0_mem_map = MemoryMap()
+        trisc0_mem_map[local_mem_trisc0_range] = self.local_mem_trisc0
+        self.trisc0_mem = PEMemory(trisc0_mem_map, "1M")
+
+        self.trisc0 = BabyRISCV(
+            BabyRISCVCoreType.TRISC0,
+            [self.tensix_mem, self.trisc0_mem],
+            snoop=trisc0_snoop,
+        )
+
+        # Create trisc1 CPU
+        self.local_mem_trisc1 = DRAM(2048)
+        local_mem_trisc1_range = AddressRange(
+            0xFFB00000, self.local_mem_trisc1.getSize()
+        )
+        trisc1_mem_map = MemoryMap()
+        trisc1_mem_map[local_mem_trisc1_range] = self.local_mem_trisc1
+        self.trisc1_mem = PEMemory(trisc1_mem_map, "1M")
+
+        self.trisc1 = BabyRISCV(
+            BabyRISCVCoreType.TRISC1,
+            [self.tensix_mem, self.trisc1_mem],
+            snoop=trisc1_snoop,
+        )
+
+        # Create trisc2 CPU
+        self.local_mem_trisc2 = DRAM(2048)
+        local_mem_trisc2_range = AddressRange(
+            0xFFB00000, self.local_mem_trisc2.getSize()
+        )
+        trisc2_mem_map = MemoryMap()
+        trisc2_mem_map[local_mem_trisc2_range] = self.local_mem_trisc2
+        self.trisc2_mem = PEMemory(trisc2_mem_map, "1M")
+
+        self.trisc2 = BabyRISCV(
+            BabyRISCVCoreType.TRISC2,
+            [self.tensix_mem, self.trisc2_mem],
+            snoop=trisc2_snoop,
+        )
+
+        super().__init__(coord_x, coord_y, noc0_router, noc1_router)
+
+    def get_clocks(self):
+        return [
+            self.brisc,
+            self.ncrisc,
+            self.trisc0,
+            self.trisc1,
+            self.trisc2,
+            self.noc0_router,
+            self.noc1_router,
+        ]
+
+    def get_tensix_memory(self):
+        return self.tensix_mem
+
+    def get_resets(self):
+        return [self.brisc, self.ncrisc, self.trisc0, self.trisc1, self.trisc2]
+
+    def read(self, address, size):
+        return self.tensix_mem.read(address, size)
+
+    def write(self, address, value, size=None):
+        return self.tensix_mem.write(address, value, size)
+
+    def getSize(self):
+        # Dummy value for now
+        return 0xFFFF
