@@ -5,7 +5,6 @@ from tt_sim.util.conversion import conv_to_bytes
 class TensixTileControl(MemMapable):
     def __init__(self):
         self.RISCV_DEBUG_REG_SOFT_RESET_0 = conv_to_bytes(0)
-        0x1B0
 
     def read(self, addr, size):
         if addr == 0x1B0:
