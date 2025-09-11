@@ -1,6 +1,75 @@
 import json
 import os
 import re
+from abc import ABC
+
+
+class BaseType(ABC):
+    def __init__(self, start_addr, end_addr):
+        self.start_addr = start_addr
+        self.end_addr = end_addr
+
+    def getBytes(self):
+        return self.end_addr - self.start_addr
+
+    @classmethod
+    def process(cls, base_start_addr, entries_config, config):
+        contents = {}
+        current_end_addr = base_start_addr
+        for key, value in entries_config.items():
+            type_name = value[1]
+            num_elements = value[2]
+            start_addr = value[0] + base_start_addr
+            if type_name in ElementType.type_widths:
+                type = ElementType(type_name, start_addr)
+            else:
+                type = cls.process(start_addr, config[type_name], config)
+
+                StructType(start_addr, config[type_name], config)
+            if num_elements == 1:
+                contents[key] = type
+            else:
+                contents[key] = ArrayType(type, start_addr, num_elements)
+
+            current_end_addr += contents[key].getBytes()
+
+        return StructType(base_start_addr, current_end_addr, contents)
+
+
+class ElementType(BaseType):
+    type_widths = {"uint8_t": 1, "uint16_t": 2, "uint32_t": 4}
+
+    def __init__(self, type_name, start_addr):
+        self.type_name = type_name
+        self.type_width = ElementType.type_widths[type_name]
+        super().__init__(start_addr, start_addr + self.type_width)
+
+    def lookup(self, keys):
+        return (self.start_addr, self.type_width)
+
+
+class ArrayType(BaseType):
+    def __init__(self, type, start_addr, num_entries):
+        self.type = type
+        self.num_entries = num_entries
+        super().__init__(start_addr, start_addr + (type.getBytes() * num_entries))
+
+    def lookup(self, keys):
+        idx = keys[0]
+        start_addr, type_width = self.type.lookup(keys[1:])
+        return (start_addr + (type_width * idx), type_width)
+
+
+class StructType(BaseType):
+    def __init__(self, start_addr, end_addr, contents):
+        self.contents = contents
+        super().__init__(start_addr, end_addr)
+
+    def lookup(self, keys):
+        k = keys[0]
+        assert k in self.contents
+        v = self.contents[k]
+        return v.lookup(keys[1:])
 
 
 class TT_Metal:
@@ -27,6 +96,77 @@ class TT_Metal:
         with open(config_file) as json_file:
             self.config = json.load(json_file)
         self.config = TT_Metal.parse_json_hex(self.config)
+        self.mailbox_config = StructType.process(
+            self.config["l1_memory_map"]["MEM_MAILBOX_BASE"],
+            self.config["mailboxes_t"],
+            self.config,
+        )
+        self.parameter_file = None
+
+    def load_kernel(self, parameter_file):
+        with open(parameter_file) as json_file:
+            self.parameters = json.load(json_file)
+        self.parameters = TT_Metal.parse_json_hex(self.parameters)
+
+    def generate_transfer_mailbox_details(self, key):
+        assert self.parameters is not None
+        return TT_Metal.flatten(
+            TT_Metal.build_transfer_data(
+                self.parameters[key], [key], self.mailbox_config
+            )
+        )
+
+    def generate_transfer_runtime_arguments_details(self):
+        assert self.parameters is not None
+        rt_base_addr = self.parameters["runtime_args_base_addr"]
+
+        contents = []
+        for idx, rt_arg in enumerate(self.parameters["runtime_args"]):
+            contents.append(((idx * 4) + rt_base_addr, 4, rt_arg))
+        return contents
+
+    def get_transfer_kernel_binary_details(self):
+        assert self.parameters is not None
+        contents = []
+        if (
+            "BRISC_binary_file" in self.parameters
+            and "BRISC_binary_text_addr" in self.parameters
+        ):
+            bin_file = self.read_binary_file(self.parameters["BRISC_binary_file"])
+            contents.append(
+                (self.parameters["BRISC_binary_text_addr"], len(bin_file), bin_file)
+            )
+        # TODO: handle other cores too
+        return contents
+
+    @classmethod
+    def flatten(cls, nested_list):
+        flat_list = []
+
+        for item in nested_list:
+            if isinstance(item, list):
+                flat_list.extend(cls.flatten(item))
+            else:
+                flat_list.append(item)
+
+        return flat_list
+
+    @classmethod
+    def build_transfer_data(cls, data, paths, mailbox_config):
+        if isinstance(data, dict):
+            contents = []
+            for k, v in data.items():
+                contents.append(cls.build_transfer_data(v, paths + [k], mailbox_config))
+        elif isinstance(data, list):
+            contents = []
+            for idx, v in enumerate(data):
+                contents.append(
+                    cls.build_transfer_data(v, paths + [idx], mailbox_config)
+                )
+        else:
+            start_addr, type_width = mailbox_config.lookup(paths)
+            contents = [(start_addr, type_width, data)]
+        return contents
 
     @classmethod
     def parse_json_hex(cls, json):
@@ -55,6 +195,10 @@ class TT_Metal:
         for key in keys[:-1]:
             current_dict = current_dict[key]
         return current_dict[keys[-1]]
+
+    def read_binary_file(self, filename):
+        with open(filename, "rb") as file:
+            return file.read()
 
     def read_firmware(self, firmware_directory):
         # Read in firmware binaries
@@ -102,7 +246,7 @@ class TT_Metal:
                 ncrisc_data,
             ),
             TT_Metal.Firmware(
-                memory_map_config["MEM_NCRISC_FIRMWARE_BASE"],
+                memory_map_config["MEM_TRISC0_FIRMWARE_BASE"],
                 trisc0_text,
             ),
             TT_Metal.Firmware(
