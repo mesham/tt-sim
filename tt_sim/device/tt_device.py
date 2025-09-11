@@ -3,6 +3,7 @@ from abc import ABC
 
 from tt_sim.device.clock import Clock
 from tt_sim.device.device import Device, DeviceTile
+from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.misc.tile_ctrl import TensixTileControl
@@ -29,16 +30,17 @@ class TT_Device(Device):
         self.tensix_tiles = tensix_tiles
 
         components_to_clock = []
-        resets = []
+        components_to_reset = []
         self.tile_directory = {}
         for tile in itertools.chain(dram_tiles, tensix_tiles):
             components_to_clock += tile.get_clocks()
-            resets += tile.get_resets()
+            components_to_reset += tile.get_resets()
             self.tile_directory[tile.get_coord_pair()] = tile
 
-        self.clock = Clock(components_to_clock)
+        self.clocks = [Clock(components_to_clock)]
+        self.resets = [Reset(components_to_reset)]
 
-        super().__init__(device_memory, [self.clock], resets)
+        super().__init__(device_memory, self.clocks, self.resets)
 
     def read(self, coordinate_pair, address, size):
         assert coordinate_pair in self.tile_directory
@@ -100,6 +102,21 @@ class Wormhole(TT_Device):
         dram_tile = DRAMTile(16, 16)
         tensix_tile = TensixTile(18, 18, True)
 
+        # Create NoC directory
+        noc_0_directory = {
+            dram_tile.get_noc_nui(0).get_id_pair(): dram_tile.get_noc_nui(0),
+            tensix_tile.get_noc_nui(0).get_id_pair(): tensix_tile.get_noc_nui(0),
+        }
+        noc_1_directory = {
+            dram_tile.get_noc_nui(1).get_id_pair(): dram_tile.get_noc_nui(1),
+            tensix_tile.get_noc_nui(1).get_id_pair(): tensix_tile.get_noc_nui(1),
+        }
+
+        dram_tile.get_noc_nui(0).set_noc_directory(noc_0_directory)
+        dram_tile.get_noc_nui(1).set_noc_directory(noc_1_directory)
+        tensix_tile.get_noc_nui(0).set_noc_directory(noc_0_directory)
+        tensix_tile.get_noc_nui(1).set_noc_directory(noc_1_directory)
+
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
         super().__init__(None, [dram_tile], [tensix_tile])
@@ -129,13 +146,13 @@ class DRAMTile(TTDeviceTile):
 
         self.dram_memory = TileMemory(dram_tile_mem_map, "10M", safe, snoop_addresses)
 
-        r0 = NUI(0, 0, 0, self.dram_memory)
-        r1 = NUI(1, 9, 11, self.dram_memory)
+        r0 = NUI(0, coord_x, coord_y, self.dram_memory)
+        r1 = NUI(1, coord_x, coord_y, self.dram_memory)
 
         super().__init__(coord_x, coord_y, r0, r1)
 
     def get_clocks(self):
-        return []
+        return [self.noc0_router, self.noc1_router]
 
     def get_resets(self):
         return []
@@ -144,7 +161,7 @@ class DRAMTile(TTDeviceTile):
         return self.dram_memory.read(address, size)
 
     def write(self, address, value, size=None):
-        return self.dram_memory(address, value, size)
+        return self.dram_memory.write(address, value, size)
 
     def getSize(self):
         # Dummy value for now
@@ -187,11 +204,11 @@ class TensixTile(TTDeviceTile):
         tensix_gpr_range = AddressRange(0xFFE00000, self.tensix_gpr.getSize())
         tensix_mem_map[tensix_gpr_range] = self.tensix_gpr
 
-        noc0_router = NUI(0, 1, 1, self.L1_mem, noc0_snoop)
+        noc0_router = NUI(0, coord_x, coord_y, self.L1_mem, noc0_snoop)
         noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
         tensix_mem_map[noc0_range] = noc0_router
 
-        noc1_router = NUI(1, 8, 10, self.L1_mem, noc1_snoop)
+        noc1_router = NUI(1, coord_x, coord_y, self.L1_mem, noc1_snoop)
         noc1_range = AddressRange(0xFFB30000, noc1_router.getSize())
         tensix_mem_map[noc1_range] = noc1_router
 
