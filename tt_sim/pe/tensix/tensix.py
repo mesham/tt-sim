@@ -47,7 +47,6 @@ class TensixBackendConfiguration(MemMapable):
             each_config_size = TensixBackendConfiguration.CFG_STATE_SIZE * 4
             second_idx = 1 if idx > TensixBackendConfiguration.CFG_STATE_SIZE * 4 else 0
             first_idx = int(idx - (each_config_size * second_idx))
-            print(f"Read tensix {second_idx}, {first_idx}")
             return conv_to_bytes(self.config[second_idx][first_idx])
         else:
             idx = idx - threadConfigStart
