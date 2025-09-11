@@ -20,9 +20,9 @@ from tt_sim.util.conversion import (
 )
 
 """
-This is the first example of a Tensix core connected to DDR. Everything is 
+This is the first example of a Tensix core connected to DDR. Everything is
 "hanging out" here to show how things are popped together, whereas in reality
-we abstract much of this via "Tensix tile" and "DRAM tile" etc. 
+we abstract much of this via "Tensix tile" and "DRAM tile" etc.
 
 Here we create a tensix tile with the baby cores and all other aspects, launch
 firmware and then launch the kernel to add pairs of numbers by BRISC. This involves
