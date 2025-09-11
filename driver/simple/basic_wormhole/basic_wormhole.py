@@ -290,7 +290,7 @@ dram_tile_mem.write(0x20, conv_to_bytes(list1))
 dram_tile_mem.write(0x1C0, conv_to_bytes(list2))
 
 ## Run 3000 cycles to process the kernel
-device.run(3000)
+device.run(3100)
 
 ## Check results in DDR memory are correct
 for i in range(100):
