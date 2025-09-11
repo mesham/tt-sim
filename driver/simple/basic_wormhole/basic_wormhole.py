@@ -20,7 +20,13 @@ from tt_sim.util.conversion import (
 )
 
 """
-This is a single tensix core launching a kernel on brisc
+This is the first example of a Tensix core connected to DDR. Everything is 
+"hanging out" here to show how things are popped together, whereas in reality
+we abstract much of this via "Tensix tile" and "DRAM tile" etc. 
+
+Here we create a tensix tile with the baby cores and all other aspects, launch
+firmware and then launch the kernel to add pairs of numbers by BRISC. This involves
+moving data via the NoC between the tensix and DDR tiles
 """
 
 # Read in firmware binaries
@@ -259,7 +265,6 @@ tensix_mem.write(0x6E, conv_to_bytes(0x1, 1))
 tensix_mem.write(0x6F, conv_to_bytes(0x0, 1))
 
 ## Write go message configuration
-
 tensix_mem.write(0x2A0, conv_to_bytes(0x50, 1))
 tensix_mem.write(0x2A1, conv_to_bytes(0x73, 1))
 tensix_mem.write(0x2A2, conv_to_bytes(0x2A, 1))
@@ -271,7 +276,6 @@ with open("brisc_kernel_text.bin", "rb") as file:
 tensix_mem.write(0x71B0, brisc_kernel)
 
 ## Write runtime arguments
-
 tensix_mem.write(0x7190, conv_to_bytes(0x20))
 tensix_mem.write(0x7194, conv_to_bytes(0x1C0))
 tensix_mem.write(0x7198, conv_to_bytes(0x360))
