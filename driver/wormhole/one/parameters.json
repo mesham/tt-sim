@@ -1,0 +1,35 @@
+{
+  "BRISC_binary_file" : "one/brisc_kernel_text.bin",
+  "BRISC_binary_text_addr": "0x71B0",
+  "launch": [{
+    "kernel_config": {
+      "watcher_kernel_ids": ["0x4", "0x0", "0x0"],
+      "ncrisc_kernel_size16": "0x0",
+      "kernel_config_base": ["0x7190", "0x3F520", "0x73D0"],
+      "sem_offset": ["0x20", "0x0", "0x0"],
+      "local_cb_offset": "0x20",
+      "remote_cb_offset": "0x20",
+      "rta_offset": [{"rta_offset": "0x0", "crta_offset": "0x20"}, {"rta_offset": "0x0", "crta_offset": "0x20"}, {"rta_offset": "0x0", "crta_offset": "0x20"}],
+      "mode": "0x1",
+      "kernel_text_offset": ["0x20", "0x0", "0x0", "0x0", "0x0"],
+      "local_cb_mask": "0x0",
+      "brisc_noc_id": "0x0",
+      "brisc_noc_mode": "0x0",
+      "min_remote_cb_start_index": "0x20",
+      "exit_erisc_kernel": "0x0",
+      "host_assigned_id": "0x0",
+      "sub_device_origin_x": "0x0",
+      "sub_device_origin_y": "0x0",
+      "enables": "0x1",
+      "preload": "0x0"
+    }
+  }],
+  "go_message": {
+    "dispatch_message_offset": "0x50",
+    "master_x": "0x73",
+    "master_y": "0x2A",
+    "signal": "0x80"
+  },
+  "runtime_args_base_addr": "0x7190",
+  "runtime_args": ["0x20", "0x1C0", "0x360", "0x16DE60", "0x16DCC0", "0x64"]
+}
