@@ -368,9 +368,9 @@ class NUI(MemMapable, Clockable):
     def __init__(self, noc_number, x_coord, y_coord, attached_memory, snoop=False):
         assert noc_number == 0 or noc_number == 1
         self.noc_number = noc_number
-        self.x_coord = x_coord
-        self.y_coord = y_coord
-        self.id_pair = (x_coord, y_coord)
+        self.x_coord = NUI.translate_tile_x_coord(noc_number, x_coord)
+        self.y_coord = NUI.translate_tile_y_coord(noc_number, y_coord)
+        self.id_pair = NUI.translate_tile_coords(noc_number, x_coord, y_coord)
         self.generate_NIU_and_NoC_config()
         self.generate_NoC_node_id()
         self.request_initiators = [
@@ -390,6 +390,7 @@ class NUI(MemMapable, Clockable):
         self.snoop = snoop
 
     def get_id_pair(self):
+        # Return the ID in this NoC coordinate system
         return self.id_pair
 
     def add_outstanding_noc_request(self, request_id, tgt_addr):
@@ -773,3 +774,78 @@ class NUI(MemMapable, Clockable):
 
     def getSize(self):
         return 0xFFFF
+
+    @classmethod
+    def translate_tile_coords(cls, noc_number, x_coord, y_coord):
+        new_x = cls.translate_tile_x_coord(noc_number, x_coord)
+        new_y = cls.translate_tile_y_coord(noc_number, y_coord)
+
+        return (new_x, new_y)
+
+    @classmethod
+    def translate_tile_x_coord(cls, noc_number, x_coord):
+        if x_coord <= 15:
+            return x_coord
+        if x_coord >= 26:
+            return 0
+
+        assert noc_number == 0 or noc_number == 1
+        match x_coord:
+            case 16:
+                return 0 if noc_number == 0 else 9
+            case 17:
+                return 5 if noc_number == 0 else 4
+            case 18:
+                return 1 if noc_number == 0 else 8
+            case 19:
+                return 2 if noc_number == 0 else 7
+            case 20:
+                return 3 if noc_number == 0 else 6
+            case 21:
+                return 4 if noc_number == 0 else 5
+            case 22:
+                return 6 if noc_number == 0 else 3
+            case 23:
+                return 7 if noc_number == 0 else 2
+            case 24:
+                return 8 if noc_number == 0 else 1
+            case 25:
+                return 9 if noc_number == 0 else 0
+            case _:
+                raise NotImplementedError(f"Unknown coordinate {x_coord}")
+
+    @classmethod
+    def translate_tile_y_coord(cls, noc_number, y_coord):
+        if y_coord <= 15:
+            return y_coord
+        if y_coord >= 28:
+            return 0
+
+        assert noc_number == 0 or noc_number == 1
+        match y_coord:
+            case 16:
+                return 0 if noc_number == 0 else 11
+            case 17:
+                return 6 if noc_number == 0 else 5
+            case 18:
+                return 1 if noc_number == 0 else 10
+            case 19:
+                return 2 if noc_number == 0 else 9
+            case 20:
+                return 3 if noc_number == 0 else 8
+            case 21:
+                return 4 if noc_number == 0 else 7
+            case 22:
+                return 5 if noc_number == 0 else 6
+            case 23:
+                return 8 if noc_number == 0 else 3
+            case 24:
+                return 9 if noc_number == 0 else 2
+            case 25:
+                return 11 if noc_number == 0 else 0
+            case 26:
+                return 7 if noc_number == 0 else 4
+            case 27:
+                return 10 if noc_number == 0 else 1
+            case _:
+                raise NotImplementedError(f"Unknown coordinate {y_coord}")
