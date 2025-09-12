@@ -106,6 +106,38 @@ class TT_Metal:
         )
         self.parameter_file = None
 
+    def generate_dram_noc_mapping_transfers(self):
+        base_addr = self.get_config_value("l1_memory_map", "MEM_BANK_TO_NOC_SCRATCH")
+        data_transfers = []
+        # Noc 0
+        data_transfers.append([base_addr + 0, 2, 0x0])
+        data_transfers.append([base_addr + 2, 2, 0x0])
+        data_transfers.append([base_addr + 4, 2, ((5 << 10) + (0 << 4))])
+        data_transfers.append([base_addr + 6, 2, ((5 << 10) + (0 << 4))])
+        data_transfers.append([base_addr + 8, 2, ((0 << 10) + (5 << 4))])
+        data_transfers.append([base_addr + 10, 2, ((0 << 10) + (5 << 4))])
+        data_transfers.append([base_addr + 12, 2, ((2 << 10) + (5 << 4))])
+        data_transfers.append([base_addr + 14, 2, ((2 << 10) + (5 << 4))])
+        data_transfers.append([base_addr + 16, 2, ((3 << 10) + (5 << 4))])
+        data_transfers.append([base_addr + 18, 2, ((3 << 10) + (5 << 4))])
+        data_transfers.append([base_addr + 20, 2, ((5 << 10) + (5 << 4))])
+        data_transfers.append([base_addr + 22, 2, ((5 << 10) + (5 << 4))])
+        # Noc 1
+        data_transfers.append([base_addr + 24, 2, ((11 << 10) + (9 << 4))])
+        data_transfers.append([base_addr + 26, 2, ((11 << 10) + (9 << 4))])
+        data_transfers.append([base_addr + 28, 2, ((6 << 10) + (9 << 4))])
+        data_transfers.append([base_addr + 30, 2, ((6 << 10) + (9 << 4))])
+        data_transfers.append([base_addr + 32, 2, ((4 << 10) + (9 << 4))])
+        data_transfers.append([base_addr + 34, 2, ((4 << 10) + (9 << 4))])
+        data_transfers.append([base_addr + 36, 2, ((2 << 10) + (4 << 4))])
+        data_transfers.append([base_addr + 38, 2, ((2 << 10) + (4 << 4))])
+        data_transfers.append([base_addr + 40, 2, ((8 << 10) + (4 << 4))])
+        data_transfers.append([base_addr + 42, 2, ((8 << 10) + (4 << 4))])
+        data_transfers.append([base_addr + 44, 2, ((5 << 10) + (4 << 4))])
+        data_transfers.append([base_addr + 46, 2, ((5 << 10) + (4 << 4))])
+
+        return data_transfers
+
     def load_kernel(self, parameter_file):
         with open(parameter_file) as json_file:
             self.parameters = json.load(json_file)
