@@ -11,12 +11,24 @@ from tt_sim.util.conversion import (
 wormhole = Wormhole()
 
 tt_metal = TT_Metal("tt_metal_0.62.2.json")
+
 go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
     "go_message", "signal"
 )
 run_msg_done = tt_metal.get_constant("RUN_MSG_DONE")
 run_msg_go = tt_metal.get_constant("RUN_MSG_GO")
 firmware_package = tt_metal.read_firmware("firmware")
+
+# TT Metal sets up a mapping table from DRAM bank to tile for each NoC, this is then
+# looked up when calling get_noc_addr_from_bank_id
+dram_to_noc_xy_transfers = tt_metal.generate_dram_noc_mapping_transfers()
+for data_transfer in dram_to_noc_xy_transfers:
+    wormhole.write(
+        (18, 18),
+        data_transfer[0],
+        conv_to_bytes(data_transfer[2], data_transfer[1]),
+        data_transfer[1],
+    )
 
 # Write firmware binaries to correct locations in tensix
 for firmware in firmware_package:
@@ -47,7 +59,7 @@ while (
 ):
     wormhole.run(100)
 
-tt_metal.load_kernel("one/parameters.json")
+tt_metal.load_kernel("two/parameters.json")
 
 # Grab the data transfers needed to the device (includes the kernel binaries,
 # mailbox values, go message, runtime arguments, cb configurations) and
