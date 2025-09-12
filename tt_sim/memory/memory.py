@@ -65,7 +65,16 @@ class MemorySpace(MemMapable, ABC):
             memory_space.write(target_addr, value, size)
 
     def getSize(self):
-        return self.size
+        low_val = None
+        high_val = None
+        for addr_range in self.memory_map.keys():
+            if low_val is None or low_val > addr_range.low:
+                low_val = addr_range.low
+            if high_val is None or high_val < addr_range.high:
+                high_val = addr_range.high
+        assert high_val is not None
+        assert low_val is not None
+        return high_val - low_val
 
     @classmethod
     def merge(cls, *memory_spaces):
