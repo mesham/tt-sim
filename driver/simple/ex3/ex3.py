@@ -22,7 +22,7 @@ ram_range = AddressRange(0x80000000, 8196)
 mem_map[ram_range] = dram_ram
 
 # Create device memory and write executable into this
-dm = DeviceMemory(mem_map, "2G")
+dm = DeviceMemory(mem_map)
 dm.write(0x0, data)
 
 # Create CPU

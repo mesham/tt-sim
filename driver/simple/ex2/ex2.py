@@ -19,11 +19,11 @@ dram_range = AddressRange(0x0, 4096)
 mem_map[dram_range] = dram
 
 # Create device memory and write executable into this
-dm = DeviceMemory(mem_map, "1M")
+dm = DeviceMemory(mem_map)
 dm.write(0x0, data)
 
 # Create CPU
-cpu = RV32I(0x0, [dm])
+cpu = RV32I(0x0, [dm], snoop=True)
 # GCC assumed sp is initalised by the preamble, we don't have that here
 # so therefore set it ourselves
 cpu.getRegisterFile()["sp"].write(conv_to_bytes(0x256))
@@ -39,7 +39,7 @@ device = Device(dm, [clock], [reset])
 
 # Reset the device and run the clock for 100 iterations
 device.reset()
-device.run(20)
+device.run(10)
 
 # Now check the result at location 0x512
 rval = dram.read(0x512, 4)

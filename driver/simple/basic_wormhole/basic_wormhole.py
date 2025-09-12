@@ -54,7 +54,7 @@ ddr_bank_0 = DRAM(10 * 1024 * 1024)
 ddr_range = AddressRange(0x0, ddr_bank_0.getSize())
 dram_tile_mem_map[ddr_range] = ddr_bank_0
 
-dram_tile_mem = TileMemory(dram_tile_mem_map, "10M")
+dram_tile_mem = TileMemory(dram_tile_mem_map)
 
 dram_noc0_router = NUI(0, 0, 0, dram_tile_mem)
 dram_noc1_router = NUI(1, 9, 11, dram_tile_mem)
@@ -101,7 +101,7 @@ tile_ctrl_range = AddressRange(0xFFB12000, tile_ctrl.getSize())
 tensix_mem_map[tile_ctrl_range] = tile_ctrl
 
 # Create global PE memory space
-tensix_mem = TensixMemory(tensix_mem_map, "10M")
+tensix_mem = TensixMemory(tensix_mem_map)
 
 # Create NoC directory
 noc_0_directory = {
@@ -123,7 +123,7 @@ brisc0_mem_map = MemoryMap()
 local_mem_brisc = DRAM(4096)
 local_mem_brisc_range = AddressRange(0xFFB00000, local_mem_brisc.getSize())
 brisc0_mem_map[local_mem_brisc_range] = local_mem_brisc
-brisc0_mem = PEMemory(brisc0_mem_map, "1M")
+brisc0_mem = PEMemory(brisc0_mem_map)
 
 brisc = BabyRISCV(BabyRISCVCoreType.BRISC, [tensix_mem, brisc0_mem], snoop=True)
 
@@ -132,7 +132,7 @@ ncrisc_mem_map = MemoryMap()
 local_mem_ncrisc = DRAM(4096)
 local_mem_ncrisc_range = AddressRange(0xFFB00000, local_mem_ncrisc.getSize())
 ncrisc_mem_map[local_mem_ncrisc_range] = local_mem_ncrisc
-ncrisc_mem = PEMemory(ncrisc_mem_map, "1M")
+ncrisc_mem = PEMemory(ncrisc_mem_map)
 
 ncrisc = BabyRISCV(BabyRISCVCoreType.NCRISC, [tensix_mem, ncrisc_mem], snoop=False)
 
@@ -141,7 +141,7 @@ trisc0_mem_map = MemoryMap()
 local_mem_trisc0 = DRAM(2048)
 local_mem_trisc0_range = AddressRange(0xFFB00000, local_mem_trisc0.getSize())
 trisc0_mem_map[local_mem_trisc0_range] = local_mem_trisc0
-trisc0_mem = PEMemory(trisc0_mem_map, "1M")
+trisc0_mem = PEMemory(trisc0_mem_map)
 
 trisc0 = BabyRISCV(BabyRISCVCoreType.TRISC0, [tensix_mem, trisc0_mem], snoop=False)
 
@@ -150,7 +150,7 @@ trisc1_mem_map = MemoryMap()
 local_mem_trisc1 = DRAM(2048)
 local_mem_trisc1_range = AddressRange(0xFFB00000, local_mem_trisc1.getSize())
 trisc1_mem_map[local_mem_trisc1_range] = local_mem_trisc1
-trisc1_mem = PEMemory(trisc1_mem_map, "1M")
+trisc1_mem = PEMemory(trisc1_mem_map)
 
 trisc1 = BabyRISCV(BabyRISCVCoreType.TRISC1, [tensix_mem, trisc1_mem], snoop=False)
 
@@ -159,7 +159,7 @@ trisc2_mem_map = MemoryMap()
 local_mem_trisc2 = DRAM(2048)
 local_mem_trisc2_range = AddressRange(0xFFB00000, local_mem_trisc2.getSize())
 trisc2_mem_map[local_mem_trisc2_range] = local_mem_trisc2
-trisc2_mem = PEMemory(trisc2_mem_map, "1M")
+trisc2_mem = PEMemory(trisc2_mem_map)
 
 trisc2 = BabyRISCV(BabyRISCVCoreType.TRISC2, [tensix_mem, trisc2_mem], snoop=False)
 

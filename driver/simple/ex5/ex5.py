@@ -30,11 +30,11 @@ ram_range = AddressRange(0x80000000, 8196)
 pe_mem_map[ram_range] = dram_ram
 
 # Create device memory and write executable into this
-dm = DeviceMemory(device_mem_map, "2G")
+dm = DeviceMemory(device_mem_map)
 dm.write(0x0, data)
 
 # Create PE memory space
-pem = PEMemory(pe_mem_map, "1M")
+pem = PEMemory(pe_mem_map)
 
 # Create CPU
 cpu = RV32IM(0x0, [dm, pem], snoop=True)
@@ -50,7 +50,7 @@ device = Device(dm, [clock], [reset])
 
 # Reset the device and run the clock for 5000 iterations
 device.reset()
-device.run(1000, print_cycle=True)
+device.run(1000)
 
 # Now check the results that have been stored
 for i in range(10):

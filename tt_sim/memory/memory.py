@@ -8,13 +8,8 @@ from tt_sim.util.conversion import conv_to_uint32
 
 
 class MemorySpace(MemMapable, ABC):
-    def __init__(self, memory_map, size, safe=True, snoop_addresses=None):
+    def __init__(self, memory_map, safe=True, snoop_addresses=None):
         self.memory_map = memory_map
-        if isinstance(size, str):
-            size = MemorySpace.parse_size_str(size)
-
-        assert isinstance(size, int)
-        self.size = size
         self.safe = safe
         self.snoop_addresses = [] if snoop_addresses is None else snoop_addresses
 
@@ -73,31 +68,11 @@ class MemorySpace(MemMapable, ABC):
         return self.size
 
     @classmethod
-    def parse_size_str(cls, size_str):
-        if "K" in size_str:
-            sval = int(size_str.split("M")[0])
-            return sval * 1024
-        elif "M" in size_str:
-            sval = int(size_str.split("M")[0])
-            return sval * 1024 * 1024
-        elif "G" in size_str:
-            sval = int(size_str.split("G")[0])
-            return sval * 1024 * 1024 * 1024
-        else:
-            raise Exception(f"Unable to parse memory size string '{size_str}'")
-
-    @classmethod
     def merge(cls, *memory_spaces):
-        max_size = 0
         memory_maps = []
         safe = False
         snoops = []
         for memory_space in memory_spaces:
-            mem_size = memory_space.size
-            if isinstance(mem_size, str):
-                mem_size = MemorySpace.parse_size_str(mem_size)
-            if mem_size > max_size:
-                max_size = mem_size
             memory_maps.append(memory_space.memory_map)
             snoops += memory_space.snoop_addresses
             # Any memory space with safety turned on turns it on for all
@@ -105,22 +80,22 @@ class MemorySpace(MemMapable, ABC):
                 safe = True
 
         new_mm = MemoryMap.merge(*memory_maps)
-        return cls(new_mm, max_size, safe, snoops)
+        return cls(new_mm, safe, snoops)
 
 
 class VisibleMemory(MemorySpace):
-    def __init__(self, memory_map, size, safe=True, snoop_addresses=None):
-        super().__init__(memory_map, size, safe, snoop_addresses)
+    def __init__(self, memory_map, safe=True, snoop_addresses=None):
+        super().__init__(memory_map, safe, snoop_addresses)
 
 
 class TensixMemory(MemorySpace):
-    def __init__(self, memory_map, size, safe=True, snoop_addresses=None):
-        super().__init__(memory_map, size, safe, snoop_addresses)
+    def __init__(self, memory_map, safe=True, snoop_addresses=None):
+        super().__init__(memory_map, safe, snoop_addresses)
 
 
 class TileMemory(MemorySpace):
-    def __init__(self, memory_map, size, safe=True, snoop_addresses=None):
-        super().__init__(memory_map, size, safe, snoop_addresses)
+    def __init__(self, memory_map, safe=True, snoop_addresses=None):
+        super().__init__(memory_map, safe, snoop_addresses)
 
 
 class AddressableMemory(MemMapable):

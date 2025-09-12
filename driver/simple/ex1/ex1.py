@@ -32,7 +32,7 @@ mem_map[dram_range] = dram
 dram_range = AddressRange(0x16384, 1024)
 mem_map[dram_range] = dram2
 
-dm = DeviceMemory(mem_map, "2G")
+dm = DeviceMemory(mem_map)
 
 dm.write(0x8192, conv_to_bytes(100))
 rv = dm.read(0x8192, 4)

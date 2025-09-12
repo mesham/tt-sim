@@ -139,7 +139,7 @@ class DRAMTile(TTDeviceTile):
         ddr_range = AddressRange(0x0_4000_0000, self.ddr_bank_1.getSize())
         dram_tile_mem_map[ddr_range] = self.ddr_bank_1
 
-        self.dram_memory = TileMemory(dram_tile_mem_map, "10M", safe, snoop_addresses)
+        self.dram_memory = TileMemory(dram_tile_mem_map, safe, snoop_addresses)
 
         r0 = NUI(0, coord_x, coord_y, self.dram_memory)
         r1 = NUI(1, coord_x, coord_y, self.dram_memory)
@@ -219,14 +219,14 @@ class TensixTile(TTDeviceTile):
         tile_ctrl_range = AddressRange(0xFFB12000, self.tile_ctrl.getSize())
         tensix_mem_map[tile_ctrl_range] = self.tile_ctrl
 
-        self.tensix_mem = TensixMemory(tensix_mem_map, "10M")
+        self.tensix_mem = TensixMemory(tensix_mem_map)
 
         # Create brisc CPU
         self.local_mem_brisc = DRAM(4096)
         local_mem_brisc_range = AddressRange(0xFFB00000, self.local_mem_brisc.getSize())
         brisc0_mem_map = MemoryMap()
         brisc0_mem_map[local_mem_brisc_range] = self.local_mem_brisc
-        self.brisc0_mem = PEMemory(brisc0_mem_map, "1M")
+        self.brisc0_mem = PEMemory(brisc0_mem_map)
 
         self.brisc = BabyRISCV(
             BabyRISCVCoreType.BRISC,
@@ -250,7 +250,7 @@ class TensixTile(TTDeviceTile):
         ncrisc_mem_map = MemoryMap()
         ncrisc_mem_map[local_mem_ncrisc_range] = self.local_mem_ncrisc
         ncrisc_mem_map[local_imem_ncrisc_range] = self.local_imem_ncrisc
-        self.ncrisc_mem = PEMemory(ncrisc_mem_map, "1M")
+        self.ncrisc_mem = PEMemory(ncrisc_mem_map)
 
         self.ncrisc = BabyRISCV(
             BabyRISCVCoreType.NCRISC,
@@ -265,7 +265,7 @@ class TensixTile(TTDeviceTile):
         )
         trisc0_mem_map = MemoryMap()
         trisc0_mem_map[local_mem_trisc0_range] = self.local_mem_trisc0
-        self.trisc0_mem = PEMemory(trisc0_mem_map, "1M")
+        self.trisc0_mem = PEMemory(trisc0_mem_map)
 
         self.trisc0 = BabyRISCV(
             BabyRISCVCoreType.TRISC0,
@@ -280,7 +280,7 @@ class TensixTile(TTDeviceTile):
         )
         trisc1_mem_map = MemoryMap()
         trisc1_mem_map[local_mem_trisc1_range] = self.local_mem_trisc1
-        self.trisc1_mem = PEMemory(trisc1_mem_map, "1M")
+        self.trisc1_mem = PEMemory(trisc1_mem_map)
 
         self.trisc1 = BabyRISCV(
             BabyRISCVCoreType.TRISC1,
@@ -295,7 +295,7 @@ class TensixTile(TTDeviceTile):
         )
         trisc2_mem_map = MemoryMap()
         trisc2_mem_map[local_mem_trisc2_range] = self.local_mem_trisc2
-        self.trisc2_mem = PEMemory(trisc2_mem_map, "1M")
+        self.trisc2_mem = PEMemory(trisc2_mem_map)
 
         self.trisc2 = BabyRISCV(
             BabyRISCVCoreType.TRISC2,
