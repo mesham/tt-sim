@@ -2,12 +2,10 @@ from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.util.bits import clear_bit, extract_bits, replace_bits
 from tt_sim.util.conversion import (
-    clear_bit,
     conv_to_bytes,
     conv_to_uint32,
-    extract_bits,
-    replace_bits,
 )
 
 

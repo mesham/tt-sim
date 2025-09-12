@@ -7,7 +7,8 @@ from tt_sim.pe.tensix.tensix_be_config_constants import (
     TensixBackendConfigurationConstants_SHAMT,
     tensix_be_config_parse_value,
 )
-from tt_sim.util.conversion import conv_to_uint32, get_nth_bit
+from tt_sim.util.bits import get_nth_bit
+from tt_sim.util.conversion import conv_to_uint32
 
 
 class BabyRISCVCoreType(IntEnum):

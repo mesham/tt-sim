@@ -16,11 +16,10 @@ from tt_sim.pe.tensix.tensix import (
     TensixCoProcessor,
     TensixGPR,
 )
+from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
-    clear_bit,
     conv_to_bytes,
     conv_to_uint32,
-    set_bit,
 )
 
 
