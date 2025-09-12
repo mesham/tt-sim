@@ -239,8 +239,17 @@ class TensixTile(TTDeviceTile):
         local_mem_ncrisc_range = AddressRange(
             0xFFB00000, self.local_mem_ncrisc.getSize()
         )
+        # ncrisc also has 16KB of IRAM (we don't distinguish here but in reality
+        # this can only be accessed by ncrisc frontend and not by instructions
+        # when they are executed, but that is fine as instruction fetch is
+        # frontend and this IRAM is just used for instructions
+        self.local_imem_ncrisc = DRAM(16384)
+        local_imem_ncrisc_range = AddressRange(
+            0xFFC00000, self.local_imem_ncrisc.getSize()
+        )
         ncrisc_mem_map = MemoryMap()
         ncrisc_mem_map[local_mem_ncrisc_range] = self.local_mem_ncrisc
+        ncrisc_mem_map[local_imem_ncrisc_range] = self.local_imem_ncrisc
         self.ncrisc_mem = PEMemory(ncrisc_mem_map, "1M")
 
         self.ncrisc = BabyRISCV(
