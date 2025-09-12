@@ -108,6 +108,13 @@ class TT_Metal:
             self.parameters = json.load(json_file)
         self.parameters = TT_Metal.parse_json_hex(self.parameters)
 
+    def get_mailbox_config_details(self, *paths):
+        return self.mailbox_config.lookup(paths)
+
+    def get_constant(self, constant):
+        assert constant in self.config["constants"]
+        return self.config["constants"][constant]
+
     def generate_transfer_mailbox_details(self, key):
         assert self.parameters is not None
         return TT_Metal.flatten(
