@@ -6,6 +6,8 @@ def conv_to_bytes(val, width=4, signed=False):
         for el in val:
             byte_data.extend(conv_to_bytes(el, signed=signed))
         return bytes(byte_data)
+    elif isinstance(val, bytes):
+        return val
     else:
         raise NotImplementedError()
 
