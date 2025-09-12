@@ -115,6 +115,14 @@ class TT_Metal:
         assert constant in self.config["constants"]
         return self.config["constants"][constant]
 
+    def generate_kernel_to_device_data_transfer_details(self):
+        transfer_details = self.get_transfer_kernel_binary_details()
+        transfer_details += self.generate_transfer_mailbox_details("launch")
+        transfer_details += self.generate_transfer_mailbox_details("go_message")
+        transfer_details += self.generate_transfer_runtime_arguments_details()
+        transfer_details += self.generate_transfer_cb_config_details()
+        return transfer_details
+
     def generate_transfer_mailbox_details(self, key):
         assert self.parameters is not None
         return TT_Metal.flatten(
@@ -125,11 +133,27 @@ class TT_Metal:
 
     def generate_transfer_runtime_arguments_details(self):
         assert self.parameters is not None
-        rt_base_addr = self.parameters["runtime_args_base_addr"]
-
         contents = []
-        for idx, rt_arg in enumerate(self.parameters["runtime_args"]):
-            contents.append(((idx * 4) + rt_base_addr, 4, rt_arg))
+
+        if (
+            "runtime_args_base_addr" in self.parameters
+            and "runtime_args" in self.parameters
+        ):
+            rt_base_addr = self.parameters["runtime_args_base_addr"]
+
+            for idx, rt_arg in enumerate(self.parameters["runtime_args"]):
+                contents.append(((idx * 4) + rt_base_addr, 4, rt_arg))
+        return contents
+
+    def generate_transfer_cb_config_details(self):
+        assert self.parameters is not None
+        contents = []
+
+        if "cb_config_base_addr" in self.parameters and "cb_config" in self.parameters:
+            cb_config_base_addr = self.parameters["cb_config_base_addr"]
+
+            for idx, cb_config in enumerate(self.parameters["cb_config"]):
+                contents.append(((idx * 4) + cb_config_base_addr, 4, cb_config))
         return contents
 
     def get_transfer_kernel_binary_details(self):

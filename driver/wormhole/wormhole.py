@@ -49,27 +49,16 @@ while (
 
 tt_metal.load_kernel("one/parameters.json")
 
-kernel_binaries = tt_metal.get_transfer_kernel_binary_details()
-for kernel_bin in kernel_binaries:
-    wormhole.write((18, 18), kernel_bin[0], kernel_bin[2], kernel_bin[1])
-
-launch_mailbox = tt_metal.generate_transfer_mailbox_details("launch")
-for mailbox_data in launch_mailbox:
-    wormhole.write(
-        (18, 18), mailbox_data[0], conv_to_bytes(mailbox_data[2], mailbox_data[1])
-    )
-
-go_message = tt_metal.generate_transfer_mailbox_details("go_message")
-for go_message_component in go_message:
-    wormhole.write(
-        (18, 18),
-        go_message_component[0],
-        conv_to_bytes(go_message_component[2], go_message_component[1]),
-    )
-
-rt_args = tt_metal.generate_transfer_runtime_arguments_details()
-for rt_arg in rt_args:
-    wormhole.write((18, 18), rt_arg[0], conv_to_bytes(rt_arg[2], rt_arg[1]))
+# Grab the data transfers needed to the device (includes the kernel binaries,
+# mailbox values, go message, runtime arguments, cb configurations) and
+# write them to the memory of the tensix core
+data_transfers = tt_metal.generate_kernel_to_device_data_transfer_details()
+for data_transfer in data_transfers:
+    if not isinstance(data_transfer[2], bytes):
+        d = conv_to_bytes(data_transfer[2], data_transfer[1])
+    else:
+        d = data_transfer[2]
+    wormhole.write((18, 18), data_transfer[0], d, data_transfer[1])
 
 ## Write input data to DDR memory
 list1 = list(range(100))
