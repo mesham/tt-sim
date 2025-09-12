@@ -182,19 +182,19 @@ class TensixTile(TTDeviceTile):
         l1_range = AddressRange(0x0, self.L1_mem.getSize())
         tensix_mem_map[l1_range] = self.L1_mem
 
-        self.tenxix_coprocessor = TensixCoProcessor()
-        tensix_range = AddressRange(0xFFE40000, self.tenxix_coprocessor.getSize())
-        tensix_mem_map[tensix_range] = self.tenxix_coprocessor
+        self.tensix_coprocessor = TensixCoProcessor()
+        tensix_range = AddressRange(0xFFE40000, self.tensix_coprocessor.getSize())
+        tensix_mem_map[tensix_range] = self.tensix_coprocessor
 
-        self.tenxix_coprocessor_be_config = TensixBackendConfiguration(
-            self.tenxix_coprocessor
+        self.tensix_coprocessor_be_config = TensixBackendConfiguration(
+            self.tensix_coprocessor
         )
         tensix_config_range = AddressRange(
-            0xFFEF0000, self.tenxix_coprocessor_be_config.getSize()
+            0xFFEF0000, self.tensix_coprocessor_be_config.getSize()
         )
-        tensix_mem_map[tensix_config_range] = self.tenxix_coprocessor_be_config
+        tensix_mem_map[tensix_config_range] = self.tensix_coprocessor_be_config
 
-        self.tensix_gpr = TensixGPR(self.tenxix_coprocessor)
+        self.tensix_gpr = TensixGPR(self.tensix_coprocessor)
         tensix_gpr_range = AddressRange(0xFFE00000, self.tensix_gpr.getSize())
         tensix_mem_map[tensix_gpr_range] = self.tensix_gpr
 
@@ -210,7 +210,7 @@ class TensixTile(TTDeviceTile):
         noc_overlay_range = AddressRange(0xFFB40000, self.noc_overlay.getSize())
         tensix_mem_map[noc_overlay_range] = self.noc_overlay
 
-        self.tdma = TDMA()
+        self.tdma = TDMA(self.tensix_coprocessor)
         tdma_range = AddressRange(0xFFB11000, self.tdma.getSize())
         tensix_mem_map[tdma_range] = self.tdma
 
@@ -302,10 +302,14 @@ class TensixTile(TTDeviceTile):
             snoop=trisc2_snoop,
         )
 
+        # Set addressable memory for Tensix co-processor
+        self.tensix_coprocessor.setAddressableMemory([self.tensix_mem, self.ncrisc_mem])
+
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
 
     def get_clocks(self):
         return [
+            self.tdma,
             self.brisc,
             self.ncrisc,
             self.trisc0,
@@ -313,6 +317,7 @@ class TensixTile(TTDeviceTile):
             self.trisc2,
             self.noc0_router,
             self.noc1_router,
+            self.tile_ctrl,
         ]
 
     def get_tensix_memory(self):
