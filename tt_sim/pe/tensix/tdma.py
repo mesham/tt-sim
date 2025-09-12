@@ -12,7 +12,6 @@ class TDMA(MemMapable, Clockable):
 
     def read(self, addr, size):
         if addr == 0x14:
-            print("Read TDMA status")
             return conv_to_bytes(self.generate_status_bits())
         else:
             raise NotImplementedError(
