@@ -156,18 +156,41 @@ class TT_Metal:
                 contents.append(((idx * 4) + cb_config_base_addr, 4, cb_config))
         return contents
 
+    def get_risc_core_kernel_binary(self, filename, address_key):
+        if filename in self.parameters and address_key in self.parameters:
+            bin_file = self.read_binary_file(self.parameters["brisc_binary_file"])
+            return (self.parameters["brisc_binary_text_addr"], len(bin_file), bin_file)
+        else:
+            return None
+
     def get_transfer_kernel_binary_details(self):
         assert self.parameters is not None
         contents = []
-        if (
-            "BRISC_binary_file" in self.parameters
-            and "BRISC_binary_text_addr" in self.parameters
-        ):
-            bin_file = self.read_binary_file(self.parameters["BRISC_binary_file"])
-            contents.append(
-                (self.parameters["BRISC_binary_text_addr"], len(bin_file), bin_file)
-            )
-        # TODO: handle other cores too
+        brisc_details = self.get_risc_core_kernel_binary(
+            "brisc_binary_file", "brisc_binary_text_addr"
+        )
+        if brisc_details is not None:
+            contents.append(brisc_details)
+        ncrisc_details = self.get_risc_core_kernel_binary(
+            "ncrisc_binary_file", "ncrisc_binary_text_addr"
+        )
+        if ncrisc_details is not None:
+            contents.append(ncrisc_details)
+        trisc0_details = self.get_risc_core_kernel_binary(
+            "trisc0_binary_file", "trisc0_binary_text_addr"
+        )
+        if trisc0_details is not None:
+            contents.append(trisc0_details)
+        trisc1_details = self.get_risc_core_kernel_binary(
+            "trisc1_binary_file", "trisc1_binary_text_addr"
+        )
+        if trisc1_details is not None:
+            contents.append(trisc1_details)
+        trisc2_details = self.get_risc_core_kernel_binary(
+            "trisc2_binary_file", "trisc2_binary_text_addr"
+        )
+        if trisc2_details is not None:
+            contents.append(trisc2_details)
         return contents
 
     @classmethod

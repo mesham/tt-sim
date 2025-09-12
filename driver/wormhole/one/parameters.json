@@ -1,6 +1,6 @@
 {
-  "BRISC_binary_file" : "one/brisc_kernel_text.bin",
-  "BRISC_binary_text_addr": "0x71B0",
+  "brisc_binary_file" : "one/brisc_kernel_text.bin",
+  "brisc_binary_text_addr": "0x71B0",
   "launch": [{
     "kernel_config": {
       "watcher_kernel_ids": ["0x4", "0x0", "0x0"],
