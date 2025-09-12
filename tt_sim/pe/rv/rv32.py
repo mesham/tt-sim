@@ -169,9 +169,12 @@ class RV32I(ProcessingElement):
     def getRegisterFile(self):
         return self.register_file
 
+    def get_start_address(self):
+        return self.start_address
+
     def initialise_core(self):
         pc = self.register_file["pc"]
-        pc.write(conv_to_bytes(self.start_address))
+        pc.write(conv_to_bytes(self.get_start_address()))
 
         self.unknown_instructions = 0
 
