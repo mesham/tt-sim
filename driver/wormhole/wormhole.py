@@ -5,11 +5,17 @@ from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.util.conversion import (
     conv_to_bytes,
     conv_to_int32,
+    conv_to_uint32,
 )
 
 wormhole = Wormhole()
 
 tt_metal = TT_Metal("tt_metal_0.62.2.json")
+go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
+    "go_message", "signal"
+)
+run_msg_done = tt_metal.get_constant("RUN_MSG_DONE")
+run_msg_go = tt_metal.get_constant("RUN_MSG_GO")
 firmware_package = tt_metal.read_firmware("firmware")
 
 # Write firmware binaries to correct locations in tensix
@@ -29,7 +35,17 @@ wormhole.assert_soft_reset()
 wormhole.deassert_soft_reset((18, 18), BabyRISCVCoreType.BRISC)
 
 wormhole.reset()
-wormhole.run(3100)
+
+# Set the go signal and then loop round whilst this is not done, the firmware will
+# set it to be done when it has finished and is ready for a kernel
+wormhole.write(
+    (18, 18), go_signal_start_addr, conv_to_bytes(run_msg_go, go_signal_byte_len)
+)
+while (
+    conv_to_uint32(wormhole.read((18, 18), go_signal_start_addr, go_signal_byte_len))
+    != run_msg_done
+):
+    wormhole.run(100)
 
 tt_metal.load_kernel("one/parameters.json")
 
@@ -61,8 +77,12 @@ list2 = [100 - i for i in range(100)]
 wormhole.write((16, 16), 0x20, conv_to_bytes(list1))
 wormhole.write((16, 16), 0x1C0, conv_to_bytes(list2))
 
-## Run 3000 cycles to process the kernel
-wormhole.run(3000)
+## Run cycles to process the kernel, continue until MSG_DONE is written
+while (
+    conv_to_uint32(wormhole.read((18, 18), go_signal_start_addr, go_signal_byte_len))
+    != run_msg_done
+):
+    wormhole.run(100)
 
 ## Check results in DDR memory are correct
 for i in range(100):
