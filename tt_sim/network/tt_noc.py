@@ -10,14 +10,29 @@ from tt_sim.util.conversion import (
 
 
 class NoCOverlay(MemMapable):
+    NOC_NUM_STREAMS = 64
+    NOC_STREAM_REG_SPACE_SIZE = 0x1000
+
     def __init__(self):
-        pass
+        self.stream_regs = [
+            [0] * (NoCOverlay.NOC_STREAM_REG_SPACE_SIZE >> 2)
+        ] * NoCOverlay.NOC_NUM_STREAMS
 
     def read(self, addr, size):
-        return 0
+        stream_id, reg_id = self.getStreamAndRegisterFromAddress(addr)
+        return conv_to_bytes(self.stream_regs[stream_id][reg_id])
 
     def write(self, addr, value, size=None):
-        pass
+        stream_id, reg_id = self.getStreamAndRegisterFromAddress(addr)
+        self.stream_regs[stream_id][reg_id] = conv_to_uint32(value)
+
+    def getStreamAndRegisterFromAddress(self, addr):
+        stream_id = int(addr / NoCOverlay.NOC_STREAM_REG_SPACE_SIZE)
+        reg_id = int(addr % NoCOverlay.NOC_STREAM_REG_SPACE_SIZE) >> 2
+        return stream_id, reg_id
+
+    def getStreamRegisterAddress(self, stream_id, reg_id):
+        return (stream_id * NoCOverlay.NOC_STREAM_REG_SPACE_SIZE) + (reg_id << 2)
 
     def getSize(self):
         return 0x3FFFF
@@ -78,8 +93,11 @@ class NUI(MemMapable, Clockable):
             self.cmd_ctrl = 0
 
             target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
-            target_tile_y = extract_bits(self.target_addr_mid, 12, 4)
-            assert (target_tile_x, target_tile_y) in self.nui.noc_directory
+            target_tile_y = extract_bits(self.target_addr_mid, 6, 10)
+            if (target_tile_x, target_tile_y) not in self.nui.noc_directory:
+                raise ValueError(
+                    f"{target_tile_x},{target_tile_y} NUI index not in NOC directory when reading via NoC {self.nui.noc_number}"
+                )
 
             read_req = NUI.NoCDataRequest(
                 self.target_addr_low,
@@ -137,8 +155,11 @@ class NUI(MemMapable, Clockable):
 
             # Send write request
             ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
-            ret_tile_y = extract_bits(self.ret_addr_mid, 12, 4)
-            assert (ret_tile_x, ret_tile_y) in self.nui.noc_directory
+            ret_tile_y = extract_bits(self.ret_addr_mid, 6, 10)
+            if (ret_tile_x, ret_tile_y) not in self.nui.noc_directory:
+                raise ValueError(
+                    f"{ret_tile_x},{ret_tile_y} NUI index not in NOC directory when writing via NoC {self.nui.noc_number}"
+                )
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
 
@@ -188,8 +209,11 @@ class NUI(MemMapable, Clockable):
 
             # Send write request
             ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
-            ret_tile_y = extract_bits(self.ret_addr_mid, 12, 4)
-            assert (ret_tile_x, ret_tile_y) in self.nui.noc_directory
+            ret_tile_y = extract_bits(self.ret_addr_mid, 6, 10)
+            if (ret_tile_x, ret_tile_y) not in self.nui.noc_directory:
+                raise ValueError(
+                    f"{ret_tile_x},{ret_tile_y} NUI index not in NOC directory when writing on NoC {self.nui.noc_number}"
+                )
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
 
