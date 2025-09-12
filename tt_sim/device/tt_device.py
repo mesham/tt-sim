@@ -32,10 +32,20 @@ class TT_Device(Device):
         components_to_clock = []
         components_to_reset = []
         self.tile_directory = {}
+        noc_0_directory = {}
+        noc_1_directory = {}
         for tile in itertools.chain(dram_tiles, tensix_tiles):
             components_to_clock += tile.get_clocks()
             components_to_reset += tile.get_resets()
             self.tile_directory[tile.get_coord_pair()] = tile
+            # Add entry to NoC directory
+            noc_0_directory[tile.get_noc_nui(0).get_id_pair()] = tile.get_noc_nui(0)
+            noc_1_directory[tile.get_noc_nui(1).get_id_pair()] = tile.get_noc_nui(1)
+
+        # Set NoC directory for each tile
+        for tile in itertools.chain(dram_tiles, tensix_tiles):
+            tile.get_noc_nui(0).set_noc_directory(noc_0_directory)
+            tile.get_noc_nui(1).set_noc_directory(noc_1_directory)
 
         self.clocks = [Clock(components_to_clock)]
         self.resets = [Reset(components_to_reset)]
@@ -101,21 +111,6 @@ class Wormhole(TT_Device):
     def __init__(self):
         dram_tile = DRAMTile(16, 16)
         tensix_tile = TensixTile(18, 18, True)
-
-        # Create NoC directory
-        noc_0_directory = {
-            dram_tile.get_noc_nui(0).get_id_pair(): dram_tile.get_noc_nui(0),
-            tensix_tile.get_noc_nui(0).get_id_pair(): tensix_tile.get_noc_nui(0),
-        }
-        noc_1_directory = {
-            dram_tile.get_noc_nui(1).get_id_pair(): dram_tile.get_noc_nui(1),
-            tensix_tile.get_noc_nui(1).get_id_pair(): tensix_tile.get_noc_nui(1),
-        }
-
-        dram_tile.get_noc_nui(0).set_noc_directory(noc_0_directory)
-        dram_tile.get_noc_nui(1).set_noc_directory(noc_1_directory)
-        tensix_tile.get_noc_nui(0).set_noc_directory(noc_0_directory)
-        tensix_tile.get_noc_nui(1).set_noc_directory(noc_1_directory)
 
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
