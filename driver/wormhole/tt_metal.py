@@ -57,7 +57,10 @@ class ArrayType(BaseType):
     def lookup(self, keys):
         idx = keys[0]
         start_addr, type_width = self.type.lookup(keys[1:])
-        return (start_addr + (type_width * idx), type_width)
+        return (
+            start_addr + (int(self.getBytes() / self.num_entries) * idx),
+            type_width,
+        )
 
 
 class StructType(BaseType):
@@ -158,8 +161,8 @@ class TT_Metal:
 
     def get_risc_core_kernel_binary(self, filename, address_key):
         if filename in self.parameters and address_key in self.parameters:
-            bin_file = self.read_binary_file(self.parameters["brisc_binary_file"])
-            return (self.parameters["brisc_binary_text_addr"], len(bin_file), bin_file)
+            bin_file = self.read_binary_file(self.parameters[filename])
+            return (self.parameters[address_key], len(bin_file), bin_file)
         else:
             return None
 
