@@ -17,6 +17,7 @@ from tt_sim.pe.tensix.tensix import (
     TensixCoProcessor,
     TensixGPR,
 )
+from tt_sim.pe.tensix.ttsync import TTSync
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -223,6 +224,10 @@ class TensixTile(TTDeviceTile):
         self.pc_buf_1 = PCBuf(self.tile_ctrl, 1)
         self.pc_buf_2 = PCBuf(self.tile_ctrl, 2)
 
+        self.ttsync_0 = TTSync(self.tile_ctrl, self.tensix_coprocessor, 0)
+        self.ttsync_1 = TTSync(self.tile_ctrl, self.tensix_coprocessor, 1)
+        self.ttsync_2 = TTSync(self.tile_ctrl, self.tensix_coprocessor, 2)
+
         self.tensix_mem = TensixMemory(tensix_mem_map)
 
         # Create brisc CPU
@@ -268,7 +273,9 @@ class TensixTile(TTDeviceTile):
             snoop=ncrisc_snoop,
         )
 
+        # Common addresses for TRISC cores
         trisc_pc_buf_range = AddressRange(0xFFE80000, 0x4)
+        trisc_ttsync_range = AddressRange(0xFFE80004, 0x1B)
 
         # Create trisc0 CPU
         self.local_mem_trisc0 = DRAM(2048)
@@ -278,6 +285,7 @@ class TensixTile(TTDeviceTile):
         trisc0_mem_map = MemoryMap()
         trisc0_mem_map[local_mem_trisc0_range] = self.local_mem_trisc0
         trisc0_mem_map[trisc_pc_buf_range] = self.pc_buf_0
+        trisc0_mem_map[trisc_ttsync_range] = self.ttsync_0
         self.trisc0_mem = PEMemory(trisc0_mem_map)
 
         self.trisc0 = BabyRISCV(
@@ -294,6 +302,7 @@ class TensixTile(TTDeviceTile):
         trisc1_mem_map = MemoryMap()
         trisc1_mem_map[local_mem_trisc1_range] = self.local_mem_trisc1
         trisc1_mem_map[trisc_pc_buf_range] = self.pc_buf_1
+        trisc1_mem_map[trisc_ttsync_range] = self.ttsync_1
         self.trisc1_mem = PEMemory(trisc1_mem_map)
 
         self.trisc1 = BabyRISCV(
@@ -310,6 +319,7 @@ class TensixTile(TTDeviceTile):
         trisc2_mem_map = MemoryMap()
         trisc2_mem_map[local_mem_trisc2_range] = self.local_mem_trisc2
         trisc2_mem_map[trisc_pc_buf_range] = self.pc_buf_2
+        trisc2_mem_map[trisc_ttsync_range] = self.ttsync_2
         self.trisc2_mem = PEMemory(trisc2_mem_map)
 
         self.trisc2 = BabyRISCV(
