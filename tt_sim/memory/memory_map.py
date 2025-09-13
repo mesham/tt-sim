@@ -2,7 +2,7 @@ class AddressRange:
     def __init__(self, low, size):
         self.low = low
         self.size = size
-        self.high = low + size
+        self.high = low + (size - 1)
 
     def __hash__(self):
         return hash((self.low, self.high))
