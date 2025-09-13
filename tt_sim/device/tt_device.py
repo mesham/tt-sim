@@ -8,6 +8,7 @@ from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.misc.tile_ctrl import TensixTileControl
 from tt_sim.network.tt_noc import NUI, NoCOverlay
+from tt_sim.pe.pcbuf import PCBuf
 from tt_sim.pe.pe import PEMemory
 from tt_sim.pe.rv.babyriscv import BabyRISCV, BabyRISCVCoreType
 from tt_sim.pe.tensix.tdma import TDMA
@@ -109,7 +110,7 @@ class TT_Device(Device):
 class Wormhole(TT_Device):
     def __init__(self):
         dram_tile = DRAMTile(16, 16)
-        tensix_tile = TensixTile(18, 18, True)
+        tensix_tile = TensixTile(18, 18, False, False, True, True, True)
 
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
@@ -218,13 +219,23 @@ class TensixTile(TTDeviceTile):
         tile_ctrl_range = AddressRange(0xFFB12000, self.tile_ctrl.getSize())
         tensix_mem_map[tile_ctrl_range] = self.tile_ctrl
 
+        self.pc_buf_0 = PCBuf(self.tile_ctrl, 0)
+        self.pc_buf_1 = PCBuf(self.tile_ctrl, 1)
+        self.pc_buf_2 = PCBuf(self.tile_ctrl, 2)
+
         self.tensix_mem = TensixMemory(tensix_mem_map)
 
         # Create brisc CPU
         self.local_mem_brisc = DRAM(4096)
         local_mem_brisc_range = AddressRange(0xFFB00000, self.local_mem_brisc.getSize())
+        brisc_pc_buf_0_range = AddressRange(0xFFE80000, self.pc_buf_0.getSize())
+        brisc_pc_buf_1_range = AddressRange(0xFFE90000, self.pc_buf_1.getSize())
+        brisc_pc_buf_2_range = AddressRange(0xFFEA0000, self.pc_buf_2.getSize())
         brisc0_mem_map = MemoryMap()
         brisc0_mem_map[local_mem_brisc_range] = self.local_mem_brisc
+        brisc0_mem_map[brisc_pc_buf_0_range] = self.pc_buf_0
+        brisc0_mem_map[brisc_pc_buf_1_range] = self.pc_buf_1
+        brisc0_mem_map[brisc_pc_buf_2_range] = self.pc_buf_2
         self.brisc0_mem = PEMemory(brisc0_mem_map)
 
         self.brisc = BabyRISCV(
@@ -257,6 +268,8 @@ class TensixTile(TTDeviceTile):
             snoop=ncrisc_snoop,
         )
 
+        trisc_pc_buf_range = AddressRange(0xFFE80000, 0x4)
+
         # Create trisc0 CPU
         self.local_mem_trisc0 = DRAM(2048)
         local_mem_trisc0_range = AddressRange(
@@ -264,6 +277,7 @@ class TensixTile(TTDeviceTile):
         )
         trisc0_mem_map = MemoryMap()
         trisc0_mem_map[local_mem_trisc0_range] = self.local_mem_trisc0
+        trisc0_mem_map[trisc_pc_buf_range] = self.pc_buf_0
         self.trisc0_mem = PEMemory(trisc0_mem_map)
 
         self.trisc0 = BabyRISCV(
@@ -279,6 +293,7 @@ class TensixTile(TTDeviceTile):
         )
         trisc1_mem_map = MemoryMap()
         trisc1_mem_map[local_mem_trisc1_range] = self.local_mem_trisc1
+        trisc1_mem_map[trisc_pc_buf_range] = self.pc_buf_1
         self.trisc1_mem = PEMemory(trisc1_mem_map)
 
         self.trisc1 = BabyRISCV(
@@ -294,6 +309,7 @@ class TensixTile(TTDeviceTile):
         )
         trisc2_mem_map = MemoryMap()
         trisc2_mem_map[local_mem_trisc2_range] = self.local_mem_trisc2
+        trisc2_mem_map[trisc_pc_buf_range] = self.pc_buf_2
         self.trisc2_mem = PEMemory(trisc2_mem_map)
 
         self.trisc2 = BabyRISCV(
