@@ -6,7 +6,7 @@ from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 class TDMA(MemMapable, Clockable):
     def __init__(self, tensix_coprocessor):
-        self.mover = tensix_coprocessor.getBackend().getMover()
+        self.mover = tensix_coprocessor.getBackend().getMoverUnit()
         self.cmd_params = [0] * 4
         self.command_queue = []
 
