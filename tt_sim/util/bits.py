@@ -48,10 +48,58 @@ def extract_bits(val, n, p):
 
     Parameters:
     - x (int): The input integer.
-    - p (int): The position to start extracting bits (0 = least significant bit).
     - n (int): The number of bits to extract.
+    - p (int): The position to start extracting bits (0 = least significant bit).
 
     Returns:
     - int: The extracted bits as a new integer.
     """
     return (val >> p) & ((1 << n) - 1)
+
+
+def get_bits(value: int, start: int, end: int) -> int:
+    """
+    Extract bits from `start` to `end` (inclusive) from a signed 32-bit integer.
+
+    Bit positions are 0-indexed from the LSB (rightmost bit).
+
+    Example:
+        extract_bits(0b111011, 1, 3) => 0b101 => 5
+
+    Args:
+        value (int): The 32-bit signed integer.
+        start (int): Starting bit index (inclusive).
+        end (int): Ending bit index (inclusive).
+
+    Returns:
+        int: The extracted bits as an integer.
+    """
+    if not (0 <= start <= 31 and 0 <= end <= 31):
+        raise ValueError("start and end must be between 0 and 31")
+    if start > end:
+        raise ValueError("start must be less than or equal to end")
+
+    # Ensure it's treated as unsigned 32-bit
+    value &= 0xFFFFFFFF
+
+    # Create bitmask
+    num_bits = end - start + 1
+    mask = (1 << num_bits) - 1
+
+    # Shift and mask
+    return (value >> start) & mask
+
+
+def int_to_bin_list(value: int, width: int = 32) -> list[int]:
+    """
+    Convert an integer to a list of binary digits (0 or 1).
+
+    Args:
+        value (int): The integer to convert.
+        width (int): The number of bits to include (default is 32).
+
+    Returns:
+        List[int]: List of binary digits, from MSB to LSB.
+    """
+    value &= (1 << width) - 1  # Ensure it's within the desired bit width
+    return [(value >> i) & 1 for i in reversed(range(width))]
