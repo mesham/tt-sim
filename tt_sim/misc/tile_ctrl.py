@@ -6,6 +6,7 @@ from tt_sim.util.conversion import conv_to_bytes
 class TensixTileControl(MemMapable, Clockable):
     def __init__(self):
         self.RISCV_DEBUG_REG_SOFT_RESET_0 = conv_to_bytes(0)
+        self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE = conv_to_bytes(0)
         self.cycle_num = 0
 
     def clock_tick(self, cycle_num):
@@ -24,6 +25,8 @@ class TensixTileControl(MemMapable, Clockable):
         elif addr == 0x1F8:
             # RISCV_DEBUG_REG_WALL_CLOCK_H
             return conv_to_bytes(self.counter_high_at, 4)
+        elif addr == 0x090:
+            return self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE
         else:
             raise NotImplementedError(
                 f"Reading from address {hex(addr)} not yet supported by tensix "
@@ -39,6 +42,8 @@ class TensixTileControl(MemMapable, Clockable):
         elif addr == 0x1F4 or addr == 0x1F8:
             # nop
             pass
+        elif addr == 0x090:
+            self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE = value
         else:
             raise NotImplementedError(
                 f"Writing to address {hex(addr)} not yet supported by tensix "
