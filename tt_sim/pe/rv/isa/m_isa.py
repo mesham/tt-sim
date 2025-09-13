@@ -65,7 +65,7 @@ class RV_M_ISA(RV_ISA):
                 # div
                 rs1_val = conv_to_int32(register_file[rs1].read())
                 rs2_val = conv_to_int32(register_file[rs2].read())
-                result = rs1_val / rs2_val
+                result = int(rs1_val / rs2_val)
                 signed = True
                 snoop_str = "div"
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} / {cls.get_reg_name(rs2)}"
@@ -73,7 +73,7 @@ class RV_M_ISA(RV_ISA):
                 # divu
                 rs1_val = conv_to_uint32(register_file[rs1].read())
                 rs2_val = conv_to_uint32(register_file[rs2].read())
-                result = rs1_val / rs2_val
+                result = int(rs1_val / rs2_val)
                 snoop_str = "divu"
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} / {cls.get_reg_name(rs2)}"
             case 0x6:
