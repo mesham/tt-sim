@@ -1,21 +1,14 @@
-from abc import ABC
-from enum import IntEnum
+import importlib.resources as resources
+
+import yaml
 
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.memory.memory import VisibleMemory
 from tt_sim.pe.pe import ProcessingElement
+from tt_sim.pe.tensix.backend import TensixBackend
+from tt_sim.pe.tensix.frontend import TensixFrontend
+from tt_sim.util.bits import extract_bits, get_bits
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
-
-
-class XMOV_DIRECTION(IntEnum):
-    XMOV_L0_TO_L1 = 0
-    XMOV_L1_TO_L0 = 1
-    XMOV_L0_TO_L0 = 2
-    XMOV_L1_TO_L1 = 3
-
-
-TENSIX_CFG_BASE = 0xFFEF0000
-MEM_NCRISC_IRAM_BASE = 0xFFC00000
 
 
 class TensixGPR(MemMapable):
@@ -91,29 +84,79 @@ class TensixBackendConfiguration(MemMapable):
         return 0xFFFF
 
 
-class TensixCoProcessor(ProcessingElement, MemMapable):
+class TensixInstructionDecoder:
     def __init__(self):
-        mover = Mover(self)
-        self.backend = TensixBackend(mover)
-        self.addressable_memory = None
+        with (
+            resources.files("tt_sim.pe.tensix")
+            .joinpath("tensix_instructions.yaml")
+            .open("r") as f
+        ):
+            self.tensix_instructions = yaml.safe_load(f)
+
+        self.opcodes = self.generate_tensix_instructions_by_opcode()
+
+    def generate_tensix_instructions_by_opcode(self):
+        by_opcode = {}
+        for k, instruction in self.tensix_instructions.items():
+            by_opcode[instruction["op_binary"]] = instruction
+            by_opcode[instruction["op_binary"]]["name"] = k
+        return by_opcode
+
+    def isInstructionRecognised(self, instruction):
+        opcode = extract_bits(instruction, 8, 24)
+        return opcode in self.opcodes
+
+    def getInstructionInfo(self, instruction):
+        opcode = extract_bits(instruction, 8, 24)
+        assert opcode in self.opcodes
+        instruction_info = self.opcodes[opcode]
+        instr_args = {}
+        if "arguments" in instruction_info and isinstance(
+            instruction_info["arguments"], list
+        ):
+            arg_ends = []  # end of each argument (inclusive)
+            for arg in instruction_info["arguments"][1:]:
+                arg_ends.append(arg["start_bit"] - 1)
+            arg_ends.append(23)  # opcode is from 24 onwards
+
+            for idx, arg in enumerate(instruction_info["arguments"]):
+                instr_args[arg["name"]] = get_bits(
+                    instruction, arg["start_bit"], arg_ends[idx]
+                )
+
+        instruction_info["instr_args"] = instr_args
+
+        return instruction_info
+
+
+class TensixCoProcessor(ProcessingElement):
+    def __init__(self):
+        self.tensix_instruction_decoder = TensixInstructionDecoder()
+        self.backend = TensixBackend(self.tensix_instruction_decoder)
+        self.threads = [
+            TensixFrontend(i, self.tensix_instruction_decoder, self.backend)
+            for i in range(3)
+        ]
+
+    def getThread(self, idx):
+        assert idx < 3
+        return self.threads[idx]
+
+    def getClocks(self):
+        clocks = self.backend.getClocks()
+        for thread in self.threads:
+            clocks += thread.getClocks()
+
+        return clocks
 
     def setAddressableMemory(self, addressable_memory):
         if len(addressable_memory) == 1:
-            self.addressable_memory = addressable_memory[0]
+            self.backend.setAddressableMemory(addressable_memory[0])
         else:
-            self.addressable_memory = VisibleMemory.merge(*addressable_memory)
+            self.backend.setAddressableMemory(VisibleMemory.merge(*addressable_memory))
 
     def getBackend(self):
         return self.backend
-
-    def read(self, addr, size):
-        return conv_to_bytes(0)
-
-    def write(self, addr, value, size=None):
-        return
-
-    def getSize(self):
-        return 0x2FFFF
 
     def getRegisterFile(self):
         pass
@@ -129,60 +172,3 @@ class TensixCoProcessor(ProcessingElement, MemMapable):
 
     def reset(self):
         pass
-
-
-class TensixBackend:
-    def __init__(self, mover):
-        self.mover = mover
-
-    def getMover(self):
-        return self.mover
-
-    def issue_instruction(self, instruction):
-        pass
-
-
-class TensixBackendUnit(ABC):
-    def __init__(self, tensix_coprocessor):
-        self.tensix_coprocessor = tensix_coprocessor
-
-
-class Mover(TensixBackendUnit):
-    def __init__(self, tensix_coprocessor):
-        super().__init__(tensix_coprocessor)
-
-    def move(self, dst, src, count, mode):
-        """
-        This is based on the functional model description at
-        https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/Mover.md
-        """
-        assert self.tensix_coprocessor.addressable_memory is not None
-        if mode == XMOV_DIRECTION.XMOV_L1_TO_L1 or mode == XMOV_DIRECTION.XMOV_L0_TO_L1:
-            # In the "_TO_L1" modes, dst must be an address in L1.
-            assert dst < 1024 * 1464
-        else:
-            if dst <= 0xFFFF:
-                dst += TENSIX_CFG_BASE
-            elif 0x40000 <= dst and dst <= 0x4FFFF:
-                dst = (dst - 0x40000) + MEM_NCRISC_IRAM_BASE
-            else:
-                dst = None  # Operation still happens, but the writes get discarded.
-
-            if (dst & 0xFFFF) + count > 0x10000:
-                raise NotImplementedError(
-                    "Can not access more than one region at a time"
-                )
-
-        # Perform the operation.
-        if mode == XMOV_DIRECTION.XMOV_L1_TO_L1 or mode == XMOV_DIRECTION.XMOV_L1_TO_L0:
-            # In the "L1_TO_" modes, a memcpy is done, and src must be an address in L1.
-            if src >= (1024 * 1464):
-                raise NotImplementedError("")
-            # print(f"Write to {hex(dst)} from {hex(src)} elements {hex(count)}")
-            self.tensix_coprocessor.addressable_memory.write(
-                dst, self.tensix_coprocessor.addressable_memory.read(src, count)
-            )
-        else:
-            # In the "L0_TO_" modes, a memset is done.
-            zero_val = conv_to_bytes(0, count)
-            self.tensix_coprocessor.addressable_memory.write(dst, zero_val)
