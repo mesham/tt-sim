@@ -1,4 +1,3 @@
-
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.util.conversion import (
     conv_to_bytes,
