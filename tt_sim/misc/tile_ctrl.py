@@ -7,6 +7,7 @@ class TensixTileControl(MemMapable, Clockable):
     def __init__(self):
         self.RISCV_DEBUG_REG_SOFT_RESET_0 = conv_to_bytes(0)
         self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE = conv_to_bytes(0)
+        self.RISCV_DEBUG_REG_DBG_FEATURE_DISABLE = conv_to_bytes(0)
         self.cycle_num = 0
 
     def clock_tick(self, cycle_num):
@@ -27,10 +28,11 @@ class TensixTileControl(MemMapable, Clockable):
             return conv_to_bytes(self.counter_high_at, 4)
         elif addr == 0x090:
             return self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE
+        elif addr == 0x68:
+            return self.RISCV_DEBUG_REG_DBG_FEATURE_DISABLE
         else:
             raise NotImplementedError(
-                f"Reading from address {hex(addr)} not yet supported by tensix "
-                f"co-processor backend configuration"
+                f"Reading from address {hex(addr)} not yet supported by tile ctrl"
             )
 
     def write(self, addr, value, size=None):
@@ -44,10 +46,11 @@ class TensixTileControl(MemMapable, Clockable):
             pass
         elif addr == 0x090:
             self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE = value
+        elif addr == 0x68:
+            self.RISCV_DEBUG_REG_DBG_FEATURE_DISABLE = value
         else:
             raise NotImplementedError(
-                f"Writing to address {hex(addr)} not yet supported by tensix "
-                f"co-processor backend configuration"
+                f"Writing to address {hex(addr)} not yet supported by tile ctrl"
             )
 
     def getSize(self):
