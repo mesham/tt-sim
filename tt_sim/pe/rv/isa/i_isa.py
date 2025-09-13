@@ -404,7 +404,7 @@ class RV_I_ISA(RV_ISA):
             bit_pos = RV_ISA.get_int(instr, 20, 25)
             if type_val == 0x1:
                 # slli
-                result = rs1_val << bit_pos
+                result = (rs1_val << bit_pos) % (1 << 32)  # Overflow is ignored
                 snoop_str = "slli"
                 info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} << {hex(bit_pos)}"
             elif type_val == 0x5:
@@ -472,7 +472,7 @@ class RV_I_ISA(RV_ISA):
         elif type_val == 0x1:
             # sll
             shift_bits = rs2_val & 0x1F  # Least significant 5 bits for RV32I
-            result = rs1_val << shift_bits
+            result = (rs1_val << shift_bits) % (1 << 32)  # Overflow is ignored
             snoop_str = "sll"
             info_msg = (
                 f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} << {hex(shift_bits)}"
