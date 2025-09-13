@@ -7,6 +7,7 @@ from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.misc.tile_ctrl import TensixTileControl
+from tt_sim.misc.ttsync import TTSync
 from tt_sim.network.tt_noc import NUI, NoCOverlay
 from tt_sim.pe.pcbuf import PCBuf
 from tt_sim.pe.pe import PEMemory
@@ -17,7 +18,6 @@ from tt_sim.pe.tensix.tensix import (
     TensixCoProcessor,
     TensixGPR,
 )
-from tt_sim.pe.tensix.ttsync import TTSync
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -177,16 +177,14 @@ class TensixTile(TTDeviceTile):
         noc0_snoop=False,
         noc1_snoop=False,
     ):
+        self.tensix_coprocessor = TensixCoProcessor()
+
         tensix_mem_map = MemoryMap()
 
         # Create DRAM
         self.L1_mem = DRAM(1507327)
         l1_range = AddressRange(0x0, self.L1_mem.getSize())
         tensix_mem_map[l1_range] = self.L1_mem
-
-        self.tensix_coprocessor = TensixCoProcessor()
-        tensix_range = AddressRange(0xFFE40000, self.tensix_coprocessor.getSize())
-        tensix_mem_map[tensix_range] = self.tensix_coprocessor
 
         self.tensix_coprocessor_be_config = TensixBackendConfiguration(
             self.tensix_coprocessor
@@ -236,11 +234,17 @@ class TensixTile(TTDeviceTile):
         brisc_pc_buf_0_range = AddressRange(0xFFE80000, self.pc_buf_0.getSize())
         brisc_pc_buf_1_range = AddressRange(0xFFE90000, self.pc_buf_1.getSize())
         brisc_pc_buf_2_range = AddressRange(0xFFEA0000, self.pc_buf_2.getSize())
+        tensix_cp_thread_0_range = AddressRange(0xFFE40000, 0xFFFF)
+        tensix_cp_thread_1_range = AddressRange(0xFFE50000, 0xFFFF)
+        tensix_cp_thread_2_range = AddressRange(0xFFE60000, 0xFFFF)
         brisc0_mem_map = MemoryMap()
         brisc0_mem_map[local_mem_brisc_range] = self.local_mem_brisc
         brisc0_mem_map[brisc_pc_buf_0_range] = self.pc_buf_0
         brisc0_mem_map[brisc_pc_buf_1_range] = self.pc_buf_1
         brisc0_mem_map[brisc_pc_buf_2_range] = self.pc_buf_2
+        brisc0_mem_map[tensix_cp_thread_0_range] = self.tensix_coprocessor.getThread(0)
+        brisc0_mem_map[tensix_cp_thread_1_range] = self.tensix_coprocessor.getThread(1)
+        brisc0_mem_map[tensix_cp_thread_2_range] = self.tensix_coprocessor.getThread(2)
         self.brisc0_mem = PEMemory(brisc0_mem_map)
 
         self.brisc = BabyRISCV(
@@ -276,6 +280,9 @@ class TensixTile(TTDeviceTile):
         # Common addresses for TRISC cores
         trisc_pc_buf_range = AddressRange(0xFFE80000, 0x4)
         trisc_ttsync_range = AddressRange(0xFFE80004, 0x1B)
+        trisc_semaphores_range = AddressRange(0xFFE80020, 0xFFDF)
+        trisc_mop_expander_cfg_range = AddressRange(0xFFB80000, 0x23)
+        trisc_cp_thread_range = AddressRange(0xFFE40000, 0xFFFF)
 
         # Create trisc0 CPU
         self.local_mem_trisc0 = DRAM(2048)
@@ -286,6 +293,13 @@ class TensixTile(TTDeviceTile):
         trisc0_mem_map[local_mem_trisc0_range] = self.local_mem_trisc0
         trisc0_mem_map[trisc_pc_buf_range] = self.pc_buf_0
         trisc0_mem_map[trisc_ttsync_range] = self.ttsync_0
+        trisc0_mem_map[trisc_semaphores_range] = (
+            self.tensix_coprocessor.getBackend().getSyncUnit()
+        )
+        trisc0_mem_map[trisc_mop_expander_cfg_range] = (
+            self.tensix_coprocessor.getThread(0).getMOPExpander()
+        )
+        trisc0_mem_map[trisc_cp_thread_range] = self.tensix_coprocessor.getThread(0)
         self.trisc0_mem = PEMemory(trisc0_mem_map)
 
         self.trisc0 = BabyRISCV(
@@ -303,6 +317,13 @@ class TensixTile(TTDeviceTile):
         trisc1_mem_map[local_mem_trisc1_range] = self.local_mem_trisc1
         trisc1_mem_map[trisc_pc_buf_range] = self.pc_buf_1
         trisc1_mem_map[trisc_ttsync_range] = self.ttsync_1
+        trisc1_mem_map[trisc_semaphores_range] = (
+            self.tensix_coprocessor.getBackend().getSyncUnit()
+        )
+        trisc1_mem_map[trisc_mop_expander_cfg_range] = (
+            self.tensix_coprocessor.getThread(1).getMOPExpander()
+        )
+        trisc1_mem_map[trisc_cp_thread_range] = self.tensix_coprocessor.getThread(1)
         self.trisc1_mem = PEMemory(trisc1_mem_map)
 
         self.trisc1 = BabyRISCV(
@@ -320,6 +341,13 @@ class TensixTile(TTDeviceTile):
         trisc2_mem_map[local_mem_trisc2_range] = self.local_mem_trisc2
         trisc2_mem_map[trisc_pc_buf_range] = self.pc_buf_2
         trisc2_mem_map[trisc_ttsync_range] = self.ttsync_2
+        trisc2_mem_map[trisc_semaphores_range] = (
+            self.tensix_coprocessor.getBackend().getSyncUnit()
+        )
+        trisc2_mem_map[trisc_mop_expander_cfg_range] = (
+            self.tensix_coprocessor.getThread(2).getMOPExpander()
+        )
+        trisc2_mem_map[trisc_cp_thread_range] = self.tensix_coprocessor.getThread(2)
         self.trisc2_mem = PEMemory(trisc2_mem_map)
 
         self.trisc2 = BabyRISCV(
@@ -334,7 +362,7 @@ class TensixTile(TTDeviceTile):
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
 
     def get_clocks(self):
-        return [
+        return self.tensix_coprocessor.getClocks() + [
             self.tdma,
             self.brisc,
             self.ncrisc,
