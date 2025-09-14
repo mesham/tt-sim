@@ -1,0 +1,3637 @@
+CFG_STATE_ID_StateID:
+  ADDR32: 0
+  SHAMT: 0
+  MASK: 0x1
+
+DEST_TARGET_REG_CFG_MATH_Offset:
+  ADDR32: 1
+  SHAMT: 0
+  MASK: 0xfff
+
+ADDR_MOD_SET_Base:
+  ADDR32: 2
+  SHAMT: 0
+  MASK: 0x1
+
+SRCA_SET_Base:
+  ADDR32: 3
+  SHAMT: 0
+  MASK: 0x3
+
+SRCA_SET_SetOvrdWithAddr:
+  ADDR32: 3
+  SHAMT: 2
+  MASK: 0x4
+
+SRCB_SET_Base:
+  ADDR32: 4
+  SHAMT: 0
+  MASK: 0x3
+
+CLR_DVALID_SrcA_Disable:
+  ADDR32: 5
+  SHAMT: 0
+  MASK: 0x1
+
+CLR_DVALID_SrcB_Disable:
+  ADDR32: 5
+  SHAMT: 1
+  MASK: 0x2
+
+FIDELITY_BASE_Phase:
+  ADDR32: 6
+  SHAMT: 0
+  MASK: 0x3
+
+ADDR_MOD_AB_SEC0_SrcAIncr:
+  ADDR32: 7
+  SHAMT: 0
+  MASK: 0x3f
+
+ADDR_MOD_AB_SEC0_SrcACR:
+  ADDR32: 7
+  SHAMT: 6
+  MASK: 0x40
+
+ADDR_MOD_AB_SEC0_SrcAClear:
+  ADDR32: 7
+  SHAMT: 7
+  MASK: 0x80
+
+ADDR_MOD_AB_SEC0_SrcBIncr:
+  ADDR32: 7
+  SHAMT: 8
+  MASK: 0x3f00
+
+ADDR_MOD_AB_SEC0_SrcBCR:
+  ADDR32: 7
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_AB_SEC0_SrcBClear:
+  ADDR32: 7
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_AB_SEC0_BiasCntIncr:
+  ADDR32: 8
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_AB_SEC0_BiasCntClear:
+  ADDR32: 8
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_AB_SEC1_SrcAIncr:
+  ADDR32: 9
+  SHAMT: 0
+  MASK: 0x3f
+
+ADDR_MOD_AB_SEC1_SrcACR:
+  ADDR32: 9
+  SHAMT: 6
+  MASK: 0x40
+
+ADDR_MOD_AB_SEC1_SrcAClear:
+  ADDR32: 9
+  SHAMT: 7
+  MASK: 0x80
+
+ADDR_MOD_AB_SEC1_SrcBIncr:
+  ADDR32: 9
+  SHAMT: 8
+  MASK: 0x3f00
+
+ADDR_MOD_AB_SEC1_SrcBCR:
+  ADDR32: 9
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_AB_SEC1_SrcBClear:
+  ADDR32: 9
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_AB_SEC1_BiasCntIncr:
+  ADDR32: 10
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_AB_SEC1_BiasCntClear:
+  ADDR32: 10
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_AB_SEC2_SrcAIncr:
+  ADDR32: 11
+  SHAMT: 0
+  MASK: 0x3f
+
+ADDR_MOD_AB_SEC2_SrcACR:
+  ADDR32: 11
+  SHAMT: 6
+  MASK: 0x40
+
+ADDR_MOD_AB_SEC2_SrcAClear:
+  ADDR32: 11
+  SHAMT: 7
+  MASK: 0x80
+
+ADDR_MOD_AB_SEC2_SrcBIncr:
+  ADDR32: 11
+  SHAMT: 8
+  MASK: 0x3f00
+
+ADDR_MOD_AB_SEC2_SrcBCR:
+  ADDR32: 11
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_AB_SEC2_SrcBClear:
+  ADDR32: 11
+  SHAMT: 15
+  MASK: 0x8000
+  
+ADDR_MOD_AB_SEC2_BiasCntIncr:
+  ADDR32: 12
+  SHAMT: 0
+  MASK: 0xf
+  
+ADDR_MOD_AB_SEC2_BiasCntClear:
+  ADDR32: 12
+  SHAMT: 4
+  MASK: 0x10
+  
+ADDR_MOD_AB_SEC3_SrcAIncr:  
+  ADDR32: 13
+  SHAMT: 0
+  MASK: 0x3f
+  
+ADDR_MOD_AB_SEC3_SrcACR:
+  ADDR32: 13
+  SHAMT: 6
+  MASK: 0x40
+  
+ADDR_MOD_AB_SEC3_SrcAClear:     
+  ADDR32: 13
+  SHAMT: 7
+  MASK: 0x80
+  
+ADDR_MOD_AB_SEC3_SrcBInc:     
+  ADDR32: 13
+  SHAMT: 8
+  MASK: 0x3f00
+  
+ADDR_MOD_AB_SEC3_SrcBCR:     
+  ADDR32: 13
+  SHAMT: 14
+  MASK: 0x4000
+  
+ADDR_MOD_AB_SEC3_SrcBClear:
+  ADDR32: 13
+  SHAMT: 15
+  MASK: 0x8000
+  
+ADDR_MOD_AB_SEC3_BiasCntIncr:
+  ADDR32: 14
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_AB_SEC3_BiasCntClear:
+  ADDR32: 14
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_AB_SEC4_SrcAIncr:
+  ADDR32: 15
+  SHAMT: 0
+  MASK: 0x3f
+
+ADDR_MOD_AB_SEC4_SrcACR:
+  ADDR32: 15
+  SHAMT: 6
+  MASK: 0x40
+
+ADDR_MOD_AB_SEC4_SrcAClear:
+  ADDR32: 15
+  SHAMT: 7
+  MASK: 0x80
+
+ADDR_MOD_AB_SEC4_SrcBIncr:
+  ADDR32: 15
+  SHAMT: 8
+  MASK: 0x3f00
+
+ADDR_MOD_AB_SEC4_SrcBCR:
+  ADDR32: 15
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_AB_SEC4_SrcBClear:
+  ADDR32: 15
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_AB_SEC4_BiasCntIncr:
+  ADDR32: 16
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_AB_SEC4_BiasCntClear:
+  ADDR32: 16
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_AB_SEC5_SrcAIncr:
+  ADDR32: 17
+  SHAMT: 0
+  MASK: 0x3f
+
+ADDR_MOD_AB_SEC5_SrcACR:
+  ADDR32: 17
+  SHAMT: 6
+  MASK: 0x40
+
+ADDR_MOD_AB_SEC5_SrcAClear:
+  ADDR32: 17
+  SHAMT: 7
+  MASK: 0x80
+
+ADDR_MOD_AB_SEC5_SrcBIncr:
+  ADDR32: 17
+  SHAMT: 8
+  MASK: 0x3f00
+
+ADDR_MOD_AB_SEC5_SrcBCR:
+  ADDR32: 17
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_AB_SEC5_SrcBClear:
+  ADDR32: 17
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_AB_SEC5_BiasCntIncr:
+  ADDR32: 18
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_AB_SEC5_BiasCntClear:
+  ADDR32: 18
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_AB_SEC6_SrcAIncr:
+  ADDR32: 19
+  SHAMT: 0
+  MASK: 0x3f
+
+ADDR_MOD_AB_SEC6_SrcACR:
+  ADDR32: 19
+  SHAMT: 6
+  MASK: 0x40
+
+ADDR_MOD_AB_SEC6_SrcAClear:
+  ADDR32: 19
+  SHAMT: 7
+  MASK: 0x80
+
+ADDR_MOD_AB_SEC6_SrcBIncr:
+  ADDR32: 19
+  SHAMT: 8
+  MASK: 0x3f00
+
+ADDR_MOD_AB_SEC6_SrcBCR:
+  ADDR32: 19
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_AB_SEC6_SrcBClear:
+  ADDR32: 19
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_AB_SEC6_BiasCntIncr:
+  ADDR32: 20
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_AB_SEC6_BiasCntClear:
+  ADDR32: 20
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_AB_SEC7_SrcAIncr:
+  ADDR32: 21
+  SHAMT: 0
+  MASK: 0x3f
+
+ADDR_MOD_AB_SEC7_SrcACR:
+  ADDR32: 21
+  SHAMT: 6
+  MASK: 0x40
+
+ADDR_MOD_AB_SEC7_SrcAClear:
+  ADDR32: 21
+  SHAMT: 7
+  MASK: 0x80
+
+ADDR_MOD_AB_SEC7_SrcBIncr:
+  ADDR32: 21
+  SHAMT: 8
+  MASK: 0x3f00
+
+ADDR_MOD_AB_SEC7_SrcBCR:
+  ADDR32: 21
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_AB_SEC7_SrcBClear:
+  ADDR32: 21
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_AB_SEC7_BiasCntIncr:
+  ADDR32: 22
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_AB_SEC7_BiasCntClear:
+  ADDR32: 22
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_DST_SEC0_DestIncr:
+  ADDR32: 23
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC0_DestCR:
+  ADDR32: 23
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC0_DestClear:
+  ADDR32: 23
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC0_DestCToCR:
+  ADDR32: 23
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC0_FidelityIncr:
+  ADDR32: 23
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC0_FidelityClear:
+  ADDR32: 23
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_DST_SEC1_DestIncr:
+  ADDR32: 24
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC1_DestCR:
+  ADDR32: 24
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC1_DestClear:
+  ADDR32: 24
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC1_DestCToCR:
+  ADDR32: 24
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC1_FidelityIncr:
+  ADDR32: 24
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC1_FidelityClear:
+  ADDR32: 24
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_DST_SEC2_DestIncr:
+  ADDR32: 25
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC2_DestCR:
+  ADDR32: 25
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC2_DestClear:
+  ADDR32: 25
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC2_DestCToCR:
+  ADDR32: 25
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC2_FidelityIncr:
+  ADDR32: 25
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC2_FidelityClear:
+  ADDR32: 25
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_DST_SEC3_DestIncr:
+  ADDR32: 26
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC3_DestCR:
+  ADDR32: 26
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC3_DestClear:
+  ADDR32: 26
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC3_DestCToCR:
+  ADDR32: 26
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC3_FidelityIncr:
+  ADDR32: 26
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC3_FidelityClear:
+  ADDR32: 26
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_DST_SEC4_DestIncr:
+  ADDR32: 27
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC4_DestCR:
+  ADDR32: 27
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC4_DestClear:
+  ADDR32: 27
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC4_DestCToCR:
+  ADDR32: 27
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC4_FidelityIncr:
+  ADDR32: 27
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC4_FidelityClear:
+  ADDR32: 27
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_DST_SEC5_DestIncr:
+  ADDR32: 28
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC5_DestCR:
+  ADDR32: 28
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC5_DestClear:
+  ADDR32: 28
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC5_DestCToCR:
+  ADDR32: 28
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC5_FidelityIncr:
+  ADDR32: 28
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC5_FidelityClear:
+  ADDR32: 28
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_DST_SEC6_DestIncr:
+  ADDR32: 29
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC6_DestCR:
+  ADDR32: 29
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC6_DestClear:
+  ADDR32: 29
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC6_DestCToCR:
+  ADDR32: 29
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC6_FidelityIncr:
+  ADDR32: 29
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC6_FidelityClear:
+  ADDR32: 29
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_DST_SEC7_DestIncr:
+  ADDR32: 30
+  SHAMT: 0
+  MASK: 0x3ff
+
+ADDR_MOD_DST_SEC7_DestCR:
+  ADDR32: 30
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_DST_SEC7_DestClear:
+  ADDR32: 30
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_DST_SEC7_DestCToCR:
+  ADDR32: 30
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_DST_SEC7_FidelityIncr:
+  ADDR32: 30
+  SHAMT: 13
+  MASK: 0x6000
+
+ADDR_MOD_DST_SEC7_FidelityClear:
+  ADDR32: 30
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC0_YsrcIncr:
+  ADDR32: 31
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC0_YsrcCR:
+  ADDR32: 31
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC0_YsrcClear:
+  ADDR32: 31
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC0_YdstIncr:
+  ADDR32: 31
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC0_YdstCR:
+  ADDR32: 31
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC0_YdstClear:
+  ADDR32: 31
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC0_ZsrcIncr:
+  ADDR32: 31
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC0_ZsrcClear:
+  ADDR32: 31
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC0_ZdstIncr:
+  ADDR32: 31
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC0_ZdstClear:
+  ADDR32: 31
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC1_YsrcIncr:
+  ADDR32: 32
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC1_YsrcCR:
+  ADDR32: 32
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC1_YsrcClear:
+  ADDR32: 32
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC1_YdstIncr:
+  ADDR32: 32
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC1_YdstCR:
+  ADDR32: 32
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC1_YdstClear:
+  ADDR32: 32
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC1_ZsrcIncr:
+  ADDR32: 32
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC1_ZsrcClear:
+  ADDR32: 32
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC1_ZdstIncr:
+  ADDR32: 32
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC1_ZdstClear:
+  ADDR32: 32
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC2_YsrcIncr:
+  ADDR32: 33
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC2_YsrcCR:
+  ADDR32: 33
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC2_YsrcClear:
+  ADDR32: 33
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC2_YdstIncr:
+  ADDR32: 33
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC2_YdstCR:
+  ADDR32: 33
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC2_YdstClear:
+  ADDR32: 33
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC2_ZsrcIncr:
+  ADDR32: 33
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC2_ZsrcClear:
+  ADDR32: 33
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC2_ZdstIncr:
+  ADDR32: 33
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC2_ZdstClear:
+  ADDR32: 33
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC3_YsrcIncr:
+  ADDR32: 34
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC3_YsrcCR:
+  ADDR32: 34
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC3_YsrcClear:
+  ADDR32: 34
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC3_YdstIncr:
+  ADDR32: 34
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC3_YdstCR:
+  ADDR32: 34
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC3_YdstClear:
+  ADDR32: 34
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC3_ZsrcIncr:
+  ADDR32: 34
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC3_ZsrcClear:
+  ADDR32: 34
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC3_ZdstIncr:
+  ADDR32: 34
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC3_ZdstClear:
+  ADDR32: 34
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC4_YsrcIncr:
+  ADDR32: 35
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC4_YsrcCR:
+  ADDR32: 35
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC4_YsrcClear:
+  ADDR32: 35
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC4_YdstIncr:
+  ADDR32: 35
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC4_YdstCR:
+  ADDR32: 35
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC4_YdstClear:
+  ADDR32: 35
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC4_ZsrcIncr:
+  ADDR32: 35
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC4_ZsrcClear:
+  ADDR32: 35
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC4_ZdstIncr:
+  ADDR32: 35
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC4_ZdstClear:
+  ADDR32: 35
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC5_YsrcIncr:
+  ADDR32: 36
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC5_YsrcCR:
+  ADDR32: 36
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC5_YsrcClear:
+  ADDR32: 36
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC5_YdstIncr:
+  ADDR32: 36
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC5_YdstCR:
+  ADDR32: 36
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC5_YdstClear:
+  ADDR32: 36
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC5_ZsrcIncr:
+  ADDR32: 36
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC5_ZsrcClear:
+  ADDR32: 36
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC5_ZdstIncr:
+  ADDR32: 36
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC5_ZdstClear:
+  ADDR32: 36
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC6_YsrcIncr:
+  ADDR32: 37
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC6_YsrcCR:
+  ADDR32: 37
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC6_YsrcClear:
+  ADDR32: 37
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC6_YdstIncr:
+  ADDR32: 37
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC6_YdstCR:
+  ADDR32: 37
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC6_YdstClear:
+  ADDR32: 37
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC6_ZsrcIncr:
+  ADDR32: 37
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC6_ZsrcClear:
+  ADDR32: 37
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC6_ZdstIncr:
+  ADDR32: 37
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC6_ZdstClear:
+  ADDR32: 37
+  SHAMT: 15
+  MASK: 0x8000
+
+ADDR_MOD_PACK_SEC7_YsrcIncr:
+  ADDR32: 38
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_PACK_SEC7_YsrcCR:
+  ADDR32: 38
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_PACK_SEC7_YsrcClear:
+  ADDR32: 38
+  SHAMT: 5
+  MASK: 0x20
+
+ADDR_MOD_PACK_SEC7_YdstIncr:
+  ADDR32: 38
+  SHAMT: 6
+  MASK: 0x3c0
+
+ADDR_MOD_PACK_SEC7_YdstCR:
+  ADDR32: 38
+  SHAMT: 10
+  MASK: 0x400
+
+ADDR_MOD_PACK_SEC7_YdstClear:
+  ADDR32: 38
+  SHAMT: 11
+  MASK: 0x800
+
+ADDR_MOD_PACK_SEC7_ZsrcIncr:
+  ADDR32: 38
+  SHAMT: 12
+  MASK: 0x1000
+
+ADDR_MOD_PACK_SEC7_ZsrcClear:
+  ADDR32: 38
+  SHAMT: 13
+  MASK: 0x2000
+
+ADDR_MOD_PACK_SEC7_ZdstIncr:
+  ADDR32: 38
+  SHAMT: 14
+  MASK: 0x4000
+
+ADDR_MOD_PACK_SEC7_ZdstClear:
+  ADDR32: 38
+  SHAMT: 15
+  MASK: 0x8000
+
+UNPACK_MISC_CFG_CfgContextOffset_0:
+  ADDR32: 39
+  SHAMT: 0
+  MASK: 0xf
+
+UNPACK_MISC_CFG_CfgContextCntReset_0:
+  ADDR32: 39
+  SHAMT: 4
+  MASK: 0x10
+
+UNPACK_MISC_CFG_CfgContextCntInc_0:
+  ADDR32: 39
+  SHAMT: 5
+  MASK: 0x20
+
+UNPACK_MISC_CFG_CfgContextOffset_1:
+  ADDR32: 39
+  SHAMT: 8
+  MASK: 0xf00
+
+UNPACK_MISC_CFG_CfgContextCntReset_1:
+  ADDR32: 39
+  SHAMT: 12
+  MASK: 0x1000
+
+UNPACK_MISC_CFG_CfgContextCntInc_1:
+  ADDR32: 39
+  SHAMT: 13
+  MASK: 0x2000
+
+NOC_OVERLAY_MSG_CLEAR_StreamId_0:
+  ADDR32: 40
+  SHAMT: 0
+  MASK: 0x3f
+
+NOC_OVERLAY_MSG_CLEAR_MsgNum_0:
+  ADDR32: 40
+  SHAMT: 8
+  MASK: 0x700
+
+NOC_OVERLAY_MSG_CLEAR_StreamId_1:
+  ADDR32: 41
+  SHAMT: 0
+  MASK: 0x3f
+
+NOC_OVERLAY_MSG_CLEAR_MsgNum_1:
+  ADDR32: 41
+  SHAMT: 8
+  MASK: 0x700
+
+CG_CTRL_EN_Regblocks:
+  ADDR32: 42
+  SHAMT: 0
+  MASK: 0x1
+
+CG_CTRL_EN_Fpu:
+  ADDR32: 42
+  SHAMT: 1
+  MASK: 0x2
+
+CG_CTRL_EN_Fpu_mtile:
+  ADDR32: 42
+  SHAMT: 2
+  MASK: 0x4
+
+CG_CTRL_EN_Fpu_sfpu:
+  ADDR32: 42
+  SHAMT: 3
+  MASK: 0x8
+
+CG_CTRL_EN_Move:
+  ADDR32: 42
+  SHAMT: 4
+  MASK: 0x10
+
+CG_CTRL_EN_Packer:
+  ADDR32: 42
+  SHAMT: 5
+  MASK: 0x1e0
+
+CG_CTRL_EN_Unpacker:
+  ADDR32: 42
+  SHAMT: 9
+  MASK: 0x600
+
+CG_CTRL_EN_Xsearch:
+  ADDR32: 42
+  SHAMT: 11
+  MASK: 0x800
+
+CG_CTRL_EN_Thcon:
+  ADDR32: 42
+  SHAMT: 12
+  MASK: 0x1000
+
+CG_CTRL_EN_Trisc:
+  ADDR32: 42
+  SHAMT: 13
+  MASK: 0x2000
+
+CG_CTRL_EN_Retmux:
+  ADDR32: 42
+  SHAMT: 14
+  MASK: 0x4000
+
+CG_CTRL_EN_Ithread:
+  ADDR32: 42
+  SHAMT: 15
+  MASK: 0x8000
+
+CG_CTRL_EN_Hyst:
+  ADDR32: 43
+  SHAMT: 2
+  MASK: 0x1fc
+
+CG_CTRL_KICK_Regblocks:
+  ADDR32: 44
+  SHAMT: 0
+  MASK: 0x1
+
+CG_CTRL_KICK_Fpu:
+  ADDR32: 44
+  SHAMT: 1
+  MASK: 0x2
+
+CG_CTRL_KICK_Move:
+  ADDR32: 44
+  SHAMT: 2
+  MASK: 0x4
+
+CG_CTRL_KICK_Packer:
+  ADDR32: 44
+  SHAMT: 3
+  MASK: 0x78
+
+CG_CTRL_KICK_Unpacker:
+  ADDR32: 44
+  SHAMT: 7
+  MASK: 0x180
+
+CG_CTRL_KICK_Xsearch:
+  ADDR32: 44
+  SHAMT: 9
+  MASK: 0x200
+
+CG_CTRL_KICK_Thcon:
+  ADDR32: 44
+  SHAMT: 10
+  MASK: 0x400
+
+CG_CTRL_KICK_Trisc:
+  ADDR32: 44
+  SHAMT: 11
+  MASK: 0x800
+
+CG_CTRL_KICK_Retmux:
+  ADDR32: 44
+  SHAMT: 12
+  MASK: 0x1000
+
+CG_CTRL_KICK_Ithread:
+  ADDR32: 44
+  SHAMT: 13
+  MASK: 0x2000
+
+PERF_CNT_CMD_Cmd0Start:
+  ADDR32: 45
+  SHAMT: 0
+  MASK: 0x1
+
+PERF_CNT_CMD_Cmd0Stop:
+  ADDR32: 45
+  SHAMT: 1
+  MASK: 0x2
+
+PERF_CNT_CMD_Cmd1Start:
+  ADDR32: 45
+  SHAMT: 2
+  MASK: 0x4
+
+PERF_CNT_CMD_Cmd1Stop:
+  ADDR32: 45
+  SHAMT: 3
+  MASK: 0x8
+
+PERF_CNT_CMD_Cmd2Start:
+  ADDR32: 45
+  SHAMT: 4
+  MASK: 0x10
+
+PERF_CNT_CMD_Cmd2Stop:
+  ADDR32: 45
+  SHAMT: 5
+  MASK: 0x20
+
+PERF_CNT_CMD_Cmd3Start:
+  ADDR32: 45
+  SHAMT: 6
+  MASK: 0x40
+
+PERF_CNT_CMD_Cmd3Stop:
+  ADDR32: 45
+  SHAMT: 7
+  MASK: 0x80
+
+ENABLE_ACC_STATS_Enable:
+  ADDR32: 46
+  SHAMT: 0
+  MASK: 0x1
+
+FPU_BIAS_SEL_Pointer:
+  ADDR32: 47
+  SHAMT: 0
+  MASK: 0x1
+
+ADDR_MOD_BIAS_SEC0_BiasIncr:
+  ADDR32: 48
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC0_BiasClear:
+  ADDR32: 48
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_BIAS_SEC1_BiasIncr:
+  ADDR32: 49
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC1_BiasClear:
+  ADDR32: 49
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_BIAS_SEC2_BiasIncr:
+  ADDR32: 50
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC2_BiasClear:
+  ADDR32: 50
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_BIAS_SEC3_BiasIncr:
+  ADDR32: 51
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC3_BiasClear:
+  ADDR32: 51
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_BIAS_SEC4_BiasIncr:
+  ADDR32: 52
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC4_BiasClear:
+  ADDR32: 52
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_BIAS_SEC5_BiasIncr:
+  ADDR32: 53
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC5_BiasClear:
+  ADDR32: 53
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_BIAS_SEC6_BiasIncr:
+  ADDR32: 54
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC6_BiasClear:
+  ADDR32: 54
+  SHAMT: 4
+  MASK: 0x10
+
+ADDR_MOD_BIAS_SEC7_BiasIncr:
+  ADDR32: 55
+  SHAMT: 0
+  MASK: 0xf
+
+ADDR_MOD_BIAS_SEC7_BiasClear:
+  ADDR32: 55
+  SHAMT: 4
+  MASK: 0x10
+
+FP16A_FORCE_Enable:
+  ADDR32: 56
+  SHAMT: 0
+  MASK: 0x1
+
+# ALU
+ALU_FORMAT_SPEC_REG_SrcA_val:
+  ADDR32: 0
+  SHAMT: 0
+  MASK: 0xf
+
+ALU_FORMAT_SPEC_REG_SrcA_override:
+  ADDR32: 0
+  SHAMT: 4
+  MASK: 0x10
+
+ALU_FORMAT_SPEC_REG_SrcB_val:
+  ADDR32: 0
+  SHAMT: 5
+  MASK: 0x1e0
+
+ALU_FORMAT_SPEC_REG_SrcB_override:
+  ADDR32: 0
+  SHAMT: 9
+  MASK: 0x200
+
+ALU_FORMAT_SPEC_REG_Dstacc_val:
+  ADDR32: 0
+  SHAMT: 10
+  MASK: 0x3c00
+
+ALU_FORMAT_SPEC_REG_Dstacc_override:
+  ADDR32: 0
+  SHAMT: 14
+  MASK: 0x4000
+
+ALU_ROUNDING_MODE_Fpu_srnd_en:
+  ADDR32: 1
+  SHAMT: 0
+  MASK: 0x1
+
+ALU_ROUNDING_MODE_Gasket_srnd_en:
+  ADDR32: 1
+  SHAMT: 1
+  MASK: 0x2
+
+ALU_ROUNDING_MODE_Packer_srnd_en:
+  ADDR32: 1
+  SHAMT: 2
+  MASK: 0x4
+
+ALU_ROUNDING_MODE_Padding:
+  ADDR32: 1
+  SHAMT: 3
+  MASK: 0x1ff8
+
+ALU_ROUNDING_MODE_GS_LF:
+  ADDR32: 1
+  SHAMT: 13
+  MASK: 0x2000
+
+ALU_ROUNDING_MODE_Bfp8_HF:
+  ADDR32: 1
+  SHAMT: 14
+  MASK: 0x4000
+
+ALU_FORMAT_SPEC_REG0_SrcAUnsigned:
+  ADDR32: 1
+  SHAMT: 15
+  MASK: 0x8000
+
+ALU_FORMAT_SPEC_REG0_SrcBUnsigned:
+  ADDR32: 1
+  SHAMT: 16
+  MASK: 0x10000
+
+ALU_FORMAT_SPEC_REG0_SrcA:
+  ADDR32: 1
+  SHAMT: 17
+  MASK: 0x1e0000
+
+ALU_FORMAT_SPEC_REG1_SrcB:
+  ADDR32: 1
+  SHAMT: 21
+  MASK: 0x1e00000
+
+ALU_FORMAT_SPEC_REG2_Dstacc:
+  ADDR32: 1
+  SHAMT: 25
+  MASK: 0x1e000000
+
+ALU_ACC_CTRL_Fp32_enabled:
+  ADDR32: 1
+  SHAMT: 29
+  MASK: 0x20000000
+
+ALU_ACC_CTRL_SFPU_Fp32_enabled:
+  ADDR32: 1
+  SHAMT: 30
+  MASK: 0x40000000
+
+ALU_ACC_CTRL_INT8_math_enabled:
+  ADDR32: 1
+  SHAMT: 31
+  MASK: 0x80000000
+
+ALU_ACC_CTRL_Zero_Flag_disabled_src:
+  ADDR32: 2
+  SHAMT: 0
+  MASK: 0x1
+
+ALU_ACC_CTRL_Zero_Flag_disabled_dst:
+  ADDR32: 2
+  SHAMT: 1
+  MASK: 0x2
+
+STACC_RELU_ApplyRelu:
+  ADDR32: 2
+  SHAMT: 2
+  MASK: 0x3c
+
+STACC_RELU_ReluThreshold:
+  ADDR32: 2
+  SHAMT: 6
+  MASK: 0x3fffc0
+
+DISABLE_RISC_BP_Disable_main:
+  ADDR32: 2
+  SHAMT: 22
+  MASK: 0x400000
+
+DISABLE_RISC_BP_Disable_trisc:
+  ADDR32: 2
+  SHAMT: 23
+  MASK: 0x3800000
+
+DISABLE_RISC_BP_Disable_ncrisc:
+  ADDR32: 2
+  SHAMT: 26
+  MASK: 0x4000000
+
+DISABLE_RISC_BP_Disable_bmp_clear_main:
+  ADDR32: 2
+  SHAMT: 27
+  MASK: 0x8000000
+
+DISABLE_RISC_BP_Disable_bmp_clear_trisc:
+  ADDR32: 2
+  SHAMT: 28
+  MASK: 0x70000000
+
+DISABLE_RISC_BP_Disable_bmp_clear_ncrisc:
+  ADDR32: 2
+  SHAMT: 31
+  MASK: 0x80000000
+
+ECC_SCRUBBER_Enable:
+  ADDR32: 3
+  SHAMT: 0
+  MASK: 0x1
+
+ECC_SCRUBBER_Scrub_On_Error:
+  ADDR32: 3
+  SHAMT: 1
+  MASK: 0x2
+
+ECC_SCRUBBER_Scrub_On_Error_Immediately:
+  ADDR32: 3
+  SHAMT: 2
+  MASK: 0x4
+
+ECC_SCRUBBER_Delay:
+  ADDR32: 3
+  SHAMT: 3
+  MASK: 0x3ff8
+
+STATE_RESET_EN:
+  ADDR32: 4
+  SHAMT: 0
+  MASK: 0x1
+
+DEST_OFFSET_Enable:
+  ADDR32: 5
+  SHAMT: 0
+  MASK: 0x1
+
+DEST_REGW_BASE_Base:
+  ADDR32: 6
+  SHAMT: 0
+  MASK: 0xffff
+
+INT_DESCALE_Enable:
+  ADDR32: 7
+  SHAMT: 0
+  MASK: 0x1
+
+INT_DESCALE_Mode:
+  ADDR32: 7
+  SHAMT: 1
+  MASK: 0x2
+
+# PACK0
+PCK0_ADDR_CTRL_XY_REG_0_Xstride:
+  ADDR32: 8
+  SHAMT: 0
+  MASK: 0xfff
+
+PCK0_ADDR_CTRL_XY_REG_0_Ystride:
+  ADDR32: 8
+  SHAMT: 12
+  MASK: 0xfff000
+
+PCK0_ADDR_CTRL_ZW_REG_0_Zstride:
+  ADDR32: 9
+  SHAMT: 0
+  MASK: 0xfff
+
+PCK0_ADDR_CTRL_ZW_REG_0_Wstride:
+  ADDR32: 9
+  SHAMT: 12
+  MASK: 0xffff000
+
+PCK0_ADDR_CTRL_XY_REG_1_Xstride:
+  ADDR32: 10
+  SHAMT: 0
+  MASK: 0xfff
+
+PCK0_ADDR_CTRL_XY_REG_1_Ystride:
+  ADDR32: 10
+  SHAMT: 12
+  MASK: 0xfff000
+
+PCK0_ADDR_CTRL_ZW_REG_1_Zstride:
+  ADDR32: 11
+  SHAMT: 0
+  MASK: 0xfff
+
+PCK0_ADDR_CTRL_ZW_REG_1_Wstride:
+  ADDR32: 11
+  SHAMT: 12
+  MASK: 0xffff000
+
+PCK0_ADDR_BASE_REG_0_Base:
+  ADDR32: 12
+  SHAMT: 0
+  MASK: 0xffff
+
+PCK0_ADDR_BASE_REG_1_Base:
+  ADDR32: 13
+  SHAMT: 0
+  MASK: 0xffff
+
+PCK_DEST_RD_CTRL_Read_32b_data:
+  ADDR32: 14
+  SHAMT: 0
+  MASK: 0x1
+
+PCK_DEST_RD_CTRL_Read_unsigned:
+  ADDR32: 14
+  SHAMT: 1
+  MASK: 0x2
+
+PCK_DEST_RD_CTRL_Read_int8:
+  ADDR32: 14
+  SHAMT: 2
+  MASK: 0x4
+
+PCK_DEST_RD_CTRL_Round_10b_mant:
+  ADDR32: 14
+  SHAMT: 3
+  MASK: 0x8
+
+PCK_EDGE_TILE_FACE_SET_SELECT_select:
+  ADDR32: 15
+  SHAMT: 0
+  MASK: 0xff
+
+PCK_EDGE_TILE_FACE_SET_SELECT_enable:
+  ADDR32: 15
+  SHAMT: 8
+  MASK: 0x100
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_0:
+  ADDR32: 16
+  SHAMT: 0
+  MASK: 0x3
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_1:
+  ADDR32: 16
+  SHAMT: 2
+  MASK: 0xc
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_2:
+  ADDR32: 16
+  SHAMT: 4
+  MASK: 0x30
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_3:
+  ADDR32: 16
+  SHAMT: 6
+  MASK: 0xc0
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_4:
+  ADDR32: 16
+  SHAMT: 8
+  MASK: 0x300
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_5:
+  ADDR32: 16
+  SHAMT: 10
+  MASK: 0xc00
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_6:
+  ADDR32: 16
+  SHAMT: 12
+  MASK: 0x3000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_7:
+  ADDR32: 16
+  SHAMT: 14
+  MASK: 0xc000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_8:
+  ADDR32: 16
+  SHAMT: 16
+  MASK: 0x30000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_9:
+  ADDR32: 16
+  SHAMT: 18
+  MASK: 0xc0000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_10:
+  ADDR32: 16
+  SHAMT: 20
+  MASK: 0x300000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_11:
+  ADDR32: 16
+  SHAMT: 22
+  MASK: 0xc00000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_12:
+  ADDR32: 16
+  SHAMT: 24
+  MASK: 0x3000000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_13:
+  ADDR32: 16
+  SHAMT: 26
+  MASK: 0xc000000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_14:
+  ADDR32: 16
+  SHAMT: 28
+  MASK: 0x30000000
+
+TILE_ROW_SET_MAPPING_0_row_set_mapping_15:
+  ADDR32: 16
+  SHAMT: 30
+  MASK: 0xc0000000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_0:
+  ADDR32: 17
+  SHAMT: 0
+  MASK: 0x3
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_1:
+  ADDR32: 17
+  SHAMT: 2
+  MASK: 0xc
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_2:
+  ADDR32: 17
+  SHAMT: 4
+  MASK: 0x30
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_3:
+  ADDR32: 17
+  SHAMT: 6
+  MASK: 0xc0
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_4:
+  ADDR32: 17
+  SHAMT: 8
+  MASK: 0x300
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_5:
+  ADDR32: 17
+  SHAMT: 10
+  MASK: 0xc00
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_6:
+  ADDR32: 17
+  SHAMT: 12
+  MASK: 0x3000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_7:
+  ADDR32: 17
+  SHAMT: 14
+  MASK: 0xc000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_8:
+  ADDR32: 17
+  SHAMT: 16
+  MASK: 0x30000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_9:
+  ADDR32: 17
+  SHAMT: 18
+  MASK: 0xc0000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_10:
+  ADDR32: 17
+  SHAMT: 20
+  MASK: 0x300000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_11:
+  ADDR32: 17
+  SHAMT: 22
+  MASK: 0xc00000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_12:
+  ADDR32: 17
+  SHAMT: 24
+  MASK: 0x3000000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_13:
+  ADDR32: 17
+  SHAMT: 26
+  MASK: 0xc000000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_14:
+  ADDR32: 17
+  SHAMT: 28
+  MASK: 0x30000000
+
+TILE_ROW_SET_MAPPING_1_row_set_mapping_15:
+  ADDR32: 17
+  SHAMT: 30
+  MASK: 0xc0000000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_0:
+  ADDR32: 18
+  SHAMT: 0
+  MASK: 0x3
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_1:
+  ADDR32: 18
+  SHAMT: 2
+  MASK: 0xc
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_2:
+  ADDR32: 18
+  SHAMT: 4
+  MASK: 0x30
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_3:
+  ADDR32: 18
+  SHAMT: 6
+  MASK: 0xc0
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_4:
+  ADDR32: 18
+  SHAMT: 8
+  MASK: 0x300
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_5:
+  ADDR32: 18
+  SHAMT: 10
+  MASK: 0xc00
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_6:
+  ADDR32: 18
+  SHAMT: 12
+  MASK: 0x3000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_7:
+  ADDR32: 18
+  SHAMT: 14
+  MASK: 0xc000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_8:
+  ADDR32: 18
+  SHAMT: 16
+  MASK: 0x30000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_9:
+  ADDR32: 18
+  SHAMT: 18
+  MASK: 0xc0000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_10:
+  ADDR32: 18
+  SHAMT: 20
+  MASK: 0x300000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_11:
+  ADDR32: 18
+  SHAMT: 22
+  MASK: 0xc00000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_12:
+  ADDR32: 18
+  SHAMT: 24
+  MASK: 0x3000000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_13:
+  ADDR32: 18
+  SHAMT: 26
+  MASK: 0xc000000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_14:
+  ADDR32: 18
+  SHAMT: 28
+  MASK: 0x30000000
+
+TILE_ROW_SET_MAPPING_2_row_set_mapping_15:
+  ADDR32: 18
+  SHAMT: 30
+  MASK: 0xc0000000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_0:
+  ADDR32: 19
+  SHAMT: 0
+  MASK: 0x3
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_1:
+  ADDR32: 19
+  SHAMT: 2
+  MASK: 0xc
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_2:
+  ADDR32: 19
+  SHAMT: 4
+  MASK: 0x30
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_3:
+  ADDR32: 19
+  SHAMT: 6
+  MASK: 0xc0
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_4:
+  ADDR32: 19
+  SHAMT: 8
+  MASK: 0x300
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_5:
+  ADDR32: 19
+  SHAMT: 10
+  MASK: 0xc00
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_6:
+  ADDR32: 19
+  SHAMT: 12
+  MASK: 0x3000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_7:
+  ADDR32: 19
+  SHAMT: 14
+  MASK: 0xc000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_8:
+  ADDR32: 19
+  SHAMT: 16
+  MASK: 0x30000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_9:
+  ADDR32: 19
+  SHAMT: 18
+  MASK: 0xc0000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_10:
+  ADDR32: 19
+  SHAMT: 20
+  MASK: 0x300000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_11:
+  ADDR32: 19
+  SHAMT: 22
+  MASK: 0xc00000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_12:
+  ADDR32: 19
+  SHAMT: 24
+  MASK: 0x3000000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_13:
+  ADDR32: 19
+  SHAMT: 26
+  MASK: 0xc000000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_14:
+  ADDR32: 19
+  SHAMT: 28
+  MASK: 0x30000000
+
+TILE_ROW_SET_MAPPING_3_row_set_mapping_15:
+  ADDR32: 19
+  SHAMT: 30
+  MASK: 0xc0000000
+
+PCK_EDGE_OFFSET_SEC0_mask:
+  ADDR32: 20
+  SHAMT: 0
+  MASK: 0xffff
+
+PCK_EDGE_MODE_mode:
+  ADDR32: 20
+  SHAMT: 16
+  MASK: 0x10000
+
+PCK_EDGE_TILE_ROW_SET_SELECT_select:
+  ADDR32: 20
+  SHAMT: 17
+  MASK: 0x1fe0000
+
+PCK_EDGE_OFFSET_SEC1_mask:
+  ADDR32: 21
+  SHAMT: 0
+  MASK: 0xffff
+
+PCK_EDGE_OFFSET_SEC2_mask:
+  ADDR32: 22
+  SHAMT: 0
+  MASK: 0xffff
+
+PCK_EDGE_OFFSET_SEC3_mask:
+  ADDR32: 23
+  SHAMT: 0
+  MASK: 0xffff
+
+PACK_COUNTERS_SEC0_pack_per_xy_plane:
+  ADDR32: 24
+  SHAMT: 0
+  MASK: 0xff
+
+PACK_COUNTERS_SEC0_pack_reads_per_xy_plane:
+  ADDR32: 24
+  SHAMT: 8
+  MASK: 0xff00
+
+PACK_COUNTERS_SEC0_pack_xys_per_tile:
+  ADDR32: 24
+  SHAMT: 16
+  MASK: 0x7f0000
+
+PACK_COUNTERS_SEC0_pack_yz_transposed:
+  ADDR32: 24
+  SHAMT: 23
+  MASK: 0x800000
+
+PACK_COUNTERS_SEC0_pack_per_xy_plane_offset:
+  ADDR32: 24
+  SHAMT: 24
+  MASK: 0xff000000
+
+PACK_COUNTERS_SEC1_pack_per_xy_plane:
+  ADDR32: 25
+  SHAMT: 0
+  MASK: 0xff
+
+PACK_COUNTERS_SEC1_pack_reads_per_xy_plane:
+  ADDR32: 25
+  SHAMT: 8
+  MASK: 0xff00
+
+PACK_COUNTERS_SEC1_pack_xys_per_tile:
+  ADDR32: 25
+  SHAMT: 16
+  MASK: 0x7f0000
+
+PACK_COUNTERS_SEC1_pack_yz_transposed:
+  ADDR32: 25
+  SHAMT: 23
+  MASK: 0x800000
+
+PACK_COUNTERS_SEC1_pack_per_xy_plane_offset:
+  ADDR32: 25
+  SHAMT: 24
+  MASK: 0xff000000
+
+PACK_COUNTERS_SEC2_pack_per_xy_plane:
+  ADDR32: 26
+  SHAMT: 0
+  MASK: 0xff
+
+PACK_COUNTERS_SEC2_pack_reads_per_xy_plane:
+  ADDR32: 26
+  SHAMT: 8
+  MASK: 0xff00
+
+PACK_COUNTERS_SEC2_pack_xys_per_tile:
+  ADDR32: 26
+  SHAMT: 16
+  MASK: 0x7f0000
+
+PACK_COUNTERS_SEC2_pack_yz_transposed:
+  ADDR32: 26
+  SHAMT: 23
+  MASK: 0x800000
+
+PACK_COUNTERS_SEC2_pack_per_xy_plane_offset:
+  ADDR32: 26
+  SHAMT: 24
+  MASK: 0xff000000
+
+PACK_COUNTERS_SEC3_pack_per_xy_plane:
+  ADDR32: 27
+  SHAMT: 0
+  MASK: 0xff
+
+PACK_COUNTERS_SEC3_pack_reads_per_xy_plane:
+  ADDR32: 27
+  SHAMT: 8
+  MASK: 0xff00
+
+PACK_COUNTERS_SEC3_pack_xys_per_tile:
+  ADDR32: 27
+  SHAMT: 16
+  MASK: 0x7f0000
+
+PACK_COUNTERS_SEC3_pack_yz_transposed:
+  ADDR32: 27
+  SHAMT: 23
+  MASK: 0x800000
+
+PACK_COUNTERS_SEC3_pack_per_xy_plane_offset:
+  ADDR32: 27
+  SHAMT: 24
+  MASK: 0xff000000
+
+PACK_CONCAT_MASK_SEC0_pack_concat_mask:
+  ADDR32: 28
+  SHAMT: 0
+  MASK: 0xffff
+
+PACK_CONCAT_MASK_SEC1_pack_concat_mask:
+  ADDR32: 29
+  SHAMT: 0
+  MASK: 0xffff
+
+PACK_CONCAT_MASK_SEC2_pack_concat_mask:
+  ADDR32: 30
+  SHAMT: 0
+  MASK: 0xffff
+
+PACK_CONCAT_MASK_SEC3_pack_concat_mask:
+  ADDR32: 31
+  SHAMT: 0
+  MASK: 0xffff
+
+# UNPACK0
+UNP0_ADDR_CTRL_XY_REG_0_Xstride:
+  ADDR32: 36
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP0_ADDR_CTRL_XY_REG_0_Ystride:
+  ADDR32: 36
+  SHAMT: 12
+  MASK: 0xfff000
+
+UNP0_ADDR_CTRL_ZW_REG_0_Zstride:
+  ADDR32: 37
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP0_ADDR_CTRL_ZW_REG_0_Wstride:
+  ADDR32: 37
+  SHAMT: 12
+  MASK: 0xffff000
+
+UNP1_ADDR_CTRL_XY_REG_0_Xstride:
+  ADDR32: 38
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP1_ADDR_CTRL_XY_REG_0_Ystride:
+  ADDR32: 38
+  SHAMT: 12
+  MASK: 0xfff000
+
+UNP1_ADDR_CTRL_ZW_REG_0_Zstride:
+  ADDR32: 39
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP1_ADDR_CTRL_ZW_REG_0_Wstride:
+  ADDR32: 39
+  SHAMT: 12
+  MASK: 0xffff000
+
+UNP0_ADDR_BASE_REG_0_Base:
+  ADDR32: 40
+  SHAMT: 0
+  MASK: 0xffff
+
+UNP0_ADDR_BASE_REG_1_Base:
+  ADDR32: 40
+  SHAMT: 16
+  MASK: 0xffff0000
+
+UNP0_FORCED_SHARED_EXP_shared_exp:
+  ADDR32: 41
+  SHAMT: 0
+  MASK: 0xff
+
+UNP0_ADD_DEST_ADDR_CNTR_add_dest_addr_cntr:
+  ADDR32: 41
+  SHAMT: 8
+  MASK: 0x100
+
+UNP0_BLOBS_Y_START_CNTX_01_blobs_y_start:
+  ADDR32: 42
+  SHAMT: 0
+  MASK: 0xffffffff
+
+UNP0_BLOBS_Y_START_CNTX_23_blobs_y_start:
+  ADDR32: 43
+  SHAMT: 0
+  MASK: 0xffffffff
+
+UNP0_ADDR_CTRL_XY_REG_1_Xstride:
+  ADDR32: 44
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP0_ADDR_CTRL_XY_REG_1_Ystride:
+  ADDR32: 44
+  SHAMT: 12
+  MASK: 0xfff000
+
+UNP0_ADDR_CTRL_ZW_REG_1_Zstride:
+  ADDR32: 45
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP0_ADDR_CTRL_ZW_REG_1_Wstride:
+  ADDR32: 45
+  SHAMT: 12
+  MASK: 0xffff000
+
+UNP1_ADDR_CTRL_XY_REG_1_Xstride:
+  ADDR32: 46
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP1_ADDR_CTRL_XY_REG_1_Ystride:
+  ADDR32: 46
+  SHAMT: 12
+  MASK: 0xfff000
+
+UNP1_ADDR_CTRL_ZW_REG_1_Zstride:
+  ADDR32: 47
+  SHAMT: 0
+  MASK: 0xfff
+
+UNP1_ADDR_CTRL_ZW_REG_1_Wstride:
+  ADDR32: 47
+  SHAMT: 12
+  MASK: 0xffff000
+
+UNP1_ADDR_BASE_REG_0_Base:
+  ADDR32: 48
+  SHAMT: 0
+  MASK: 0xffff
+
+UNP1_ADDR_BASE_REG_1_Base:
+  ADDR32: 48
+  SHAMT: 16
+  MASK: 0xffff0000
+
+UNP1_FORCED_SHARED_EXP_shared_exp:
+  ADDR32: 49
+  SHAMT: 0
+  MASK: 0xff
+
+UNP1_ADD_DEST_ADDR_CNTR_add_dest_addr_cntr:
+  ADDR32: 49
+  SHAMT: 8
+  MASK: 0x100
+
+THCON_SEC0_REG0_TileDescriptor:
+  ADDR32: 52
+  SHAMT: 0
+  MASK: 0xffffffffffffffffffffffffffffffff
+
+THCON_SEC0_REG1_Row_start_section_size:
+  ADDR32: 56
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG1_Exp_section_size:
+  ADDR32: 56
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC0_REG1_L1_Dest_addr:
+  ADDR32: 57
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG1_Disable_zero_compress:
+  ADDR32: 58
+  SHAMT: 0
+  MASK: 0x1
+
+THCON_SEC0_REG1_Add_l1_dest_addr_offset:
+  ADDR32: 58
+  SHAMT: 1
+  MASK: 0x2
+
+THCON_SEC0_REG1_Addr_cnt_context:
+  ADDR32: 58
+  SHAMT: 2
+  MASK: 0xc
+
+THCON_SEC0_REG1_Out_data_format:
+  ADDR32: 58
+  SHAMT: 4
+  MASK: 0xf0
+
+THCON_SEC0_REG1_In_data_format:
+  ADDR32: 58
+  SHAMT: 8
+  MASK: 0xf00
+
+THCON_SEC0_REG1_Dis_shared_exp_assembler:
+  ADDR32: 58
+  SHAMT: 12
+  MASK: 0x1000
+
+THCON_SEC0_REG1_Force_pack_per_max_xy_plane:
+  ADDR32: 58
+  SHAMT: 13
+  MASK: 0x2000
+
+THCON_SEC0_REG1_Enable_out_fifo:
+  ADDR32: 58
+  SHAMT: 14
+  MASK: 0x4000
+
+THCON_SEC0_REG1_Sub_l1_tile_header_size:
+  ADDR32: 58
+  SHAMT: 15
+  MASK: 0x8000
+
+THCON_SEC0_REG1_Source_interface_selection:
+  ADDR32: 58
+  SHAMT: 16
+  MASK: 0x10000
+
+THCON_SEC0_REG1_All_pack_disable_zero_compress:
+  ADDR32: 58
+  SHAMT: 17
+  MASK: 0x1e0000
+
+THCON_SEC0_REG1_All_pack_disable_zero_compress_ovrd:
+  ADDR32: 58
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC0_REG1_Add_tile_header_size:
+  ADDR32: 58
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC0_REG1_L1_source_addr:
+  ADDR32: 58
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC0_REG1_Downsample_mask:
+  ADDR32: 59
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG1_Downsample_rate:
+  ADDR32: 59
+  SHAMT: 16
+  MASK: 0x70000
+
+THCON_SEC0_REG1_Read_mode:
+  ADDR32: 59
+  SHAMT: 19
+  MASK: 0x80000
+
+THCON_SEC0_REG1_Exp_threshold_en:
+  ADDR32: 59
+  SHAMT: 20
+  MASK: 0x100000
+
+THCON_SEC0_REG1_Pack_L1_Acc:
+  ADDR32: 59
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC0_REG1_Disable_pack_zero_flags:
+  ADDR32: 59
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC0_REG1_Exp_threshold:
+  ADDR32: 59
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC0_REG2_Out_data_format:
+  ADDR32: 60
+  SHAMT: 0
+  MASK: 0xf
+
+THCON_SEC0_REG2_Throttle_mode:
+  ADDR32: 60
+  SHAMT: 4
+  MASK: 0x30
+
+THCON_SEC0_REG2_Context_count:
+  ADDR32: 60
+  SHAMT: 6
+  MASK: 0xc
+
+THCON_SEC0_REG2_Haloize_mode:
+  ADDR32: 60
+  SHAMT: 8
+  MASK: 0x100
+
+THCON_SEC0_REG2_Tileize_mode:
+  ADDR32: 60
+  SHAMT: 9
+  MASK: 0x200
+
+THCON_SEC0_REG2_Unpack_Src_Reg_Set_Upd:
+  ADDR32: 60
+  SHAMT: 10
+  MASK: 0x400
+
+THCON_SEC0_REG2_Unpack_If_Sel:
+  ADDR32: 60
+  SHAMT: 11
+  MASK: 0x800
+
+THCON_SEC0_REG2_Upsample_rate:
+  ADDR32: 60
+  SHAMT: 12
+  MASK: 0x3000
+
+THCON_SEC0_REG2_Ovrd_data_format:
+  ADDR32: 60
+  SHAMT: 14
+  MASK: 0x4000
+
+THCON_SEC0_REG2_Upsample_and_interleave:
+  ADDR32: 60
+  SHAMT: 15
+  MASK: 0x8000
+
+THCON_SEC0_REG2_Shift_amount_cntx0:
+  ADDR32: 60
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC0_REG2_Shift_amount_cntx1:
+  ADDR32: 60
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC0_REG2_Shift_amount_cntx2:
+  ADDR32: 60
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC0_REG2_Shift_amount_cntx3:
+  ADDR32: 60
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx0:
+  ADDR32: 61
+  SHAMT: 0
+  MASK: 0x1
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx1:
+  ADDR32: 61
+  SHAMT: 1
+  MASK: 0x2
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx2:
+  ADDR32: 61
+  SHAMT: 2
+  MASK: 0x4
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx3:
+  ADDR32: 61
+  SHAMT: 3
+  MASK: 0x8
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx0:
+  ADDR32: 61
+  SHAMT: 4
+  MASK: 0x10
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx1:
+  ADDR32: 61
+  SHAMT: 5
+  MASK: 0x20
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx2:
+  ADDR32: 61
+  SHAMT: 6
+  MASK: 0x40
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx3:
+  ADDR32: 61
+  SHAMT: 7
+  MASK: 0x80
+
+THCON_SEC0_REG2_Force_shared_exp:
+  ADDR32: 61
+  SHAMT: 8
+  MASK: 0x100
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx4:
+  ADDR32: 61
+  SHAMT: 16
+  MASK: 0x10000
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx5:
+  ADDR32: 61
+  SHAMT: 17
+  MASK: 0x20000
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx6:
+  ADDR32: 61
+  SHAMT: 18
+  MASK: 0x40000
+
+THCON_SEC0_REG2_Disable_zero_compress_cntx7:
+  ADDR32: 61
+  SHAMT: 19
+  MASK: 0x80000
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx4:
+  ADDR32: 61
+  SHAMT: 20
+  MASK: 0x100000
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx5:
+  ADDR32: 61
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx6:
+  ADDR32: 61
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC0_REG2_Unpack_if_sel_cntx7:
+  ADDR32: 61
+  SHAMT: 23
+  MASK: 0x800000
+
+THCON_SEC0_REG2_Unpack_limit_address:
+  ADDR32: 62
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC0_REG2_Unpack_fifo_size:
+  ADDR32: 63
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC0_REG3_Base_address:
+  ADDR32: 64
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG3_Base_cntx1_address:
+  ADDR32: 65
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG3_Base_cntx2_address:
+  ADDR32: 66
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG3_Base_cntx3_address:
+  ADDR32: 67
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG4_Base_cntx4_address:
+  ADDR32: 68
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG4_Base_cntx5_address:
+  ADDR32: 69
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG4_Base_cntx6_address:
+  ADDR32: 70
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG4_Base_cntx7_address:
+  ADDR32: 71
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG5_Dest_cntx0_address:
+  ADDR32: 72
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG5_Dest_cntx1_address:
+  ADDR32: 72
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC0_REG5_Dest_cntx2_address:
+  ADDR32: 73
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG5_Dest_cntx3_address:
+  ADDR32: 73
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC0_REG5_Tile_x_dim_cntx0:
+  ADDR32: 74
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG5_Tile_x_dim_cntx1:
+  ADDR32: 74
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC0_REG5_Tile_x_dim_cntx2:
+  ADDR32: 75
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG5_Tile_x_dim_cntx3:
+  ADDR32: 75
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC0_REG6_Source_address:
+  ADDR32: 76
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG6_Destination_address:
+  ADDR32: 77
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG6_Buffer_size:
+  ADDR32: 78
+  SHAMT: 0
+  MASK: 0x3fffffff
+
+THCON_SEC0_REG6_Transfer_direction:
+  ADDR32: 78
+  SHAMT: 30
+  MASK: 0xc0000000
+
+THCON_SEC0_REG7_Offset_address:
+  ADDR32: 80
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG7_Unpack_data_format_cntx0:
+  ADDR32: 80
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx0:
+  ADDR32: 80
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC0_REG7_Unpack_data_format_cntx4:
+  ADDR32: 80
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx4:
+  ADDR32: 80
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC0_REG7_Offset_cntx1_address:
+  ADDR32: 81
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG7_Unpack_data_format_cntx1:
+  ADDR32: 81
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx1:
+  ADDR32: 81
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC0_REG7_Unpack_data_format_cntx5:
+  ADDR32: 81
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx5:
+  ADDR32: 81
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC0_REG7_Offset_cntx2_address:
+  ADDR32: 82
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG7_Unpack_data_format_cntx2:
+  ADDR32: 82
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx2:
+  ADDR32: 82
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC0_REG7_Unpack_data_format_cntx6:
+  ADDR32: 82
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx6:
+  ADDR32: 82
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC0_REG7_Offset_cntx3_address:
+  ADDR32: 83
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG7_Unpack_data_format_cntx3:
+  ADDR32: 83
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx3:
+  ADDR32: 83
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC0_REG7_Unpack_data_format_cntx7:
+  ADDR32: 83
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC0_REG7_Unpack_out_data_format_cntx7:
+  ADDR32: 83
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC0_REG8_Row_start_section_size:
+  ADDR32: 84
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG8_Exp_section_size:
+  ADDR32: 84
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC0_REG8_L1_Dest_addr:
+  ADDR32: 85
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC0_REG8_Disable_zero_compress:
+  ADDR32: 86
+  SHAMT: 0
+  MASK: 0x1
+
+THCON_SEC0_REG8_Add_l1_dest_addr_offset:
+  ADDR32: 86
+  SHAMT: 1
+  MASK: 0x2
+
+THCON_SEC0_REG8_Addr_cnt_context:
+  ADDR32: 86
+  SHAMT: 2
+  MASK: 0xc
+
+THCON_SEC0_REG8_Out_data_format:
+  ADDR32: 86
+  SHAMT: 4
+  MASK: 0xf0
+
+THCON_SEC0_REG8_In_data_format:
+  ADDR32: 86
+  SHAMT: 8
+  MASK: 0xf00
+
+THCON_SEC0_REG8_Dis_shared_exp_assembler:
+  ADDR32: 86
+  SHAMT: 12
+  MASK: 0x1000
+
+THCON_SEC0_REG8_Force_pack_per_max_xy_plane:
+  ADDR32: 86
+  SHAMT: 13
+  MASK: 0x2000
+
+THCON_SEC0_REG8_Enable_out_fifo:
+  ADDR32: 86
+  SHAMT: 14
+  MASK: 0x4000
+
+THCON_SEC0_REG8_Sub_l1_tile_header_size:
+  ADDR32: 86
+  SHAMT: 15
+  MASK: 0x8000
+
+THCON_SEC0_REG8_Source_interface_selection:
+  ADDR32: 86
+  SHAMT: 16
+  MASK: 0x10000
+
+THCON_SEC0_REG8_Add_tile_header_size:
+  ADDR32: 86
+  SHAMT: 17
+  MASK: 0x20000
+
+THCON_SEC0_REG8_L1_source_addr:
+  ADDR32: 86
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC0_REG8_Downsample_mask:
+  ADDR32: 87
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC0_REG8_Downsample_rate:
+  ADDR32: 87
+  SHAMT: 16
+  MASK: 0x70000
+
+THCON_SEC0_REG8_Read_mode:
+  ADDR32: 87
+  SHAMT: 19
+  MASK: 0x80000
+
+THCON_SEC0_REG8_Exp_threshold_en:
+  ADDR32: 87
+  SHAMT: 20
+  MASK: 0x100000
+
+THCON_SEC0_REG8_Pack_L1_Acc:
+  ADDR32: 87
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC0_REG8_Disable_pack_zero_flags:
+  ADDR32: 87
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC0_REG8_Exp_threshold:
+  ADDR32: 87
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC0_REG9_Pack_0_2_limit_address:
+  ADDR32: 88
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC0_REG9_Pack_0_2_fifo_size:
+  ADDR32: 89
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC0_REG9_Pack_1_3_limit_address:
+  ADDR32: 90
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC0_REG9_Pack_1_3_fifo_size:
+  ADDR32: 91
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC1_REG0_TileDescriptor:
+  ADDR32: 92
+  SHAMT: 0
+  MASK: 0xffffffffffffffffffffffffffffffff
+
+THCON_SEC1_REG1_Row_start_section_size:
+  ADDR32: 96
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG1_Exp_section_size:
+  ADDR32: 96
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC1_REG1_L1_Dest_addr:
+  ADDR32: 97
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG1_Disable_zero_compress:
+  ADDR32: 98
+  SHAMT: 0
+  MASK: 0x1
+
+THCON_SEC1_REG1_Add_l1_dest_addr_offset:
+  ADDR32: 98
+  SHAMT: 1
+  MASK: 0x2
+
+THCON_SEC1_REG1_Addr_cnt_context:
+  ADDR32: 98
+  SHAMT: 2
+  MASK: 0xc
+
+THCON_SEC1_REG1_Out_data_format:
+  ADDR32: 98
+  SHAMT: 4
+  MASK: 0xf0
+
+THCON_SEC1_REG1_In_data_format:
+  ADDR32: 98
+  SHAMT: 8
+  MASK: 0xf00
+
+THCON_SEC1_REG1_Dis_shared_exp_assembler:
+  ADDR32: 98
+  SHAMT: 12
+  MASK: 0x1000
+
+THCON_SEC1_REG1_Force_pack_per_max_xy_plane:
+  ADDR32: 98
+  SHAMT: 13
+  MASK: 0x2000
+
+THCON_SEC1_REG1_Enable_out_fifo:
+  ADDR32: 98
+  SHAMT: 14
+  MASK: 0x4000
+
+THCON_SEC1_REG1_Sub_l1_tile_header_size:
+  ADDR32: 98
+  SHAMT: 15
+  MASK: 0x8000
+
+THCON_SEC1_REG1_Source_interface_selection:
+  ADDR32: 98
+  SHAMT: 16
+  MASK: 0x10000
+
+THCON_SEC1_REG1_All_pack_disable_zero_compress:
+  ADDR32: 98
+  SHAMT: 17
+  MASK: 0x1e0000
+
+THCON_SEC1_REG1_All_pack_disable_zero_compress_ovrd:
+  ADDR32: 98
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC1_REG1_Add_tile_header_size:
+  ADDR32: 98
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC1_REG1_L1_source_addr:
+  ADDR32: 98
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC1_REG1_Downsample_mask:
+  ADDR32: 99
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG1_Downsample_rate:
+  ADDR32: 99
+  SHAMT: 16
+  MASK: 0x70000
+
+THCON_SEC1_REG1_Read_mode:
+  ADDR32: 99
+  SHAMT: 19
+  MASK: 0x80000
+
+THCON_SEC1_REG1_Exp_threshold_en:
+  ADDR32: 99
+  SHAMT: 20
+  MASK: 0x100000
+
+THCON_SEC1_REG1_Pack_L1_Acc:
+  ADDR32: 99
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC1_REG1_Disable_pack_zero_flags:
+  ADDR32: 99
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC1_REG1_Exp_threshold:
+  ADDR32: 99
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC1_REG2_Out_data_format:
+  ADDR32: 100
+  SHAMT: 0
+  MASK: 0xf
+
+THCON_SEC1_REG2_Throttle_mode:
+  ADDR32: 100
+  SHAMT: 4
+  MASK: 0x30
+
+THCON_SEC1_REG2_Context_count:
+  ADDR32: 100
+  SHAMT: 6
+  MASK: 0xc
+
+THCON_SEC1_REG2_Haloize_mode:
+  ADDR32: 100
+  SHAMT: 8
+  MASK: 0x100
+
+THCON_SEC1_REG2_Tileize_mode:
+  ADDR32: 100
+  SHAMT: 9
+  MASK: 0x200
+
+THCON_SEC1_REG2_Unpack_Src_Reg_Set_Upd:
+  ADDR32: 100
+  SHAMT: 10
+  MASK: 0x400
+
+THCON_SEC1_REG2_Unpack_If_Sel:
+  ADDR32: 100
+  SHAMT: 11
+  MASK: 0x800
+
+THCON_SEC1_REG2_Upsample_rate:
+  ADDR32: 100
+  SHAMT: 12
+  MASK: 0x3000
+
+THCON_SEC1_REG2_Ovrd_data_format:
+  ADDR32: 100
+  SHAMT: 14
+  MASK: 0x4000
+
+THCON_SEC1_REG2_Upsample_and_interleave:
+  ADDR32: 100
+  SHAMT: 15
+  MASK: 0x8000
+
+THCON_SEC1_REG2_Shift_amount_cntx0:
+  ADDR32: 100
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC1_REG2_Shift_amount_cntx1:
+  ADDR32: 100
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC1_REG2_Shift_amount_cntx2:
+  ADDR32: 100
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC1_REG2_Shift_amount_cntx3:
+  ADDR32: 100
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx0:
+  ADDR32: 101
+  SHAMT: 0
+  MASK: 0x1
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx1:
+  ADDR32: 101
+  SHAMT: 1
+  MASK: 0x2
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx2:
+  ADDR32: 101
+  SHAMT: 2
+  MASK: 0x4
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx3:
+  ADDR32: 101
+  SHAMT: 3
+  MASK: 0x8
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx0:
+  ADDR32: 101
+  SHAMT: 4
+  MASK: 0x10
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx1:
+  ADDR32: 101
+  SHAMT: 5
+  MASK: 0x20
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx2:
+  ADDR32: 101
+  SHAMT: 6
+  MASK: 0x40
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx3:
+  ADDR32: 101
+  SHAMT: 7
+  MASK: 0x80
+
+THCON_SEC1_REG2_Force_shared_exp:
+  ADDR32: 101
+  SHAMT: 8
+  MASK: 0x100
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx4:
+  ADDR32: 101
+  SHAMT: 16
+  MASK: 0x10000
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx5:
+  ADDR32: 101
+  SHAMT: 17
+  MASK: 0x20000
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx6:
+  ADDR32: 101
+  SHAMT: 18
+  MASK: 0x40000
+
+THCON_SEC1_REG2_Disable_zero_compress_cntx7:
+  ADDR32: 101
+  SHAMT: 19
+  MASK: 0x80000
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx4:
+  ADDR32: 101
+  SHAMT: 20
+  MASK: 0x100000
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx5:
+  ADDR32: 101
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx6:
+  ADDR32: 101
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC1_REG2_Unpack_if_sel_cntx7:
+  ADDR32: 101
+  SHAMT: 23
+  MASK: 0x800000
+
+THCON_SEC1_REG2_Unpack_limit_address:
+  ADDR32: 102
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC1_REG2_Unpack_fifo_size:
+  ADDR32: 103
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC1_REG3_Base_address:
+  ADDR32: 104
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG3_Base_cntx1_address:
+  ADDR32: 105
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG3_Base_cntx2_address:
+  ADDR32: 106
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG3_Base_cntx3_address:
+  ADDR32: 107
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG4_Base_cntx4_address:
+  ADDR32: 108
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG4_Base_cntx5_address:
+  ADDR32: 109
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG4_Base_cntx6_address:
+  ADDR32: 110
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG4_Base_cntx7_address:
+  ADDR32: 111
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG5_Dest_cntx0_address:
+  ADDR32: 112
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG5_Dest_cntx1_address:
+  ADDR32: 112
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC1_REG5_Dest_cntx2_address:
+  ADDR32: 113
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG5_Dest_cntx3_address:
+  ADDR32: 113
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC1_REG5_Tile_x_dim_cntx0:
+  ADDR32: 114
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG5_Tile_x_dim_cntx1:
+  ADDR32: 114
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC1_REG5_Tile_x_dim_cntx2:
+  ADDR32: 115
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG5_Tile_x_dim_cntx3:
+  ADDR32: 115
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC1_REG6_Source_address:
+  ADDR32: 116
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG6_Destination_address:
+  ADDR32: 117
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG6_Buffer_size:
+  ADDR32: 118
+  SHAMT: 0
+  MASK: 0x3fffffff
+
+THCON_SEC1_REG6_Transfer_direction:
+  ADDR32: 118
+  SHAMT: 30
+  MASK: 0xc0000000
+
+THCON_SEC1_REG7_Offset_address:
+  ADDR32: 120
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG7_Unpack_data_format_cntx0:
+  ADDR32: 120
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx0:
+  ADDR32: 120
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC1_REG7_Unpack_data_format_cntx4:
+  ADDR32: 120
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx4:
+  ADDR32: 120
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC1_REG7_Offset_cntx1_address:
+  ADDR32: 121
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG7_Unpack_data_format_cntx1:
+  ADDR32: 121
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx1:
+  ADDR32: 121
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC1_REG7_Unpack_data_format_cntx5:
+  ADDR32: 121
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx5:
+  ADDR32: 121
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC1_REG7_Offset_cntx2_address:
+  ADDR32: 122
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG7_Unpack_data_format_cntx2:
+  ADDR32: 122
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx2:
+  ADDR32: 122
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC1_REG7_Unpack_data_format_cntx6:
+  ADDR32: 122
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx6:
+  ADDR32: 122
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC1_REG7_Offset_cntx3_address:
+  ADDR32: 123
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG7_Unpack_data_format_cntx3:
+  ADDR32: 123
+  SHAMT: 16
+  MASK: 0xf0000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx3:
+  ADDR32: 123
+  SHAMT: 20
+  MASK: 0xf00000
+
+THCON_SEC1_REG7_Unpack_data_format_cntx7:
+  ADDR32: 123
+  SHAMT: 24
+  MASK: 0xf000000
+
+THCON_SEC1_REG7_Unpack_out_data_format_cntx7:
+  ADDR32: 123
+  SHAMT: 28
+  MASK: 0xf0000000
+
+THCON_SEC1_REG8_Row_start_section_size:
+  ADDR32: 124
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG8_Exp_section_size:
+  ADDR32: 124
+  SHAMT: 16
+  MASK: 0xffff0000
+
+THCON_SEC1_REG8_L1_Dest_addr:
+  ADDR32: 125
+  SHAMT: 0
+  MASK: 0xffffffff
+
+THCON_SEC1_REG8_Disable_zero_compress:
+  ADDR32: 126
+  SHAMT: 0
+  MASK: 0x1
+
+THCON_SEC1_REG8_Add_l1_dest_addr_offset:
+  ADDR32: 126
+  SHAMT: 1
+  MASK: 0x2
+
+THCON_SEC1_REG8_Addr_cnt_context:
+  ADDR32: 126
+  SHAMT: 2
+  MASK: 0xc
+
+THCON_SEC1_REG8_Out_data_format:
+  ADDR32: 126
+  SHAMT: 4
+  MASK: 0xf0
+
+THCON_SEC1_REG8_In_data_format:
+  ADDR32: 126
+  SHAMT: 8
+  MASK: 0xf00
+
+THCON_SEC1_REG8_Dis_shared_exp_assembler:
+  ADDR32: 126
+  SHAMT: 12
+  MASK: 0x1000
+
+THCON_SEC1_REG8_Force_pack_per_max_xy_plane:
+  ADDR32: 126
+  SHAMT: 13
+  MASK: 0x2000
+
+THCON_SEC1_REG8_Enable_out_fifo:
+  ADDR32: 126
+  SHAMT: 14
+  MASK: 0x4000
+
+THCON_SEC1_REG8_Sub_l1_tile_header_size:
+  ADDR32: 126
+  SHAMT: 15
+  MASK: 0x8000
+
+THCON_SEC1_REG8_Source_interface_selection:
+  ADDR32: 126
+  SHAMT: 16
+  MASK: 0x10000
+
+THCON_SEC1_REG8_Add_tile_header_size:
+  ADDR32: 126
+  SHAMT: 17
+  MASK: 0x20000
+
+THCON_SEC1_REG8_L1_source_addr:
+  ADDR32: 126
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC1_REG8_Downsample_mask:
+  ADDR32: 127
+  SHAMT: 0
+  MASK: 0xffff
+
+THCON_SEC1_REG8_Downsample_rate:
+  ADDR32: 127
+  SHAMT: 16
+  MASK: 0x70000
+
+THCON_SEC1_REG8_Read_mode:
+  ADDR32: 127
+  SHAMT: 19
+  MASK: 0x80000
+
+THCON_SEC1_REG8_Exp_threshold_en:
+  ADDR32: 127
+  SHAMT: 20
+  MASK: 0x100000
+
+THCON_SEC1_REG8_Pack_L1_Acc:
+  ADDR32: 127
+  SHAMT: 21
+  MASK: 0x200000
+
+THCON_SEC1_REG8_Disable_pack_zero_flags:
+  ADDR32: 127
+  SHAMT: 22
+  MASK: 0x400000
+
+THCON_SEC1_REG8_Exp_threshold:
+  ADDR32: 127
+  SHAMT: 24
+  MASK: 0xff000000
+
+THCON_SEC1_REG9_Pack_0_2_limit_address:
+  ADDR32: 128
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC1_REG9_Pack_0_2_fifo_size:
+  ADDR32: 129
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC1_REG9_Pack_1_3_limit_address:
+  ADDR32: 130
+  SHAMT: 0
+  MASK: 0x1ffff
+
+THCON_SEC1_REG9_Pack_1_3_fifo_size:
+  ADDR32: 131
+  SHAMT: 0
+  MASK: 0x1ffff
+
+DEST_TARGET_REG_CFG_PACK_SEC0_Offset:
+  ADDR32: 152
+  SHAMT: 0
+  MASK: 0xfff
+
+DEST_TARGET_REG_CFG_PACK_SEC0_ZOffset:
+  ADDR32: 152
+  SHAMT: 12
+  MASK: 0x3f000
+
+DEST_TARGET_REG_CFG_PACK_SEC1_Offset:
+  ADDR32: 153
+  SHAMT: 0
+  MASK: 0xfff
+
+DEST_TARGET_REG_CFG_PACK_SEC1_ZOffset:
+  ADDR32: 153
+  SHAMT: 12
+  MASK: 0x3f000
+
+DEST_TARGET_REG_CFG_PACK_SEC2_Offset:
+  ADDR32: 154
+  SHAMT: 0
+  MASK: 0xfff
+
+DEST_TARGET_REG_CFG_PACK_SEC2_ZOffset:
+  ADDR32: 154
+  SHAMT: 12
+  MASK: 0x3f000
+
+DEST_TARGET_REG_CFG_PACK_SEC3_Offset:
+  ADDR32: 155
+  SHAMT: 0
+  MASK: 0xfff
+
+DEST_TARGET_REG_CFG_PACK_SEC3_ZOffset:
+  ADDR32: 155
+  SHAMT: 12
+  MASK: 0x3f000
+
+CG_SRC_PIPELINE_GateSrcAPipeEn:
+  ADDR32: 156
+  SHAMT: 0
+  MASK: 0x1
+
+CG_SRC_PIPELINE_GateSrcBPipeEn:
+  ADDR32: 156
+  SHAMT: 1
+  MASK: 0x2
+
+RISCV_IC_INVALIDATE_InvalidateAll:
+  ADDR32: 157
+  SHAMT: 0
+  MASK: 0x1f
+
+TRISC_RESET_PC_SEC0_PC:
+  ADDR32: 158
+  SHAMT: 0
+  MASK: 0xffffffff
+
+TRISC_RESET_PC_SEC1_PC:
+  ADDR32: 159
+  SHAMT: 0
+  MASK: 0xffffffff
+
+TRISC_RESET_PC_SEC2_PC:
+  ADDR32: 160
+  SHAMT: 0
+  MASK: 0xffffffff
+
+TRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en:
+  ADDR32: 161
+  SHAMT: 0
+  MASK: 0x7
+
+NCRISC_RESET_PC_PC:
+  ADDR32: 162
+  SHAMT: 0
+  MASK: 0xffffffff
+
+NCRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en:
+  ADDR32: 163
+  SHAMT: 0
+  MASK: 0x1
+
+PRNG_SEED_Seed_Val:
+  ADDR32: 164
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC0_Value:
+  ADDR32: 165
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC1_Value:
+  ADDR32: 166
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC2_Value:
+  ADDR32: 167
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC3_Value:
+  ADDR32: 168
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC4_Value:
+  ADDR32: 169
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC5_Value:
+  ADDR32: 170
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC6_Value:
+  ADDR32: 171
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC7_Value:
+  ADDR32: 172
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC8_Value:
+  ADDR32: 173
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC9_Value:
+  ADDR32: 174
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC10_Value:
+  ADDR32: 175
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC11_Value:
+  ADDR32: 176
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC12_Value:
+  ADDR32: 177
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC13_Value:
+  ADDR32: 178
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC14_Value:
+  ADDR32: 179
+  SHAMT: 0
+  MASK: 0xffffffff
+
+INT_DESCALE_VALUES_SEC15_Value:
+  ADDR32: 180
+  SHAMT: 0
+  MASK: 0xffffffff
+
+TRISC_END_PC_SEC0_PC:
+  ADDR32: 181
+  SHAMT: 0
+  MASK: 0xffffffff
+
+TRISC_END_PC_SEC1_PC:
+  ADDR32: 182
+  SHAMT: 0
+  MASK: 0xffffffff
+
+TRISC_END_PC_SEC2_PC:
+  ADDR32: 183
+  SHAMT: 0
+  MASK: 0xffffffff
+
+BRISC_END_PC_PC:
+  ADDR32: 184
+  SHAMT: 0
+  MASK: 0xffffffff
+
+NOC_RISC_END_PC_PC:
+  ADDR32: 185
+  SHAMT: 0
+  MASK: 0xffffffff
+
+RISC_PREFETCH_CTRL_Enable_Trisc:
+  ADDR32: 186
+  SHAMT: 0
+  MASK: 0x7
+
+RISC_PREFETCH_CTRL_Enable_Brisc:
+  ADDR32: 186
+  SHAMT: 3
+  MASK: 0x8
+
+RISC_PREFETCH_CTRL_Enable_NocRisc:
+  ADDR32: 186
+  SHAMT: 4
+  MASK: 0x10
+
+RISC_PREFETCH_CTRL_Max_Req_Count:
+  ADDR32: 186
+  SHAMT: 5
+  MASK: 0x1fe0
