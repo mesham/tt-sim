@@ -1,4 +1,5 @@
-from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
+from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
+from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.util.bits import extract_bits, get_nth_bit
 
 
@@ -7,13 +8,176 @@ class MatrixUnit(TensixBackendUnit):
         "ZEROACC": "handle_zeroacc",
         "SETRWC": "handle_setrwc",
         "ELWADD": "handle_elwadd",
+        "ZEROSRC": "handle_zerosrc",
     }
 
     def __init__(self, backend):
+        self.srcABank = 0
+        self.srcBBank = 0
         super().__init__(backend, MatrixUnit.OPCODE_TO_HANDLER, "Matrix")
 
+    def handle_zerosrc(self, instruction_info, issue_thread, instr_args):
+        clearSrcABank = [False] * 2
+        clearSrcBBank = [False] * 2
+
+        clearSrcA = get_nth_bit(instr_args["src_mask"], 0)
+        clearSrcB = get_nth_bit(instr_args["src_mask"], 0)
+        bothBanks = instr_args["bank_mask"]
+        singleBankMatrixUnit = instr_args["write_mode"]
+        negativeInfSrcA = instr_args["zero_val"]
+
+        if clearSrcA:
+            if bothBanks:
+                clearSrcABank[0] = True
+                clearSrcABank[1] = True
+            elif singleBankMatrixUnit:
+                clearSrcABank[self.srcABank] = True
+            else:
+                pass
+                # clearSrcABank[Unpackers[0].SrcBank] = True
+
+        if clearSrcB:
+            if bothBanks:
+                clearSrcBBank[0] = True
+                clearSrcBBank[1] = True
+            elif singleBankMatrixUnit:
+                clearSrcBBank[self.srcBBank] = True
+            else:
+                pass
+                # clearSrcBBank[Unpackers[0].SrcBank] = True
+
+        # Do the clearing
+        for bank in range(2):
+            for i in range(64):
+                for j in range(16):
+                    if clearSrcABank[bank]:
+                        self.backend.getSrcA(bank)[i, j] = ~0 if negativeInfSrcA else 0
+                    if clearSrcBBank[bank]:
+                        self.backend.getSrcA(bank)[i, j] = 0
+
     def handle_elwadd(self, instruction_info, issue_thread, instr_args):
-        pass
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        rwc = self.getRCW(issue_thread)
+        broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
+        broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
+        dstRow = instr_args["dst"]
+        addDst = instr_args["dest_accum_en"]
+
+        flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
+        flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
+
+        # Determine data formats
+        if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
+            srcAStyle = DataFormat.FP16
+            useDst32b = False
+        elif self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled"):
+            srcAStyle = DataFormat.INT8
+            useDst32b = True
+        else:
+            if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_override"):
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
+            else:
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+
+            if srcAFmt in [
+                DataFormat.FP32,
+                DataFormat.BF16,
+                DataFormat.BFP8,
+                DataFormat.BFP4,
+                DataFormat.BFP2,
+                DataFormat.INT32,
+                DataFormat.UINT16,
+            ]:
+                srcAStyle = DataFormat.BF16
+            elif srcAFmt in [
+                DataFormat.FP16,
+                DataFormat.BFP8_b,
+                DataFormat.BFP4_b,
+                DataFormat.BFP2_b,
+                DataFormat.INT8,
+            ]:
+                srcAStyle = DataFormat.FP16
+            else:
+                # SrcAFmt == TF32
+                srcAStyle = DataFormat.TF32
+
+            useDst32b = self.getConfigValue(stateID, "ALU_ACC_CTRL_Fp32_enabled")
+
+        # Determine the row range
+        srcARow = rwc.SrcA & 0x38
+        srcBRow = rwc.SrcB & (0x3F if broadcastSrcBRow else 0x38)
+        dstRow += self.getThreadConfigValue(
+            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+        )
+        dstRow += rwc.Dst + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
+        dstRow &= 0x3F8
+
+        # Determine the fidelity phase.
+        fidelityPhase = rwc.FidelityPhase
+        fidelityPhase += self.getThreadConfigValue(issue_thread, "FIDELITY_BASE_Phase")
+        fidelityPhase &= 3
+
+        # Perform the element-wise computation
+        for i in range(8):
+            for j in range(16):
+                srcAVal = self.backend.getSrcA(self.srcABank)[srcARow + i, j]
+                srcBVal = self.backend.getSrcB(self.srcBBank)[
+                    srcBRow + (0 if broadcastSrcBRow else i),
+                    0 if broadcastSrcBCol0 else j,
+                ]
+                result = srcAVal + srcBVal
+                if srcAStyle == DataFormat.INT8:
+                    if addDst:
+                        result += self.backend.getDst().getDst32b(dstRow + i, j)
+                    if dstRow + i >= 512:
+                        print(f"Warning: ignoring dstRow + i as value is {dstRow + i}")
+                    else:
+                        self.backend.getDst().setDst32b(dstRow + i, j, result)
+                else:
+                    # These divisions are rarely desirable, so software
+                    # is encouraged to ensure that FidelityPhase == 0
+                    if fidelityPhase & 1:
+                        result /= 32.0
+                    elif fidelityPhase & 2:
+                        result /= 128.0
+
+                    if useDst32b:
+                        # Dst is FP32, regardless of SrcAStyle
+                        if addDst:
+                            result += self.backend.getDst().getDst32b(dstRow + i, j)
+                            self.backend.getDst().setDst32b(dstRow + i, j, result)
+                    elif srcAStyle == DataFormat.FP16:
+                        # Dst is FP16, just like SrcAStyle
+                        if addDst:
+                            result += self.backend.getDst().getDst16b(dstRow + i, j)
+                            self.backend.getDst().setDst16b(dstRow + i, j, result)
+                    else:
+                        # Dst is BF16 (SrcAStyle is either BF16 or TF32)
+                        if addDst:
+                            result += self.backend.getDst().getDst16b(dstRow + i, j)
+                            self.backend.getDst().setDst16b(dstRow + i, j, result)
+
+        # Possibly flip source banks
+        if flipsrca:
+            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
+                self.backend.getSrcA(
+                    self.srcABank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.srcABank ^= 1
+
+        if flipsrcb:
+            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcB_Disable"):
+                self.backend.getSrcB(
+                    self.srcBBank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.srcBBank ^= 1
+
+        # Advance the RWCs
+        addr_mod = extract_bits(instr_args["addr_mode"], 2, 0)
+        rwc.applyAddrMod(issue_thread, addr_mod)
 
     def handle_setrwc(self, instruction_info, issue_thread, instr_args):
         rcw = self.getRCW(issue_thread)
@@ -60,15 +224,17 @@ class MatrixUnit(TensixBackendUnit):
 
         if flipsrca:
             if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
-                # TODO: SrcA[MatrixUnit.SrcABank].AllowedClient = SrcClient::Unpackers;
-                # MatrixUnit.SrcABank ^= 1;
-                pass
+                self.backend.getSrcA(
+                    self.srcABank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.srcABank ^= 1
 
         if flipsrcb:
             if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcB_Disable"):
-                # TODO: SrcB[MatrixUnit.SrcABank].AllowedClient = SrcClient::Unpackers;
-                # MatrixUnit.SrcBBank ^= 1;
-                pass
+                self.backend.getSrcB(
+                    self.srcBBank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.srcBBank ^= 1
 
     def handle_zeroacc(self, instruction_info, issue_thread, instr_args):
         ZEROACC_MODE_ONE_ROW = 0
