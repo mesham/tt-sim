@@ -2,6 +2,7 @@ from abc import ABC
 from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
+from tt_sim.pe.tensix.util import TensixInstructionDecoder
 
 
 class DataFormat(IntEnum):
@@ -41,9 +42,7 @@ class TensixBackendUnit(Clockable, ABC):
     def clock_tick(self, cycle_num):
         if len(self.instruction_buffer) > 0:
             instruction, issue_thread = self.instruction_buffer.pop(0)
-            instruction_info = (
-                self.backend.tensix_instruction_decoder.getInstructionInfo(instruction)
-            )
+            instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
             instruction_name = instruction_info["name"]
             if instruction_name in self.opcode_to_method_map:
                 if "instr_args" in instruction_info:

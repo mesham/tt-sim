@@ -5,6 +5,7 @@ from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.backends.matrix import MatrixUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import DstRegister, SrcRegister
+from tt_sim.pe.tensix.util import TensixConfigurationConstants, TensixInstructionDecoder
 from tt_sim.util.bits import extract_bits, get_nth_bit, int_to_bin_list, replace_bits
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
@@ -115,9 +116,7 @@ class RCW:
 
 
 class TensixBackend:
-    def __init__(self, tensix_instruction_decoder, configuration_constants):
-        self.tensix_instruction_decoder = tensix_instruction_decoder
-        self.configuration_constants = configuration_constants
+    def __init__(self):
         self.gpr = TensixGPR()
         self.mover_unit = MoverUnit(self)
         self.sync_unit = TensixSyncUnit(self)
@@ -196,19 +195,17 @@ class TensixBackend:
         return unit_clocks
 
     def getThreadConfigValue(self, issue_thread, key):
-        addr_idx = self.configuration_constants.get_addr32(key)
+        addr_idx = TensixConfigurationConstants.get_addr32(key)
         val = self.getConfigUnit().get_threadConfig_entry(issue_thread, addr_idx)
-        return self.configuration_constants.parse_raw_config_value(val, key)
+        return TensixConfigurationConstants.parse_raw_config_value(val, key)
 
     def getConfigValue(self, state_id, key):
-        addr_idx = self.configuration_constants.get_addr32(key)
+        addr_idx = TensixConfigurationConstants.get_addr32(key)
         val = self.getConfigUnit().get_config_entry(state_id, addr_idx)
-        return self.configuration_constants.parse_raw_config_value(val, key)
+        return TensixConfigurationConstants.parse_raw_config_value(val, key)
 
     def issueInstruction(self, instruction, from_thread):
-        instruction_info = self.tensix_instruction_decoder.getInstructionInfo(
-            instruction
-        )
+        instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         tgt_backend_unit = instruction_info["ex_resource"]
         print(f"Issue {instruction_info['name']} to {tgt_backend_unit}")
         if tgt_backend_unit != "NONE":
@@ -587,10 +584,13 @@ class UnPackerUnit(TensixBackendUnit):
 
 
 class PackerUnit(TensixBackendUnit):
-    OPCODE_TO_HANDLER = {}
+    OPCODE_TO_HANDLER = {"PACR": "handle_pacr"}
 
     def __init__(self, backend):
         super().__init__(backend, PackerUnit.OPCODE_TO_HANDLER, "Packer")
+
+    def handle_pacr(self, instruction_info, issue_thread, instr_args):
+        pass
 
 
 class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):

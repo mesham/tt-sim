@@ -2,21 +2,21 @@ from abc import ABC
 
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.pe.tensix.util import TensixInstructionDecoder
 from tt_sim.util.bits import extract_bits
 from tt_sim.util.conversion import conv_to_uint32
 
 
 class TensixFrontend(MemMapable):
-    def __init__(self, thread_id, tensix_instruction_decoder, backend):
+    def __init__(self, thread_id, backend):
         self.thread_id = thread_id
         self.backend = backend
         self.mop_instruction_fifo = []
         self.replay_instruction_fifo = []
         self.wait_gate_instruction_fifo = []
-        self.tensix_instruction_decoder = tensix_instruction_decoder
-        self.mop_expander = TensixMOPExpander(self, tensix_instruction_decoder)
-        self.replay_expander = TensixReplayExpander(self, tensix_instruction_decoder)
-        self.wait_gate = WaitGate(self, tensix_instruction_decoder)
+        self.mop_expander = TensixMOPExpander(self)
+        self.replay_expander = TensixReplayExpander(self)
+        self.wait_gate = WaitGate(self)
 
     def getClocks(self):
         return [self.mop_expander, self.replay_expander, self.wait_gate]
@@ -58,7 +58,7 @@ class TensixFrontend(MemMapable):
 
     def write(self, addr, value, size=None):
         instruction = conv_to_uint32(value)
-        if self.tensix_instruction_decoder.isInstructionRecognised(instruction):
+        if TensixInstructionDecoder.isInstructionRecognised(instruction):
             self.push_mop_instruction(instruction)
         else:
             opcode = extract_bits(instruction, 8, 24)
@@ -71,14 +71,13 @@ class TensixFrontend(MemMapable):
 
 
 class TensixFrontendUnit(Clockable, ABC):
-    def __init__(self, frontend, tensix_instruction_decoder):
+    def __init__(self, frontend):
         self.frontend = frontend
-        self.tensix_instruction_decoder = tensix_instruction_decoder
 
 
 class WaitGate(TensixFrontendUnit):
-    def __init__(self, frontend, tensix_instruction_decoder):
-        super().__init__(frontend, tensix_instruction_decoder)
+    def __init__(self, frontend):
+        super().__init__(frontend)
 
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_wait_gate_instruction()
@@ -87,14 +86,14 @@ class WaitGate(TensixFrontendUnit):
 
 
 class TensixReplayExpander(TensixFrontendUnit):
-    def __init__(self, frontend, tensix_instruction_decoder):
+    def __init__(self, frontend):
         self.replay_buffer = [0] * 32
         self.append_instruction_to_buffer = False
         self.exec_while_load = False
         self.replay_len = 0
         self.replay_start_idx = 0
         self.replay_idx = 0
-        super().__init__(frontend, tensix_instruction_decoder)
+        super().__init__(frontend)
 
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_replay_instruction()
@@ -111,7 +110,7 @@ class TensixReplayExpander(TensixFrontendUnit):
                     self.append_instruction_to_buffer = False
 
             if not self.append_instruction_to_buffer:
-                instruction_info = self.tensix_instruction_decoder.getInstructionInfo(
+                instruction_info = TensixInstructionDecoder.getInstructionInfo(
                     instruction
                 )
                 if instruction_info["name"] == "REPLAY":
@@ -133,10 +132,10 @@ class TensixReplayExpander(TensixFrontendUnit):
 
 
 class TensixMOPExpander(TensixFrontendUnit, MemMapable):
-    def __init__(self, frontend, tensix_instruction_decoder):
+    def __init__(self, frontend):
         self.mop_cfg = [0] * 9
         self.mask_hi = 0
-        super().__init__(frontend, tensix_instruction_decoder)
+        super().__init__(frontend)
 
     def read(self, address, size):
         raise NotImplementedError("Can not read from Tensix MOP expander configuration")
@@ -150,9 +149,7 @@ class TensixMOPExpander(TensixFrontendUnit, MemMapable):
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_mop_instruction()
         if instruction is not None:
-            instruction_info = self.tensix_instruction_decoder.getInstructionInfo(
-                instruction
-            )
+            instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
             if instruction_info["name"] == "MOP":
                 instr_args = instruction_info["instr_args"]
                 if instr_args["mop_type"] == 0:
