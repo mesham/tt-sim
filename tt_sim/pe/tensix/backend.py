@@ -1,15 +1,102 @@
-from abc import ABC
 from enum import IntEnum
 
-from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
+from tt_sim.pe.tensix.backends.matrix import MatrixUnit
+from tt_sim.pe.tensix.backends.vector import VectorUnit
+from tt_sim.pe.tensix.registers import DstRegister
 from tt_sim.util.bits import extract_bits, get_nth_bit, int_to_bin_list
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
+class RCW:
+    def __init__(self, backend):
+        self.Dst = 0
+        self.Dst_Cr = 0
+        self.SrcA = 0
+        self.SrcA_Cr = 0
+        self.SrcB = 0
+        self.SrcB_Cr = 0
+        self.FidelityPhase = 0
+        self.ExtraAddrModBit = 0
+        self.backend = backend
+
+    def applyAddrMod(self, thread_id, addrmod, updateFidelityPhase=True):
+        if self.ExtraAddrModBit or self.backend.getThreadConfigValue(
+            thread_id, "ADDR_MOD_SET_Base"
+        ):
+            addrmod += 4
+
+        AB_key = "ADDR_MOD_AB_SEC" + str(addrmod)
+        Dst_key = "ADDR_MOD_DST_SEC" + str(addrmod)
+        Bias_key = "ADDR_MOD_BIAS_SEC" + str(addrmod)
+
+        if self.backend.getThreadConfigValue(thread_id, AB_key + "_SrcAClear"):
+            self.SrcA = 0
+            self.SrcA_Cr = 0
+        elif self.backend.getThreadConfigValue(thread_id, AB_key + "_SrcACR"):
+            self.SrcA_Cr += self.backend.getThreadConfigValue(
+                thread_id, AB_key + "_SrcAIncr"
+            )
+            self.SrcA = self.SrcA_Cr
+        else:
+            self.SrcA += self.backend.getThreadConfigValue(
+                thread_id, AB_key + "_SrcAIncr"
+            )
+
+        if self.backend.getThreadConfigValue(thread_id, AB_key + "_SrcBClear"):
+            self.SrcB = 0
+            self.SrcB_Cr = 0
+        elif self.backend.getThreadConfigValue(thread_id, AB_key + "_SrcBCR"):
+            self.SrcB_Cr += self.backend.getThreadConfigValue(
+                thread_id, AB_key + "_SrcBIncr"
+            )
+            self.SrcB = self.SrcB_Cr
+        else:
+            self.SrcB += self.backend.getThreadConfigValue(
+                thread_id, AB_key + "_SrcBIncr"
+            )
+
+        if self.backend.getThreadConfigValue(thread_id, Dst_key + "_DestClear"):
+            self.Dst = 0
+            self.Dst_Cr = 0
+        elif self.backend.getThreadConfigValue(thread_id, Dst_key + "_DestCToCR"):
+            self.Dst += self.backend.getThreadConfigValue(
+                thread_id, AB_key + "_DestIncr"
+            )
+            self.Dst_Cr = self.Dst
+        elif self.backend.getThreadConfigValue(thread_id, Dst_key + "_DestCR"):
+            self.Dst_Cr += self.backend.getThreadConfigValue(
+                thread_id, AB_key + "_DestIncr"
+            )
+            self.Dst = self.Dst_Cr
+        else:
+            self.Dst += self.backend.getThreadConfigValue(
+                thread_id, AB_key + "_DestIncr"
+            )
+
+        if updateFidelityPhase:
+            # SFPLOAD / SFPSTORE / SFPLOADMACRO do not update FidelityPhase, all other instructions do.
+            if self.backend.getThreadConfigValue(thread_id, Dst_key + "_FidelityClear"):
+                self.FidelityPhase = 0
+            else:
+                self.FidelityPhase += self.backend.getThreadConfigValue(
+                    thread_id, Dst_key + "_FidelityIncr"
+                )
+
+        if self.backend.getThreadConfigValue(thread_id, Bias_key + "_BiasClear"):
+            self.ExtraAddrModBit = 0
+        elif self.backend.getThreadConfigValue(thread_id, Bias_key + "_BiasIncr") & 3:
+            self.ExtraAddrModBit += 1
+
+    def applyPartialAddrMod(self, thread_id, addrMod):
+        self.applyAddrMod(thread_id, addrMod, False)
+
+
 class TensixBackend:
-    def __init__(self, tensix_instruction_decoder):
+    def __init__(self, tensix_instruction_decoder, configuration_constants):
         self.tensix_instruction_decoder = tensix_instruction_decoder
+        self.configuration_constants = configuration_constants
         self.mover_unit = MoverUnit(self)
         self.sync_unit = TensixSyncUnit(self)
         self.matrix_unit = MatrixUnit(self)
@@ -18,6 +105,9 @@ class TensixBackend:
         self.unpacker_units = [UnPackerUnit(self)] * 2
         self.packer_units = [PackerUnit(self)] * 4
         self.misc_unit = MiscellaneousUnit(self)
+        self.config_unit = TensixBackendConfigurationUnit(self)
+        self.gpr = TensixGPR()
+        self.dst = DstRegister()
         self.backend_units = {
             "MATH": self.matrix_unit,
             "SFPU": self.vector_unit,
@@ -26,7 +116,12 @@ class TensixBackend:
             "XMOV": self.mover_unit,
             "TDMA": self.misc_unit,
         }
+        self.rcw = [RCW(self)] * 3
         self.addressable_memory = None
+
+    def getRCW(self, thread_id):
+        assert thread_id <= 2
+        return self.rcw[thread_id]
 
     def getMoverUnit(self):
         return self.mover_unit
@@ -34,16 +129,37 @@ class TensixBackend:
     def getSyncUnit(self):
         return self.sync_unit
 
+    def getConfigUnit(self):
+        return self.config_unit
+
     def setAddressableMemory(self, addressable_memory):
         self.addressable_memory = addressable_memory
 
     def getAddressableMemory(self):
         return self.addressable_memory
 
-    def getClocks(self):
-        return []
+    def getGPR(self):
+        return self.gpr
 
-    def issueInstruction(self, instruction):
+    def getClocks(self):
+        return [self.matrix_unit]
+
+    def getDst(self):
+        return self.dst
+
+    def getThreadConfigValue(self, issue_thread, key):
+        addr_idx = self.backend.configuration_constants.get_addr32(key)
+        val = self.backend.getConfigUnit().get_threadConfig_entry(
+            issue_thread, addr_idx
+        )
+        return self.configuration_constants.parse_raw_config_value(val, key)
+
+    def getConfigValue(self, state_id, key):
+        addr_idx = self.backend.configuration_constants.get_addr32(key)
+        val = self.backend.getConfigUnit().get_config_entry(state_id, addr_idx)
+        return self.configuration_constants.parse_raw_config_value(val, key)
+
+    def issueInstruction(self, instruction, from_thread):
         instruction_info = self.tensix_instruction_decoder.getInstructionInfo(
             instruction
         )
@@ -54,48 +170,68 @@ class TensixBackend:
         if tgt_backend_unit != "NONE":
             if tgt_backend_unit == "UNPACK":
                 unpacker = get_nth_bit(instruction, 23)
-                self.unpacker_units[unpacker].issueInstruction(instruction)
+                self.unpacker_units[unpacker].issueInstruction(instruction, from_thread)
             elif tgt_backend_unit == "PACK":
                 packers_int = extract_bits(instruction, 4, 8)
                 if packers_int == 0x0:
-                    self.packer_units[0].issueInstruction(instruction)
+                    self.packer_units[0].issueInstruction(instruction, from_thread)
                 else:
                     packers = int_to_bin_list(packers_int, 4)
                     for idx, packer_bit in enumerate(packers):
                         if packer_bit:
                             # Working left to right, hence 3-idx as the first bit
                             # represents the highest number packer
-                            self.packer_units[3 - idx].issueInstruction(instruction)
+                            self.packer_units[3 - idx].issueInstruction(
+                                instruction, from_thread
+                            )
             else:
                 assert tgt_backend_unit in self.backend_units
-                print(f"{instruction_info['name']}: {tgt_backend_unit}")
-                exit(0)
-                self.backend_units[tgt_backend_unit].issueInstruction(instruction)
+                self.backend_units[tgt_backend_unit].issueInstruction(
+                    instruction, from_thread
+                )
 
 
-class TensixBackendUnit(Clockable, ABC):
-    def __init__(self, backend):
-        self.backend = backend
-        self.instruction_buffer = []
+class TensixGPR(MemMapable):
+    class TensixGPRPerTRISCInMem(MemMapable):
+        def __init__(self, thread_id, tensix_gpr):
+            self.thread_id = thread_id
+            self.tensix_gpr = tensix_gpr
 
-    def issueInstruction(self, instruction):
-        self.instruction_buffer.append(instruction)
+        def read(self, addr, size):
+            addr += self.thread_id * 64 * 4
+            return self.tensix_gpr.read(addr, size)
 
+        def write(self, addr, value, size=None):
+            addr += self.thread_id * 64 * 4
+            self.tensix_gpr.write(addr, value, size)
 
-class VectorUnit(TensixBackendUnit):
-    def __init__(self, backend):
-        super().__init__(backend)
+        def getSize(self):
+            return 0xFFF
 
-    def clock_tick(self, cycle_num):
-        pass
+    def __init__(self):
+        self.registers = [[0] * 64] * 3
+        self.GPRPerTRISC = [TensixGPR.TensixGPRPerTRISCInMem(i, self) for i in range(3)]
 
+    def getGPRPerTRISC(self, trisc_id):
+        return self.GPRPerTRISC[trisc_id]
 
-class MatrixUnit(TensixBackendUnit):
-    def __init__(self, backend):
-        super().__init__(backend)
+    def read(self, addr, size):
+        base_idx, element_idx = self.get_base_and_element_idx(addr)
+        return conv_to_bytes(self.registers[base_idx][element_idx])
 
-    def clock_tick(self, cycle_num):
-        pass
+    def write(self, addr, value, size=None):
+        if size is not None:
+            assert size <= 4
+        base_idx, element_idx = self.get_base_and_element_idx(addr)
+        self.registers[base_idx][element_idx] = conv_to_uint32(value)
+
+    def getSize(self):
+        return 0xFFF
+
+    def get_base_and_element_idx(self, addr):
+        base_idx = int(addr / (64 * 4))
+        element_idx = int((addr - (base_idx * 64 * 4)) / 4)
+        return base_idx, element_idx
 
 
 class ScalarUnit(TensixBackendUnit):
@@ -168,6 +304,62 @@ class PackerUnit(TensixBackendUnit):
 
     def clock_tick(self, cycle_num):
         pass
+
+
+class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
+    CFG_STATE_SIZE = 47
+    THD_STATE_SIZE = 57
+
+    def __init__(self, backend):
+        self.config = [[0] * TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4] * 2
+        self.threadConfig = [[0] * TensixBackendConfigurationUnit.THD_STATE_SIZE] * 3
+        super().__init__(backend)
+
+    def get_threadConfig_entry(self, thread, entry_idx):
+        return self.threadConfig[thread][entry_idx]
+
+    def get_config_entry(self, state, entry_idx):
+        return self.config[state][entry_idx]
+
+    def clock_tick(self, cycle_num):
+        pass
+
+    def read(self, addr, size):
+        threadConfigStart = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4 * 2
+        idx = addr / 4
+        if idx < threadConfigStart:
+            each_config_size = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+            second_idx = (
+                1 if idx > TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4 else 0
+            )
+            first_idx = int(idx - (each_config_size * second_idx))
+            return conv_to_bytes(self.config[second_idx][first_idx])
+        else:
+            idx = idx - threadConfigStart
+            second_idx = idx / TensixBackendConfigurationUnit.THD_STATE_SIZE
+            return conv_to_bytes(
+                self.threadConfig[second_idx][
+                    idx - ((TensixBackendConfigurationUnit.THD_STATE_SIZE) * second_idx)
+                ]
+            )
+
+    def write(self, addr, value, size=None):
+        threadConfigStart = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4 * 2
+        idx = addr / 4
+        if idx < threadConfigStart:
+            each_config_size = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+            second_idx = 1 if idx > each_config_size else 0
+            first_idx = int(idx - (each_config_size * second_idx))
+            self.config[second_idx][first_idx] = conv_to_uint32(value)
+        else:
+            idx = idx - threadConfigStart
+            second_idx = int(idx / TensixBackendConfigurationUnit.THD_STATE_SIZE)
+            self.threadConfig[second_idx][
+                idx - ((TensixBackendConfigurationUnit.THD_STATE_SIZE) * second_idx)
+            ] = conv_to_uint32(value)
+
+    def getSize(self):
+        return 0xFFFF
 
 
 class MoverUnit(TensixBackendUnit):

@@ -14,9 +14,7 @@ from tt_sim.pe.pe import PEMemory
 from tt_sim.pe.rv.babyriscv import BabyRISCV, BabyRISCVCoreType
 from tt_sim.pe.tensix.tdma import TDMA
 from tt_sim.pe.tensix.tensix import (
-    TensixBackendConfiguration,
     TensixCoProcessor,
-    TensixGPR,
 )
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
@@ -186,17 +184,13 @@ class TensixTile(TTDeviceTile):
         l1_range = AddressRange(0x0, self.L1_mem.getSize())
         tensix_mem_map[l1_range] = self.L1_mem
 
-        self.tensix_coprocessor_be_config = TensixBackendConfiguration(
-            self.tensix_coprocessor
+        self.tensix_coprocessor_be_config = (
+            self.tensix_coprocessor.getBackend().getConfigUnit()
         )
         tensix_config_range = AddressRange(
             0xFFEF0000, self.tensix_coprocessor_be_config.getSize()
         )
         tensix_mem_map[tensix_config_range] = self.tensix_coprocessor_be_config
-
-        self.tensix_gpr = TensixGPR(self.tensix_coprocessor)
-        tensix_gpr_range = AddressRange(0xFFE00000, self.tensix_gpr.getSize())
-        tensix_mem_map[tensix_gpr_range] = self.tensix_gpr
 
         noc0_router = NUI(0, coord_x, coord_y, self.L1_mem, noc0_snoop)
         noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
@@ -237,6 +231,9 @@ class TensixTile(TTDeviceTile):
         tensix_cp_thread_0_range = AddressRange(0xFFE40000, 0xFFFF)
         tensix_cp_thread_1_range = AddressRange(0xFFE50000, 0xFFFF)
         tensix_cp_thread_2_range = AddressRange(0xFFE60000, 0xFFFF)
+        brisc_tensix_gpr_range = AddressRange(
+            0xFFE00000, self.tensix_coprocessor.getBackend().getGPR().getSize()
+        )
         brisc0_mem_map = MemoryMap()
         brisc0_mem_map[local_mem_brisc_range] = self.local_mem_brisc
         brisc0_mem_map[brisc_pc_buf_0_range] = self.pc_buf_0
@@ -245,6 +242,10 @@ class TensixTile(TTDeviceTile):
         brisc0_mem_map[tensix_cp_thread_0_range] = self.tensix_coprocessor.getThread(0)
         brisc0_mem_map[tensix_cp_thread_1_range] = self.tensix_coprocessor.getThread(1)
         brisc0_mem_map[tensix_cp_thread_2_range] = self.tensix_coprocessor.getThread(2)
+        brisc0_mem_map[brisc_tensix_gpr_range] = (
+            self.tensix_coprocessor.getBackend().getGPR()
+        )
+
         self.brisc0_mem = PEMemory(brisc0_mem_map)
 
         self.brisc = BabyRISCV(
@@ -283,6 +284,9 @@ class TensixTile(TTDeviceTile):
         trisc_semaphores_range = AddressRange(0xFFE80020, 0xFFDF)
         trisc_mop_expander_cfg_range = AddressRange(0xFFB80000, 0x23)
         trisc_cp_thread_range = AddressRange(0xFFE40000, 0xFFFF)
+        trisc_tensix_gpr_range = AddressRange(
+            0xFFE00000, self.tensix_coprocessor.getBackend().getGPR().getSize()
+        )
 
         # Create trisc0 CPU
         self.local_mem_trisc0 = DRAM(2048)
@@ -300,6 +304,9 @@ class TensixTile(TTDeviceTile):
             self.tensix_coprocessor.getThread(0).getMOPExpander()
         )
         trisc0_mem_map[trisc_cp_thread_range] = self.tensix_coprocessor.getThread(0)
+        trisc0_mem_map[trisc_tensix_gpr_range] = (
+            self.tensix_coprocessor.getBackend().getGPR().getGPRPerTRISC(0)
+        )
         self.trisc0_mem = PEMemory(trisc0_mem_map)
 
         self.trisc0 = BabyRISCV(
@@ -324,6 +331,9 @@ class TensixTile(TTDeviceTile):
             self.tensix_coprocessor.getThread(1).getMOPExpander()
         )
         trisc1_mem_map[trisc_cp_thread_range] = self.tensix_coprocessor.getThread(1)
+        trisc1_mem_map[trisc_tensix_gpr_range] = (
+            self.tensix_coprocessor.getBackend().getGPR().getGPRPerTRISC(1)
+        )
         self.trisc1_mem = PEMemory(trisc1_mem_map)
 
         self.trisc1 = BabyRISCV(
@@ -348,6 +358,9 @@ class TensixTile(TTDeviceTile):
             self.tensix_coprocessor.getThread(2).getMOPExpander()
         )
         trisc2_mem_map[trisc_cp_thread_range] = self.tensix_coprocessor.getThread(2)
+        trisc2_mem_map[trisc_tensix_gpr_range] = (
+            self.tensix_coprocessor.getBackend().getGPR().getGPRPerTRISC(2)
+        )
         self.trisc2_mem = PEMemory(trisc2_mem_map)
 
         self.trisc2 = BabyRISCV(

@@ -83,7 +83,7 @@ class WaitGate(TensixFrontendUnit):
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_wait_gate_instruction()
         if instruction is not None:
-            self.frontend.backend.issueInstruction(instruction)
+            self.frontend.backend.issueInstruction(instruction, self.frontend.thread_id)
 
 
 class TensixReplayExpander(TensixFrontendUnit):
