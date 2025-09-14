@@ -207,7 +207,9 @@ class TensixBackend:
     def issueInstruction(self, instruction, from_thread):
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         tgt_backend_unit = instruction_info["ex_resource"]
-        print(f"Issue {instruction_info['name']} to {tgt_backend_unit}")
+        print(
+            f"Issue {instruction_info['name']} to {tgt_backend_unit} from thread {from_thread}"
+        )
         if tgt_backend_unit != "NONE":
             if tgt_backend_unit == "UNPACK":
                 unpacker = get_nth_bit(instruction, 23)
