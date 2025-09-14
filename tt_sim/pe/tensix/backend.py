@@ -5,7 +5,7 @@ from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.backends.matrix import MatrixUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import DstRegister
-from tt_sim.util.bits import extract_bits, get_nth_bit, int_to_bin_list
+from tt_sim.util.bits import extract_bits, get_nth_bit, int_to_bin_list, replace_bits
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
@@ -115,6 +115,7 @@ class TensixBackend:
             "SYNC": self.sync_unit,
             "XMOV": self.mover_unit,
             "TDMA": self.misc_unit,
+            "CFG": self.config_unit,
         }
         self.rcw = [RCW(self)] * 3
         self.addressable_memory = None
@@ -142,16 +143,25 @@ class TensixBackend:
         return self.gpr
 
     def getClocks(self):
-        return [self.matrix_unit]
+        unit_clocks = [
+            self.matrix_unit,
+            self.scalar_unit,
+            self.vector_unit,
+            self.misc_unit,
+            self.sync_unit,
+            self.mover_unit,
+            self.config_unit,
+        ]
+        unit_clocks += self.unpacker_units
+        unit_clocks += self.packer_units
+        return unit_clocks
 
     def getDst(self):
         return self.dst
 
     def getThreadConfigValue(self, issue_thread, key):
-        addr_idx = self.backend.configuration_constants.get_addr32(key)
-        val = self.backend.getConfigUnit().get_threadConfig_entry(
-            issue_thread, addr_idx
-        )
+        addr_idx = self.configuration_constants.get_addr32(key)
+        val = self.getConfigUnit().get_threadConfig_entry(issue_thread, addr_idx)
         return self.configuration_constants.parse_raw_config_value(val, key)
 
     def getConfigValue(self, state_id, key):
@@ -164,9 +174,7 @@ class TensixBackend:
             instruction
         )
         tgt_backend_unit = instruction_info["ex_resource"]
-        # For now ignore, need to add this
-        if tgt_backend_unit == "CFG":
-            return
+        print(f"Issue {instruction_info['name']} to {tgt_backend_unit}")
         if tgt_backend_unit != "NONE":
             if tgt_backend_unit == "UNPACK":
                 unpacker = get_nth_bit(instruction, 23)
@@ -235,11 +243,10 @@ class TensixGPR(MemMapable):
 
 
 class ScalarUnit(TensixBackendUnit):
-    def __init__(self, backend):
-        super().__init__(backend)
+    OPCODE_TO_HANDLER = {}
 
-    def clock_tick(self, cycle_num):
-        pass
+    def __init__(self, backend):
+        super().__init__(backend, ScalarUnit.OPCODE_TO_HANDLER, "Scalar")
 
 
 class TensixSyncUnit(TensixBackendUnit, MemMapable):
@@ -248,11 +255,30 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             self.value = 0
             self.max = 0
 
+    OPCODE_TO_HANDLER = {
+        "SEMINIT": "handle_seminit",
+        "STALLWAIT": "handle_stallwait",
+        "SEMWAIT": "handle_semwait",
+    }
+
     def __init__(self, backend):
-        super().__init__(backend)
+        super().__init__(backend, TensixSyncUnit.OPCODE_TO_HANDLER, "Sync")
         self.semaphores = [TensixSyncUnit.TTSemaphore()] * 8
 
-    def clock_tick(self, cycle_num):
+    def handle_seminit(self, instruction_info, issue_thread, instr_args):
+        sem_sel = instr_args["sem_sel"]
+        new_value = instr_args["init_value"]
+        max_value = instr_args["max_value"]
+
+        for i in range(8):
+            if get_nth_bit(sem_sel, i):
+                self.semaphores[i].value = new_value
+                self.semaphores[i].max = max_value
+
+    def handle_stallwait(self, instruction_info, issue_thread, instr_args):
+        pass
+
+    def handle_semwait(self, instruction_info, issue_thread, instr_args):
         pass
 
     def read(self, addr, size):
@@ -283,46 +309,86 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
 
 
 class MiscellaneousUnit(TensixBackendUnit):
-    def __init__(self, backend):
-        super().__init__(backend)
+    OPCODE_TO_HANDLER = {}
 
-    def clock_tick(self, cycle_num):
-        pass
+    def __init__(self, backend):
+        super().__init__(backend, MiscellaneousUnit.OPCODE_TO_HANDLER, "Misc")
 
 
 class UnPackerUnit(TensixBackendUnit):
-    def __init__(self, backend):
-        super().__init__(backend)
+    OPCODE_TO_HANDLER = {}
 
-    def clock_tick(self, cycle_num):
-        pass
+    def __init__(self, backend):
+        super().__init__(backend, UnPackerUnit.OPCODE_TO_HANDLER, "Unpacker")
 
 
 class PackerUnit(TensixBackendUnit):
-    def __init__(self, backend):
-        super().__init__(backend)
+    OPCODE_TO_HANDLER = {}
 
-    def clock_tick(self, cycle_num):
-        pass
+    def __init__(self, backend):
+        super().__init__(backend, PackerUnit.OPCODE_TO_HANDLER, "Packer")
 
 
 class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
+    OPCODE_TO_HANDLER = {
+        "SETC16": "handle_setc16",
+        "RMWCIB0": "handle_rmwcib0",
+        "RMWCIB1": "handle_rmwcib1",
+        "RMWCIB2": "handle_rmwcib2",
+        "RMWCIB3": "handle_rmwcib3",
+    }
     CFG_STATE_SIZE = 47
     THD_STATE_SIZE = 57
 
     def __init__(self, backend):
         self.config = [[0] * TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4] * 2
         self.threadConfig = [[0] * TensixBackendConfigurationUnit.THD_STATE_SIZE] * 3
-        super().__init__(backend)
+        super().__init__(
+            backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
+        )
+
+    def handle_setc16(self, instruction_info, issue_thread, instr_args):
+        cfg_index = instr_args["setc16_reg"]
+        new_value = instr_args["setc16_value"]
+
+        assert cfg_index < TensixBackendConfigurationUnit.THD_STATE_SIZE
+
+        self.threadConfig[issue_thread][cfg_index] = new_value
+
+    def handle_rmwcib0(self, instruction_info, issue_thread, instr_args):
+        self.handle_rmwcib(instruction_info, issue_thread, instr_args, 0)
+
+    def handle_rmwcib1(self, instruction_info, issue_thread, instr_args):
+        self.handle_rmwcib(instruction_info, issue_thread, instr_args, 1)
+
+    def handle_rmwcib2(self, instruction_info, issue_thread, instr_args):
+        self.handle_rmwcib(instruction_info, issue_thread, instr_args, 2)
+
+    def handle_rmwcib3(self, instruction_info, issue_thread, instr_args):
+        self.handle_rmwcib(instruction_info, issue_thread, instr_args, 3)
+
+    def handle_rmwcib(self, instruction_info, issue_thread, instr_args, index1):
+        index4 = instr_args["CfgRegAddr"]
+        new_value = instr_args["Data"]
+        mask = instr_args["Mask"]
+
+        assert index4 < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+        existing_val = self.config[stateID][index4]
+
+        new_value = new_value & mask
+        replaced_value = replace_bits(existing_val, new_value, index1 * 8, 8)
+
+        self.config[stateID][index4] = replaced_value
 
     def get_threadConfig_entry(self, thread, entry_idx):
         return self.threadConfig[thread][entry_idx]
 
     def get_config_entry(self, state, entry_idx):
         return self.config[state][entry_idx]
-
-    def clock_tick(self, cycle_num):
-        pass
 
     def read(self, addr, size):
         threadConfigStart = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4 * 2
@@ -369,14 +435,13 @@ class MoverUnit(TensixBackendUnit):
         XMOV_L0_TO_L0 = 2
         XMOV_L1_TO_L1 = 3
 
+    OPCODE_TO_HANDLER = {}
+
     TENSIX_CFG_BASE = 0xFFEF0000
     MEM_NCRISC_IRAM_BASE = 0xFFC00000
 
     def __init__(self, backend):
-        super().__init__(backend)
-
-    def clock_tick(self, cycle_num):
-        pass
+        super().__init__(backend, MoverUnit.OPCODE_TO_HANDLER, "Mover")
 
     def move(self, dst, src, count, mode):
         """
