@@ -1,12 +1,7 @@
 from enum import IntEnum
 
 from tt_sim.pe.rv.rv32 import RV32IM_TT
-from tt_sim.pe.tensix.tensix_be_config_constants import (
-    TensixBackendConfigurationConstants_ADDR32,
-    TensixBackendConfigurationConstants_MASK,
-    TensixBackendConfigurationConstants_SHAMT,
-    tensix_be_config_parse_value,
-)
+from tt_sim.pe.tensix.util import TensixConfigurationConstants
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
@@ -61,84 +56,43 @@ class BabyRISCV(RV32IM_TT):
         TENSIX_BACKEND_CONFIG_BASE = 0xFFEF_0000
 
         if self.core_type == BabyRISCVCoreType.NCRISC:
-            override_tensix_config_addr_offset = (
-                TensixBackendConfigurationConstants_ADDR32.NCRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en
-                * 4
-            )
-            override_tensix_config_shamt = TensixBackendConfigurationConstants_SHAMT.NCRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en
-            override_tensix_config_mask = TensixBackendConfigurationConstants_MASK.NCRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en
+            override_key = "NCRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en"
             enabled_bit = 0
         else:
-            override_tensix_config_addr_offset = (
-                TensixBackendConfigurationConstants_ADDR32.TRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en
-                * 4
-            )
-            override_tensix_config_shamt = TensixBackendConfigurationConstants_SHAMT.TRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en
-            override_tensix_config_mask = TensixBackendConfigurationConstants_MASK.TRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en
+            override_key = "TRISC_RESET_PC_OVERRIDE_Reset_PC_Override_en"
             enabled_bit = self.core_type - 2
 
+        override_tensix_config_addr_offset = (
+            TensixConfigurationConstants.get_addr32(override_key) * 4
+        )
         override_flag = conv_to_uint32(
             self.visible_memory.read(
                 TENSIX_BACKEND_CONFIG_BASE + override_tensix_config_addr_offset, 4
             )
         )
-        override_flag = tensix_be_config_parse_value(
-            override_flag, override_tensix_config_shamt, override_tensix_config_mask
+        override_flag = TensixConfigurationConstants.parse_raw_config_value(
+            override_flag, override_key
         )
         override_enabled = get_nth_bit(override_flag, enabled_bit)
 
         if override_enabled:
             if self.core_type == BabyRISCVCoreType.NCRISC:
-                pc_val_addr_offset = (
-                    TensixBackendConfigurationConstants_ADDR32.NCRISC_RESET_PC_PC * 4
-                )
-                pc_val_shamt = (
-                    TensixBackendConfigurationConstants_SHAMT.NCRISC_RESET_PC_PC
-                )
-                pc_val_mask = (
-                    TensixBackendConfigurationConstants_MASK.NCRISC_RESET_PC_PC
-                )
+                pc_key = "NCRISC_RESET_PC_PC"
             elif self.core_type == BabyRISCVCoreType.TRISC0:
-                pc_val_addr_offset = (
-                    TensixBackendConfigurationConstants_ADDR32.TRISC_RESET_PC_SEC0_PC
-                    * 4
-                )
-                pc_val_shamt = (
-                    TensixBackendConfigurationConstants_SHAMT.TRISC_RESET_PC_SEC0_PC
-                )
-                pc_val_mask = (
-                    TensixBackendConfigurationConstants_MASK.TRISC_RESET_PC_SEC0_PC
-                )
+                pc_key = "TRISC_RESET_PC_SEC0_PC"
             elif self.core_type == BabyRISCVCoreType.TRISC1:
-                pc_val_addr_offset = (
-                    TensixBackendConfigurationConstants_ADDR32.TRISC_RESET_PC_SEC1_PC
-                    * 4
-                )
-                pc_val_shamt = (
-                    TensixBackendConfigurationConstants_SHAMT.TRISC_RESET_PC_SEC1_PC
-                )
-                pc_val_mask = (
-                    TensixBackendConfigurationConstants_MASK.TRISC_RESET_PC_SEC1_PC
-                )
+                pc_key = "TRISC_RESET_PC_SEC1_PC"
             elif self.core_type == BabyRISCVCoreType.TRISC2:
-                pc_val_addr_offset = (
-                    TensixBackendConfigurationConstants_ADDR32.TRISC_RESET_PC_SEC2_PC
-                    * 4
-                )
-                pc_val_shamt = (
-                    TensixBackendConfigurationConstants_SHAMT.TRISC_RESET_PC_SEC2_PC
-                )
-                pc_val_mask = (
-                    TensixBackendConfigurationConstants_MASK.TRISC_RESET_PC_SEC2_PC
-                )
+                pc_key = "TRISC_RESET_PC_SEC2_PC"
             else:
                 raise Exception("Unknown core type")
+            pc_val_addr_offset = TensixConfigurationConstants.get_addr32(pc_key) * 4
             raw_pc = conv_to_uint32(
                 self.visible_memory.read(
                     TENSIX_BACKEND_CONFIG_BASE + pc_val_addr_offset, 4
                 )
             )
-            return tensix_be_config_parse_value(raw_pc, pc_val_shamt, pc_val_mask)
+            return TensixConfigurationConstants.parse_raw_config_value(raw_pc, pc_key)
         else:
             return self.start_address
 
