@@ -374,7 +374,9 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
 
     def handle_atrelm(self, instruction_info, issue_thread, instr_args):
         index = instr_args["mutex_index"]
-        self.mutexes[index].held_by = None  # TODO: wait here
+        if self.mutexes[index].held_by == issue_thread:
+            # If I own the mutex then release it, otherwise ignore
+            self.mutexes[index].held_by = None
 
     def handle_atgetm(self, instruction_info, issue_thread, instr_args):
         index = instr_args["mutex_index"]
