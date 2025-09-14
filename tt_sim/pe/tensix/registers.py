@@ -1,3 +1,5 @@
+from enum import IntEnum
+
 import numpy as np
 
 
@@ -11,12 +13,24 @@ class DstRegister:
     def getDst16b(self, idx0, idx1):
         if idx0 in self.undefined_rows:
             return None
-        return self.dst[idx0, idx1]
+        return self.dst16[idx0, idx1]
 
     def getDst32b(self, idx0, idx1):
         if idx0 * 2 in self.undefined_rows or (idx0 * 2) + 1 in self.undefined_rows:
             return None
-        return self.dst[idx0, idx1]
+        return self.dst32[idx0, idx1]
+
+    def setDst16b(self, idx0, idx1, value):
+        if idx0 in self.undefined_rows:
+            self.undefined_rows.remove(idx0)
+        self.dst16[idx0, idx1] = value
+
+    def setDst32b(self, idx0, idx1, value):
+        if idx0 * 2 in self.undefined_rows:
+            self.undefined_rows.remove(idx0 * 2)
+        if (idx0 * 2) + 1 in self.undefined_rows:
+            self.undefined_rows.remove((idx0 * 2) + 1)
+        self.dst32[idx0, idx1] = value
 
     def setUndefinedRow(self, row, isDst32=False):
         if isDst32:
@@ -24,3 +38,21 @@ class DstRegister:
             self.undefined_rows.append((row * 2) + 1)
         else:
             self.undefined_rows.append(row)
+
+
+class SrcRegister:
+    class SrcClient(IntEnum):
+        MatrixUnit = 0
+        Unpackers = 1
+
+    def __init__(self):
+        self.allowedClient = SrcRegister.SrcClient.Unpackers
+        self.data = np.empty([64, 16], dtype=np.uint32)
+
+    def __getitem__(self, key):
+        x, y = key
+        return self.data[x, y]
+
+    def __setitem__(self, key, value):
+        x, y = key
+        self.data[x, y] = value
