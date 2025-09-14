@@ -4,9 +4,30 @@ from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.backends.matrix import MatrixUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
-from tt_sim.pe.tensix.registers import DstRegister
+from tt_sim.pe.tensix.registers import DstRegister, SrcRegister
 from tt_sim.util.bits import extract_bits, get_nth_bit, int_to_bin_list, replace_bits
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
+
+
+class ADCThread:
+    class ADCUnit:
+        class ADCChannel:
+            def __init__(self):
+                self.X = 0
+                self.X_Cr = 0
+                self.Y = 0
+                self.Y_Cr = 0
+                self.Z = 0
+                self.Z_Cr = 0
+                self.W = 0
+                self.W_Cr = 0
+
+        def __init__(self):
+            self.Channel = [ADCThread.ADCUnit.ADCChannel()] * 2
+
+    def __init__(self):
+        self.Unpacker = [ADCThread.ADCUnit()] * 2
+        self.Packers = ADCThread.ADCUnit()
 
 
 class RCW:
@@ -62,17 +83,17 @@ class RCW:
             self.Dst_Cr = 0
         elif self.backend.getThreadConfigValue(thread_id, Dst_key + "_DestCToCR"):
             self.Dst += self.backend.getThreadConfigValue(
-                thread_id, AB_key + "_DestIncr"
+                thread_id, Dst_key + "_DestIncr"
             )
             self.Dst_Cr = self.Dst
         elif self.backend.getThreadConfigValue(thread_id, Dst_key + "_DestCR"):
             self.Dst_Cr += self.backend.getThreadConfigValue(
-                thread_id, AB_key + "_DestIncr"
+                thread_id, Dst_key + "_DestIncr"
             )
             self.Dst = self.Dst_Cr
         else:
             self.Dst += self.backend.getThreadConfigValue(
-                thread_id, AB_key + "_DestIncr"
+                thread_id, Dst_key + "_DestIncr"
             )
 
         if updateFidelityPhase:
@@ -97,17 +118,19 @@ class TensixBackend:
     def __init__(self, tensix_instruction_decoder, configuration_constants):
         self.tensix_instruction_decoder = tensix_instruction_decoder
         self.configuration_constants = configuration_constants
+        self.gpr = TensixGPR()
         self.mover_unit = MoverUnit(self)
         self.sync_unit = TensixSyncUnit(self)
         self.matrix_unit = MatrixUnit(self)
-        self.scalar_unit = ScalarUnit(self)
+        self.scalar_unit = ScalarUnit(self, self.gpr)
         self.vector_unit = VectorUnit(self)
         self.unpacker_units = [UnPackerUnit(self)] * 2
         self.packer_units = [PackerUnit(self)] * 4
         self.misc_unit = MiscellaneousUnit(self)
-        self.config_unit = TensixBackendConfigurationUnit(self)
-        self.gpr = TensixGPR()
+        self.config_unit = TensixBackendConfigurationUnit(self, self.gpr)
         self.dst = DstRegister()
+        self.srcA = [SrcRegister(), SrcRegister()]
+        self.srcB = [SrcRegister(), SrcRegister()]
         self.backend_units = {
             "MATH": self.matrix_unit,
             "SFPU": self.vector_unit,
@@ -118,17 +141,33 @@ class TensixBackend:
             "CFG": self.config_unit,
         }
         self.rcw = [RCW(self)] * 3
+        self.adc = [ADCThread()] * 3
         self.addressable_memory = None
 
     def getRCW(self, thread_id):
         assert thread_id <= 2
         return self.rcw[thread_id]
 
+    def getADC(self, thread_id):
+        assert thread_id <= 2
+        return self.adc[thread_id]
+
     def getMoverUnit(self):
         return self.mover_unit
 
     def getSyncUnit(self):
         return self.sync_unit
+
+    def getSrcA(self, idx):
+        assert idx < 2
+        return self.srcA[idx]
+
+    def getSrcB(self, idx):
+        assert idx < 2
+        return self.srcB[idx]
+
+    def getDst(self):
+        return self.dst
 
     def getConfigUnit(self):
         return self.config_unit
@@ -156,17 +195,14 @@ class TensixBackend:
         unit_clocks += self.packer_units
         return unit_clocks
 
-    def getDst(self):
-        return self.dst
-
     def getThreadConfigValue(self, issue_thread, key):
         addr_idx = self.configuration_constants.get_addr32(key)
         val = self.getConfigUnit().get_threadConfig_entry(issue_thread, addr_idx)
         return self.configuration_constants.parse_raw_config_value(val, key)
 
     def getConfigValue(self, state_id, key):
-        addr_idx = self.backend.configuration_constants.get_addr32(key)
-        val = self.backend.getConfigUnit().get_config_entry(state_id, addr_idx)
+        addr_idx = self.configuration_constants.get_addr32(key)
+        val = self.getConfigUnit().get_config_entry(state_id, addr_idx)
         return self.configuration_constants.parse_raw_config_value(val, key)
 
     def issueInstruction(self, instruction, from_thread):
@@ -223,6 +259,9 @@ class TensixGPR(MemMapable):
     def getGPRPerTRISC(self, trisc_id):
         return self.GPRPerTRISC[trisc_id]
 
+    def getRegisters(self, thread_id):
+        return self.registers[thread_id]
+
     def read(self, addr, size):
         base_idx, element_idx = self.get_base_and_element_idx(addr)
         return conv_to_bytes(self.registers[base_idx][element_idx])
@@ -243,10 +282,32 @@ class TensixGPR(MemMapable):
 
 
 class ScalarUnit(TensixBackendUnit):
-    OPCODE_TO_HANDLER = {}
+    OPCODE_TO_HANDLER = {"SETDMAREG": "handle_setdmareg", "REG2FLOP": "handle_reg2flop"}
 
-    def __init__(self, backend):
+    def __init__(self, backend, gprs):
+        self.gprs = gprs
         super().__init__(backend, ScalarUnit.OPCODE_TO_HANDLER, "Scalar")
+
+    def handle_reg2flop(self, instruction_info, issue_thread, instr_args):
+        # TODO
+        pass
+
+    def handle_setdmareg(self, instruction_info, issue_thread, instr_args):
+        setSignalsMode = instr_args["SetSignalsMode"]
+        if setSignalsMode == 0:
+            # Set 16 bits of one GPR
+            resultHalfReg = instr_args["RegIndex16b"]
+            newValue1 = instr_args["Payload_SigSel"]
+            newValue2 = instr_args["Payload_SigSelSize"]
+
+            newValue = newValue1 | (newValue2 << 14)
+
+            existing_val = self.gprs.getRegisters(issue_thread)[int(resultHalfReg / 2)]
+            self.gprs.getRegisters(issue_thread)[int(resultHalfReg / 2)] = (
+                existing_val & 0xFF00
+            ) | newValue
+        else:
+            pass
 
 
 class TensixSyncUnit(TensixBackendUnit, MemMapable):
@@ -255,15 +316,38 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             self.value = 0
             self.max = 0
 
+    class TTMutex:
+        def __init__(self):
+            self.held_by = None
+
     OPCODE_TO_HANDLER = {
         "SEMINIT": "handle_seminit",
         "STALLWAIT": "handle_stallwait",
         "SEMWAIT": "handle_semwait",
+        "SEMPOST": "handle_sempost",
+        "ATGETM": "handle_atgetm",
+        "ATRELM": "handle_atrelm",
     }
 
     def __init__(self, backend):
         super().__init__(backend, TensixSyncUnit.OPCODE_TO_HANDLER, "Sync")
         self.semaphores = [TensixSyncUnit.TTSemaphore()] * 8
+        # 7 mutexes, but index 1 is ignored
+        self.mutexes = [TensixSyncUnit.TTMutex()] * 8
+
+    def handle_atrelm(self, instruction_info, issue_thread, instr_args):
+        index = instr_args["mutex_index"]
+        self.mutexes[index].held_by = None  # TODO: wait here
+
+    def handle_atgetm(self, instruction_info, issue_thread, instr_args):
+        index = instr_args["mutex_index"]
+        self.mutexes[index].held_by = issue_thread  # TODO: wait here
+
+    def handle_sempost(self, instruction_info, issue_thread, instr_args):
+        sem_sel = instr_args["sem_sel"]
+        for i in range(8):
+            if get_nth_bit(sem_sel, i) and self.semaphores[i].value < 15:
+                self.semaphores[i].value += 1
 
     def handle_seminit(self, instruction_info, issue_thread, instr_args):
         sem_sel = instr_args["sem_sel"]
@@ -309,10 +393,190 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
 
 
 class MiscellaneousUnit(TensixBackendUnit):
-    OPCODE_TO_HANDLER = {}
+    OPCODE_TO_HANDLER = {
+        "SETADCXY": "handle_setadcxy",
+        "SETADCZW": "handle_setadczw",
+        "SETADCXX": "handle_setadcxx",
+        "DMANOP": "handle_dmanop",
+        "SETADC": "handle_setadc",
+    }
 
     def __init__(self, backend):
         super().__init__(backend, MiscellaneousUnit.OPCODE_TO_HANDLER, "Misc")
+
+    def handle_dmanop(self, instruction_info, issue_thread, instr_args):
+        # This is a nop (but in documentation says for the scalar unit, but it is
+        # directed to the misc unit for some reason)
+        pass
+
+    def handle_setadcxx(self, instruction_info, issue_thread, instr_args):
+        def apply_to(adc_channel, X0Val, X1Val):
+            adc_channel.Channel[0].X = X0Val
+            adc_channel.Channel[0].X_Cr = X0Val
+            adc_channel.Channel[1].X = X1Val
+            adc_channel.Channel[1].X_Cr = X1Val
+
+        X0Val = instr_args["x_start"]
+        X1Val = instr_args["x_end2"]
+
+        if get_nth_bit(instr_args["CntSetMask"], 0):
+            apply_to(self.backend.getADC(issue_thread).Unpacker[0], X0Val, X1Val)
+        if get_nth_bit(instr_args["CntSetMask"], 1):
+            apply_to(self.backend.getADC(issue_thread).Unpacker[1], X0Val, X1Val)
+        if get_nth_bit(instr_args["CntSetMask"], 2):
+            apply_to(self.backend.getADC(issue_thread).Packers, X0Val, X1Val)
+
+    def handle_setadc(self, instruction_info, issue_thread, instr_args):
+        def apply_to(adc_channel, xyzw, newValue):
+            match xyzw:
+                case 0:
+                    adc_channel.X = newValue
+                    adc_channel.X_Cr = newValue
+                case 1:
+                    adc_channel.Y = newValue
+                    adc_channel.Y_Cr = newValue
+                case 2:
+                    adc_channel.Z = newValue
+                    adc_channel.Z_Cr = newValue
+                case 3:
+                    adc_channel.W = newValue
+                    adc_channel.W_Cr = newValue
+
+        newValue = instr_args["Value"]
+        threadOverride = newValue >> 16
+        whichThread = issue_thread if threadOverride == 0 else threadOverride - 1
+
+        channelIndex = instr_args["ChannelIndex"]
+        xyzw = instr_args["DimensionIndex"]
+
+        if get_nth_bit(instr_args["CntSetMask"], 0):
+            apply_to(
+                self.backend.getADC(whichThread).Unpacker[0].Channel[channelIndex],
+                xyzw,
+                newValue,
+            )
+        if get_nth_bit(instr_args["CntSetMask"], 1):
+            apply_to(
+                self.backend.getADC(whichThread).Unpacker[1].Channel[channelIndex],
+                xyzw,
+                newValue,
+            )
+        if get_nth_bit(instr_args["CntSetMask"], 2):
+            apply_to(
+                self.backend.getADC(whichThread).Packers.Channel[channelIndex],
+                xyzw,
+                newValue,
+            )
+
+    def handle_setadczw(self, instruction_info, issue_thread, instr_args):
+        def apply_to(adc_channel, enables, X0Val, Y0Val, X1Val, Y1Val):
+            if get_nth_bit(enables, 0):
+                adc_channel.Channel[0].Z = X0Val
+                adc_channel.Channel[0].W_Cr = X0Val
+
+            if get_nth_bit(enables, 1):
+                adc_channel.Channel[0].Z = Y0Val
+                adc_channel.Channel[0].W_Cr = Y0Val
+
+            if get_nth_bit(enables, 2):
+                adc_channel.Channel[1].Z = X1Val
+                adc_channel.Channel[1].W_Cr = X1Val
+
+            if get_nth_bit(enables, 3):
+                adc_channel.Channel[1].Z = Y1Val
+                adc_channel.Channel[1].W_Cr = Y1Val
+
+        threadOverride = extract_bits(instr_args["Ch1_Y"], 2, 3)
+        whichThread = issue_thread if threadOverride == 0 else threadOverride - 1
+
+        X0Val = instr_args["Ch0_X"]
+        Y0Val = instr_args["Ch0_Y"]
+        X1Val = instr_args["Ch1_X"]
+        Y1Val = extract_bits(instr_args["Ch1_Y"], 3, 0)
+        enables = instr_args["BitMask"]
+
+        if get_nth_bit(instr_args["CntSetMask"], 0):
+            apply_to(
+                self.backend.getADC(whichThread).Unpacker[0],
+                enables,
+                X0Val,
+                Y0Val,
+                X1Val,
+                Y1Val,
+            )
+        if get_nth_bit(instr_args["CntSetMask"], 1):
+            apply_to(
+                self.backend.getADC(whichThread).Unpacker[1],
+                enables,
+                X0Val,
+                Y0Val,
+                X1Val,
+                Y1Val,
+            )
+        if get_nth_bit(instr_args["CntSetMask"], 2):
+            apply_to(
+                self.backend.getADC(whichThread).Packers,
+                enables,
+                X0Val,
+                Y0Val,
+                X1Val,
+                Y1Val,
+            )
+
+    def handle_setadcxy(self, instruction_info, issue_thread, instr_args):
+        def apply_to(adc_channel, enables, X0Val, Y0Val, X1Val, Y1Val):
+            if get_nth_bit(enables, 0):
+                adc_channel.Channel[0].X = X0Val
+                adc_channel.Channel[0].X_Cr = X0Val
+
+            if get_nth_bit(enables, 1):
+                adc_channel.Channel[0].Y = Y0Val
+                adc_channel.Channel[0].Y_Cr = Y0Val
+
+            if get_nth_bit(enables, 2):
+                adc_channel.Channel[1].X = X1Val
+                adc_channel.Channel[1].X_Cr = X1Val
+
+            if get_nth_bit(enables, 3):
+                adc_channel.Channel[1].Y = Y1Val
+                adc_channel.Channel[1].Y_Cr = Y1Val
+
+        threadOverride = extract_bits(instr_args["Ch1_Y"], 2, 3)
+        whichThread = issue_thread if threadOverride == 0 else threadOverride - 1
+
+        X0Val = instr_args["Ch0_X"]
+        Y0Val = instr_args["Ch0_Y"]
+        X1Val = instr_args["Ch1_X"]
+        Y1Val = extract_bits(instr_args["Ch1_Y"], 3, 0)
+        enables = instr_args["BitMask"]
+
+        if get_nth_bit(instr_args["CntSetMask"], 0):
+            apply_to(
+                self.backend.getADC(whichThread).Unpacker[0],
+                enables,
+                X0Val,
+                Y0Val,
+                X1Val,
+                Y1Val,
+            )
+        if get_nth_bit(instr_args["CntSetMask"], 1):
+            apply_to(
+                self.backend.getADC(whichThread).Unpacker[1],
+                enables,
+                X0Val,
+                Y0Val,
+                X1Val,
+                Y1Val,
+            )
+        if get_nth_bit(instr_args["CntSetMask"], 2):
+            apply_to(
+                self.backend.getADC(whichThread).Packers,
+                enables,
+                X0Val,
+                Y0Val,
+                X1Val,
+                Y1Val,
+            )
 
 
 class UnPackerUnit(TensixBackendUnit):
@@ -336,16 +600,38 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         "RMWCIB1": "handle_rmwcib1",
         "RMWCIB2": "handle_rmwcib2",
         "RMWCIB3": "handle_rmwcib3",
+        "WRCFG": "handle_wrcfg",
     }
     CFG_STATE_SIZE = 47
     THD_STATE_SIZE = 57
 
-    def __init__(self, backend):
+    def __init__(self, backend, gprs):
         self.config = [[0] * TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4] * 2
         self.threadConfig = [[0] * TensixBackendConfigurationUnit.THD_STATE_SIZE] * 3
+        self.gprs = gprs
         super().__init__(
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
+
+    def handle_wrcfg(self, instruction_info, issue_thread, instr_args):
+        cfgIndex = instr_args["CfgReg"]
+        assert cfgIndex < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+
+        inputReg = instr_args["GprAddress"]
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        if instr_args["wr128b"]:
+            for i in range(4):
+                self.config[stateID][cfgIndex + i] = self.gprs.getRegisters(
+                    issue_thread
+                )[inputReg + i]
+        else:
+            self.config[stateID][cfgIndex] = self.gprs.getRegisters(issue_thread)[
+                inputReg
+            ]
 
     def handle_setc16(self, instruction_info, issue_thread, instr_args):
         cfg_index = instr_args["setc16_reg"]
