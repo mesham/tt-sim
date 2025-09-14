@@ -246,8 +246,7 @@ class RV_I_ISA(RV_ISA):
                 result = conv_to_bytes(
                     RV_I_ISA.sign_extend(conv_to_int32(byte_val), 8), signed=True
                 )
-            else:
-                result = ProcessingElement.PEStall
+
         elif type_val == 0x4:
             # lu
             RV_ISA.print_snoop(
@@ -260,8 +259,7 @@ class RV_I_ISA(RV_ISA):
                 result = conv_to_bytes(
                     RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 8)
                 )
-            else:
-                result = ProcessingElement.PEStall
+
         elif type_val == 0x1:
             # lh
             RV_ISA.print_snoop(
@@ -274,8 +272,7 @@ class RV_I_ISA(RV_ISA):
                 result = conv_to_bytes(
                     RV_I_ISA.sign_extend(conv_to_int32(byte_val), 16), signed=True
                 )
-            else:
-                result = ProcessingElement.PEStall
+
         elif type_val == 0x5:
             # lhu
             RV_ISA.print_snoop(
@@ -288,8 +285,7 @@ class RV_I_ISA(RV_ISA):
                 result = conv_to_bytes(
                     RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 16)
                 )
-            else:
-                result = ProcessingElement.PEStall
+
         elif type_val == 0x2:
             # lw
             RV_ISA.print_snoop(
@@ -301,14 +297,13 @@ class RV_I_ISA(RV_ISA):
         else:
             write_result = False
 
-        if write_result and result != ProcessingElement.PEStall:
+        if write_result and result != MemoryStall:
             register_file[rd].write(result)
             return True
+        elif result == MemoryStall:
+            return ProcessingElement.PEStall
         else:
-            if result == ProcessingElement.PEStall:
-                return result
-            else:
-                return False
+            return False
 
     @classmethod
     def handle_s_store(cls, instr, register_file, memory_space, snoop):
