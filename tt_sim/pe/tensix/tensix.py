@@ -18,21 +18,21 @@ class TensixConfigurationConstants:
         ):
             self.config_constants = yaml.safe_load(f)
 
-    def get_addr32(self, value):
-        assert value in self.config_constants
-        return self.config_constants[value]["ADDR32"]
+    def get_addr32(self, key):
+        assert key in self.config_constants
+        return self.config_constants[key]["ADDR32"]
 
-    def get_shamt(self, value):
-        assert value in self.config_constants
-        return self.config_constants[value]["SHAMT"]
+    def get_shamt(self, key):
+        assert key in self.config_constants
+        return self.config_constants[key]["SHAMT"]
 
-    def get_mask(self, value):
-        assert value in self.config_constants
-        return self.config_constants[value]["MASK"]
+    def get_mask(self, key):
+        assert key in self.config_constants
+        return self.config_constants[key]["MASK"]
 
     def parse_raw_config_value(self, value, key):
-        mask = self.get_mask(value)
-        shamt = self.get_shamt(value)
+        mask = self.get_mask(key)
+        shamt = self.get_shamt(key)
         return self.tensix_be_config_parse_value(value, shamt, mask)
 
     def tensix_be_config_parse_value(self, value, shamt, mask):
