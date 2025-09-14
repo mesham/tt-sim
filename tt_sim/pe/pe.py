@@ -11,6 +11,9 @@ class PEMemory(MemorySpace):
 
 
 class ProcessingElement(Clockable, Resetable, ABC):
+    class PEStall:
+        pass
+
     @abstractmethod
     def start(self):
         raise NotImplementedError()

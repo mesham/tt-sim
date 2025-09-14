@@ -7,6 +7,10 @@ from tt_sim.memory.memory_map import MemoryMap
 from tt_sim.util.conversion import conv_to_uint32
 
 
+class MemoryStall:
+    pass
+
+
 class MemorySpace(MemMapable, ABC):
     def __init__(self, memory_map, safe=True, snoop_addresses=None):
         self.memory_map = memory_map

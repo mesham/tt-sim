@@ -1,3 +1,5 @@
+from tt_sim.memory.memory import MemoryStall
+from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
 from tt_sim.util.conversion import conv_to_bytes, conv_to_int32, conv_to_uint32
 
@@ -240,9 +242,12 @@ class RV_I_ISA(RV_ISA):
                 f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
             )
             byte_val = memory_space.read(tgt_mem_address, 1)
-            result = conv_to_bytes(
-                RV_I_ISA.sign_extend(conv_to_int32(byte_val), 8), signed=True
-            )
+            if byte_val != MemoryStall:
+                result = conv_to_bytes(
+                    RV_I_ISA.sign_extend(conv_to_int32(byte_val), 8), signed=True
+                )
+            else:
+                result = ProcessingElement.PEStall
         elif type_val == 0x4:
             # lu
             RV_ISA.print_snoop(
@@ -251,7 +256,12 @@ class RV_I_ISA(RV_ISA):
                 f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
             )
             byte_val = memory_space.read(tgt_mem_address, 1)
-            result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 8))
+            if byte_val != MemoryStall:
+                result = conv_to_bytes(
+                    RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 8)
+                )
+            else:
+                result = ProcessingElement.PEStall
         elif type_val == 0x1:
             # lh
             RV_ISA.print_snoop(
@@ -260,9 +270,12 @@ class RV_I_ISA(RV_ISA):
                 f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
             )
             byte_val = memory_space.read(tgt_mem_address, 2)
-            result = conv_to_bytes(
-                RV_I_ISA.sign_extend(conv_to_int32(byte_val), 16), signed=True
-            )
+            if byte_val != MemoryStall:
+                result = conv_to_bytes(
+                    RV_I_ISA.sign_extend(conv_to_int32(byte_val), 16), signed=True
+                )
+            else:
+                result = ProcessingElement.PEStall
         elif type_val == 0x5:
             # lhu
             RV_ISA.print_snoop(
@@ -271,7 +284,12 @@ class RV_I_ISA(RV_ISA):
                 f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
             )
             byte_val = memory_space.read(tgt_mem_address, 2)
-            result = conv_to_bytes(RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 16))
+            if byte_val != MemoryStall:
+                result = conv_to_bytes(
+                    RV_I_ISA.zero_extend(conv_to_uint32(byte_val), 16)
+                )
+            else:
+                result = ProcessingElement.PEStall
         elif type_val == 0x2:
             # lw
             RV_ISA.print_snoop(
@@ -283,11 +301,14 @@ class RV_I_ISA(RV_ISA):
         else:
             write_result = False
 
-        if write_result:
+        if write_result and result != ProcessingElement.PEStall:
             register_file[rd].write(result)
             return True
         else:
-            return False
+            if result == ProcessingElement.PEStall:
+                return result
+            else:
+                return False
 
     @classmethod
     def handle_s_store(cls, instr, register_file, memory_space, snoop):

@@ -141,12 +141,14 @@ class RV32I(ProcessingElement):
             print(f"[{self.core_id}-> {cycle_num}][{hex(pc_val)}] ", end="")
 
         actioned = False
+        pe_stall = False
         for isa in self.isas:
             actioned = isa.run(self.register_file, self.visible_memory, self.snoop)
-            if actioned:
+            pe_stall = actioned == ProcessingElement.PEStall
+            if actioned or pe_stall:
                 break
 
-        if not actioned:
+        if not actioned and not pe_stall:
             self.unknown_instructions += 1
             if self.unknown_instr_is_error:
                 raise Exception("Unknown instruction")
@@ -158,9 +160,12 @@ class RV32I(ProcessingElement):
                 print(f"unknown # {binary_str}", end="")
 
         if self.snoop:
+            if pe_stall:
+                print("[Stalled]")
             print("")
 
-        pc.write(nextpc.read())
+        if not pe_stall:
+            pc.write(nextpc.read())
 
     def reset(self):
         self.stop()
