@@ -1,6 +1,26 @@
 from abc import ABC
+from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
+
+
+class DataFormat(IntEnum):
+    FP32 = 0
+    FP16 = 1
+    BFP8 = 2
+    BFP4 = 3
+    BFP2 = 11
+    FP16_b = 5
+    BFP8_b = 6
+    BFP4_b = 7
+    BFP2_b = 15
+    INT8 = 14
+    UINT8 = 30
+    UINT16 = 9
+    INT32 = 8
+    UINT32 = 24
+    TF32 = 4
+    BF16 = 10
 
 
 class TensixBackendUnit(Clockable, ABC):
