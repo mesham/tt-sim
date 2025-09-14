@@ -88,11 +88,23 @@ class TensixFrontendUnit(Clockable, ABC):
 class WaitGate(TensixFrontendUnit):
     def __init__(self, frontend):
         super().__init__(frontend)
+        self.stall = False
 
     def clock_tick(self, cycle_num):
-        instruction = self.frontend.pop_wait_gate_instruction()
-        if instruction is not None:
-            self.frontend.backend.issueInstruction(instruction, self.frontend.thread_id)
+        if not self.stall:
+            instruction = self.frontend.pop_wait_gate_instruction()
+            if instruction is not None:
+                instruction_info = TensixInstructionDecoder.getInstructionInfo(
+                    instruction
+                )
+                if instruction_info["name"] == "ATGETM":
+                    self.stall = True
+                self.frontend.backend.issueInstruction(
+                    instruction, self.frontend.thread_id
+                )
+
+    def informMutexAcquired(self):
+        self.stall = False
 
 
 class TensixReplayExpander(TensixFrontendUnit):

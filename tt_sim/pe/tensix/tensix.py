@@ -8,6 +8,7 @@ class TensixCoProcessor(ProcessingElement):
     def __init__(self):
         self.backend = TensixBackend()
         self.threads = [TensixFrontend(i, self.backend) for i in range(3)]
+        self.backend.setFrontendThreads(self.threads)
 
     def getThread(self, idx):
         assert idx < 3

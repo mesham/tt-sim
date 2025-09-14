@@ -154,6 +154,13 @@ class TensixBackend:
     def getMoverUnit(self):
         return self.mover_unit
 
+    def setFrontendThreads(self, frontend_threads):
+        self.frontend_threads = frontend_threads
+
+    def getFrontendThread(self, thread_id):
+        assert thread_id < 3
+        return self.frontend_threads[thread_id]
+
     def getSyncUnit(self):
         return self.sync_unit
 
@@ -345,6 +352,25 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         self.semaphores = [TensixSyncUnit.TTSemaphore()] * 8
         # 7 mutexes, but index 1 is ignored
         self.mutexes = [TensixSyncUnit.TTMutex()] * 8
+        self.blocked_mutex = []
+
+    def clock_tick(self, cycle_num):
+        super().clock_tick(cycle_num)
+        to_remove = []
+        for idx, (issue_thread, index) in enumerate(self.blocked_mutex):
+            if (
+                self.mutexes[index].held_by is None
+                or self.mutexes[index].held_by == issue_thread
+            ):
+                self.mutexes[index].held_by = issue_thread
+                self.backend.getFrontendThread(
+                    issue_thread
+                ).wait_gate.informMutexAcquired()
+                to_remove.append(idx)
+        if len(to_remove) > 1:
+            to_remove.reverse()
+            for idx in to_remove:
+                del self.blocked_mutex[idx]
 
     def handle_atrelm(self, instruction_info, issue_thread, instr_args):
         index = instr_args["mutex_index"]
@@ -352,7 +378,14 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
 
     def handle_atgetm(self, instruction_info, issue_thread, instr_args):
         index = instr_args["mutex_index"]
-        self.mutexes[index].held_by = issue_thread  # TODO: wait here
+        if (
+            self.mutexes[index].held_by is not None
+            and self.mutexes[index].held_by != issue_thread
+        ):
+            self.blocked_mutex.append((issue_thread, index))
+        else:
+            self.mutexes[index].held_by = issue_thread
+            self.backend.getFrontendThread(issue_thread).wait_gate.informMutexAcquired()
 
     def handle_sempost(self, instruction_info, issue_thread, instr_args):
         sem_sel = instr_args["sem_sel"]
