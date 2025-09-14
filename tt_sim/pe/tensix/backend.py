@@ -204,6 +204,18 @@ class TensixBackend:
         val = self.getConfigUnit().get_config_entry(state_id, addr_idx)
         return TensixConfigurationConstants.parse_raw_config_value(val, key)
 
+    def hasInflightInstructionsFromThread(self, from_thread):
+        for unit in self.backend_units.values():
+            if unit.hasInflightInstructionsFromThread(from_thread):
+                return True
+        for unpacker in self.unpacker_units:
+            if unpacker.hasInflightInstructionsFromThread(from_thread):
+                return True
+        for packer in self.packer_units:
+            if packer.hasInflightInstructionsFromThread(from_thread):
+                return True
+        return False
+
     def issueInstruction(self, instruction, from_thread):
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         tgt_backend_unit = instruction_info["ex_resource"]

@@ -21,6 +21,16 @@ class TensixFrontend(MemMapable):
     def getClocks(self):
         return [self.mop_expander, self.replay_expander, self.wait_gate]
 
+    def hasInflightInstructions(self):
+        return (
+            len(self.mop_instruction_fifo) > 0
+            or len(self.replay_instruction_fifo)
+            or len(self.wait_gate_instruction_fifo)
+        )
+
+    def MOPExpanderDoneCheck(self):
+        return len(self.mop_instruction_fifo) > 0
+
     def pop_mop_instruction(self):
         if len(self.mop_instruction_fifo) > 0:
             return self.mop_instruction_fifo.pop(0)

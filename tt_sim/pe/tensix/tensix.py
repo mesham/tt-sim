@@ -26,6 +26,14 @@ class TensixCoProcessor(ProcessingElement):
         else:
             self.backend.setAddressableMemory(VisibleMemory.merge(*addressable_memory))
 
+    def CoprocessorDoneCheck(self, thread_id):
+        if self.threads[thread_id].hasInflightInstructions():
+            return True
+        return self.backend.hasInflightInstructionsFromThread(thread_id)
+
+    def MOPExpanderDoneCheck(self, thread_id):
+        return self.threads[thread_id].MOPExpanderDoneCheck()
+
     def getBackend(self):
         return self.backend
 

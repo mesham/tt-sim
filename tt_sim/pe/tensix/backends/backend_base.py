@@ -39,6 +39,12 @@ class TensixBackendUnit(Clockable, ABC):
             )
         )
 
+    def hasInflightInstructionsFromThread(self, from_thread):
+        for _, issue_thread in self.instruction_buffer:
+            if issue_thread == from_thread:
+                return True
+        return False
+
     def clock_tick(self, cycle_num):
         if len(self.instruction_buffer) > 0:
             instruction, issue_thread = self.instruction_buffer.pop(0)
