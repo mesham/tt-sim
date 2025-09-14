@@ -1,31 +1,80 @@
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
-from tt_sim.util.bits import extract_bits
+from tt_sim.util.bits import extract_bits, get_nth_bit
 
 
 class MatrixUnit(TensixBackendUnit):
+    OPCODE_TO_HANDLER = {
+        "ZEROACC": "handle_zeroacc",
+        "SETRWC": "handle_setrwc",
+        "ELWADD": "handle_elwadd",
+    }
+
     def __init__(self, backend):
-        super().__init__(backend)
+        super().__init__(backend, MatrixUnit.OPCODE_TO_HANDLER, "Matrix")
 
-    def clock_tick(self, cycle_num):
-        if len(self.instruction_buffer) > 0:
-            instruction, issue_thread = self.instruction_buffer.pop(0)
-            instruction_info = (
-                self.backend.tensix_instruction_decoder.getInstructionInfo(instruction)
-            )
-            if instruction_info["name"] == "ZEROACC":
-                self.handle_zeroacc(instruction_info, issue_thread)
-            else:
-                raise NotImplementedError(
-                    f"Matrix unix can not handle instruction '{instruction_info['name']}'"
-                )
+    def handle_elwadd(self, instruction_info, issue_thread, instr_args):
+        pass
 
-    def handle_zeroacc(self, instruction_info, issue_thread):
+    def handle_setrwc(self, instruction_info, issue_thread, instr_args):
+        rcw = self.getRCW(issue_thread)
+
+        srca = get_nth_bit(instr_args["BitMask"], 0)
+        srcb = get_nth_bit(instr_args["BitMask"], 1)
+        dst = get_nth_bit(instr_args["BitMask"], 2)
+        fidelity = get_nth_bit(instr_args["BitMask"], 3)
+
+        srca_cr = get_nth_bit(instr_args["rwc_cr"], 0)
+        srcb_cr = get_nth_bit(instr_args["rwc_cr"], 1)
+        dst_cr = get_nth_bit(instr_args["rwc_cr"], 2)
+        dst_c_to_cr = get_nth_bit(instr_args["rwc_cr"], 3)
+
+        flipsrca = get_nth_bit(instr_args["clear_ab_vld"], 0)
+        flipsrcb = get_nth_bit(instr_args["clear_ab_vld"], 1)
+
+        SrcAVal = instr_args["rwc_a"]
+        SrcBVal = instr_args["rwc_b"]
+        DstVal = instr_args["rwc_d"]
+
+        if srca:
+            if srca_cr:
+                SrcAVal += rcw.SrcA_Cr
+            rcw.SrcA = SrcAVal
+            rcw.SrcA_Cr = SrcAVal
+
+        if srcb:
+            if srcb_cr:
+                SrcBVal += rcw.SrcB_Cr
+            rcw.SrcB = SrcBVal
+            rcw.SrcB_Cr = SrcBVal
+
+        if dst or dst_c_to_cr:
+            if dst_c_to_cr:
+                DstVal += rcw.Dst
+            elif dst_cr:
+                DstVal += rcw.Dst_Cr
+            rcw.Dst = DstVal
+            rcw.Dst_Cr = DstVal
+
+        if fidelity:
+            rcw.FidelityPhase = 0
+
+        if flipsrca:
+            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
+                # TODO: SrcA[MatrixUnit.SrcABank].AllowedClient = SrcClient::Unpackers;
+                # MatrixUnit.SrcABank ^= 1;
+                pass
+
+        if flipsrcb:
+            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcB_Disable"):
+                # TODO: SrcB[MatrixUnit.SrcABank].AllowedClient = SrcClient::Unpackers;
+                # MatrixUnit.SrcBBank ^= 1;
+                pass
+
+    def handle_zeroacc(self, instruction_info, issue_thread, instr_args):
         ZEROACC_MODE_ONE_ROW = 0
         ZEROACC_MODE_16_ROWS = 1
         ZEROACC_MODE_HALF_OF_DST = 2
         ZEROACC_MODE_ALL_OF_DST = 3
-
-        instr_args = instruction_info["instr_args"]
 
         mode = extract_bits(instr_args["clear_mode"], 2, 0)
         useDst32b = extract_bits(instr_args["clear_mode"], 1, 2)
