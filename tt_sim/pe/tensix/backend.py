@@ -235,25 +235,32 @@ class TensixBackend:
         if tgt_backend_unit != "NONE":
             if tgt_backend_unit == "UNPACK":
                 unpacker = get_nth_bit(instruction, 23)
-                self.unpacker_units[unpacker].issueInstruction(instruction, from_thread)
+                return self.unpacker_units[unpacker].issueInstruction(
+                    instruction, from_thread
+                )
             elif tgt_backend_unit == "PACK":
                 packers_int = extract_bits(instruction, 4, 8)
                 if packers_int == 0x0:
-                    self.packer_units[0].issueInstruction(instruction, from_thread)
+                    return self.packer_units[0].issueInstruction(
+                        instruction, from_thread
+                    )
                 else:
                     packers = int_to_bin_list(packers_int, 4)
                     for idx, packer_bit in enumerate(packers):
                         if packer_bit:
                             # Working left to right, hence 3-idx as the first bit
                             # represents the highest number packer
-                            self.packer_units[3 - idx].issueInstruction(
+                            return self.packer_units[3 - idx].issueInstruction(
                                 instruction, from_thread
                             )
             else:
                 assert tgt_backend_unit in self.backend_units
-                self.backend_units[tgt_backend_unit].issueInstruction(
+                return self.backend_units[tgt_backend_unit].issueInstruction(
                     instruction, from_thread
                 )
+        else:
+            # NOP is handled here, just ignore
+            return True
 
 
 class TensixGPR(MemMapable):
@@ -357,6 +364,45 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         # 7 mutexes, but index 1 is ignored
         self.mutexes = [TensixSyncUnit.TTMutex()] * 8
         self.blocked_mutex = []
+
+    def issueInstruction(self, instruction, from_thread):
+        instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+        instruction_name = instruction_info["name"]
+        if instruction_name == "ATGEM" or instruction_name == "ATRELM":
+            # Allowed up to three of these as long as they don't reference the same mutex
+            if len(self.next_instruction) < 3:
+                index = instruction_info["instr_args"]["mutex_index"]
+                for instr, _ in self.next_instruction:
+                    instruction_n_info = TensixInstructionDecoder.getInstructionInfo(
+                        instr
+                    )
+                    if instruction_n_info["instr_args"]["mutex_index"] == index:
+                        # Same mutex referenced, do not issue this cycle
+                        return False
+                self.next_instruction.append(
+                    (
+                        instruction,
+                        from_thread,
+                    )
+                )
+                return True
+            else:
+                # Three or more already issued, do not issue this cycle
+                return False
+        else:
+            # Only one of any other instruction allowed
+            if not self.checkIfNextInstructionsContainAnyOtherOpcodes(
+                "ATGEM", "ATRELM"
+            ):
+                self.next_instruction.append(
+                    (
+                        instruction,
+                        from_thread,
+                    )
+                )
+                return True
+            else:
+                return False
 
     def clock_tick(self, cycle_num):
         super().clock_tick(cycle_num)
@@ -486,6 +532,19 @@ class MiscellaneousUnit(TensixBackendUnit):
 
     def __init__(self, backend):
         super().__init__(backend, MiscellaneousUnit.OPCODE_TO_HANDLER, "Misc")
+
+    def issueInstruction(self, instruction, from_thread):
+        # Accepts one per thread
+        for _, thread_id in self.next_instruction:
+            if thread_id == from_thread:
+                return False
+        self.next_instruction.append(
+            (
+                instruction,
+                from_thread,
+            )
+        )
+        return True
 
     def handle_dmanop(self, instruction_info, issue_thread, instr_args):
         # This is a nop (but in documentation says for the scalar unit, but it is
@@ -695,9 +754,58 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         self.config = [[0] * TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4] * 2
         self.threadConfig = [[0] * TensixBackendConfigurationUnit.THD_STATE_SIZE] * 3
         self.gprs = gprs
+        self.prev_cycle_setc16_or_wrcfg = False
         super().__init__(
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
+
+    def clock_tick(self, cycle_num):
+        self.prev_cycle_setc16_or_wrcfg = self.checkIfNextInstructionsContainOpcodes(
+            "SETC16", "WRCFG"
+        )
+        super().clock_tick(cycle_num)
+
+    def issueInstruction(self, instruction, from_thread):
+        instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+        instruction_name = instruction_info["name"]
+        if instruction_name == "SETC16":
+            if self.next_instruction.count("SETC16") < 3:
+                # Max one per thread per cycle allowed
+                self.next_instruction.append(
+                    (
+                        instruction,
+                        from_thread,
+                    )
+                )
+                return True
+            else:
+                return False
+        elif instruction_name == "WRCFG":
+            if self.next_instruction.count("WRCFG") == 0:
+                # Max one in total per cycle allowed
+                self.next_instruction.append(
+                    (
+                        instruction,
+                        from_thread,
+                    )
+                )
+                return True
+            else:
+                return False
+        else:
+            if (
+                not self.prev_cycle_setc16_or_wrcfg
+                and not self.checkIfNextInstructionsContainAnyOtherOpcodes("SETC16")
+            ):
+                self.next_instruction.append(
+                    (
+                        instruction,
+                        from_thread,
+                    )
+                )
+                return True
+            else:
+                return False
 
     def handle_wrcfg(self, instruction_info, issue_thread, instr_args):
         cfgIndex = instr_args["CfgReg"]

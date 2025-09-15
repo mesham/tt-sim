@@ -27,27 +27,37 @@ class DataFormat(IntEnum):
 class TensixBackendUnit(Clockable, ABC):
     def __init__(self, backend, opcode_to_method_map, unit_name):
         self.backend = backend
-        self.instruction_buffer = []
+        self.next_instruction = []
         self.opcode_to_method_map = opcode_to_method_map
         self.unit_name = unit_name
 
     def issueInstruction(self, instruction, from_thread):
-        self.instruction_buffer.append(
-            (
-                instruction,
-                from_thread,
+        # The default issuing of instructions here, which applies to most
+        # units, is one instruction per cycle. Can override for specific
+        # units with more complex behaviour
+        if len(self.next_instruction) == 0:
+            self.next_instruction.append(
+                (
+                    instruction,
+                    from_thread,
+                )
             )
-        )
+            return True
+        else:
+            return False
 
     def hasInflightInstructionsFromThread(self, from_thread):
-        for _, issue_thread in self.instruction_buffer:
-            if issue_thread == from_thread:
-                return True
+        if len(self.next_instruction) > 0:
+            for _, thread_id in self.next_instruction:
+                if thread_id == from_thread:
+                    return True
         return False
 
     def clock_tick(self, cycle_num):
-        if len(self.instruction_buffer) > 0:
-            instruction, issue_thread = self.instruction_buffer.pop(0)
+        # next_instruction is all instructions to process in this cycle,
+        # is often one but for some units might be more
+        while len(self.next_instruction) > 0:
+            instruction, issue_thread = self.next_instruction.pop(0)
             instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
             instruction_name = instruction_info["name"]
             if instruction_name in self.opcode_to_method_map:
@@ -74,3 +84,19 @@ class TensixBackendUnit(Clockable, ABC):
 
     def getDst(self):
         return self.backend.getDst()
+
+    def checkIfNextInstructionsContainOpcodes(self, *instr_op):
+        for instruction, _ in self.next_instruction:
+            instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+            instruction_name = instruction_info["name"]
+            if instruction_name in list(instr_op):
+                return True
+        return False
+
+    def checkIfNextInstructionsContainAnyOtherOpcodes(self, *allowed_instr_op):
+        for instruction, _ in self.next_instruction:
+            instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+            instruction_name = instruction_info["name"]
+            if instruction_name not in list(allowed_instr_op):
+                return True
+        return False

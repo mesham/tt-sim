@@ -252,10 +252,13 @@ class WaitGate(TensixFrontendUnit):
                             instruction_info["name"]
                         ):
                             return
-                    self.frontend.backend.issueInstruction(
+                    instruction_accepted = self.frontend.backend.issueInstruction(
                         instruction, self.frontend.thread_id
                     )
-                    self.frontend.pop_wait_gate_instruction()
+                    if instruction_accepted:
+                        # If the instruction was accepted then remove it,
+                        # otherwise retry next cycle
+                        self.frontend.pop_wait_gate_instruction()
 
     def checkIfFPUInstructionShouldStall(self, opcode):
         if opcode in WaitGate.MATH_ALLOWED_CLIENT_INSTRUCTIONS[0]:
