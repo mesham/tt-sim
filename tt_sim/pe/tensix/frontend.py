@@ -3,7 +3,7 @@ from abc import ABC
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
-from tt_sim.util.bits import extract_bits
+from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
 
@@ -16,7 +16,7 @@ class TensixFrontend(MemMapable):
         self.wait_gate_instruction_fifo = []
         self.mop_expander = TensixMOPExpander(self)
         self.replay_expander = TensixReplayExpander(self)
-        self.wait_gate = WaitGate(self)
+        self.wait_gate = WaitGate(self, backend)
 
     def getClocks(self):
         return [self.mop_expander, self.replay_expander, self.wait_gate]
@@ -55,6 +55,12 @@ class TensixFrontend(MemMapable):
         else:
             return None
 
+    def inspect_wait_gate_instruction(self):
+        if len(self.wait_gate_instruction_fifo) > 0:
+            return self.wait_gate_instruction_fifo[0]
+        else:
+            return None
+
     def push_wait_gate_instruction(self, instruction):
         return self.wait_gate_instruction_fifo.append(instruction)
 
@@ -86,25 +92,132 @@ class TensixFrontendUnit(Clockable, ABC):
 
 
 class WaitGate(TensixFrontendUnit):
-    def __init__(self, frontend):
+    class LatchedInstruction:
+        BLOCKED_INSTRUCTION_TYPES = [
+            (
+                "TDMA",
+                "XMOV",
+                "THCON",
+                "PACK",
+                "UNPACK",
+            ),
+            ("SYNC",),
+            ("PACK",),
+            ("UNPACK",),
+            ("XMOV",),
+            ("THCON",),
+            ("MATH",),
+            ("CFG",),
+            ("SFPU",),
+        ]
+
+        def __init__(self, opcode, condition_mask, block_mask, semaphore_mask=None):
+            self.opcode = opcode
+            self.condition_mask = condition_mask
+            self.block_mask = block_mask
+            self.semaphore_mask = semaphore_mask
+
+        def doesInstructionMatchBlockMask(self, instruction_info):
+            tgt_backend_unit = instruction_info["ex_resource"]
+            for bit_idx in range(9):
+                do_check = get_nth_bit(self.block_mask, bit_idx)
+                if do_check:
+                    if (
+                        tgt_backend_unit
+                        in WaitGate.LatchedInstruction.BLOCKED_INSTRUCTION_TYPES[
+                            bit_idx
+                        ]
+                    ):
+                        return True
+            return False
+
+        def getConditionCheck(self, idx):
+            return get_nth_bit(self.condition_mask, idx)
+
+        def isSemaphoreMode(self):
+            if self.opcode == "SEMWAIT":
+                assert self.semaphore_mask > 0
+                return True
+            return False  # is STALLWAIT
+
+        def getSemaphoresToCheck(self):
+            sem_check = []
+            for i in range(8):
+                if get_nth_bit(self.semaphore_mask, i):
+                    sem_check.append(i)
+            return sem_check
+
+    def __init__(self, frontend, backend):
         super().__init__(frontend)
-        self.stall = False
+        self.mutex_stall = False
+        self.latchedWaitInstruction = None
+        self.latch_wait = False
+        self.backend = backend
+
+    def setLatchedWaitInstruction(
+        self, opcode, condition_mask, block_mask, semaphore_mask=None
+    ):
+        self.latchedWaitInstruction = WaitGate.LatchedInstruction(
+            opcode, condition_mask, block_mask, semaphore_mask
+        )
+
+    def check_for_wait_condition_met(self):
+        assert self.latchedWaitInstruction is not None
+        if self.latchedWaitInstruction.isSemaphoreMode():
+            sem_checks = self.latchedWaitInstruction.getSemaphoresToCheck()
+            for sem in sem_checks:
+                semaphore = self.backend.getSyncUnit().getSemaphore(sem)
+                if (
+                    self.latchedWaitInstruction.getConditionCheck(0)
+                    and semaphore.value != 0
+                ):
+                    return False
+                if (
+                    self.latchedWaitInstruction.getConditionCheck(1)
+                    and semaphore.value < semaphore.max
+                ):
+                    return False
+                return True
+        else:
+            for idx in range(15):
+                if self.latchedWaitInstruction.getConditionCheck(idx):
+                    # TODO: For now assume condition is matched
+                    return True
 
     def clock_tick(self, cycle_num):
-        if not self.stall:
-            instruction = self.frontend.pop_wait_gate_instruction()
-            if instruction is not None:
-                instruction_info = TensixInstructionDecoder.getInstructionInfo(
-                    instruction
-                )
-                if instruction_info["name"] == "ATGETM":
-                    self.stall = True
-                self.frontend.backend.issueInstruction(
-                    instruction, self.frontend.thread_id
-                )
+        if not self.mutex_stall:
+            if not self.latch_wait and self.latchedWaitInstruction is not None:
+                check_for_blocked_instr = self.frontend.inspect_wait_gate_instruction()
+                if check_for_blocked_instr is not None:
+                    instruction_info = TensixInstructionDecoder.getInstructionInfo(
+                        check_for_blocked_instr
+                    )
+                    self.latch_wait = (
+                        self.latchedWaitInstruction.doesInstructionMatchBlockMask(
+                            instruction_info
+                        )
+                    )
+            elif self.latch_wait:
+                condition_met = self.check_for_wait_condition_met()
+                if condition_met:
+                    self.latch_wait = False
+                    self.latchedWaitInstruction = None
+                    return  # One cycle latency here
+
+            if not self.latch_wait:
+                instruction = self.frontend.pop_wait_gate_instruction()
+                if instruction is not None:
+                    instruction_info = TensixInstructionDecoder.getInstructionInfo(
+                        instruction
+                    )
+                    if instruction_info["name"] == "ATGETM":
+                        self.mutex_stall = True
+                    self.frontend.backend.issueInstruction(
+                        instruction, self.frontend.thread_id
+                    )
 
     def informMutexAcquired(self):
-        self.stall = False
+        self.mutex_stall = False
 
 
 class TensixReplayExpander(TensixFrontendUnit):

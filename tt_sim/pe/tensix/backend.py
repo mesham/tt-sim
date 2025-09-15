@@ -373,6 +373,10 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             for idx in to_remove:
                 del self.blocked_mutex[idx]
 
+    def getSemaphore(self, idx):
+        assert idx <= 7
+        return self.semaphores[idx]
+
     def handle_atrelm(self, instruction_info, issue_thread, instr_args):
         index = instr_args["mutex_index"]
         if self.mutexes[index].held_by == issue_thread:
@@ -413,10 +417,33 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                 self.semaphores[i].value -= 1
 
     def handle_stallwait(self, instruction_info, issue_thread, instr_args):
-        pass
+        cond_mask = instr_args["wait_res"]
+        block_mask = instr_args["stall_res"]
+
+        self.backend.getFrontendThread(
+            issue_thread
+        ).wait_gate.setLatchedWaitInstruction(
+            "STALLWAIT",
+            cond_mask if cond_mask else 0x7F,
+            block_mask if block_mask else 1 << 6,
+        )
 
     def handle_semwait(self, instruction_info, issue_thread, instr_args):
-        pass
+        sem_sel = instr_args["sem_sel"]
+        cond_mask = instr_args["wait_sem_cond"]
+        block_mask = instr_args["stall_res"]
+        block_mask = block_mask if block_mask else 1 << 6
+
+        if cond_mask:
+            self.backend.getFrontendThread(
+                issue_thread
+            ).wait_gate.setLatchedWaitInstruction(
+                "SEMWAIT", cond_mask, block_mask, sem_sel
+            )
+        else:
+            self.backend.getFrontendThread(
+                issue_thread
+            ).wait_gate.setLatchedWaitInstruction("STALLWAIT", 0x7F, block_mask)
 
     def read(self, addr, size):
         # Accesses semaphore[i].value, where each
