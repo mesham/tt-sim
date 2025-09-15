@@ -16,6 +16,12 @@ class MatrixUnit(TensixBackendUnit):
         self.srcBBank = 0
         super().__init__(backend, MatrixUnit.OPCODE_TO_HANDLER, "Matrix")
 
+    def getSrcA(self):
+        return self.backend.getSrcA(self.srcABank)
+
+    def getSrcB(self):
+        return self.backend.getSrcB(self.srcBBank)
+
     def handle_zerosrc(self, instruction_info, issue_thread, instr_args):
         clearSrcABank = [False] * 2
         clearSrcBBank = [False] * 2
@@ -133,7 +139,7 @@ class MatrixUnit(TensixBackendUnit):
                     if addDst:
                         result += self.backend.getDst().getDst32b(dstRow + i, j)
                     if dstRow + i >= 512:
-                        print(f"Warning: ignoring dstRow + i as value is {dstRow + i}")
+                        pass  # print(f"Warning: ignoring dstRow + i as value is {dstRow + i}")
                     else:
                         self.backend.getDst().setDst32b(dstRow + i, j, result)
                 else:

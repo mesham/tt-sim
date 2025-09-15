@@ -2,6 +2,7 @@ from abc import ABC
 
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
@@ -92,6 +93,37 @@ class TensixFrontendUnit(Clockable, ABC):
 
 
 class WaitGate(TensixFrontendUnit):
+    # The math instructions to check allowedclient for, first element is
+    # list of applicable instructions that need to check srcA, second element
+    # is list of applicable instructions that need to check srcB
+    MATH_ALLOWED_CLIENT_INSTRUCTIONS = [
+        (
+            "MVMUL",
+            "DOTPV",
+            "GAPOOL",
+            "GMPOOL",
+            "ELWMUL",
+            "ELWADD",
+            "ELWSUB",
+            "MOVA2D",
+            "MOVDBGA2D",
+            "SHIFTXA",
+        ),
+        (
+            "MVMUL",
+            "DOTPV",
+            "GAPOOL",
+            "GMPOOL",
+            "ELWMUL",
+            "ELWADD",
+            "ELWSUB",
+            "MOVB2D",
+            "MOVB2A",
+            "SHIFTXB",
+            "TRANSPSRCB",
+        ),
+    ]
+
     class LatchedInstruction:
         BLOCKED_INSTRUCTION_TYPES = [
             (
@@ -186,11 +218,11 @@ class WaitGate(TensixFrontendUnit):
 
     def clock_tick(self, cycle_num):
         if not self.mutex_stall:
+            instruction = self.frontend.inspect_wait_gate_instruction()
             if not self.latch_wait and self.latchedWaitInstruction is not None:
-                check_for_blocked_instr = self.frontend.inspect_wait_gate_instruction()
-                if check_for_blocked_instr is not None:
+                if instruction is not None:
                     instruction_info = TensixInstructionDecoder.getInstructionInfo(
-                        check_for_blocked_instr
+                        instruction
                     )
                     self.latch_wait = (
                         self.latchedWaitInstruction.doesInstructionMatchBlockMask(
@@ -205,16 +237,42 @@ class WaitGate(TensixFrontendUnit):
                     return  # One cycle latency here
 
             if not self.latch_wait:
-                instruction = self.frontend.pop_wait_gate_instruction()
                 if instruction is not None:
                     instruction_info = TensixInstructionDecoder.getInstructionInfo(
                         instruction
                     )
                     if instruction_info["name"] == "ATGETM":
+                        # Stall due to mutex, but still process this instruction to ensure
+                        # it reaches the sync unit
                         self.mutex_stall = True
+                    if instruction_info["ex_resource"] == "MATH":
+                        # For FPU instructions need to ensure that srcA and srcB
+                        # being consumed has allowed client of MatrixUnit
+                        if self.checkIfFPUInstructionShouldStall(
+                            instruction_info["name"]
+                        ):
+                            return
                     self.frontend.backend.issueInstruction(
                         instruction, self.frontend.thread_id
                     )
+                    self.frontend.pop_wait_gate_instruction()
+
+    def checkIfFPUInstructionShouldStall(self, opcode):
+        if opcode in WaitGate.MATH_ALLOWED_CLIENT_INSTRUCTIONS[0]:
+            if (
+                self.backend.getMatrixUnit().getSrcA().allowedClient
+                == SrcRegister.SrcClient.Unpackers
+            ):
+                return True
+
+        if opcode in WaitGate.MATH_ALLOWED_CLIENT_INSTRUCTIONS[1]:
+            if (
+                self.backend.getMatrixUnit().getSrcB().allowedClient
+                == SrcRegister.SrcClient.Unpackers
+            ):
+                return True
+
+        return False
 
     def informMutexAcquired(self):
         self.mutex_stall = False

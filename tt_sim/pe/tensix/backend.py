@@ -175,6 +175,9 @@ class TensixBackend:
     def getDst(self):
         return self.dst
 
+    def getMatrixUnit(self):
+        return self.matrix_unit
+
     def getConfigUnit(self):
         return self.config_unit
 
