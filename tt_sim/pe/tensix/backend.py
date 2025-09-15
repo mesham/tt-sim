@@ -343,6 +343,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         "STALLWAIT": "handle_stallwait",
         "SEMWAIT": "handle_semwait",
         "SEMPOST": "handle_sempost",
+        "SEMGET": "handle_semget",
         "ATGETM": "handle_atgetm",
         "ATRELM": "handle_atrelm",
     }
@@ -404,6 +405,12 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             if get_nth_bit(sem_sel, i):
                 self.semaphores[i].value = new_value
                 self.semaphores[i].max = max_value
+
+    def handle_semget(self, instruction_info, issue_thread, instr_args):
+        sem_sel = instr_args["sem_sel"]
+        for i in range(8):
+            if get_nth_bit(sem_sel, i) and self.semaphores[i].value < 15:
+                self.semaphores[i].value -= 1
 
     def handle_stallwait(self, instruction_info, issue_thread, instr_args):
         pass
