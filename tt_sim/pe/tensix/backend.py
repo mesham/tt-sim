@@ -22,8 +22,8 @@ class TensixBackend:
         self.matrix_unit = MatrixUnit(self)
         self.scalar_unit = ScalarUnit(self, self.gpr)
         self.vector_unit = VectorUnit(self)
-        self.unpacker_units = [UnPackerUnit(self)] * 2
-        self.packer_units = [PackerUnit(self)] * 4
+        self.unpacker_units = [UnPackerUnit(self, i) for i in range(2)]
+        self.packer_units = [PackerUnit(self) for i in range(4)]
         self.misc_unit = MiscellaneousUnit(self)
         self.config_unit = TensixBackendConfigurationUnit(self, self.gpr)
         self.dst = DstRegister()
@@ -38,8 +38,8 @@ class TensixBackend:
             "TDMA": self.misc_unit,
             "CFG": self.config_unit,
         }
-        self.rcw = [RCW(self)] * 3
-        self.adc = [ADCThread()] * 3
+        self.rcw = [RCW(self) for i in range(3)]
+        self.adc = [ADCThread() for i in range(3)]
         self.addressable_memory = None
 
     def getRCW(self, thread_id):
@@ -108,10 +108,21 @@ class TensixBackend:
         val = self.getConfigUnit().get_threadConfig_entry(issue_thread, addr_idx)
         return TensixConfigurationConstants.parse_raw_config_value(val, key)
 
-    def getConfigValue(self, state_id, key):
+    def getConfigValue(self, state_id, key, words=1):
         addr_idx = TensixConfigurationConstants.get_addr32(key)
-        val = self.getConfigUnit().get_config_entry(state_id, addr_idx)
-        return TensixConfigurationConstants.parse_raw_config_value(val, key)
+        if words == 1:
+            val = self.getConfigUnit().get_config_entry(state_id, addr_idx)
+            return TensixConfigurationConstants.parse_raw_config_value(val, key)
+        else:
+            results = []
+            for word in range(words):
+                val = self.getConfigUnit().get_config_entry(
+                    state_id, addr_idx + (word * 4)
+                )
+                results.append(
+                    TensixConfigurationConstants.parse_raw_config_value(val, key)
+                )
+            return results
 
     def hasInflightInstructionsFromThread(self, from_thread):
         for unit in self.backend_units.values():
@@ -128,13 +139,10 @@ class TensixBackend:
     def issueInstruction(self, instruction, from_thread):
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         tgt_backend_unit = instruction_info["ex_resource"]
-        print(
-            f"Issue {instruction_info['name']} to {tgt_backend_unit} from thread {from_thread}"
-        )
         if tgt_backend_unit != "NONE":
             if tgt_backend_unit == "UNPACK":
-                unpacker = get_nth_bit(instruction, 23)
-                return self.unpacker_units[unpacker].issueInstruction(
+                which_unpacker = get_nth_bit(instruction, 23)
+                return self.unpacker_units[which_unpacker].issueInstruction(
                     instruction, from_thread
                 )
             elif tgt_backend_unit == "PACK":
@@ -176,10 +184,13 @@ class ADCThread:
                 self.W_Cr = 0
 
         def __init__(self):
-            self.Channel = [ADCThread.ADCUnit.ADCChannel()] * 2
+            self.Channel = [
+                ADCThread.ADCUnit.ADCChannel(),
+                ADCThread.ADCUnit.ADCChannel(),
+            ]
 
     def __init__(self):
-        self.Unpacker = [ADCThread.ADCUnit()] * 2
+        self.Unpacker = [ADCThread.ADCUnit(), ADCThread.ADCUnit()]
         self.Packers = ADCThread.ADCUnit()
 
 

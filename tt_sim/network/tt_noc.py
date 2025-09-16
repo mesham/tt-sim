@@ -15,8 +15,9 @@ class NoCOverlay(MemMapable):
 
     def __init__(self):
         self.stream_regs = [
-            [0] * (NoCOverlay.NOC_STREAM_REG_SPACE_SIZE >> 2)
-        ] * NoCOverlay.NOC_NUM_STREAMS
+            [0 for i in range(NoCOverlay.NOC_STREAM_REG_SPACE_SIZE >> 2)]
+            for i in range(NoCOverlay.NOC_NUM_STREAMS)
+        ]
 
     def read(self, addr, size):
         stream_id, reg_id = self.getStreamAndRegisterFromAddress(addr)

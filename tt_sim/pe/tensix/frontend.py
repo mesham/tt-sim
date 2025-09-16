@@ -259,10 +259,8 @@ class WaitGate(TensixFrontendUnit):
                         # If the instruction was accepted then remove it,
                         # otherwise retry next cycle
                         print(
-
-                                f"Issued {instruction_info['name']} to {instruction_info['ex_resource']} "
-                                " from thread {self.frontend.thread_id}"
-
+                            f"Issued {instruction_info['name']} to {instruction_info['ex_resource']} "
+                            f"from thread {self.frontend.thread_id}"
                         )
                         self.frontend.pop_wait_gate_instruction()
 
