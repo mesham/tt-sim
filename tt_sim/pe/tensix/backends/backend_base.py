@@ -23,6 +23,28 @@ class DataFormat(IntEnum):
     TF32 = 4
     BF16 = 10
 
+    def isBFPFormat(self):
+        return self.value == 2 or self.value == 3 or self.value == 11
+
+
+DATA_FORMAT_TO_BITS = {
+    DataFormat.FP32: 32,
+    DataFormat.FP16: 16,
+    DataFormat.BFP8: 8,
+    DataFormat.BFP4: 4,
+    DataFormat.BFP2: 2,
+    DataFormat.FP16_b: 16,
+    DataFormat.BFP8_b: 8,
+    DataFormat.BFP4_b: 4,
+    DataFormat.BFP2_b: 2,
+    DataFormat.INT8: 8,
+    DataFormat.UINT8: 8,
+    DataFormat.UINT16: 16,
+    DataFormat.UINT32: 32,
+    DataFormat.TF32: 32,
+    DataFormat.BF16: 16,
+}
+
 
 class TensixBackendUnit(Clockable, ABC):
     def __init__(self, backend, opcode_to_method_map, unit_name):
@@ -76,8 +98,8 @@ class TensixBackendUnit(Clockable, ABC):
     def getThreadConfigValue(self, issue_thread, key):
         return self.backend.getThreadConfigValue(issue_thread, key)
 
-    def getConfigValue(self, state_id, key):
-        return self.backend.getConfigValue(state_id, key)
+    def getConfigValue(self, state_id, key, words=1):
+        return self.backend.getConfigValue(state_id, key, words)
 
     def getRCW(self, thread_id):
         return self.backend.getRCW(thread_id)
