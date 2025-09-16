@@ -131,6 +131,8 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         for i in range(8):
             if get_nth_bit(sem_sel, i) and self.semaphores[i].value < 15:
                 self.semaphores[i].value -= 1
+                if self.semaphores[i].value <= 0:
+                    self.semaphores[i].value = 0
 
     def handle_stallwait(self, instruction_info, issue_thread, instr_args):
         cond_mask = instr_args["wait_res"]
