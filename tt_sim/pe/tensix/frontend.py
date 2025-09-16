@@ -258,6 +258,12 @@ class WaitGate(TensixFrontendUnit):
                     if instruction_accepted:
                         # If the instruction was accepted then remove it,
                         # otherwise retry next cycle
+                        print(
+
+                                f"Issued {instruction_info['name']} to {instruction_info['ex_resource']} "
+                                " from thread {self.frontend.thread_id}"
+
+                        )
                         self.frontend.pop_wait_gate_instruction()
 
     def checkIfFPUInstructionShouldStall(self, opcode):
