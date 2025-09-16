@@ -49,6 +49,15 @@ class SrcRegister:
         self.allowedClient = SrcRegister.SrcClient.Unpackers
         self.data = np.empty([64, 16], dtype=np.uint32)
 
+    def flipAllowedClient(self):
+        if self.allowedClient == SrcRegister.SrcClient.Unpackers:
+            self.allowedClient = SrcRegister.SrcClient.MatrixUnit
+        else:
+            self.allowedClient = SrcRegister.SrcClient.Unpackers
+
+    def getAllowedClient(self):
+        return self.allowedClient
+
     def __getitem__(self, key):
         x, y = key
         return self.data[x, y]
