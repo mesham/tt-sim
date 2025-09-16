@@ -19,19 +19,22 @@ class TensixConfigurationConstants:
     @classmethod
     def get_addr32(cls, key):
         cls.init()
-        assert key in cls.config_constants
+        if key not in cls.config_constants:
+            raise IndexError(f"'{key}' not in constants")
         return cls.config_constants[key]["ADDR32"]
 
     @classmethod
     def get_shamt(cls, key):
         cls.init()
-        assert key in cls.config_constants
+        if key not in cls.config_constants:
+            raise IndexError(f"'{key}' not in constants")
         return cls.config_constants[key]["SHAMT"]
 
     @classmethod
     def get_mask(cls, key):
         cls.init()
-        assert key in cls.config_constants
+        if key not in cls.config_constants:
+            raise IndexError(f"'{key}' not in constants")
         return cls.config_constants[key]["MASK"]
 
     @classmethod
