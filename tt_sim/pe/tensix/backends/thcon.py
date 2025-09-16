@@ -2,13 +2,21 @@ from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 
 
 class ScalarUnit(TensixBackendUnit):
-    OPCODE_TO_HANDLER = {"SETDMAREG": "handle_setdmareg", "REG2FLOP": "handle_reg2flop"}
+    OPCODE_TO_HANDLER = {
+        "SETDMAREG": "handle_setdmareg",
+        "REG2FLOP": "handle_reg2flop",
+        "STOREREG": "handle_storereg",
+    }
 
     def __init__(self, backend, gprs):
         self.gprs = gprs
         super().__init__(backend, ScalarUnit.OPCODE_TO_HANDLER, "Scalar")
 
     def handle_reg2flop(self, instruction_info, issue_thread, instr_args):
+        # TODO
+        pass
+
+    def handle_storereg(self, instruction_info, issue_thread, instr_args):
         # TODO
         pass
 
