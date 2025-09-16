@@ -206,7 +206,7 @@ class WaitGate(TensixFrontendUnit):
                     return False
                 if (
                     self.latchedWaitInstruction.getConditionCheck(1)
-                    and semaphore.value < semaphore.max
+                    and semaphore.value >= semaphore.max
                 ):
                     return False
                 return True

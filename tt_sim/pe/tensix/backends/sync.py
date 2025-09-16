@@ -27,9 +27,9 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
 
     def __init__(self, backend):
         super().__init__(backend, TensixSyncUnit.OPCODE_TO_HANDLER, "Sync")
-        self.semaphores = [TensixSyncUnit.TTSemaphore()] * 8
+        self.semaphores = [TensixSyncUnit.TTSemaphore() for i in range(8)]
         # 7 mutexes, but index 1 is ignored
-        self.mutexes = [TensixSyncUnit.TTMutex()] * 8
+        self.mutexes = [TensixSyncUnit.TTMutex() for i in range(8)]
         self.blocked_mutex = []
 
     def issueInstruction(self, instruction, from_thread):
@@ -129,10 +129,8 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
     def handle_semget(self, instruction_info, issue_thread, instr_args):
         sem_sel = instr_args["sem_sel"]
         for i in range(8):
-            if get_nth_bit(sem_sel, i) and self.semaphores[i].value < 15:
+            if get_nth_bit(sem_sel, i) and self.semaphores[i].value > 0:
                 self.semaphores[i].value -= 1
-                if self.semaphores[i].value <= 0:
-                    self.semaphores[i].value = 0
 
     def handle_stallwait(self, instruction_info, issue_thread, instr_args):
         cond_mask = instr_args["wait_res"]
