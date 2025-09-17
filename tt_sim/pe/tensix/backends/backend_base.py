@@ -41,6 +41,7 @@ DATA_FORMAT_TO_BITS = {
     DataFormat.UINT8: 8,
     DataFormat.UINT16: 16,
     DataFormat.UINT32: 32,
+    DataFormat.INT32: 32,
     DataFormat.TF32: 32,
     DataFormat.BF16: 16,
 }
