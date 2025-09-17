@@ -1,4 +1,5 @@
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
+from tt_sim.pe.tensix.util import TensixInstructionDecoder
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
@@ -25,7 +26,12 @@ class RV_TT_ISA(RV_ISA):
 
             constant = RV_TT_ISA.rotate_right(RV_ISA.get_int(instr, 0, 31), 2)
             memory_space.write(0xFFE40000, conv_to_bytes(constant))
-            RV_ISA.print_snoop(snoop, f"ttinst {hex(constant)}")
+            if snoop:
+                inst_info = TensixInstructionDecoder.getInstructionInfo(constant)
+                info_msg = (
+                    f"issue {inst_info['name']} to BE unit {inst_info['ex_resource']}"
+                )
+                RV_ISA.print_snoop(snoop, f"ttinst {hex(constant)}", info_msg)
             return True
         else:
             return False
