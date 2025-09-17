@@ -10,7 +10,7 @@ from tt_sim.pe.tensix.backends.unpacker import UnPackerUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import DstRegister, SrcRegister
 from tt_sim.pe.tensix.util import TensixConfigurationConstants, TensixInstructionDecoder
-from tt_sim.util.bits import extract_bits, get_nth_bit, int_to_bin_list
+from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
@@ -23,7 +23,7 @@ class TensixBackend:
         self.scalar_unit = ScalarUnit(self, self.gpr)
         self.vector_unit = VectorUnit(self)
         self.unpacker_units = [UnPackerUnit(self, i) for i in range(2)]
-        self.packer_units = [PackerUnit(self) for i in range(4)]
+        self.packer_unit = PackerUnit(self)
         self.misc_unit = MiscellaneousUnit(self)
         self.config_unit = TensixBackendConfigurationUnit(self, self.gpr)
         self.dst = DstRegister()
@@ -37,6 +37,7 @@ class TensixBackend:
             "XMOV": self.mover_unit,
             "TDMA": self.misc_unit,
             "CFG": self.config_unit,
+            "PACK": self.packer_unit,
         }
         self.rcw = [RCW(self) for i in range(3)]
         self.adc = [ADCThread() for i in range(3)]
@@ -98,9 +99,9 @@ class TensixBackend:
             self.sync_unit,
             self.mover_unit,
             self.config_unit,
+            self.packer_unit,
         ]
         unit_clocks += self.unpacker_units
-        unit_clocks += self.packer_units
         return unit_clocks
 
     def getThreadConfigValue(self, issue_thread, key):
@@ -131,9 +132,8 @@ class TensixBackend:
         for unpacker in self.unpacker_units:
             if unpacker.hasInflightInstructionsFromThread(from_thread):
                 return True
-        for packer in self.packer_units:
-            if packer.hasInflightInstructionsFromThread(from_thread):
-                return True
+        if self.packer_unit.hasInflightInstructionsFromThread(from_thread):
+            return True
         return False
 
     def issueInstruction(self, instruction, from_thread):
@@ -145,21 +145,6 @@ class TensixBackend:
                 return self.unpacker_units[which_unpacker].issueInstruction(
                     instruction, from_thread
                 )
-            elif tgt_backend_unit == "PACK":
-                packers_int = extract_bits(instruction, 4, 8)
-                if packers_int == 0x0:
-                    return self.packer_units[0].issueInstruction(
-                        instruction, from_thread
-                    )
-                else:
-                    packers = int_to_bin_list(packers_int, 4)
-                    for idx, packer_bit in enumerate(packers):
-                        if packer_bit:
-                            # Working left to right, hence 3-idx as the first bit
-                            # represents the highest number packer
-                            return self.packer_units[3 - idx].issueInstruction(
-                                instruction, from_thread
-                            )
             else:
                 assert tgt_backend_unit in self.backend_units
                 return self.backend_units[tgt_backend_unit].issueInstruction(
