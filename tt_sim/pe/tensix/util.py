@@ -15,6 +15,18 @@ class TensixConfigurationConstants:
                 .open("r") as f
             ):
                 cls.config_constants = yaml.safe_load(f)
+                cls.ids = {}
+                for k in cls.config_constants.keys():
+                    addr32 = cls.get_addr32(k)
+                    cls.ids[addr32] = k
+
+    @classmethod
+    def get_name(cls, id):
+        cls.init()
+        if id in cls.ids:
+            return cls.ids[id]
+        else:
+            return "NONE"
 
     @classmethod
     def get_addr32(cls, key):
