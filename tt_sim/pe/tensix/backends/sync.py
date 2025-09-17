@@ -178,7 +178,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         if conv_to_uint32(value) & 1:
             # This is like a SEMGET instruction
             if self.semaphores[idx].value > 0:
-                self.semaphores[idx].value = -1
+                self.semaphores[idx].value -= 1
         else:
             # This is like a SEMPOST instruction
             if self.semaphores[idx].value < 15:
