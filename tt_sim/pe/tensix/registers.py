@@ -65,3 +65,27 @@ class SrcRegister:
     def __setitem__(self, key, value):
         x, y = key
         self.data[x, y] = value
+
+
+class LReg:
+    def __init__(self):
+        self.read_only = False
+        self.hard_wired_value = None
+        self.data = np.empty([32], dtype=np.uint32)
+
+    def __setitem__(self, key, value):
+        assert not self.read_only
+        self.data[key] = value
+
+    def __getitem__(self, key):
+        if self.hard_wired_value is not None:
+            return self.hard_wired_value
+        else:
+            return self.data[key]
+
+    def setReadOnly(self, hard_wired_value=None):
+        self.read_only = True
+        self.setHardwiredValue(hard_wired_value)
+
+    def setHardwiredValue(self, value):
+        self.hard_wired_value = value
