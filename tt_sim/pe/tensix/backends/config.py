@@ -1,6 +1,6 @@
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
-from tt_sim.pe.tensix.util import TensixInstructionDecoder
+from tt_sim.pe.tensix.util import TensixConfigurationConstants, TensixInstructionDecoder
 from tt_sim.util.bits import replace_bits
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
@@ -13,13 +13,21 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         "RMWCIB2": "handle_rmwcib2",
         "RMWCIB3": "handle_rmwcib3",
         "WRCFG": "handle_wrcfg",
+        "RDCFG": "handle_rdcfg",
     }
     CFG_STATE_SIZE = 47
     THD_STATE_SIZE = 57
 
     def __init__(self, backend, gprs):
-        self.config = [[0] * TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4] * 2
-        self.threadConfig = [[0] * TensixBackendConfigurationUnit.THD_STATE_SIZE] * 3
+        self.config = [
+            [0] * (TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4),
+            [0] * TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4,
+        ]
+        self.threadConfig = [
+            [0] * TensixBackendConfigurationUnit.THD_STATE_SIZE,
+            [0] * TensixBackendConfigurationUnit.THD_STATE_SIZE,
+            [0] * TensixBackendConfigurationUnit.THD_STATE_SIZE,
+        ]
         self.gprs = gprs
         self.prev_cycle_setc16_or_wrcfg = False
         super().__init__(
@@ -74,6 +82,34 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             else:
                 return False
 
+    def setConfig(self, stateID, cfgIndex, value):
+        if self.getDiagnosticSettings().reportConfigurationSet():
+            print(
+                f"Set config [{stateID}]{TensixConfigurationConstants.get_name(cfgIndex)} "
+                f"value={hex(value )}"
+            )
+        self.config[stateID][cfgIndex] = value
+
+    def setThreadConfig(self, thread_id, cfg_index, value):
+        if self.getDiagnosticSettings().reportConfigurationSet():
+            print(
+                f"Set threadConfig [{thread_id}]{TensixConfigurationConstants.get_name(cfg_index)} "
+                f"value={hex(value)}"
+            )
+        self.threadConfig[thread_id][cfg_index] = value
+
+    def handle_rdcfg(self, instruction_info, issue_thread, instr_args):
+        cfgIndex = instr_args["CfgReg"]
+        assert cfgIndex < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+
+        resultReg = instr_args["GprAddress"]
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        self.gprs.getRegisters(issue_thread)[resultReg] = self.config[stateID][cfgIndex]
+
     def handle_wrcfg(self, instruction_info, issue_thread, instr_args):
         cfgIndex = instr_args["CfgReg"]
         assert cfgIndex < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
@@ -86,13 +122,15 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
 
         if instr_args["wr128b"]:
             for i in range(4):
-                self.config[stateID][cfgIndex + i] = self.gprs.getRegisters(
-                    issue_thread
-                )[inputReg + i]
+                self.setConfig(
+                    stateID,
+                    cfgIndex + i,
+                    self.gprs.getRegisters(issue_thread)[inputReg + i],
+                )
         else:
-            self.config[stateID][cfgIndex] = self.gprs.getRegisters(issue_thread)[
-                inputReg
-            ]
+            self.setConfig(
+                stateID, cfgIndex, self.gprs.getRegisters(issue_thread)[inputReg]
+            )
 
     def handle_setc16(self, instruction_info, issue_thread, instr_args):
         cfg_index = instr_args["setc16_reg"]
@@ -100,7 +138,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
 
         assert cfg_index < TensixBackendConfigurationUnit.THD_STATE_SIZE
 
-        self.threadConfig[issue_thread][cfg_index] = new_value
+        self.setThreadConfig(issue_thread, cfg_index, new_value)
 
     def handle_rmwcib0(self, instruction_info, issue_thread, instr_args):
         self.handle_rmwcib(instruction_info, issue_thread, instr_args, 0)
@@ -129,7 +167,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         new_value = new_value & mask
         replaced_value = replace_bits(existing_val, new_value, index1 * 8, 8)
 
-        self.config[stateID][index4] = replaced_value
+        self.setConfig(stateID, index4, replaced_value)
 
     def get_threadConfig_entry(self, thread, entry_idx):
         return self.threadConfig[thread][entry_idx]
@@ -163,13 +201,15 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             each_config_size = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
             second_idx = 1 if idx > each_config_size else 0
             first_idx = int(idx - (each_config_size * second_idx))
-            self.config[second_idx][first_idx] = conv_to_uint32(value)
+            self.setConfig(second_idx, first_idx, conv_to_uint32(value))
         else:
             idx = idx - threadConfigStart
             second_idx = int(idx / TensixBackendConfigurationUnit.THD_STATE_SIZE)
-            self.threadConfig[second_idx][
-                idx - ((TensixBackendConfigurationUnit.THD_STATE_SIZE) * second_idx)
-            ] = conv_to_uint32(value)
+            self.setThreadConfig(
+                second_idx,
+                idx - ((TensixBackendConfigurationUnit.THD_STATE_SIZE) * second_idx),
+                conv_to_uint32(value),
+            )
 
     def getSize(self):
         return 0xFFFF
