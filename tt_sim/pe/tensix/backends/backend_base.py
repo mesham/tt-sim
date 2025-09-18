@@ -69,6 +69,9 @@ class TensixBackendUnit(Clockable, ABC):
         else:
             return False
 
+    def getDiagnosticSettings(self):
+        return self.backend.getDiagnosticSettings()
+
     def hasInflightInstructionsFromThread(self, from_thread):
         if len(self.next_instruction) > 0:
             for _, thread_id in self.next_instruction:

@@ -5,9 +5,11 @@ from tt_sim.pe.tensix.frontend import TensixFrontend
 
 
 class TensixCoProcessor(ProcessingElement):
-    def __init__(self):
-        self.backend = TensixBackend()
-        self.threads = [TensixFrontend(i, self.backend) for i in range(3)]
+    def __init__(self, diags_settings=None):
+        self.backend = TensixBackend(diags_settings)
+        self.threads = [
+            TensixFrontend(i, self.backend, diags_settings) for i in range(3)
+        ]
         self.backend.setFrontendThreads(self.threads)
 
     def getThread(self, idx):

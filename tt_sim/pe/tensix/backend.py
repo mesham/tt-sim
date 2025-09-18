@@ -9,13 +9,17 @@ from tt_sim.pe.tensix.backends.thcon import ScalarUnit
 from tt_sim.pe.tensix.backends.unpacker import UnPackerUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import DstRegister, SrcRegister
-from tt_sim.pe.tensix.util import TensixConfigurationConstants, TensixInstructionDecoder
+from tt_sim.pe.tensix.util import (
+    DiagnosticsSettings,
+    TensixConfigurationConstants,
+    TensixInstructionDecoder,
+)
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
 class TensixBackend:
-    def __init__(self):
+    def __init__(self, diags_settings=None):
         self.gpr = TensixGPR()
         self.mover_unit = MoverUnit(self)
         self.sync_unit = TensixSyncUnit(self)
@@ -42,6 +46,12 @@ class TensixBackend:
         self.rcw = [RCW(self) for i in range(3)]
         self.adc = [ADCThread() for i in range(3)]
         self.addressable_memory = None
+        self.diags_settings = (
+            diags_settings if diags_settings is not None else DiagnosticsSettings()
+        )
+
+    def getDiagnosticSettings(self):
+        return self.diags_settings
 
     def getRCW(self, thread_id):
         assert thread_id <= 2

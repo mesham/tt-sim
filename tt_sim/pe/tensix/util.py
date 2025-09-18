@@ -5,6 +5,37 @@ import yaml
 from tt_sim.util.bits import extract_bits, get_bits
 
 
+class DiagnosticsSettings:
+    def __init__(
+        self,
+        issued_instructions=False,
+        configurations_set=False,
+        unpacking=False,
+        packing=False,
+        fpu_calculations=False,
+    ):
+        self.issued_instructions = issued_instructions
+        self.configurations_set = configurations_set
+        self.unpacking = unpacking
+        self.packing = packing
+        self.fpu_calculations = fpu_calculations
+
+    def reportFPUCalculations(self):
+        return self.fpu_calculations
+
+    def reportUnpacking(self):
+        return self.unpacking
+
+    def reportPacking(self):
+        return self.packing
+
+    def reportIssuedInstructions(self):
+        return self.issued_instructions
+
+    def reportConfigurationSet(self):
+        return self.configurations_set
+
+
 class TensixConfigurationConstants:
     @classmethod
     def init(cls):
