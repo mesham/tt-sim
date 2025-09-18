@@ -113,6 +113,7 @@ class UnPackerUnit(TensixBackendUnit):
     def get_isUncompressed(
         self, configDescriptor, stateID, multiContextMode, whichContext
     ):
+        return True
         if multiContextMode:
             return self.getConfigValue(
                 stateID,
@@ -176,7 +177,6 @@ class UnPackerUnit(TensixBackendUnit):
                 )
                 & 0xFFFF
             )
-
         inAddr = (inAddr + 1 + get_bits(configDescriptor[3], 24, 31)) * 16
         return inAddr
 
@@ -195,6 +195,7 @@ class UnPackerUnit(TensixBackendUnit):
         ydim,
         zdim,
         wdim,
+        inAddr_RowStart,
     ):
         adc_xy = self.backend.getADC(whichADC).Unpacker[self.unpacker_id].Channel[0]
         adc_zw = self.backend.getADC(issue_thread).Unpacker[self.unpacker_id].Channel[0]
@@ -279,7 +280,15 @@ class UnPackerUnit(TensixBackendUnit):
 
         blobsPerXYPlane = get_bits(configDescriptor[3], 8, 11)
         if not isUncompressed:
-            raise NotImplementedError()
+            inAddr_RowStart = inAddr
+            if blobsPerXYPlane:
+                numBlobs = blobsPerXYPlane * zdim * wdim
+                inAddr += ceil((numBlobs + 1) * 2 / 16) * 16
+            else:
+                numRows = ydim * zdim * wdim
+                inAddr += ceil((numRows + 1) * 2 / 16) * 16
+        else:
+            inAddr_RowStart = 0
 
         inAddr_Exponents = 0
         if inDataFormat.isBFPFormat() and not self.getConfigValue(
@@ -306,6 +315,7 @@ class UnPackerUnit(TensixBackendUnit):
             ydim,
             zdim,
             wdim,
+            inAddr_RowStart,
         )
 
         inAddr_Datums = inAddr
@@ -314,7 +324,10 @@ class UnPackerUnit(TensixBackendUnit):
             inAddr_Datums += firstDatum * datumSizeBytes
             inAddr_Deltas = None
         else:
-            raise NotImplementedError()
+            inAddr_Datums += int(firstDatum / 32) * int(32 * datumSizeBytes + 32 * 0.5)
+            inAddr_Deltas = inAddr_Datums + 32 * datumSizeBytes
+            inAddr_Datums += (firstDatum % 32) * datumSizeBytes
+            inAddr_Deltas += int((firstDatum % 32) * 0.5)
 
         inAddr_Exponents = self.wrapAddr(stateID, inAddr_Exponents)
         inAddr_Datums = self.wrapAddr(stateID, inAddr_Datums)
@@ -505,14 +518,24 @@ class UnPackerUnit(TensixBackendUnit):
         transpose,
         allDatumsAreZero,
     ):
+        if self.unpacker_id == 1:
+            inAddr_Datums += 8
+        else:
+            inAddr_Datums += 4
+
+        if self.getDiagnosticSettings().reportUnpacking():
+            print(
+                f"Starting unpacker {self.unpacker_id} read at {hex(inAddr_Datums)} for "
+                f"{inputNumDatums} datums of bytes size {datumSizeBytes} storing to "
+                f"{outAddr} starting at row {int(outAddr / 16)}"
+            )
         for i in range(inputNumDatums):  # don't handle DecompressNumDatums for now
-            # print(f"Read L1 at {hex(int(inAddr_Datums))} of size {datumSizeBytes}")
             val = conv_to_uint32(
                 self.backend.addressable_memory.read(inAddr_Datums, datumSizeBytes)
             )
+
             if allDatumsAreZero:
                 val = 0
-            # print(f"{i} = {val}")
             inAddr_Datums += datumSizeBytes
             if (i + 1) % 16 == 0:
                 inAddr_Datums -= datumSizeBytes * 16
@@ -524,24 +547,16 @@ class UnPackerUnit(TensixBackendUnit):
                     continue
                 row = int(outAddr / 16)
                 col = outAddr & 15
-                # print(f"{outAddr} to {row} {col}")
 
                 if self.unpacker_id == 1:
                     # always srcB
-                    # print(f"Write to srcB at {row},{col} = {val}")
                     row = (row + self.srcRow[issue_thread]) & 0x3F
                     self.backend.getSrcB(self.srcBank)[row, col] = val
                 else:
                     # Always srcA
                     if not unpackToDst:
-                        row = int((outAddr + 4) / 16)
-                        col = outAddr + 4 & 15
-                        # Write to SrcA
-                        # print(outAddr)
-                        # if col > 11 or col < colShift:
-                        #  outAddr+=1
-                        #  continue
-                        # col += 4
+                        row = int(outAddr / 16)
+                        col = outAddr & 15
                         col -= colShift
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
@@ -555,23 +570,19 @@ class UnPackerUnit(TensixBackendUnit):
                                 rowLowBits = col
                                 col = row & 0xF
                                 row = (row & ~0xF) | rowLowBits
-                        # print(f"Write to srcA at {row},{col} = {val}")
                         self.backend.getSrcA(self.srcBank)[row, col] = val
                     else:
-                        # Write to Dst
-                        # row -= 4
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
                         ):
                             row &= 15
                         else:
                             row &= 0x3FF
-                            if DATA_FORMAT_TO_BITS(outDataFormat) == 32:
-                                self.backend.getDest().setDst32b(row, col, val)
+                            if DATA_FORMAT_TO_BITS[outDataFormat] == 32:
+                                self.backend.getDst().setDst32b(row, col, val)
                             else:
-                                self.backend.getDest().setDst16b(row, col, val)
+                                self.backend.getDst().setDst16b(row, col, val)
                 outAddr += 1
-                # print(outAddr)
 
     def increment_counter(
         self, stateID, issue_thread, whichContext, multiContextMode, useContextCounter
@@ -636,6 +647,9 @@ class UnPackerUnit(TensixBackendUnit):
                 self.blocked = True
                 self.repeat_instruction = (instruction_info, issue_thread)
                 return
+
+        self.blocked = False
+        self.repeat_instruction = None
 
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
