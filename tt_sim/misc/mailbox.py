@@ -64,7 +64,7 @@ class Mailbox(MemMapable):
 
         if isRead:
             if len(self.mailboxes[mb_idx]) > 0:
-                return self.mailboxes[mb_idx].pop()
+                return self.mailboxes[mb_idx].pop(0)
             else:
                 return MemoryStall
         else:
