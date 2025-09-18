@@ -8,6 +8,9 @@ class DstRegister:
         buf = bytearray(32768)
         self.dst16 = np.ndarray([1024, 16], dtype=np.uint16, buffer=buf)
         self.dst32 = np.ndarray([512, 16], dtype=np.uint32, buffer=buf)
+        for i in range(1024):
+            for j in range(16):
+                self.dst16[i, j] = 0
         self.undefined_rows = []
 
     def getDst16b(self, idx0, idx1):
@@ -34,10 +37,13 @@ class DstRegister:
 
     def setUndefinedRow(self, row, isDst32=False):
         if isDst32:
-            self.undefined_rows.append(row * 2)
-            self.undefined_rows.append((row * 2) + 1)
+            if row * 2 not in self.undefined_rows:
+                self.undefined_rows.append(row * 2)
+            if (row * 2) + 1 not in self.undefined_rows:
+                self.undefined_rows.append((row * 2) + 1)
         else:
-            self.undefined_rows.append(row)
+            if row not in self.undefined_rows:
+                self.undefined_rows.append(row)
 
 
 class SrcRegister:
