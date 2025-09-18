@@ -87,7 +87,6 @@ class MatrixUnit(TensixBackendUnit):
                 srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
             else:
                 srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
-
             if srcAFmt in [
                 DataFormat.FP32,
                 DataFormat.BF16,
@@ -126,6 +125,11 @@ class MatrixUnit(TensixBackendUnit):
         fidelityPhase += self.getThreadConfigValue(issue_thread, "FIDELITY_BASE_Phase")
         fidelityPhase &= 3
 
+        if self.getDiagnosticSettings().reportFPUCalculations():
+            print(
+                f"Perform FPU compute, dst starts at {dstRow}, srcA starts at {srcARow} and srcB at {srcBRow}"
+            )
+
         # Perform the element-wise computation
         for i in range(8):
             for j in range(16):
@@ -135,13 +139,11 @@ class MatrixUnit(TensixBackendUnit):
                     0 if broadcastSrcBCol0 else j,
                 ]
                 result = srcAVal + srcBVal
-                if srcAStyle == DataFormat.INT8:
+                if 1 == 1 or srcAFmt == DataFormat.INT8:
                     if addDst:
                         result += self.backend.getDst().getDst32b(dstRow + i, j)
-                    if dstRow + i >= 512:
-                        pass  # print(f"Warning: ignoring dstRow + i as value is {dstRow + i}")
-                    else:
-                        self.backend.getDst().setDst32b(dstRow + i, j, result)
+
+                    self.backend.getDst().setDst32b(int(dstRow / 2) + i, j, result)
                 else:
                     # These divisions are rarely desirable, so software
                     # is encouraged to ensure that FidelityPhase == 0
@@ -154,17 +156,17 @@ class MatrixUnit(TensixBackendUnit):
                         # Dst is FP32, regardless of SrcAStyle
                         if addDst:
                             result += self.backend.getDst().getDst32b(dstRow + i, j)
-                            self.backend.getDst().setDst32b(dstRow + i, j, result)
+                        self.backend.getDst().setDst32b(dstRow + i, j, result)
                     elif srcAStyle == DataFormat.FP16:
                         # Dst is FP16, just like SrcAStyle
                         if addDst:
                             result += self.backend.getDst().getDst16b(dstRow + i, j)
-                            self.backend.getDst().setDst16b(dstRow + i, j, result)
+                        self.backend.getDst().setDst16b(dstRow + i, j, result)
                     else:
                         # Dst is BF16 (SrcAStyle is either BF16 or TF32)
                         if addDst:
                             result += self.backend.getDst().getDst16b(dstRow + i, j)
-                            self.backend.getDst().setDst16b(dstRow + i, j, result)
+                        self.backend.getDst().setDst16b(dstRow + i, j, result)
 
         # Possibly flip source banks
         if flipsrca:
