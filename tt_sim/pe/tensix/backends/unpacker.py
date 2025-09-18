@@ -461,7 +461,7 @@ class UnPackerUnit(TensixBackendUnit):
             assert not outAddr & 1
             outAddr >>= 1
 
-        if multiContextMode and self.unpacker_id != 0:
+        if multiContextMode and self.unpacker_id == 0:
             ctxOutAddr = self.getConfigValue(
                 stateID,
                 "THCON_SEC"
@@ -523,40 +523,35 @@ class UnPackerUnit(TensixBackendUnit):
         else:
             inAddr_Datums += 4
 
+        start_row = int(outAddr / 16)
+        if self.unpacker_id == 0:
+            assert start_row >= 4
+            start_row -= 4
+
         if self.getDiagnosticSettings().reportUnpacking():
             print(
                 f"Starting unpacker {self.unpacker_id} read at {hex(inAddr_Datums)} for "
-                f"{inputNumDatums} datums of bytes size {datumSizeBytes} storing to "
-                f"{outAddr} starting at row {int(outAddr / 16)}"
-            )
-        for i in range(inputNumDatums):  # don't handle DecompressNumDatums for now
-            val = conv_to_uint32(
-                self.backend.addressable_memory.read(inAddr_Datums, datumSizeBytes)
+                f"{inputNumDatums} datums of bytes size {datumSizeBytes} "
+                f"starting at row {start_row}"
             )
 
-            if allDatumsAreZero:
-                val = 0
-            inAddr_Datums += datumSizeBytes
-            if (i + 1) % 16 == 0:
-                inAddr_Datums -= datumSizeBytes * 16
-                inAddr_Datums += rowStride
-                inAddr_Datums = self.wrapAddr(stateID, inAddr_Datums)
+        for row in range(int(inputNumDatums / 16)):
+            for col in range(16):
+                val = conv_to_uint32(
+                    self.backend.addressable_memory.read(inAddr_Datums, datumSizeBytes)
+                )
 
-            for k in range(upsampleZeroes + 1):
-                if upsampleInterleave and k == 0:
-                    continue
-                row = int(outAddr / 16)
-                col = outAddr & 15
+                if allDatumsAreZero:
+                    val = 0
+                inAddr_Datums += datumSizeBytes
 
                 if self.unpacker_id == 1:
                     # always srcB
-                    row = (row + self.srcRow[issue_thread]) & 0x3F
+                    row = (row + self.srcRow[issue_thread] + start_row) & 0x3F
                     self.backend.getSrcB(self.srcBank)[row, col] = val
                 else:
                     # Always srcA
                     if not unpackToDst:
-                        row = int(outAddr / 16)
-                        col = outAddr & 15
                         col -= colShift
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
@@ -564,7 +559,7 @@ class UnPackerUnit(TensixBackendUnit):
                             assert row < 64
                         else:
                             assert row < 16
-                            row += self.srcRow[issue_thread]
+                            row += self.srcRow[issue_thread] + start_row
 
                             if transpose:
                                 rowLowBits = col
@@ -578,10 +573,12 @@ class UnPackerUnit(TensixBackendUnit):
                             row &= 15
                         else:
                             row &= 0x3FF
-                            if DATA_FORMAT_TO_BITS[outDataFormat] == 32:
-                                self.backend.getDst().setDst32b(row, col, val)
-                            else:
-                                self.backend.getDst().setDst16b(row, col, val)
+                        if DATA_FORMAT_TO_BITS[outDataFormat] == 32:
+                            self.backend.getDst().setDst32b(
+                                row + int(start_row / 2), col, val
+                            )
+                        else:
+                            self.backend.getDst().setDst16b(row + start_row, col, val)
                 outAddr += 1
 
     def increment_counter(

@@ -145,12 +145,12 @@ class PackerUnit(TensixBackendUnit):
             else:
                 addr = (int(addr / bytesPerDatum) & ~ADC_X_Mask) + (adc.X & ADC_X_Mask)
                 # comment out
-                # addr += (
-                #    self.getConfigValue(
-                #        stateID, "DEST_TARGET_REG_CFG_PACK_SEC" + str(i) + "_Offset"
-                #    )
-                #    << 4
-                # )
+                addr += (
+                    self.getConfigValue(
+                        stateID, "DEST_TARGET_REG_CFG_PACK_SEC" + str(i) + "_Offset"
+                    )
+                    << 4
+                )
 
                 self.packerI[i].inputSource = PackerUnit.InputSource.DST
                 self.packerI[i].inputSourceAddr = (
