@@ -344,6 +344,8 @@ class PackerUnit(TensixBackendUnit):
             row_start = int(self.packerI[i].inputSourceAddr / (16))
             rows = int(self.packerI[i].inputNumDatums / 16)
 
+            # Are offset by this amount (packer does the same, but +1 is added
+            # before the << 4
             addr += 0x10
 
             if self.getDiagnosticSettings().reportPacking():
