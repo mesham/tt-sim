@@ -1,4 +1,4 @@
-from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
+from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
 from tt_sim.util.bits import get_bits, get_nth_bit
 
@@ -7,7 +7,10 @@ class VectorUnit(TensixBackendUnit):
     OPCODE_TO_HANDLER = {
         "SFPENCC": "handle_sfpencc",
         "SFPLOADI": "handle_sfploadi",
+        "SFPLOAD": "handle_sfpload",
         "SFPCONFIG": "handle_sfpconfig",
+        "SFPIADD": "handle_sfpiadd",
+        "SFPSTORE": "handle_sfpstore",
     }
 
     MOD1_IMM16_IS_VALUE = 1
@@ -28,6 +31,30 @@ class VectorUnit(TensixBackendUnit):
     SFPENCC_MOD1_RI = 8  # Set LaneFlags from SFPENCC_IMM2_R
     SFPENCC_IMM2_E = 1  # Immediate bit for UseLaneFlagsForLaneEnable
     SFPENCC_IMM2_R = 2  # Immediate bit for LaneFlags
+
+    MOD0_FMT_SRCB = 0
+    MOD0_FMT_FP16 = 1
+    MOD0_FMT_BF16 = 2
+    MOD0_FMT_FP32 = 3
+    MOD0_FMT_INT32 = 4
+    MOD0_FMT_INT8 = 5
+    MOD0_FMT_UINT16 = 6
+    MOD0_FMT_HI16 = 7
+    MOD0_FMT_INT16 = 8
+    MOD0_FMT_LO16 = 9
+    MOD0_FMT_INT32_ALL = 10
+    MOD0_FMT_ZERO = 11
+    MOD0_FMT_INT32_SM = 12
+    MOD0_FMT_INT8_COMP = 13
+    MOD0_FMT_LO16_ONLY = 14
+    MOD0_FMT_HI16_ONLY = 15
+
+    SFPIADD_MOD1_ARG_LREG_DST = 0
+    SFPIADD_MOD1_ARG_IMM = 1
+    SFPIADD_MOD1_ARG_2SCOMP_LREG_DST = 2
+    SFPIADD_MOD1_CC_LT0 = 0
+    SFPIADD_MOD1_CC_NONE = 4
+    SFPIADD_MOD1_CC_GTE0 = 8
 
     class LoadMacroConfig:
         def __init__(self):
@@ -92,6 +119,138 @@ class VectorUnit(TensixBackendUnit):
                     self.laneFlags[lane] = (imm2 & VectorUnit.SFPENCC_IMM2_R) != 0
                 else:
                     self.laneFlags[lane] = True
+
+    def handle_sfpiadd(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        imm12 = instr_args["imm12_math"] & 0xFFF
+
+        vb = vd
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.laneEnabled[lane]:
+                    if mod1 & VectorUnit.SFPIADD_MOD1_ARG_IMM:
+                        self.lregs[vd][lane] = self.lregs[vc][lane] + imm12
+                    elif mod1 & VectorUnit.SFPIADD_MOD1_ARG_2SCOMP_LREG_DST:
+                        self.lregs[vd][lane] = (
+                            self.lregs[vc][lane] - self.lregs[vb][lane]
+                        )
+                    else:
+                        self.lregs[vd][lane] = (
+                            self.lregs[vc][lane] + self.lregs[vb][lane]
+                        )
+
+                    if vd < 8:
+                        if mod1 & VectorUnit.SFPIADD_MOD1_CC_NONE:
+                            # Leave LaneFlags as-is
+                            pass
+                        else:
+                            self.laneFlags[lane] = self.lregs[vd][lane] < 0
+
+                        if mod1 & VectorUnit.SFPIADD_MOD1_CC_GTE0:
+                            self.laneFlags[lane] = not self.laneFlags[lane]
+
+    def get_dst_address(self, issue_thread, mod0, imm10):
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        if mod0 == VectorUnit.MOD0_FMT_SRCB:
+            if self.getConfigValue(stateID, "ALU_ACC_CTRL_SFPU_Fp32_enabled"):
+                # Functionally identical to MOD0_FMT_INT32
+                mod0 = VectorUnit.MOD0_FMT_FP32
+            else:
+                srcBFmt = (
+                    self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcB_val")
+                    if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcB_override")
+                    else self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG1_SrcB")
+                )
+                if srcBFmt in [
+                    DataFormat.FP32,
+                    DataFormat.TF32,
+                    DataFormat.BF16,
+                    DataFormat.BF16,
+                    DataFormat.BFP4,
+                    DataFormat.BFP2,
+                    DataFormat.INT32,
+                    DataFormat.INT16,
+                ]:
+                    mod0 = VectorUnit.MOD0_FMT_BF16
+                else:
+                    mod0 = VectorUnit.MOD0_FMT_FP16
+
+        # Apply various Dst address adjustments.
+        # The top 8 bits of Addr end up selecting an aligned group of four rows of Dst, the
+        # next bit selects between even and odd columns, and the low bit goes unused.
+
+        addr = imm10 + self.backend.getThreadConfigValue(
+            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+        )
+        if mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
+            addr += (
+                self.backend.getRCW(issue_thread).Dst
+                + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
+                & 3
+            )
+        else:
+            addr += self.backend.getRCW(issue_thread).Dst + self.getConfigValue(
+                stateID, "DEST_REGW_BASE_Base"
+            )
+
+        return addr
+
+    def handle_sfpstore(self, instruction_info, issue_thread, instr_args):
+        imm10 = instr_args["dest_reg_addr"]
+        addrmod = instr_args["sfpu_addr_mode"]
+        mod0 = instr_args["instr_mod0"]
+        vd = instr_args["lreg_ind"]
+
+        addr = self.get_dst_address(issue_thread, mod0, imm10)
+
+        for lane in range(32):
+            # if self.laneConfig[lane].BLOCK_SFPU_RD_FROM_DEST:
+            #  continue
+            if vd < 12:  # or LaneConfig.DISABLE_BACKDOOR_LOAD
+                if self.laneEnabled[lane] or mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
+                    row = (addr & ~3) + int(lane / 8)
+                    column = (lane & 7) * 2
+                    if addr & 2:  # or self.laneConfig[lane & 7].DEST_RD_COL_EXCHANGE
+                        column += 1
+
+                    datum = self.lregs[vd][lane]
+                    self.getDst().setDst16b(row, column, datum)
+
+        self.backend.getRCW(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
+
+    def handle_sfpload(self, instruction_info, issue_thread, instr_args):
+        imm10 = instr_args["dest_reg_addr"]
+        addrmod = instr_args["sfpu_addr_mode"]
+        mod0 = instr_args["instr_mod0"]
+        vd = instr_args["lreg_ind"]
+
+        addr = self.get_dst_address(issue_thread, mod0, imm10)
+
+        if vd < 8:
+            for lane in range(32):
+                # if self.laneConfig[lane].BLOCK_SFPU_RD_FROM_DEST:
+                #  continue
+                if self.laneEnabled[lane] or mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
+                    row = (addr & ~3) + int(lane / 8)
+                    column = (lane & 7) * 2
+                    if addr & 2:  # or self.laneConfig[lane & 7].DEST_RD_COL_EXCHANGE
+                        column += 1
+
+                    datum = self.getDst().getDst16b(row, column)
+
+                    self.lregs[vd][lane] = datum
+                    if (
+                        vd < 4
+                    ):  # and self.laneConfig[lane].ENABLE_DEST_INDEX and self.laneConfig[lane].CAPTURE_DEFAULT_DEST_INDEX
+                        self.lregs[vd + 4][lane] = (row << 4) | column
+
+        self.backend.getRCW(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
 
     def handle_sfploadi(self, instruction_info, issue_thread, instr_args):
         mod0 = instr_args["instr_mod0"]
