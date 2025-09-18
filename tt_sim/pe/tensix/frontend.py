@@ -3,13 +3,13 @@ from abc import ABC
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.registers import SrcRegister
-from tt_sim.pe.tensix.util import TensixInstructionDecoder
+from tt_sim.pe.tensix.util import DiagnosticsSettings, TensixInstructionDecoder
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
 
 class TensixFrontend(MemMapable):
-    def __init__(self, thread_id, backend):
+    def __init__(self, thread_id, backend, diags_settings=None):
         self.thread_id = thread_id
         self.backend = backend
         self.mop_instruction_fifo = []
@@ -18,9 +18,15 @@ class TensixFrontend(MemMapable):
         self.mop_expander = TensixMOPExpander(self)
         self.replay_expander = TensixReplayExpander(self)
         self.wait_gate = WaitGate(self, backend)
+        self.diags_settings = (
+            diags_settings if diags_settings is not None else DiagnosticsSettings()
+        )
 
     def getClocks(self):
         return [self.mop_expander, self.replay_expander, self.wait_gate]
+
+    def getDiagnosticSettings(self):
+        return self.diags_settings
 
     def hasInflightInstructions(self):
         return (
@@ -90,6 +96,9 @@ class TensixFrontend(MemMapable):
 class TensixFrontendUnit(Clockable, ABC):
     def __init__(self, frontend):
         self.frontend = frontend
+
+    def getDiagnosticSettings(self):
+        return self.frontend.getDiagnosticSettings()
 
 
 class WaitGate(TensixFrontendUnit):
@@ -201,7 +210,7 @@ class WaitGate(TensixFrontendUnit):
                 semaphore = self.backend.getSyncUnit().getSemaphore(sem)
                 if (
                     self.latchedWaitInstruction.getConditionCheck(0)
-                    and semaphore.value != 0
+                    and semaphore.value == 0
                 ):
                     return False
                 if (
@@ -258,10 +267,11 @@ class WaitGate(TensixFrontendUnit):
                     if instruction_accepted:
                         # If the instruction was accepted then remove it,
                         # otherwise retry next cycle
-                        print(
-                            f"Issued {instruction_info['name']} to {instruction_info['ex_resource']} "
-                            f"from thread {self.frontend.thread_id}"
-                        )
+                        if self.getDiagnosticSettings().reportIssuedInstructions():
+                            print(
+                                f"Issued {instruction_info['name']} to {instruction_info['ex_resource']} "
+                                f"from thread {self.frontend.thread_id}"
+                            )
                         self.frontend.pop_wait_gate_instruction()
 
     def checkIfFPUInstructionShouldStall(self, opcode):
@@ -406,6 +416,7 @@ class TensixMOPExpander(TensixFrontendUnit, MemMapable):
         loop1last = self.mop_cfg[
             8
         ]  # overrides loopop or loopop1 on last iteration of inner loop, if not last iteration of outer loop
+
         if self.isnop(loopop1):
             loopopflip = 0
         else:
