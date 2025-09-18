@@ -120,7 +120,7 @@ class NUI(MemMapable, Clockable):
                 print(
                     f"[NoC {self.nui.id_pair}]: Issue read request id {read_req.request_id} to NUI "
                     f"{(target_tile_x, target_tile_y)}, reading at {hex(read_req.tgt_address)} of size "
-                    f"{hex(read_req.data_length_bytes)}"
+                    f"{hex(read_req.data_length_bytes)} and store in {hex(self.ret_addr_low)}"
                 )
 
         def handle_inline_write_transfer(
@@ -177,6 +177,13 @@ class NUI(MemMapable, Clockable):
                 noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
             )
             self.nui.noc_directory[(ret_tile_x, ret_tile_y)].transmit(write_req)
+
+            if self.nui.snoop:
+                print(
+                    f"[NoC {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
+                    f"{(ret_tile_x, ret_tile_y)}, writing from {hex(self.target_addr_low)} "
+                    f" to {hex(write_req.tgt_address)} of size {hex(write_req.data_length_bytes)}"
+                )
 
         def handle_none_inline_write(
             self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
@@ -255,8 +262,8 @@ class NUI(MemMapable, Clockable):
             if self.nui.snoop:
                 print(
                     f"[NoC {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
-                    f"{(ret_tile_x, ret_tile_y)}, writing at {hex(write_req.tgt_address)} of size "
-                    f"{hex(write_req.data_length_bytes)}"
+                    f"{(ret_tile_x, ret_tile_y)}, writing from {hex(self.target_addr_low)} to "
+                    f"{hex(write_req.tgt_address)} of size {hex(write_req.data_length_bytes)}"
                 )
 
         def handle_write_transfer(self):
