@@ -9,6 +9,7 @@ class MatrixUnit(TensixBackendUnit):
         "SETRWC": "handle_setrwc",
         "ELWADD": "handle_elwadd",
         "ZEROSRC": "handle_zerosrc",
+        "INCRWC": "handle_incrwc",
     }
 
     def __init__(self, backend):
@@ -21,6 +22,35 @@ class MatrixUnit(TensixBackendUnit):
 
     def getSrcB(self):
         return self.backend.getSrcB(self.srcBBank)
+
+    def handle_incrwc(self, instruction_info, issue_thread, instr_args):
+        srcAInc = instr_args["rwc_a"]
+        srcBInc = instr_args["rwc_b"]
+        dstInc = instr_args["rwc_d"]
+        rwc_CR = instr_args["rwc_cr"]
+        srcACr = get_nth_bit(rwc_CR, 0)
+        srcBCr = get_nth_bit(rwc_CR, 1)
+        dstCr = get_nth_bit(rwc_CR, 2)
+
+        rwc = self.backend.getRCW(issue_thread)
+
+        if srcACr:
+            rwc.SrcA_Cr += srcAInc
+            rwc.SrcA = rwc.SrcA_Cr
+        else:
+            rwc.SrcA += srcAInc
+
+        if srcBCr:
+            rwc.SrcB_Cr += srcBInc
+            rwc.SrcB = rwc.SrcB_Cr
+        else:
+            rwc.SrcB += srcBInc
+
+        if dstCr:
+            rwc.Dst_Cr += dstInc
+            rwc.Dst = rwc.Dst_Cr
+        else:
+            rwc.Dst += dstInc
 
     def handle_zerosrc(self, instruction_info, issue_thread, instr_args):
         clearSrcABank = [False] * 2
