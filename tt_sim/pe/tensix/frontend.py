@@ -191,9 +191,16 @@ class WaitGate(TensixFrontendUnit):
     def __init__(self, frontend, backend):
         super().__init__(frontend)
         self.mutex_stall = False
+        self.backend_enforced_stall = False
         self.latchedWaitInstruction = None
         self.latch_wait = False
         self.backend = backend
+
+    def setBackendEnforcedStall(self):
+        self.backend_enforced_stall = True
+
+    def clearBackendEnforcedStall(self):
+        self.backend_enforced_stall = False
 
     def setLatchedWaitInstruction(
         self, opcode, condition_mask, block_mask, semaphore_mask=None
@@ -226,7 +233,7 @@ class WaitGate(TensixFrontendUnit):
                     return True
 
     def clock_tick(self, cycle_num):
-        if not self.mutex_stall:
+        if not self.mutex_stall and not self.backend_enforced_stall:
             instruction = self.frontend.inspect_wait_gate_instruction()
             if not self.latch_wait and self.latchedWaitInstruction is not None:
                 if instruction is not None:

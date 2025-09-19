@@ -8,6 +8,7 @@ class ScalarUnit(TensixBackendUnit):
         "SETDMAREG": "handle_setdmareg",
         "REG2FLOP": "handle_reg2flop",
         "STOREREG": "handle_storereg",
+        "FLUSHDMA": "handle_flushdma",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
@@ -15,7 +16,61 @@ class ScalarUnit(TensixBackendUnit):
 
     def __init__(self, backend, gprs):
         self.gprs = gprs
+        self.stalled = False
+        self.stalled_condition = 0
+        self.stalled_thread = 0
         super().__init__(backend, ScalarUnit.OPCODE_TO_HANDLER, "Scalar")
+
+    def issueInstruction(self, instruction, from_thread):
+        if self.stalled:
+            return False
+
+        return super().issueInstruction(instruction, from_thread)
+
+    def clock_tick(self, cycle_num):
+        if self.stalled:
+            if not self.checkStalledCondition(self.stalled_condition):
+                self.stalled = False
+                self.backend.getFrontendThread(
+                    self.stalled_thread
+                ).wait_gate.clearBackendEnforcedStall()
+                self.stalled_condition = self.stalled_thread = 0
+        else:
+            super().clock_tick(cycle_num)
+
+    def checkStalledCondition(self, stalled_condition):
+        if get_nth_bit(self.stalled_condition, 1):
+            if self.backend.unpacker_units[0].hasInflightInstructionsFromThread(
+                self.stalled_thread
+            ):
+                return True
+        if get_nth_bit(self.stalled_condition, 2):
+            if self.backend.unpacker_units[1].hasInflightInstructionsFromThread(
+                self.stalled_thread
+            ):
+                return True
+
+        if get_nth_bit(self.stalled_condition, 3):
+            if self.backend.packer_unit.hasInflightInstructionsFromThread(
+                self.stalled_thread
+            ):
+                return True
+
+        return False
+
+    def handle_flushdma(self, instruction_info, issue_thread, instr_args):
+        conditionMask = instr_args["FlushSpec"]
+
+        if conditionMask == 0:
+            conditionMask = 0xF
+
+        if self.checkStalledCondition(conditionMask):
+            self.stalled_thread = issue_thread
+            self.stalled_condition = conditionMask
+            self.stalled = True
+            self.backend.getFrontendThread(
+                issue_thread
+            ).wait_gate.setBackendEnforcedStall()
 
     def handle_reg2flop(self, instruction_info, issue_thread, instr_args):
         inputReg = instr_args["RegIndex"]
