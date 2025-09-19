@@ -43,7 +43,7 @@ class TensixBackend:
             "CFG": self.config_unit,
             "PACK": self.packer_unit,
         }
-        self.rcw = [RCW(self) for i in range(3)]
+        self.rwc = [RWC(self) for i in range(3)]
         self.adc = [ADCThread() for i in range(3)]
         self.addressable_memory = None
         self.diags_settings = (
@@ -53,9 +53,9 @@ class TensixBackend:
     def getDiagnosticSettings(self):
         return self.diags_settings
 
-    def getRCW(self, thread_id):
+    def getRWC(self, thread_id):
         assert thread_id <= 2
-        return self.rcw[thread_id]
+        return self.rwc[thread_id]
 
     def getADC(self, thread_id):
         assert thread_id <= 2
@@ -189,7 +189,7 @@ class ADCThread:
         self.Packers = ADCThread.ADCUnit()
 
 
-class RCW:
+class RWC:
     def __init__(self, backend):
         self.Dst = 0
         self.Dst_Cr = 0

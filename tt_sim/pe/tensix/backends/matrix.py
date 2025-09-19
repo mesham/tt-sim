@@ -32,7 +32,7 @@ class MatrixUnit(TensixBackendUnit):
         srcBCr = get_nth_bit(rwc_CR, 1)
         dstCr = get_nth_bit(rwc_CR, 2)
 
-        rwc = self.backend.getRCW(issue_thread)
+        rwc = self.backend.getRWC(issue_thread)
 
         if srcACr:
             rwc.SrcA_Cr += srcAInc
@@ -94,7 +94,7 @@ class MatrixUnit(TensixBackendUnit):
             issue_thread, "CFG_STATE_ID_StateID"
         )
 
-        rwc = self.getRCW(issue_thread)
+        rwc = self.getRWC(issue_thread)
         broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
         broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
         dstRow = instr_args["dst"]
@@ -216,7 +216,7 @@ class MatrixUnit(TensixBackendUnit):
         rwc.applyAddrMod(issue_thread, addr_mod)
 
     def handle_setrwc(self, instruction_info, issue_thread, instr_args):
-        rcw = self.getRCW(issue_thread)
+        rwc = self.getRWC(issue_thread)
 
         srca = get_nth_bit(instr_args["BitMask"], 0)
         srcb = get_nth_bit(instr_args["BitMask"], 1)
@@ -237,26 +237,26 @@ class MatrixUnit(TensixBackendUnit):
 
         if srca:
             if srca_cr:
-                SrcAVal += rcw.SrcA_Cr
-            rcw.SrcA = SrcAVal
-            rcw.SrcA_Cr = SrcAVal
+                SrcAVal += rwc.SrcA_Cr
+            rwc.SrcA = SrcAVal
+            rwc.SrcA_Cr = SrcAVal
 
         if srcb:
             if srcb_cr:
-                SrcBVal += rcw.SrcB_Cr
-            rcw.SrcB = SrcBVal
-            rcw.SrcB_Cr = SrcBVal
+                SrcBVal += rwc.SrcB_Cr
+            rwc.SrcB = SrcBVal
+            rwc.SrcB_Cr = SrcBVal
 
         if dst or dst_c_to_cr:
             if dst_c_to_cr:
-                DstVal += rcw.Dst
+                DstVal += rwc.Dst
             elif dst_cr:
-                DstVal += rcw.Dst_Cr
-            rcw.Dst = DstVal
-            rcw.Dst_Cr = DstVal
+                DstVal += rwc.Dst_Cr
+            rwc.Dst = DstVal
+            rwc.Dst_Cr = DstVal
 
         if fidelity:
-            rcw.FidelityPhase = 0
+            rwc.FidelityPhase = 0
 
         if flipsrca:
             if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
@@ -288,7 +288,7 @@ class MatrixUnit(TensixBackendUnit):
             row += self.getThreadConfigValue(
                 issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
             )
-            row += self.getRCW(issue_thread).Dst + self.getConfigValue(
+            row += self.getRWC(issue_thread).Dst + self.getConfigValue(
                 state_id, "DEST_REGW_BASE_Base"
             )
 
@@ -328,4 +328,4 @@ class MatrixUnit(TensixBackendUnit):
 
         if mode == ZEROACC_MODE_ONE_ROW or mode == ZEROACC_MODE_16_ROWS:
             addr_mod = extract_bits(instr_args["AddrMode"], 2, 0)
-            self.getRCW(issue_thread).applyAddrMod(issue_thread, addr_mod)
+            self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)

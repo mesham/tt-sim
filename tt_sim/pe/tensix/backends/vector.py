@@ -541,12 +541,12 @@ class VectorUnit(TensixBackendUnit):
         )
         if mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
             addr += (
-                self.backend.getRCW(issue_thread).Dst
+                self.backend.getRWC(issue_thread).Dst
                 + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
                 & 3
             )
         else:
-            addr += self.backend.getRCW(issue_thread).Dst + self.getConfigValue(
+            addr += self.backend.getRWC(issue_thread).Dst + self.getConfigValue(
                 stateID, "DEST_REGW_BASE_Base"
             )
 
@@ -584,7 +584,7 @@ class VectorUnit(TensixBackendUnit):
                         case _:
                             self.getDst().setDst16b(row, column, datum)
 
-        self.backend.getRCW(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
+        self.backend.getRWC(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
 
     def handle_sfpload(self, instruction_info, issue_thread, instr_args):
         imm10 = instr_args["dest_reg_addr"]
@@ -627,7 +627,7 @@ class VectorUnit(TensixBackendUnit):
                     ):
                         self.lregs[vd + 4][lane] = (row << 4) | column
 
-        self.backend.getRCW(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
+        self.backend.getRWC(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
 
     def handle_sfploadi(self, instruction_info, issue_thread, instr_args):
         mod0 = instr_args["instr_mod0"]

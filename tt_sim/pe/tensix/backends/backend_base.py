@@ -105,8 +105,8 @@ class TensixBackendUnit(Clockable, ABC):
     def getConfigValue(self, state_id, key, words=1):
         return self.backend.getConfigValue(state_id, key, words)
 
-    def getRCW(self, thread_id):
-        return self.backend.getRCW(thread_id)
+    def getRWC(self, thread_id):
+        return self.backend.getRWC(thread_id)
 
     def getDst(self):
         return self.backend.getDst()
