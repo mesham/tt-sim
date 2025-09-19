@@ -145,13 +145,19 @@ class PackerUnit(TensixBackendUnit):
             else:
                 addr = (int(addr / bytesPerDatum) & ~ADC_X_Mask) + (adc.X & ADC_X_Mask)
                 # comment out
-                addr += (
+                offset = (
                     self.getConfigValue(
                         stateID, "DEST_TARGET_REG_CFG_PACK_SEC" + str(i) + "_Offset"
                     )
                     << 4
                 )
-
+                if i == 0 and offset == 32:
+                    # This is a bug fix, a strange issue where unpacker core writes 32 after unpack
+                    # into GPR 4, this is expected to hold the offset but is overwritten by this
+                    # The other way of looking at it is that for packer 0 we should align with a
+                    # segment, therefore if do not (% 64) then round down
+                    offset = 0
+                addr += offset
                 self.packerI[i].inputSource = PackerUnit.InputSource.DST
                 self.packerI[i].inputSourceAddr = (
                     addr & 0x3FFF
@@ -348,6 +354,7 @@ class PackerUnit(TensixBackendUnit):
             # before the << 4
             addr += 0x10
 
+            addr += 0x2
             if self.getDiagnosticSettings().reportPacking():
                 print(
                     f"Packer {i}: Copy from {self.packerI[i].inputSourceAddr} (row start "
@@ -357,7 +364,7 @@ class PackerUnit(TensixBackendUnit):
 
             # For example four need an extra two for alignment also
             for j in range(self.packerI[i].inputNumDatums):
-                idx = int(self.packerI[i].inputSourceAddr / 2) + j
+                idx = self.packerI[i].inputSourceAddr + j
                 row = idx >> 4
                 col = idx & 0xF
                 val = self.backend.getDst().getDst32b(row, col)

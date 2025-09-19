@@ -5,35 +5,45 @@ import numpy as np
 
 class DstRegister:
     def __init__(self):
-        buf = bytearray(32768)
-        self.dst16 = np.ndarray([1024, 16], dtype=np.uint16, buffer=buf)
-        self.dst32 = np.ndarray([512, 16], dtype=np.uint32, buffer=buf)
-        for i in range(1024):
-            for j in range(16):
-                self.dst16[i, j] = 0
+        self.dstBits = [[0 for _ in range(16)] for _ in range(1024)]
         self.undefined_rows = []
 
     def getDst16b(self, idx0, idx1):
         if idx0 in self.undefined_rows:
             return None
-        return self.dst16[idx0, idx1]
-
-    def getDst32b(self, idx0, idx1):
-        if idx0 * 2 in self.undefined_rows or (idx0 * 2) + 1 in self.undefined_rows:
-            return None
-        return self.dst32[idx0, idx1]
+        return self.dstBits[idx0][idx1]
 
     def setDst16b(self, idx0, idx1, value):
         if idx0 in self.undefined_rows:
             self.undefined_rows.remove(idx0)
-        self.dst16[idx0, idx1] = value
+        self.dstBits[idx0][idx1] = value
+
+    def to_32b_row(self, r_16b):
+        br = ((r_16b & 0x1F8) << 1) | (r_16b & 0x207)
+        return br, br + 8
+
+    def getDst32b(self, idx0, idx1):
+        r1, r2 = self.to_32b_row(idx0)
+        if r1 in self.undefined_rows or r2 in self.undefined_rows:
+            return None
+
+        v1 = self.dstBits[r1][idx1]
+        v2 = self.dstBits[r2][idx1]
+
+        return (v1 << 16) | (v2 & 0x00FF)
 
     def setDst32b(self, idx0, idx1, value):
-        if idx0 * 2 in self.undefined_rows:
-            self.undefined_rows.remove(idx0 * 2)
-        if (idx0 * 2) + 1 in self.undefined_rows:
-            self.undefined_rows.remove((idx0 * 2) + 1)
-        self.dst32[idx0, idx1] = value
+        r1, r2 = self.to_32b_row(idx0)
+        if r1 in self.undefined_rows:
+            self.undefined_rows.remove(r1)
+        if r2 in self.undefined_rows:
+            self.undefined_rows.remove(r2)
+
+        v1 = value >> 16
+        v2 = value & 0x00FF
+
+        self.dstBits[r1][idx1] = v1
+        self.dstBits[r2][idx1] = v2
 
     def setUndefinedRow(self, row, isDst32=False):
         if isDst32:

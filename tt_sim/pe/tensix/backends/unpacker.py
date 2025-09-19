@@ -521,7 +521,7 @@ class UnPackerUnit(TensixBackendUnit):
         if self.unpacker_id == 1:
             inAddr_Datums += 8
         else:
-            inAddr_Datums += 4
+            pass  # inAddr_Datums += 4
 
         start_row = int(outAddr / 16)
         if self.unpacker_id == 0:
@@ -574,9 +574,7 @@ class UnPackerUnit(TensixBackendUnit):
                         else:
                             row &= 0x3FF
                         if DATA_FORMAT_TO_BITS[outDataFormat] == 32:
-                            self.backend.getDst().setDst32b(
-                                row + int(start_row / 2), col, val
-                            )
+                            self.backend.getDst().setDst32b(row + start_row, col, val)
                         else:
                             self.backend.getDst().setDst16b(row + start_row, col, val)
                 outAddr += 1
