@@ -69,8 +69,7 @@ class MatrixUnit(TensixBackendUnit):
             elif singleBankMatrixUnit:
                 clearSrcABank[self.srcABank] = True
             else:
-                pass
-                # clearSrcABank[Unpackers[0].SrcBank] = True
+                clearSrcABank[self.backend.unpacker_units[0].srcBank] = True
 
         if clearSrcB:
             if bothBanks:
@@ -79,8 +78,7 @@ class MatrixUnit(TensixBackendUnit):
             elif singleBankMatrixUnit:
                 clearSrcBBank[self.srcBBank] = True
             else:
-                pass
-                # clearSrcBBank[Unpackers[0].SrcBank] = True
+                clearSrcABank[self.backend.unpacker_units[1].srcBank] = True
 
         # Do the clearing
         for bank in range(2):
