@@ -9,10 +9,18 @@ class ScalarUnit(TensixBackendUnit):
         "REG2FLOP": "handle_reg2flop",
         "STOREREG": "handle_storereg",
         "FLUSHDMA": "handle_flushdma",
+        "ADDDMAREG": "handle_adddmareg",
+        "SUBDMAREG": "handle_subdmareg",
+        "MULDMAREG": "handle_muldmareg",
+        "CMPDMAREG": "handle_cmpdmareg",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
     THCON_CFGREG_BASE_ADDR32 = 52
+
+    CMPDMAREG_MODE_GT = 0
+    CMPDMAREG_MODE_LT = 1
+    CMPDMAREG_MODE_EQ = 2
 
     def __init__(self, backend, gprs):
         self.gprs = gprs
@@ -71,6 +79,80 @@ class ScalarUnit(TensixBackendUnit):
             self.backend.getFrontendThread(
                 issue_thread
             ).wait_gate.setBackendEnforcedStall()
+
+    def handle_cmpdmareg(self, instruction_info, issue_thread, instr_args):
+        leftReg = instr_args["OpARegIndex"]
+        rightRegOrImm6 = instr_args["OpBRegIndex"]
+        resultReg = instr_args["ResultRegIndex"]
+        mode = instr_args["OpSel"]
+        use_val = instr_args["OpBisConst"]
+
+        leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
+
+        if use_val == 0:
+            rightVal = self.gprs.getRegisters(issue_thread)[rightRegOrImm6]
+        else:
+            rightVal = rightRegOrImm6
+
+        match mode:
+            case ScalarUnit.CMPDMAREG_MODE_GT:
+                resultval = leftVal > rightVal
+            case ScalarUnit.CMPDMAREG_MODE_LT:
+                resultval = leftVal < rightVal
+            case ScalarUnit.CMPDMAREG_MODE_EQ:
+                resultval = leftVal == rightVal
+            case _:
+                raise NotImplementedError()
+
+        self.gprs.getRegisters(issue_thread)[resultReg] = 1 if resultval else 0
+
+    def handle_muldmareg(self, instruction_info, issue_thread, instr_args):
+        leftReg = instr_args["OpARegIndex"]
+        rightRegOrImm6 = instr_args["OpBRegIndex"]
+        resultReg = instr_args["ResultRegIndex"]
+        mode = instr_args["OpBisConst"]
+
+        leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
+
+        if mode == 0:
+            rightVal = self.gprs.getRegisters(issue_thread)[rightRegOrImm6]
+        else:
+            rightVal = rightRegOrImm6
+
+        result = (leftVal & 0xFFFF) * (rightVal & 0xFFFF)
+        self.gprs.getRegisters(issue_thread)[resultReg] = result
+
+    def handle_subdmareg(self, instruction_info, issue_thread, instr_args):
+        leftReg = instr_args["OpARegIndex"]
+        rightRegOrImm6 = instr_args["OpBRegIndex"]
+        resultReg = instr_args["ResultRegIndex"]
+        mode = instr_args["OpBisConst"]
+
+        leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
+
+        if mode == 0:
+            rightVal = self.gprs.getRegisters(issue_thread)[rightRegOrImm6]
+        else:
+            rightVal = rightRegOrImm6
+
+        result = leftVal - rightVal
+        self.gprs.getRegisters(issue_thread)[resultReg] = result
+
+    def handle_adddmareg(self, instruction_info, issue_thread, instr_args):
+        leftReg = instr_args["OpARegIndex"]
+        rightRegOrImm6 = instr_args["OpBRegIndex"]
+        resultReg = instr_args["ResultRegIndex"]
+        mode = instr_args["OpBisConst"]
+
+        leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
+
+        if mode == 0:
+            rightVal = self.gprs.getRegisters(issue_thread)[rightRegOrImm6]
+        else:
+            rightVal = rightRegOrImm6
+
+        result = leftVal + rightVal
+        self.gprs.getRegisters(issue_thread)[resultReg] = result
 
     def handle_reg2flop(self, instruction_info, issue_thread, instr_args):
         inputReg = instr_args["RegIndex"]
