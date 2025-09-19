@@ -16,6 +16,17 @@ class VectorUnit(TensixBackendUnit):
         "SFPMUL": "handle_mul",
         "SFPADDI": "handle_addi",
         "SFPMULI": "handle_muli",
+        "SFPABS": "handle_sfpabs",
+        "SFPSETSGN": "handle_sfpsetsgn",
+        "SFPAND": "handle_sfpand",
+        "SFPOR": "handle_sfpor",
+        "SFPXOR": "handle_sfpxor",
+        "SFPNOT": "handle_sfpnot",
+        "SFPNOP": "handle_sfpnop",
+        "SFPSETCC": "handle_sfpsetcc",
+        "SFPPUSHC": "handle_sfppushc",
+        "SFPPOPC": "handle_sfppopc",
+        "SFPCOMPC": "handle_sfpcompc",
     }
 
     MOD1_IMM16_IS_VALUE = 1
@@ -36,6 +47,14 @@ class VectorUnit(TensixBackendUnit):
     SFPENCC_MOD1_RI = 8  # Set LaneFlags from SFPENCC_IMM2_R
     SFPENCC_IMM2_E = 1  # Immediate bit for UseLaneFlagsForLaneEnable
     SFPENCC_IMM2_R = 2  # Immediate bit for LaneFlags
+
+    SFPSETCC_MOD1_IMM_BIT0 = 1
+    SFPSETCC_MOD1_CLEAR = 8
+
+    SFPSETCC_MOD1_LREG_LT0 = 0
+    SFPSETCC_MOD1_LREG_NE0 = 2
+    SFPSETCC_MOD1_LREG_GTE0 = 4
+    SFPSETCC_MOD1_LREG_EQ0 = 6
 
     MOD0_FMT_SRCB = 0
     MOD0_FMT_FP16 = 1
@@ -60,9 +79,22 @@ class VectorUnit(TensixBackendUnit):
     SFPIADD_MOD1_CC_LT0 = 0
     SFPIADD_MOD1_CC_NONE = 4
     SFPIADD_MOD1_CC_GTE0 = 8
-
     SFPMAD_MOD1_INDIRECT_VA = 4
     SFPMAD_MOD1_INDIRECT_VD = 8
+    SFPABS_MOD1_FLOAT = 1
+    SFPSETSGN_MOD1_ARG_IMM = 1
+
+    ENABLE_FP16A_INF = (0, 1)
+    DISABLE_BACKDOOR_LOAD = (1, 1)
+    ENABLE_DEST_INDEX = (2, 1)
+    CAPTURE_DEFAULT_DEST_INDEX = (3, 1)
+    BLOCK_DEST_WR_FROM_SFPU = (4, 1)
+    BLOCK_SFPU_RD_FROM_DEST = (5, 1)
+    DEST_RD_COL_EXCHANGE = (6, 1)
+    DEST_WR_COL_EXCHANGE = (7, 1)
+    EXCHANGE_SRCB_SRCC = (8, 1)
+    BLOCK_DEST_MOV = (9, 2)
+    ROW_MASK = (12, 4)
 
     class LoadMacroConfig:
         def __init__(self):
@@ -97,13 +129,103 @@ class VectorUnit(TensixBackendUnit):
         for i in range(32):
             self.lregs[15][i] = i * 2
         self.lregs[15].setReadOnly()
-        self.laneEnabled = [True] * 32
+
         self.laneFlags = [False] * 32
         self.useLaneFlagsForLaneEnable = [False] * 32
-        self.flagStack = [0] * 32
+        self.flagStack = []
         self.laneConfig = [0] * 32
         self.loadMacroConfig = [VectorUnit.LoadMacroConfig() for i in range(32)]
         super().__init__(backend, VectorUnit.OPCODE_TO_HANDLER, "Vector")
+
+    def laneConfigValue(self, lane, key):
+        assert len(key) == 2
+        return get_bits(self.laneConfig[lane], key[0], (key[0] + key[1]) - 1)
+
+    def handle_sfpnot(self, instruction_info, issue_thread, instr_args):
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    self.lregs[vd][lane] = ~self.lregs[vc][lane]
+
+    def handle_sfpxor(self, instruction_info, issue_thread, instr_args):
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        vb = vd
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    self.lregs[vd][lane] = self.lregs[vb][lane] ^ self.lregs[vc][lane]
+
+    def handle_sfpand(self, instruction_info, issue_thread, instr_args):
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        vb = vd
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    self.lregs[vd][lane] = self.lregs[vb][lane] & self.lregs[vc][lane]
+
+    def handle_sfpor(self, instruction_info, issue_thread, instr_args):
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        vb = vd
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    self.lregs[vd][lane] = self.lregs[vb][lane] | self.lregs[vc][lane]
+
+    def handle_sfpsetsgn(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        imm1 = instr_args["imm12_math"]
+
+        vb = vd
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    c = self.lregs[vc][lane]
+                    exp = (c >> 23) & 0xFF
+                    man = c & 0x7FFFFF
+                    if mod1 & VectorUnit.SFPSETSGN_MOD1_ARG_IMM:
+                        sign = imm1 & 0x1
+                    else:
+                        b = self.lregs[vb][lane]
+                        sign = b >> 31
+                    self.lregs[vd][lane] = (sign << 31) | (exp << 23) | man
+
+    def handle_sfpabs(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    x = self.lregs[vc][lane]
+                    if x >= 0x80000000:
+                        # Sign bit is set, i.e. value is negative.
+                        if mod1 & VectorUnit.SFPABS_MOD1_FLOAT:
+                            if x > 0xFF800000:
+                                # Value is -NaN; leave it as -NaN
+                                pass
+                            else:
+                                # Clear the sign bit, i.e. floating-point negation
+                                x &= 0x7FFFFFFF
+                        else:
+                            # Two's complement integer negation, unless the input is
+                            # -2147483648, in which case it remains as -2147483648
+                            x = -x
+                    else:
+                        # Value is positive (or zero); leave it as-is
+                        pass
+                    x = self.lregs[vd][lane] = x
 
     def handle_addi(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -111,8 +233,8 @@ class VectorUnit(TensixBackendUnit):
         imm16 = instr_args["imm16_math"]
         vc = vd
         for lane in range(32):
-            if lane < 12:  # TODO: || LaneConfig.DISABLE_BACKDOOR_LOAD
-                if self.laneEnabled[lane]:
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                if self.isLaneEnabled(lane):
                     c = self.lregs[vc][lane]
                     d = self.BF16ToFP32(imm16) + c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
@@ -128,8 +250,8 @@ class VectorUnit(TensixBackendUnit):
         imm16 = instr_args["imm16_math"]
         vc = vd
         for lane in range(32):
-            if lane < 12:  # TODO: || LaneConfig.DISABLE_BACKDOOR_LOAD
-                if self.laneEnabled[lane]:
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                if self.isLaneEnabled(lane):
                     c = self.lregs[vc][lane]
                     d = self.BF16ToFP32(imm16) * c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
@@ -141,8 +263,8 @@ class VectorUnit(TensixBackendUnit):
 
     def perform_mad(self, va, vb, vc, vd, mod1):
         for lane in range(32):
-            if lane < 12:  # TODO: || LaneConfig.DISABLE_BACKDOOR_LOAD
-                if self.laneEnabled[lane]:
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                if self.isLaneEnabled(lane):
                     va = (
                         self.lregs[7][lane] & 15
                         if mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VA
@@ -188,12 +310,150 @@ class VectorUnit(TensixBackendUnit):
         vc = 9  # hardcoded to be lanes containing 0
         self.perform_mad(va, vb, vc, vd, mod1)
 
+    def handle_sfpcompc(self, instruction_info, issue_thread, instr_args):
+        vd = instr_args["lreg_dest"]
+
+        do_compc = False
+        for lane in range(32):
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                do_compc = True
+                break
+
+        if do_compc:
+            if len(self.flagStack) == 0:
+                top = (True, True)
+            else:
+                top = self.flagStack[0]
+
+            # Note we are doing this on a lane by lane basis, whereas have implemented
+            # popc and pushc across all lanes
+            for lane in range(32):
+                # Invert laneFlags, subject to top
+                if top[1][lane] and self.useLaneFlagsForLaneEnable[lane]:
+                    self.laneFlags[lane] = top[0][lane] and (not self.laneFlags[lane])
+                else:
+                    self.laneFlags[lane] = False
+
+    def handle_sfppopc(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+
+        do_pop = False
+        for lane in range(32):
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                do_pop = True
+                break
+
+        if do_pop:
+            if len(self.flagStack) == 0:
+                top = (False, False)
+            else:
+                top = self.flagStack[0]
+
+            if mod1 == 0:
+                # Plain pop from stack
+                assert len(self.flagStack) > 0
+                self.flagStack.pop(0)
+            elif len(self.flagStack) == 8:
+                self.flagStack[7] = top
+
+            if mod1 == 0:
+                # Set LaneFlags and UseLaneFlagsForLaneEnable to Top
+                self.laneFlags = top[0]
+                self.useLaneFlagsForLaneEnable = top[1]
+            elif mod1 <= 12:
+                # Mutate LaneFlags and UseLaneFlagsForLaneEnable based on Top
+                self.laneFlags = list(self.booleanOp(mod1, self.laneFlags, top[0]))
+                self.useLaneFlagsForLaneEnable = top[1]
+            elif mod1 == 13:
+                # Just invert laneFlags
+                self.laneFlags = [not v for v in self.laneFlags]
+            elif mod1 == 14:
+                # Set laneFlags and useLaneFlagsForLaneEnable to constants
+                self.laneFlags = self.useLaneFlagsForLaneEnable = [
+                    True for _ in range(32)
+                ]
+            elif mod1 == 15:
+                # Set LaneFlags and UseLaneFlagsForLaneEnable to constants
+                self.useLaneFlagsForLaneEnable = [True for _ in range(32)]
+                self.laneFlags = [False for _ in range(32)]
+
+    def booleanOp(self, mod1, A_list, B_list):
+        for A, B in zip(A_list, B_list):
+            match mod1:
+                case 1:
+                    yield B
+                case 2:
+                    yield not B
+                case 3:
+                    yield A and B
+                case 4:
+                    yield A or B
+                case 5:
+                    yield A and (not B)
+                case 6:
+                    yield A or (not B)
+                case 7:
+                    yield (not A) and B
+                case 8:
+                    yield (not A) or B
+                case 9:
+                    yield (not A) and (not B)
+                case 10:
+                    yield (not A) or (not B)
+                case 11:
+                    yield A != B
+                case 12:
+                    yield A == B
+
+    def handle_sfppushc(self, instruction_info, issue_thread, instr_args):
+        vd = instr_args["lreg_dest"]
+        do_push = False
+        for lane in range(32):
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                do_push = True
+                break
+
+        if do_push:
+            assert self.flagStack.Size() < 8
+            self.flagStack.append((self.laneFlags, self.useLaneFlagsForLaneEnable))
+
+    def handle_sfpsetcc(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        imm1 = instr_args["imm12_math"] & 0x1
+
+        for lane in range(32):
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                if self.isLaneEnabled(
+                    lane
+                ):  # Is this correct? Seems strange that can not reenable
+                    if not self.useLaneFlagsForLaneEnable[lane]:
+                        self.laneFlags[lane] = False
+                    elif mod1 & VectorUnit.SFPSETCC_MOD1_CLEAR:
+                        self.laneFlags[lane] = False
+                    elif mod1 & VectorUnit.SFPSETCC_MOD1_IMM_BIT0:
+                        self.laneFlags[lane] = imm1 != 0
+                    else:
+                        c = self.lregs[vc][lane]
+                        match mod1:
+                            case VectorUnit.SFPSETCC_MOD1_LREG_LT0:
+                                self.laneFlags[lane] = c < 0
+                            case VectorUnit.SFPSETCC_MOD1_LREG_NE0:
+                                self.laneFlags[lane] = c != 0
+                            case VectorUnit.SFPSETCC_MOD1_LREG_GTE0:
+                                self.laneFlags[lane] = c >= 0
+                            case VectorUnit.SFPSETCC_MOD1_LREG_EQ0:
+                                self.laneFlags[lane] = c == 0
+
     def handle_sfpencc(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
         imm2 = instr_args["imm12_math"]
 
         for lane in range(32):
-            if lane < 12:  # TODO: || LaneConfig.DISABLE_BACKDOOR_LOAD
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if mod1 & VectorUnit.SFPENCC_MOD1_EI:
                     self.useLaneFlagsForLaneEnable[lane] = (
                         imm2 & VectorUnit.SFPENCC_IMM2_E
@@ -221,7 +481,7 @@ class VectorUnit(TensixBackendUnit):
 
         if vd < 8 or vd == 16:
             for lane in range(32):
-                if self.laneEnabled[lane]:
+                if self.isLaneEnabled(lane):
                     if mod1 & VectorUnit.SFPIADD_MOD1_ARG_IMM:
                         self.lregs[vd][lane] = self.lregs[vc][lane] + imm12
                     elif mod1 & VectorUnit.SFPIADD_MOD1_ARG_2SCOMP_LREG_DST:
@@ -301,13 +561,15 @@ class VectorUnit(TensixBackendUnit):
         addr = self.get_dst_address(issue_thread, mod0, imm10)
 
         for lane in range(32):
-            # if self.laneConfig[lane].BLOCK_SFPU_RD_FROM_DEST:
-            #  continue
-            if vd < 12:  # or LaneConfig.DISABLE_BACKDOOR_LOAD
-                if self.laneEnabled[lane] or mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
+            if self.laneConfigValue(lane, VectorUnit.BLOCK_SFPU_RD_FROM_DEST):
+                continue
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                if self.isLaneEnabled(lane) or mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
                     row = (addr & ~3) + int(lane / 8)
                     column = (lane & 7) * 2
-                    if addr & 2:  # or self.laneConfig[lane & 7].DEST_RD_COL_EXCHANGE
+                    if addr & 2 or self.laneConfigValue(
+                        lane & 7, VectorUnit.DEST_RD_COL_EXCHANGE
+                    ):
                         column += 1
 
                     datum = self.lregs[vd][lane]
@@ -334,12 +596,14 @@ class VectorUnit(TensixBackendUnit):
 
         if vd < 8:
             for lane in range(32):
-                # if self.laneConfig[lane].BLOCK_SFPU_RD_FROM_DEST:
-                #  continue
-                if self.laneEnabled[lane] or mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
+                if self.laneConfigValue(lane, VectorUnit.BLOCK_SFPU_RD_FROM_DEST):
+                    continue
+                if self.isLaneEnabled(lane) or mod0 == VectorUnit.MOD0_FMT_INT32_ALL:
                     row = (addr & ~3) + int(lane / 8)
                     column = (lane & 7) * 2
-                    if addr & 2:  # or self.laneConfig[lane & 7].DEST_RD_COL_EXCHANGE
+                    if addr & 2 or self.laneConfigValue(
+                        lane & 7, VectorUnit.DEST_RD_COL_EXCHANGE
+                    ):
                         column += 1
 
                     match mod0:
@@ -355,8 +619,12 @@ class VectorUnit(TensixBackendUnit):
 
                     self.lregs[vd][lane] = datum
                     if (
-                        vd < 4
-                    ):  # and self.laneConfig[lane].ENABLE_DEST_INDEX and self.laneConfig[lane].CAPTURE_DEFAULT_DEST_INDEX
+                        (vd < 4)
+                        and self.laneConfigValue(lane, VectorUnit.ENABLE_DEST_INDEX)
+                        and self.laneConfigValue(
+                            lane, VectorUnit.CAPTURE_DEFAULT_DEST_INDEX
+                        )
+                    ):
                         self.lregs[vd + 4][lane] = (row << 4) | column
 
         self.backend.getRCW(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
@@ -368,7 +636,7 @@ class VectorUnit(TensixBackendUnit):
 
         assert vd < 8
         for lane in range(32):
-            if self.laneEnabled:
+            if self.isLaneEnabled(lane):
                 match mod0:
                     case VectorUnit.SFPLOADI_MOD0_FLOATB:
                         self.lregs[vd][lane] = self.BF16toFP32(imm16)
@@ -389,16 +657,8 @@ class VectorUnit(TensixBackendUnit):
                     case _:
                         raise ValueError()
 
-    def BF16toFP32(self, val):
-        return val << 16
-
-    def FP16toFP32(self, val):
-        sign = val >> 15
-        exp = (val >> 10) & 0x1F
-        man = val & 0x3FF
-
-        exp += 112  # Rebias 5b exponent to 8b
-        return (sign << 31) | (exp << 23) | (man << 13)
+    def handle_sfpnop(self, instruction_info, issue_thread, instr_args):
+        pass
 
     def handle_sfpconfig(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -472,3 +732,24 @@ class VectorUnit(TensixBackendUnit):
 
                     if mod1 & VectorUnit.MOD1_IMM16_IS_VALUE:
                         self.laneConfig[lane] |= original & ~0xFFFF
+
+    def isLaneEnabled(self, lane):
+        if get_nth_bit(
+            self.laneConfigValue(lane & 7, VectorUnit.ROW_MASK), int(lane / 8)
+        ):
+            return False
+        elif self.useLaneFlagsForLaneEnable[lane]:
+            return self.laneFlags[lane]
+        else:
+            return True
+
+    def BF16toFP32(self, val):
+        return val << 16
+
+    def FP16toFP32(self, val):
+        sign = val >> 15
+        exp = (val >> 10) & 0x1F
+        man = val & 0x3FF
+
+        exp += 112  # Rebias 5b exponent to 8b
+        return (sign << 31) | (exp << 23) | (man << 13)
