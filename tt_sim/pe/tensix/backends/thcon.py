@@ -10,6 +10,7 @@ class ScalarUnit(TensixBackendUnit):
     class THConStallType(IntEnum):
         FLUSHDMA = 1
         SRC_UNPACKER = 2
+        ATCAS = 3
 
     OPCODE_TO_HANDLER = {
         "SETDMAREG": "handle_setdmareg",
@@ -27,6 +28,7 @@ class ScalarUnit(TensixBackendUnit):
         "LOADIND": "handle_loadind",
         "LOADREG": "handle_loadreg",
         "ATINCGET": "handle_atincget",
+        "ATCAS": "handle_atcas",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
@@ -64,9 +66,12 @@ class ScalarUnit(TensixBackendUnit):
                         self.stalled_thread
                     ).wait_gate.clearBackendEnforcedStall()
                     self.stalled_condition = self.stalled_thread = 0
-            else:
-                assert self.stalled_type == ScalarUnit.THConStallType.SRC_UNPACKER
+            elif self.stalled_type == ScalarUnit.THConStallType.SRC_UNPACKER:
                 self.process_srca_srcb_from_gpr(*self.stalled_condition)
+            elif self.stalled_type == ScalarUnit.THConStallType.ATCAS:
+                self.handle_atcas(*self.stalled_condition)
+            else:
+                raise NotImplementedError()
         else:
             super().clock_tick(cycle_num)
 
@@ -394,6 +399,29 @@ class ScalarUnit(TensixBackendUnit):
                 self.backend.getAddressableMemory().write(
                     L1Address + (i * 2), conv_to_bytes(val, 2)
                 )
+
+    def handle_atcas(self, instruction_info, issue_thread, instr_args):
+        # L1 atomic compare and set
+        addrReg = instr_args["AddrRegIndex"]
+        Ofs = instr_args["Sel32b"]
+        cmpVal = instr_args["CmpVal"]
+        setVal = instr_args["SwapVal"] & 0xF
+
+        L1Address = self.gprs.getRegisters(issue_thread)[addrReg] * 16 + Ofs * 4
+        assert L1Address < (1464 * 1024)
+
+        testValue = conv_to_uint32(
+            self.backend.getAddressableMemory().read(L1Address, 4)
+        )
+
+        if testValue != cmpVal:
+            self.stalled_condition = (instruction_info, issue_thread, instr_args)
+            self.stalled_type = ScalarUnit.THConStallType.ATCAS
+            self.stalled = True
+        else:
+            self.stalled = False
+            self.stalled_condition = self.stalled_type = None
+            self.backend.getAddressableMemory().write(L1Address, conv_to_bytes(setVal))
 
     def handle_atincget(self, instruction_info, issue_thread, instr_args):
         # Atomically increment an integer in L1
