@@ -8,6 +8,8 @@ class MatrixUnit(TensixBackendUnit):
         "ZEROACC": "handle_zeroacc",
         "SETRWC": "handle_setrwc",
         "ELWADD": "handle_elwadd",
+        "ELWSUB": "handle_elwsub",
+        "ELWMUL": "handle_elwmul",
         "ZEROSRC": "handle_zerosrc",
         "INCRWC": "handle_incrwc",
     }
@@ -89,20 +91,22 @@ class MatrixUnit(TensixBackendUnit):
                     if clearSrcBBank[bank]:
                         self.backend.getSrcA(bank)[i, j] = 0
 
-    def handle_elwadd(self, instruction_info, issue_thread, instr_args):
-        stateID = self.backend.getThreadConfigValue(
-            issue_thread, "CFG_STATE_ID_StateID"
-        )
-
-        rwc = self.getRWC(issue_thread)
-        broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
-        broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
-        dstRow = instr_args["dst"]
-        addDst = instr_args["dest_accum_en"]
-
-        flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
-        flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
-
+    def handle_elementwise_op(
+        self,
+        stateID,
+        issue_thread,
+        rwc,
+        broadcastSrcBCol0,
+        broadcastSrcBRow,
+        dstRow,
+        addDst,
+        flipsrca,
+        flipsrcb,
+        addrMode,
+        op_handler,
+        int8_handler,
+        other_handler,
+    ):
         # Determine data formats
         if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
             srcAStyle = DataFormat.FP16
@@ -166,35 +170,28 @@ class MatrixUnit(TensixBackendUnit):
                     srcBRow + (0 if broadcastSrcBRow else i),
                     0 if broadcastSrcBCol0 else j,
                 ]
-                result = srcAVal + srcBVal
-                if 1 == 1 or srcAFmt == DataFormat.INT8:
-                    if addDst:
-                        result += self.backend.getDst().getDst32b(dstRow + i, j)
-
-                    self.backend.getDst().setDst32b(int(dstRow / 2) + i, j, result)
+                if op_handler is not None:
+                    result = op_handler(srcAVal, srcBVal)
                 else:
-                    # These divisions are rarely desirable, so software
-                    # is encouraged to ensure that FidelityPhase == 0
-                    if fidelityPhase & 1:
-                        result /= 32.0
-                    elif fidelityPhase & 2:
-                        result /= 128.0
+                    result = None
 
-                    if useDst32b:
-                        # Dst is FP32, regardless of SrcAStyle
-                        if addDst:
-                            result += self.backend.getDst().getDst32b(dstRow + i, j)
-                        self.backend.getDst().setDst32b(dstRow + i, j, result)
-                    elif srcAStyle == DataFormat.FP16:
-                        # Dst is FP16, just like SrcAStyle
-                        if addDst:
-                            result += self.backend.getDst().getDst16b(dstRow + i, j)
-                        self.backend.getDst().setDst16b(dstRow + i, j, result)
-                    else:
-                        # Dst is BF16 (SrcAStyle is either BF16 or TF32)
-                        if addDst:
-                            result += self.backend.getDst().getDst16b(dstRow + i, j)
-                        self.backend.getDst().setDst16b(dstRow + i, j, result)
+                if 1 == 1 or srcAFmt == DataFormat.INT8:
+                    int8_handler(
+                        fidelityPhase, addDst, result, srcAVal, srcBVal, dstRow, i, j
+                    )
+                else:
+                    other_handler(
+                        fidelityPhase,
+                        result,
+                        useDst32b,
+                        addDst,
+                        srcAStyle,
+                        srcAVal,
+                        srcBVal,
+                        dstRow,
+                        i,
+                        j,
+                    )
 
         # Possibly flip source banks
         if flipsrca:
@@ -212,8 +209,197 @@ class MatrixUnit(TensixBackendUnit):
             self.srcBBank ^= 1
 
         # Advance the RWCs
-        addr_mod = extract_bits(instr_args["addr_mode"], 2, 0)
-        rwc.applyAddrMod(issue_thread, addr_mod)
+        rwc.applyAddrMod(issue_thread, addrMode)
+
+    def elementwise_addsub_int8(
+        self, fidelityPhase, addDst, result, srcAVal, srcBVal, dstRow, i, j
+    ):
+        if addDst:
+            result += self.backend.getDst().getDst32b(dstRow + i, j)
+
+        self.backend.getDst().setDst32b(dstRow + i, j, result)
+
+    def elementwise_addsub_other(
+        self,
+        fidelityPhase,
+        result,
+        useDst32b,
+        addDst,
+        srcAStyle,
+        srcAVal,
+        srcBVal,
+        dstRow,
+        i,
+        j,
+    ):
+        # These divisions are rarely desirable, so software
+        # is encouraged to ensure that FidelityPhase == 0
+        if fidelityPhase & 1:
+            result /= 32.0
+        elif fidelityPhase & 2:
+            result /= 128.0
+
+        if useDst32b:
+            # Dst is FP32, regardless of SrcAStyle
+            if addDst:
+                result += self.backend.getDst().getDst32b(dstRow + i, j)
+            self.backend.getDst().setDst32b(dstRow + i, j, result)
+        elif srcAStyle == DataFormat.FP16:
+            # Dst is FP16, just like SrcAStyle
+            if addDst:
+                result += self.backend.getDst().getDst16b(dstRow + i, j)
+            self.backend.getDst().setDst16b(dstRow + i, j, result)
+        else:
+            # Dst is BF16 (SrcAStyle is either BF16 or TF32)
+            if addDst:
+                result += self.backend.getDst().getDst16b(dstRow + i, j)
+            self.backend.getDst().setDst16b(dstRow + i, j, result)
+
+    def elementwise_mul_int8(
+        self, fidelityPhase, addDst, result, srcAVal, srcBVal, dstRow, i, j
+    ):
+        srcAValInt = self.readSrcInt8(
+            srcAVal & (0x41FFF if fidelityPhase & 1 else 0x4E0FF)
+        )
+        srcBValInt = self.readSrcInt8(
+            srcBVal & (0x40FFF if fidelityPhase & 2 else 0x7F0FF)
+        )
+
+        result = srcAValInt * srcBValInt
+
+        # Dst is INT32
+        # Result = SaturateAddInt32(Result, ReadDstInt32(Dst32b[DstRow + i][j]));
+
+        self.backend.getDst().setDst32b(dstRow + i, j, result)
+
+    def elementwise_mul_other(
+        self,
+        fidelityPhase,
+        result,
+        useDst32b,
+        addDst,
+        srcAStyle,
+        srcAVal,
+        srcBVal,
+        dstRow,
+        i,
+        j,
+    ):
+        result = self.srcAFidelityBits(srcAVal, fidelityPhase) * self.srcBFidelityBits(
+            srcBVal, fidelityPhase
+        )
+
+        if useDst32b:
+            # Dst is FP32, regardless of SrcAStyle
+            result += self.backend.getDst().getDst32b(dstRow + i, j)
+            self.backend.getDst().setDst32b(dstRow + i, j, result)
+        elif srcAStyle == DataFormat.FP16:
+            # Dst is FP16, just like SrcAStyle
+            result += self.backend.getDst().getDst16b(dstRow + i, j)
+            self.backend.getDst().setDst16b(dstRow + i, j, result)
+        else:
+            #  Dst is BF16 (SrcAStyle is either BF16 or TF32)
+            result += self.backend.getDst().getDst16b(dstRow + i, j)
+            self.backend.getDst().setDst16b(dstRow + i, j, result)
+
+    def handle_elwmul(self, instruction_info, issue_thread, instr_args):
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        rwc = self.getRWC(issue_thread)
+        broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
+        broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
+        dstRow = instr_args["dst"]
+        addDst = instr_args["dest_accum_en"]
+        addrMode = instr_args["addr_mode"]
+
+        flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
+        flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
+
+        self.handle_elementwise_op(
+            stateID,
+            issue_thread,
+            rwc,
+            broadcastSrcBCol0,
+            broadcastSrcBRow,
+            dstRow,
+            addDst,
+            flipsrca,
+            flipsrcb,
+            addrMode,
+            None,
+            self.elementwise_mul_int8,
+            self.elementwise_mul_other,
+        )
+
+    def handle_elwadd(self, instruction_info, issue_thread, instr_args):
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        rwc = self.getRWC(issue_thread)
+        broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
+        broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
+        dstRow = instr_args["dst"]
+        addDst = instr_args["dest_accum_en"]
+        addrMode = instr_args["addr_mode"]
+
+        flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
+        flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
+
+        def add_handler(srcAVal, srcBVal):
+            return srcAVal + srcBVal
+
+        self.handle_elementwise_op(
+            stateID,
+            issue_thread,
+            rwc,
+            broadcastSrcBCol0,
+            broadcastSrcBRow,
+            dstRow,
+            addDst,
+            flipsrca,
+            flipsrcb,
+            addrMode,
+            add_handler,
+            self.elementwise_addsub_int8,
+            self.elementwise_addsub_other,
+        )
+
+    def handle_elwsub(self, instruction_info, issue_thread, instr_args):
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        rwc = self.getRWC(issue_thread)
+        broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
+        broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
+        dstRow = instr_args["dst"]
+        addDst = instr_args["dest_accum_en"]
+        addrMode = instr_args["addr_mode"]
+
+        flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
+        flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
+
+        def add_handler(srcAVal, srcBVal):
+            return srcAVal - srcBVal
+
+        self.handle_elementwise_op(
+            stateID,
+            issue_thread,
+            rwc,
+            broadcastSrcBCol0,
+            broadcastSrcBRow,
+            dstRow,
+            addDst,
+            flipsrca,
+            flipsrcb,
+            addrMode,
+            add_handler,
+            self.elementwise_addsub_int8,
+            self.elementwise_addsub_other,
+        )
 
     def handle_setrwc(self, instruction_info, issue_thread, instr_args):
         rwc = self.getRWC(issue_thread)
@@ -329,3 +515,25 @@ class MatrixUnit(TensixBackendUnit):
         if mode == ZEROACC_MODE_ONE_ROW or mode == ZEROACC_MODE_16_ROWS:
             addr_mod = extract_bits(instr_args["AddrMode"], 2, 0)
             self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)
+
+    def readSrcInt8(self, x):
+        # src holds INT8 as Sign,Mag(10b),Zero(3b),Exp(5b)
+        sign = x >> 18
+        mag = (x >> 8) & 0x3FF
+        return -mag if sign else mag
+
+    def srcAFidelityBits(self, x, fidelityPhase):
+        if fidelityPhase & 1 == 0:
+            # Sign, Exp, implicit 1 of Man, next four Man bits
+            return x & 0xFFF80000
+        else:
+            # Isolate the next five Man bits not consumed by prior branch
+            return x - (x & 0xFFF83FFF)
+
+    def srcBFidelityBits(self, x, fidelityPhase):
+        if fidelityPhase & 2 == 0:
+            # Sign, Exp, implicit 1 of Man, next six Man bits
+            return x & 0xFFFE0000
+        else:
+            # Isolate the next four Man bits not consumed by prior branch
+            return x - (x & 0xFFFE1FFF)
