@@ -318,6 +318,7 @@ class RV_I_ISA(RV_ISA):
 
         rs2_val = register_file[rs2].read()
 
+        ret_val = None
         if type_val == 0x0:
             # sb
             RV_ISA.print_snoop(
@@ -325,8 +326,7 @@ class RV_I_ISA(RV_ISA):
                 f"sb {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
                 f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
             )
-            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0], 1))
-            return True
+            ret_val = memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0], 1))
         elif type_val == 0x1:
             # sh
             RV_ISA.print_snoop(
@@ -334,8 +334,9 @@ class RV_I_ISA(RV_ISA):
                 f"sh {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
                 f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
             )
-            memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0:1], 2))
-            return True
+            ret_val = memory_space.write(
+                tgt_mem_address, conv_to_bytes(rs2_val[0:1], 2)
+            )
         elif type_val == 0x2:
             # sw
             RV_ISA.print_snoop(
@@ -343,10 +344,14 @@ class RV_I_ISA(RV_ISA):
                 f"sw {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
                 f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
             )
-            memory_space.write(tgt_mem_address, rs2_val)
-            return True
+            ret_val = memory_space.write(tgt_mem_address, rs2_val)
         else:
             return False
+
+        if ret_val == MemoryStall:
+            return ProcessingElement.PEStall
+        else:
+            return True
 
     @classmethod
     def handle_i_arith(cls, instr, register_file, memory_space, snoop):

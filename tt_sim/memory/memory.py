@@ -66,7 +66,7 @@ class MemorySpace(MemMapable, ABC):
         addr_range, memory_space = self._locate_memory_space(addr)
         if addr_range is not None and memory_space is not None:
             target_addr = self.convert_addr_to_target_range(addr_range, addr)
-            memory_space.write(target_addr, value, size)
+            return memory_space.write(target_addr, value, size)
 
     def getSize(self):
         low_val = None
