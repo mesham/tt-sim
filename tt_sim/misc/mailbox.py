@@ -4,6 +4,11 @@ from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 
 
 class Mailbox(MemMapable):
+    """
+    Implementation of a mailbox between baby cores, based on
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/BabyRISCV/Mailboxes.md
+    """
+
     def __init__(self, core_id):
         self.core_id = core_id
         self.mailboxes = [[], [], [], []]
@@ -94,7 +99,9 @@ class Mailbox(MemMapable):
         else:
             tgt_idx = self.coreTypeToIdx(ct)
             accepted = self.other_mbs[tgt_idx].sendValue(my_ct, value)
-        return accepted
+
+        if not accepted:
+            return MemoryStall
 
     def getSize(self):
         return 0x3FFF
