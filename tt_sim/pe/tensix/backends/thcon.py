@@ -3,7 +3,7 @@ from enum import IntEnum
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.util.bits import get_bits, get_nth_bit
-from tt_sim.util.conversion import conv_to_bytes
+from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
 class ScalarUnit(TensixBackendUnit):
@@ -24,6 +24,7 @@ class ScalarUnit(TensixBackendUnit):
         "SHIFTDMAREG": "handle_shiftdmareg",
         "STOREIND": "handle_storeind",
         "ATSWAP": "handle_atswap",
+        "LOADIND": "handle_loadind",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
@@ -392,6 +393,58 @@ class ScalarUnit(TensixBackendUnit):
                     L1Address + (i * 2), conv_to_bytes(val, 2)
                 )
 
+    def handle_loadind(self, instruction_info, issue_thread, instr_args):
+        addrReg = instr_args["AddrRegIndex"]
+        resultReg = instr_args["DataRegIndex"]
+        offsetIncrement = instr_args["AutoIncSpec"]
+        offsetHalfReg = instr_args["OffsetIndex"]
+        sizeSel = instr_args["sizeSel"]
+
+        gpr_reg_idx = resultReg & (0x3F if sizeSel else 0x3C)
+        offset_val = self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2]
+        L1Address = (self.gprs.getRegisters(issue_thread)[addrReg] * 16) + offset_val
+        assert L1Address < (1464 * 1024)
+
+        match offsetIncrement:
+            case 0:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 0
+            case 1:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 2
+            case 2:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 4
+            case 3:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 16
+
+        match sizeSel:
+            case 0:
+                # Four consecutive GPRs
+                L1Address &= ~15
+                for i in range(4):
+                    l1_val = conv_to_uint32(
+                        self.backend.getAddressableMemory().read(L1Address, 4)
+                    )
+                    self.gprs.getRegisters(issue_thread)[gpr_reg_idx + i] = l1_val
+                    L1Address += 4
+            case 1:
+                l1_val = conv_to_uint32(
+                    self.backend.getAddressableMemory().read(L1Address & ~3, 4)
+                )
+                self.gprs.getRegisters(issue_thread)[gpr_reg_idx] = l1_val
+            case 2:
+                # Low 16 bits of GPR
+                l1_val = conv_to_uint32(
+                    self.backend.getAddressableMemory().read(L1Address & ~1, 2)
+                )
+                gpr_val = self.gprs.getRegisters(issue_thread)[gpr_reg_idx] & 0xFFFF0000
+                self.gprs.getRegisters(issue_thread)[gpr_reg_idx] = gpr_val | l1_val
+            case 3:
+                # Low 8 bits of GPR
+                l1_val = conv_to_uint32(
+                    self.backend.getAddressableMemory().read(L1Address, 1)
+                )
+                gpr_val = self.gprs.getRegisters(issue_thread)[gpr_reg_idx] & 0xFFFFFF00
+                self.gprs.getRegisters(issue_thread)[gpr_reg_idx] = gpr_val | l1_val
+
     def handle_storeind(self, instruction_info, issue_thread, instr_args):
         addrReg = instr_args["AddrRegIndex"]
         dataReg = instr_args["DataRegIndex"]
@@ -564,7 +617,6 @@ class ScalarUnit(TensixBackendUnit):
         gpr_reg_idx = dataReg & (0x3F if size else 0x3C)
         offset_val = self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2]
         L1Address = (self.gprs.getRegisters(issue_thread)[addrReg] * 16) + offset_val
-
         assert L1Address < (1464 * 1024)
 
         match offsetIncrement:
