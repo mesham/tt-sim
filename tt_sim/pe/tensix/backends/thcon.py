@@ -25,6 +25,8 @@ class ScalarUnit(TensixBackendUnit):
         "STOREIND": "handle_storeind",
         "ATSWAP": "handle_atswap",
         "LOADIND": "handle_loadind",
+        "LOADREG": "handle_loadreg",
+        "ATINCGET": "handle_atincget",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
@@ -392,6 +394,42 @@ class ScalarUnit(TensixBackendUnit):
                 self.backend.getAddressableMemory().write(
                     L1Address + (i * 2), conv_to_bytes(val, 2)
                 )
+
+    def handle_atincget(self, instruction_info, issue_thread, instr_args):
+        # Atomically increment an integer in L1
+        addrReg = instr_args["AddrRegIndex"]
+        inOutReg = instr_args["DataRegIndex"]
+        Ofs = instr_args["Sel32b"]
+        intWidth = instr_args["WrapVal"] & 0x1F
+
+        L1Address = self.gprs.getRegisters(issue_thread)[addrReg] * 16 + Ofs * 4
+        assert L1Address < (1464 * 1024)
+
+        incrementBy = self.gprs.getRegisters(issue_thread)[inOutReg]
+        intMask = (2 << intWidth) - 1
+
+        originalValue = conv_to_uint32(
+            self.backend.getAddressableMemory().read(L1Address, 4)
+        )
+        incremented = originalValue + incrementBy
+        self.backend.getAddressableMemory().write(
+            L1Address,
+            conv_to_bytes((incremented & intMask) | (originalValue & ~intMask)),
+        )
+
+        self.gprs.getRegisters(issue_thread)[inOutReg] = originalValue
+
+    def handle_loadreg(self, instruction_info, issue_thread, instr_args):
+        # Read from MMIO into a register
+        addrLo = instr_args["RegAddr"]
+        resultReg = instr_args["TdmaDataRegIndex"]
+
+        addr = 0xFFB00000 + (addrLo << 2)
+        assert addr >= 0xFFB11000
+
+        self.gprs.getRegisters(issue_thread)[resultReg] = conv_to_uint32(
+            self.backend.getAddressableMemory().read(addr, 4)
+        )
 
     def handle_loadind(self, instruction_info, issue_thread, instr_args):
         addrReg = instr_args["AddrRegIndex"]
