@@ -23,6 +23,7 @@ class ScalarUnit(TensixBackendUnit):
         "BITWOPDMAREG": "handle_bitwopdmareg",
         "SHIFTDMAREG": "handle_shiftdmareg",
         "STOREIND": "handle_storeind",
+        "ATSWAP": "handle_atswap",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
@@ -361,8 +362,38 @@ class ScalarUnit(TensixBackendUnit):
         else:
             raise NotImplementedError()
 
+    def handle_atswap(self, instruction_info, issue_thread, instr_args):
+        addrReg = instr_args["AddrRegIndex"]
+        dataReg = instr_args["DataRegIndex"]
+        mask = instr_args["SwapMask"]
+        singleDataReg = instr_args["MemHierSel"]
+
+        L1Address = self.gprs.getRegisters(issue_thread)[addrReg] * 16
+        assert L1Address < (1464 * 1024)
+
+        toWrite = [0] * 4
+        if singleDataReg:
+            for i in range(4):
+                toWrite[i] = self.gprs.getRegisters(issue_thread)[dataReg + i]
+        else:
+            for i in range(4):
+                toWrite[i] = self.gprs.getRegisters(issue_thread)[(dataReg & 0x3C) + i]
+
+        for i in range(8):
+            if mask & (1 << i):
+                val = toWrite[int(i / 2)]
+                if i % 2 == 0:
+                    # Low part
+                    val &= 0xFFFF
+                else:
+                    # High part
+                    val >>= 16
+                self.backend.getAddressableMemory().write(
+                    L1Address + (i * 2), conv_to_bytes(val, 2)
+                )
+
     def handle_storeind(self, instruction_info, issue_thread, instr_args):
-        addrReg = instr_args["AddrReg"]
+        addrReg = instr_args["AddrRegIndex"]
         dataReg = instr_args["DataRegIndex"]
         offsetIncrement = instr_args["AutoIncSpec"]
         offsetHalfReg = instr_args["OffsetIndex"]
