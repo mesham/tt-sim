@@ -13,6 +13,8 @@ class ScalarUnit(TensixBackendUnit):
         "SUBDMAREG": "handle_subdmareg",
         "MULDMAREG": "handle_muldmareg",
         "CMPDMAREG": "handle_cmpdmareg",
+        "BITWOPDMAREG": "handle_bitwopdmareg",
+        "SHIFTDMAREG": "handle_shiftdmareg",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
@@ -21,6 +23,11 @@ class ScalarUnit(TensixBackendUnit):
     CMPDMAREG_MODE_GT = 0
     CMPDMAREG_MODE_LT = 1
     CMPDMAREG_MODE_EQ = 2
+    SHIFTDMAREG_MODE_LEFT = 0
+    SHIFTDMAREG_MODE_RIGHT = 1
+    BITWOPDMAREG_MODE_AND = 0
+    BITWOPDMAREG_MODE_OR = 1
+    BITWOPDMAREG_MODE_XOR = 2
 
     def __init__(self, backend, gprs):
         self.gprs = gprs
@@ -79,6 +86,56 @@ class ScalarUnit(TensixBackendUnit):
             self.backend.getFrontendThread(
                 issue_thread
             ).wait_gate.setBackendEnforcedStall()
+
+    def handle_shiftdmareg(self, instruction_info, issue_thread, instr_args):
+        leftReg = instr_args["OpARegIndex"]
+        rightRegOrImm5 = instr_args["OpBRegIndex"]
+        resultReg = instr_args["ResultRegIndex"]
+        mode = instr_args["OpSel"]
+        use_val = instr_args["OpBisConst"]
+
+        leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
+
+        if use_val == 0:
+            rightVal = self.gprs.getRegisters(issue_thread)[rightRegOrImm5] & 0x1F
+        else:
+            rightVal = rightRegOrImm5 & 0x1F
+
+        match mode:
+            case ScalarUnit.SHIFTDMAREG_MODE_LEFT:
+                resultVal = leftVal << rightVal
+            case ScalarUnit.SHIFTDMAREG_MODE_RIGHT:
+                resultVal = leftVal >> rightVal
+            case _:
+                raise NotImplementedError()
+
+        self.gprs.getRegisters(issue_thread)[resultReg] = resultVal
+
+    def handle_bitwopdmareg(self, instruction_info, issue_thread, instr_args):
+        leftReg = instr_args["OpARegIndex"]
+        rightRegOrImm6 = instr_args["OpBRegIndex"]
+        resultReg = instr_args["ResultRegIndex"]
+        mode = instr_args["OpSel"]
+        use_val = instr_args["OpBisConst"]
+
+        leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
+
+        if use_val == 0:
+            rightVal = self.gprs.getRegisters(issue_thread)[rightRegOrImm6]
+        else:
+            rightVal = rightRegOrImm6
+
+        match mode:
+            case ScalarUnit.BITWOPDMAREG_MODE_AND:
+                resultVal = leftVal & rightVal
+            case ScalarUnit.BITWOPDMAREG_MODE_OR:
+                resultVal = leftVal | rightVal
+            case ScalarUnit.BITWOPDMAREG_MODE_XOR:
+                resultVal = leftVal ^ rightVal
+            case _:
+                raise NotImplementedError()
+
+        self.gprs.getRegisters(issue_thread)[resultReg] = resultVal
 
     def handle_cmpdmareg(self, instruction_info, issue_thread, instr_args):
         leftReg = instr_args["OpARegIndex"]
