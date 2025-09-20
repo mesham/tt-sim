@@ -1,9 +1,16 @@
+from enum import IntEnum
+
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
+from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.util.bits import get_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes
 
 
 class ScalarUnit(TensixBackendUnit):
+    class THConStallType(IntEnum):
+        FLUSHDMA = 1
+        SRC_UNPACKER = 2
+
     OPCODE_TO_HANDLER = {
         "SETDMAREG": "handle_setdmareg",
         "REG2FLOP": "handle_reg2flop",
@@ -15,6 +22,7 @@ class ScalarUnit(TensixBackendUnit):
         "CMPDMAREG": "handle_cmpdmareg",
         "BITWOPDMAREG": "handle_bitwopdmareg",
         "SHIFTDMAREG": "handle_shiftdmareg",
+        "STOREIND": "handle_storeind",
     }
 
     GLOBAL_CFGREG_BASE_ADDR32 = 152
@@ -32,6 +40,7 @@ class ScalarUnit(TensixBackendUnit):
     def __init__(self, backend, gprs):
         self.gprs = gprs
         self.stalled = False
+        self.stalled_type = None
         self.stalled_condition = 0
         self.stalled_thread = 0
         super().__init__(backend, ScalarUnit.OPCODE_TO_HANDLER, "Scalar")
@@ -44,12 +53,16 @@ class ScalarUnit(TensixBackendUnit):
 
     def clock_tick(self, cycle_num):
         if self.stalled:
-            if not self.checkStalledCondition(self.stalled_condition):
-                self.stalled = False
-                self.backend.getFrontendThread(
-                    self.stalled_thread
-                ).wait_gate.clearBackendEnforcedStall()
-                self.stalled_condition = self.stalled_thread = 0
+            if self.stalled_type == ScalarUnit.THConStallType.FLUSHDMA:
+                if not self.checkStalledCondition(self.stalled_condition):
+                    self.stalled = False
+                    self.backend.getFrontendThread(
+                        self.stalled_thread
+                    ).wait_gate.clearBackendEnforcedStall()
+                    self.stalled_condition = self.stalled_thread = 0
+            else:
+                assert self.stalled_type == ScalarUnit.THConStallType.SRC_UNPACKER
+                self.process_srca_srcb_from_gpr(*self.stalled_condition)
         else:
             super().clock_tick(cycle_num)
 
@@ -82,6 +95,7 @@ class ScalarUnit(TensixBackendUnit):
         if self.checkStalledCondition(conditionMask):
             self.stalled_thread = issue_thread
             self.stalled_condition = conditionMask
+            self.stalled_type = ScalarUnit.THConStallType.FLUSHDMA
             self.stalled = True
             self.backend.getFrontendThread(
                 issue_thread
@@ -346,3 +360,230 @@ class ScalarUnit(TensixBackendUnit):
             self.gprs.getRegisters(issue_thread)[base_reg] = nv
         else:
             raise NotImplementedError()
+
+    def handle_storeind(self, instruction_info, issue_thread, instr_args):
+        addrReg = instr_args["AddrReg"]
+        dataReg = instr_args["DataRegIndex"]
+        offsetIncrement = instr_args["AutoIncSpec"]
+        offsetHalfReg = instr_args["OffsetIndex"]
+        memHierSel = instr_args["MemHierSel"]
+        regSizeSel = instr_args["RegSizeSel"]
+        sizeSel = instr_args["SizeSel"]
+
+        if memHierSel == 1:
+            self.process_storeind_l1_from_gpr(
+                issue_thread,
+                addrReg,
+                dataReg,
+                offsetIncrement,
+                offsetHalfReg,
+                memHierSel,
+                regSizeSel,
+                sizeSel,
+            )
+        else:
+            if sizeSel == 1:
+                self.process_mmio_from_gpr(
+                    issue_thread, addrReg, dataReg, offsetIncrement, offsetHalfReg
+                )
+            else:
+                self.process_srca_srcb_from_gpr(
+                    issue_thread,
+                    addrReg,
+                    dataReg,
+                    offsetIncrement,
+                    offsetHalfReg,
+                    regSizeSel,
+                )
+
+    def process_srca_srcb_from_gpr(
+        self,
+        issue_thread,
+        addrReg,
+        dataReg,
+        offsetIncrement,
+        offsetHalfReg,
+        storeToSrcB,
+    ):
+        # SrcA/SrcB write 4xBF16 from 2xGPR
+        datum = [0] * 4
+        datum[0] = self.readBF16Lo(self.gprs.getRegisters(issue_thread)[dataReg & 0x3C])
+        datum[1] = self.readBF16Hi(self.gprs.getRegisters(issue_thread)[dataReg & 0x3C])
+        datum[2] = self.readBF16Lo(
+            self.gprs.getRegisters(issue_thread)[(dataReg & 0x3C) + 1]
+        )
+        datum[3] = self.readBF16Hi(
+            self.gprs.getRegisters(issue_thread)[(dataReg & 0x3C) + 1]
+        )
+
+        offset_val = self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2]
+        addr = self.gprs.getRegisters(issue_thread)[addrReg] + (offset_val >> 4)
+
+        match offsetIncrement:
+            case 0:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 0
+            case 1:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 2
+            case 2:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 4
+            case 3:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 16
+
+        assert not (addr & 0xF0000)
+
+        column0 = (addr & 3) * 4
+        if storeToSrcB:
+            bank = self.backend.unpackers[1].srcBank
+
+            if (
+                self.backend.getSrcB[bank].allowedClient
+                != SrcRegister.SrcClient.Unpackers
+            ):
+                self.stalled_condition = (
+                    issue_thread,
+                    addrReg,
+                    dataReg,
+                    offsetIncrement,
+                    offsetHalfReg,
+                    storeToSrcB,
+                )
+                self.stalled_type = ScalarUnit.THConStallType.SRC_UNPACKER
+                self.stalled = True
+            else:
+                self.stalled = False
+                self.stalled_condition = self.stalled_type = None
+
+            row = addr >> 2
+            assert row < 16
+            row += self.backend.unpackers[1].srcRow[
+                issue_thread
+            ]  # Will add 0 / 16 / 32 / 48
+            for i in range(4):
+                self.backend.getSrcB(bank)[row][column0 + i] = datum[i]
+        else:
+            bank = self.backend.unpackers[0].srcBank
+            if (
+                self.backend.getSrcA[bank].allowedClient
+                != SrcRegister.SrcClient.Unpackers
+            ):
+                self.stalled_condition = (
+                    issue_thread,
+                    addrReg,
+                    dataReg,
+                    offsetIncrement,
+                    offsetHalfReg,
+                    storeToSrcB,
+                )
+                self.stalled_type = ScalarUnit.THConStallType.SRC_UNPACKER
+                self.stalled = True
+            else:
+                self.stalled = False
+                self.stalled_condition = self.stalled_type = None
+            row = (addr >> 2) - 4
+            if row >= 0:
+                if self.getThreadConfigValue(issue_thread, "SRCA_SET_SetOvrdWithAddr"):
+                    assert row < 64
+                else:
+                    assert row < 16
+                    row += self.backend.unpackers[0].srcRow[issue_thread]
+                for i in range(4):
+                    self.backend.getSrcA(bank)[row][column0 + i] = datum[i]
+
+    def process_mmio_from_gpr(
+        self,
+        issue_thread,
+        addrReg,
+        dataReg,
+        offsetIncrement,
+        offsetHalfReg,
+    ):
+        # MMIO register write from GPR
+        offset_val = self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2]
+        addr = self.gprs.getRegisters(issue_thread)[addrReg] + (offset_val >> 4)
+        addr = 0xFFB00000 + (addr & 0x000FFFFC)
+
+        assert addr >= 0xFFB11000
+
+        gpr_val = self.gprs.getRegisters(issue_thread)[dataReg]
+        self.backend.getAddressableMemory().write(addr, conv_to_bytes(gpr_val))
+
+        match offsetIncrement:
+            case 0:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 0
+            case 1:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 2
+            case 2:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 4
+            case 3:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 16
+
+    def process_storeind_l1_from_gpr(
+        self,
+        issue_thread,
+        addrReg,
+        dataReg,
+        offsetIncrement,
+        offsetHalfReg,
+        memHierSel,
+        regSizeSel,
+        sizeSel,
+    ):
+        # L1 write from GPR
+        size = ((sizeSel << 1) | regSizeSel) & 0x3
+        gpr_reg_idx = dataReg & (0x3F if size else 0x3C)
+        offset_val = self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2]
+        L1Address = (self.gprs.getRegisters(issue_thread)[addrReg] * 16) + offset_val
+
+        assert L1Address < (1464 * 1024)
+
+        match offsetIncrement:
+            case 0:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 0
+            case 1:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 2
+            case 2:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 4
+            case 3:
+                self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 16
+
+        match size:
+            case 0:
+                # Four consecutive GPRs
+                L1Address &= ~15
+                for i in range(4):
+                    gpr_val = self.gprs.getRegisters(issue_thread)[gpr_reg_idx + i]
+                    self.backend.getAddressableMemory().write(
+                        L1Address, conv_to_bytes(gpr_val)
+                    )
+                    L1Address += 4
+            case 1:
+                gpr_val = self.gprs.getRegisters(issue_thread)[gpr_reg_idx]
+                self.backend.getAddressableMemory().write(
+                    L1Address & ~3, conv_to_bytes(gpr_val)
+                )
+            case 2:
+                # Low 16 bits of GPR
+                gpr_val = self.gprs.getRegisters(issue_thread)[gpr_reg_idx] & 0xFFFF
+                self.backend.getAddressableMemory().write(
+                    L1Address & ~1, conv_to_bytes(gpr_val, 2)
+                )
+            case 3:
+                # Low 8 bits of GPR
+                gpr_val = self.gprs.getRegisters(issue_thread)[gpr_reg_idx] & 0xFF
+                self.backend.getAddressableMemory().write(
+                    L1Address, conv_to_bytes(gpr_val, 1)
+                )
+
+    def readBF16Lo(self, x):
+        sign = x & 0x8000
+        man = x & 0x7F00
+        exp = x & 0x00FF
+
+        return (sign << 3) | (man << 3) | exp
+
+    def readBF16Hi(self, x):
+        sign = x >> 31
+        man = (x >> 23) & 0xFF
+        exp = (x >> 16) & 0x7F
+
+        return (sign << 18) | (man << 11) | exp
