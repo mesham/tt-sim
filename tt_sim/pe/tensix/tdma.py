@@ -30,7 +30,9 @@ class TDMA(MemMapable, Clockable):
             else:
                 self.command_queue.append([cmd, *self.cmd_params])
         elif addr == 0x24:
-            print(f"SET! {hex(conv_to_uint32(value) & 0xffffff7)}")
+            # print(f"SET! {hex(conv_to_uint32(value) & 0xffffff7)}")
+            # For now do nothing, not clear how to link this up with unpacker
+            pass
         else:
             raise NotImplementedError(
                 f"Writing to tdma address {hex(addr)} not supported"
