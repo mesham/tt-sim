@@ -14,6 +14,10 @@ Then from within this _wormhole_ directory you can run an example (note it takes
 
 ```bash
 ~/tt-sim/driver/wormhole $ python3 one/one.py
+--> Launching and running firmware
+    --> Done, device is ready
+--> Launching and running kernel
+    --> Done
 Example one completed successfully
 ```
 
