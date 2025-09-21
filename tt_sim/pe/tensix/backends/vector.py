@@ -145,6 +145,9 @@ class VectorUnit(TensixBackendUnit):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
 
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = ~ lreg[{vc}]")
+
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -153,8 +156,10 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpxor(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-
         vb = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = lreg[{vb}] ^ lreg[{vc}]")
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -163,8 +168,10 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpand(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-
         vb = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = lreg[{vb}] & lreg[{vc}]")
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -173,8 +180,11 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpor(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-
         vb = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = lreg[{vb}] | lreg[{vc}]")
+
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -205,6 +215,9 @@ class VectorUnit(TensixBackendUnit):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
 
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = abs(lreg[{vc}])")
+
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -225,13 +238,16 @@ class VectorUnit(TensixBackendUnit):
                     else:
                         # Value is positive (or zero); leave it as-is
                         pass
-                    x = self.lregs[vd][lane] = x
+                    self.lregs[vd][lane] = x
 
     def handle_addi(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
         vd = instr_args["lreg_dest"]
         imm16 = instr_args["imm16_math"]
         vc = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = {hex(imm16)} + lreg[{vc}]")
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
@@ -249,6 +265,10 @@ class VectorUnit(TensixBackendUnit):
         vd = instr_args["lreg_dest"]
         imm16 = instr_args["imm16_math"]
         vc = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = {hex(imm16)} * lreg[{vc}]")
+
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
@@ -262,6 +282,8 @@ class VectorUnit(TensixBackendUnit):
                         self.lregs[vd][lane] = d
 
     def perform_mad(self, va, vb, vc, vd, mod1):
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = lreg[{va}] * lreg[{vb}] + lreg[{vc}]")
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
@@ -479,6 +501,9 @@ class VectorUnit(TensixBackendUnit):
 
         vb = vd
 
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"lreg[{vd}] = lreg[{vc}] + lreg[{vb}]")
+
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -560,6 +585,16 @@ class VectorUnit(TensixBackendUnit):
 
         addr = self.get_dst_address(issue_thread, mod0, imm10)
 
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            if addr & 2:
+                col_start = 1
+            else:
+                col_start = 0
+            print(
+                f"Store lreg[{vd}] into between dst[{(addr & ~3)}, {col_start}] and dst"
+                f"[{(addr & ~3) + int(31 / 8)}, X] from thread{issue_thread}"
+            )
+
         for lane in range(32):
             if self.laneConfigValue(lane, VectorUnit.BLOCK_SFPU_RD_FROM_DEST):
                 continue
@@ -593,6 +628,16 @@ class VectorUnit(TensixBackendUnit):
         vd = instr_args["lreg_ind"]
 
         addr = self.get_dst_address(issue_thread, mod0, imm10)
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            if addr & 2:
+                col_start = 1
+            else:
+                col_start = 0
+            print(
+                f"Load between dst[{(addr & ~3)}, {col_start}] and dst[{(addr & ~3) + int(31 / 8)}, "
+                f"X]into lreg[{vd}] from thread{issue_thread}"
+            )
 
         if vd < 8:
             for lane in range(32):

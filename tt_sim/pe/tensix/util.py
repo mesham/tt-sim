@@ -13,15 +13,20 @@ class DiagnosticsSettings:
         unpacking=False,
         packing=False,
         fpu_calculations=False,
+        sfpu_calculations=False,
     ):
         self.issued_instructions = issued_instructions
         self.configurations_set = configurations_set
         self.unpacking = unpacking
         self.packing = packing
         self.fpu_calculations = fpu_calculations
+        self.sfpu_calculations = sfpu_calculations
 
     def reportFPUCalculations(self):
         return self.fpu_calculations
+
+    def reportSFPUCalculations(self):
+        return self.sfpu_calculations
 
     def reportUnpacking(self):
         return self.unpacking

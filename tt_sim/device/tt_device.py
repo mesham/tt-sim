@@ -17,6 +17,7 @@ from tt_sim.pe.tensix.tdma import TDMA
 from tt_sim.pe.tensix.tensix import (
     TensixCoProcessor,
 )
+from tt_sim.pe.tensix.util import DiagnosticsSettings
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -111,7 +112,23 @@ class Wormhole(TT_Device):
     def __init__(self):
         dram_tile = DRAMTile(16, 16)
         tensix_tile = TensixTile(
-            18, 18, False, False, False, False, False, False, False
+            18,
+            18,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            coprocessor_diagnostics=DiagnosticsSettings(
+                unpacking=False,
+                packing=False,
+                configurations_set=False,
+                issued_instructions=False,
+                fpu_calculations=False,
+                sfpu_calculations=True,
+            ),
         )
 
         # For now don't provide any memory, in future this will be the memory
@@ -177,8 +194,9 @@ class TensixTile(TTDeviceTile):
         trisc2_snoop=False,
         noc0_snoop=False,
         noc1_snoop=False,
+        coprocessor_diagnostics=None,
     ):
-        self.tensix_coprocessor = TensixCoProcessor()
+        self.tensix_coprocessor = TensixCoProcessor(coprocessor_diagnostics)
 
         mb_brisc = Mailbox(BabyRISCVCoreType.BRISC)
         mb_trisc0 = Mailbox(BabyRISCVCoreType.TRISC0)
@@ -217,7 +235,7 @@ class TensixTile(TTDeviceTile):
         noc_overlay_range = AddressRange(0xFFB40000, self.noc_overlay.getSize())
         tensix_mem_map[noc_overlay_range] = self.noc_overlay
 
-        self.tdma = TDMA(self.tensix_coprocessor)
+        self.tdma = TDMA(self.tensix_coprocessor, self.L1_mem)
         tdma_range = AddressRange(0xFFB11000, self.tdma.getSize())
         tensix_mem_map[tdma_range] = self.tdma
 
