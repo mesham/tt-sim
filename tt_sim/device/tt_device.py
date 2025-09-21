@@ -128,7 +128,7 @@ class Wormhole(TT_Device):
                 issued_instructions=False,
                 fpu_calculations=False,
                 sfpu_calculations=False,
-                thcon=True,
+                thcon=False,
             ),
         )
 
