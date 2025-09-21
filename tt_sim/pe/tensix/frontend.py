@@ -9,6 +9,14 @@ from tt_sim.util.conversion import conv_to_uint32
 
 
 class TensixFrontend(MemMapable):
+    """
+    Tensix unit frontend, we have a frontend per thread and there are three threads.
+    Each frontend contains a MOP expander, replay expander and wait gate.
+
+    Based on description at
+    https://github.com/tenstorrent/tt-isa-documentation/tree/main/WormholeB0/TensixTile/TensixCoprocessor
+    """
+
     def __init__(self, thread_id, backend, diags_settings=None):
         self.thread_id = thread_id
         self.backend = backend
@@ -102,6 +110,15 @@ class TensixFrontendUnit(Clockable, ABC):
 
 
 class WaitGate(TensixFrontendUnit):
+    """
+    The wait gate will pause instructions based on SEMWAIT, mutex or semaphores
+    as well as some other conditions such as math instructions not having
+    srcA or srcB bank ready for them.
+
+    This is based on description and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/WaitGate.md
+    """
+
     # The math instructions to check allowedclient for, first element is
     # list of applicable instructions that need to check srcA, second element
     # is list of applicable instructions that need to check srcB
@@ -361,6 +378,14 @@ class WaitGate(TensixFrontendUnit):
 
 
 class TensixReplayExpander(TensixFrontendUnit):
+    """
+    The replay expander front end unit to record or replay sequences
+    of instructions.
+
+    Based on description and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/REPLAY.md
+    """
+
     def __init__(self, frontend):
         self.replay_buffer = [0] * 32
         self.append_instruction_to_buffer = False
@@ -407,6 +432,15 @@ class TensixReplayExpander(TensixFrontendUnit):
 
 
 class TensixMOPExpander(TensixFrontendUnit, MemMapable):
+    """
+    The MOP expander allows templating of instructions, with a single MOP then
+    issuing a chain of preset instructions. Often used for unpacker and matrix
+    unit opertions, where multiple instructions are needed for one logical step.
+
+    Based on description and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/MOPExpander.md
+    """
+
     def __init__(self, frontend):
         self.mop_cfg = [0] * 9
         self.mask_hi = 0

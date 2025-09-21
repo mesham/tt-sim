@@ -4,6 +4,14 @@ from tt_sim.util.bits import extract_bits, get_nth_bit
 
 
 class MatrixUnit(TensixBackendUnit):
+    """
+    Performs operations on srcA and srcB, writing results to dst register. Most obvious
+    is matrix multiplication, but other element wise operations supported too.
+
+    Based on description and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/MatrixUnit.md
+    """
+
     OPCODE_TO_HANDLER = {
         "ZEROACC": "handle_zeroacc",
         "SETRWC": "handle_setrwc",

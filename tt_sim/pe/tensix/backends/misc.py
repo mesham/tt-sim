@@ -3,6 +3,14 @@ from tt_sim.util.bits import extract_bits, get_nth_bit
 
 
 class MiscellaneousUnit(TensixBackendUnit):
+    """
+    The misc unit is mainly concerned with setting the ADC registers to generate
+    addresses for the packer and unpacker.
+
+    Based on description and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/MiscellaneousUnit.md
+    """
+
     OPCODE_TO_HANDLER = {
         "SETADCXY": "handle_setadcxy",
         "SETADCZW": "handle_setadczw",

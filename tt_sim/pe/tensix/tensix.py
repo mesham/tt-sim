@@ -5,6 +5,11 @@ from tt_sim.pe.tensix.frontend import TensixFrontend
 
 
 class TensixCoProcessor(ProcessingElement):
+    """
+    Entry point into the Tensix coprocessor, this is really just a wrapper for
+    the frontend and backend parts
+    """
+
     def __init__(self, diags_settings=None):
         self.backend = TensixBackend(diags_settings)
         self.threads = [

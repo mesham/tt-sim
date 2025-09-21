@@ -19,6 +19,11 @@ from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
 class TensixBackend:
+    """
+    Tensix backend, containing the units that make this up, see
+    https://github.com/tenstorrent/tt-isa-documentation/tree/main/WormholeB0/TensixTile/TensixCoprocessor
+    """
+
     def __init__(self, diags_settings=None):
         self.gpr = TensixGPR()
         self.mover_unit = MoverUnit(self)

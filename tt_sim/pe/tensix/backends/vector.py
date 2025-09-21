@@ -4,6 +4,13 @@ from tt_sim.util.bits import get_bits, get_nth_bit
 
 
 class VectorUnit(TensixBackendUnit):
+    """
+    SFPU vector unit, which has 32 lanes of 32 bit and 17 LRegs that can feed these lanes.
+
+    This is based on the description and functional code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/VectorUnit.md
+    """
+
     OPCODE_TO_HANDLER = {
         "SFPENCC": "handle_sfpencc",
         "SFPLOADI": "handle_sfploadi",

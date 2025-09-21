@@ -11,6 +11,13 @@ from tt_sim.util.conversion import conv_to_uint32
 
 
 class UnPackerUnit(TensixBackendUnit):
+    """
+    Unpacker unit, which unpacks from L1 into either srcA/srcB or dst.
+
+    Based on the description and functional code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/UNPACR.md
+    """
+
     OPCODE_TO_HANDLER = {"UNPACR": "handle_unpacr"}
 
     def __init__(self, backend, unpacker_id):

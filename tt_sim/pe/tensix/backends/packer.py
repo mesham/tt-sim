@@ -11,6 +11,15 @@ from tt_sim.util.conversion import conv_to_bytes
 
 
 class PackerUnit(TensixBackendUnit):
+    """
+    Packer backend unit, note that currently this is only running one packer to do the
+    actual packing (all four calculate input and output addresses) as the logic doesn't
+    share the packing but instead duplicates it out.
+
+    Based on description and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/UNPACR.md
+    """
+
     OPCODE_TO_HANDLER = {"PACR": "handle_pacr"}
 
     packer0InitialAddr = 0

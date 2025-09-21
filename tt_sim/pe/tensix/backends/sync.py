@@ -6,6 +6,15 @@ from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
 class TensixSyncUnit(TensixBackendUnit, MemMapable):
+    """
+    The sync unit provides mutex and semaphore functionality to instruct the waitgate
+    to block the issuing of instructions to the backend based on specific conditions.
+    Also provides the STALLWAIT which is more generic.
+
+    Based on descriptions and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/SyncUnit.md
+    """
+
     class TTSemaphore:
         def __init__(self):
             self.value = 0

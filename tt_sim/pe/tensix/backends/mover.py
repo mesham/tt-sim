@@ -5,6 +5,14 @@ from tt_sim.util.conversion import conv_to_bytes
 
 
 class MoverUnit(TensixBackendUnit):
+    """
+    This unit moves data between L1 and other memory spaces, such as the
+    16KB NCRISC private IRAM. This can be used to accelerate memcpy.
+
+    Based on description and code snippets at
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/XMOV.md
+    """
+
     class XMOV_DIRECTION(IntEnum):
         XMOV_L0_TO_L1 = 0
         XMOV_L1_TO_L0 = 1
