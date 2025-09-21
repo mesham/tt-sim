@@ -6,6 +6,11 @@ from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
 class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
+    """
+    Backend configuration unit as per
+    https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/ConfigurationUnit.md
+    """
+
     OPCODE_TO_HANDLER = {
         "SETC16": "handle_setc16",
         "RMWCIB0": "handle_rmwcib0",
@@ -82,11 +87,12 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             else:
                 return False
 
-    def setConfig(self, stateID, cfgIndex, value):
+    def setConfig(self, stateID, cfgIndex, value, from_thread=None):
         if self.getDiagnosticSettings().reportConfigurationSet():
+            frm_thread = f"from thread {from_thread}"
             print(
                 f"Set config [{stateID}]{TensixConfigurationConstants.get_name(cfgIndex)} "
-                f"value={hex(value )}"
+                f"value={hex(value )} {frm_thread if from_thread is not None else ''}"
             )
         self.config[stateID][cfgIndex] = value
 
@@ -126,10 +132,14 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
                     stateID,
                     cfgIndex + i,
                     self.gprs.getRegisters(issue_thread)[inputReg + i],
+                    issue_thread,
                 )
         else:
             self.setConfig(
-                stateID, cfgIndex, self.gprs.getRegisters(issue_thread)[inputReg]
+                stateID,
+                cfgIndex,
+                self.gprs.getRegisters(issue_thread)[inputReg],
+                issue_thread,
             )
 
     def handle_setc16(self, instruction_info, issue_thread, instr_args):
@@ -167,7 +177,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         new_value = new_value & mask
         replaced_value = replace_bits(existing_val, new_value, index1 * 8, 8)
 
-        self.setConfig(stateID, index4, replaced_value)
+        self.setConfig(stateID, index4, replaced_value, issue_thread)
 
     def get_threadConfig_entry(self, thread, entry_idx):
         return self.threadConfig[thread][entry_idx]
@@ -203,13 +213,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             first_idx = int(idx - (each_config_size * second_idx))
             self.setConfig(second_idx, first_idx, conv_to_uint32(value))
         else:
-            idx = idx - threadConfigStart
-            second_idx = int(idx / TensixBackendConfigurationUnit.THD_STATE_SIZE)
-            self.setThreadConfig(
-                second_idx,
-                idx - ((TensixBackendConfigurationUnit.THD_STATE_SIZE) * second_idx),
-                conv_to_uint32(value),
-            )
+            raise ValueError("Can not write to thread config from RISC-V core")
 
     def getSize(self):
         return 0xFFFF
