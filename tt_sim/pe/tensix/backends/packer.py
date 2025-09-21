@@ -1,6 +1,11 @@
 from enum import IntEnum
+from math import ceil
 
-from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
+from tt_sim.pe.tensix.backends.backend_base import (
+    DATA_FORMAT_TO_BITS,
+    DataFormat,
+    TensixBackendUnit,
+)
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes
 
@@ -20,6 +25,7 @@ class PackerUnit(TensixBackendUnit):
             self.inputSourceStride = 0
             self.byteAddress = 0
             self.datastreamNeedsNewAddr = 0
+            self.outBytes = 0
 
     class InputSource(IntEnum):
         L1 = 1
@@ -144,7 +150,6 @@ class PackerUnit(TensixBackendUnit):
                 ].inputSourceStride = bytesPerDatum  # L1 is addressed in bytes
             else:
                 addr = (int(addr / bytesPerDatum) & ~ADC_X_Mask) + (adc.X & ADC_X_Mask)
-                # comment out
                 offset = (
                     self.getConfigValue(
                         stateID, "DEST_TARGET_REG_CFG_PACK_SEC" + str(i) + "_Offset"
@@ -283,8 +288,16 @@ class PackerUnit(TensixBackendUnit):
                 )
                 & 2
             )
+
             if outputFormatLessThan16Bits:
                 raise NotImplementedError()
+
+            output_data_format = DataFormat(
+                self.getConfigValue(
+                    stateID, self.getIPackerConfig(i, 4, 1, 8) + "Out_data_format"
+                )
+            )
+            self.packerI[i].outBytes = ceil(DATA_FORMAT_TO_BITS[output_data_format] / 8)
 
             if self.packerI[i].datastreamNeedsNewAddr:
                 self.packerI[i].byteAddress = (addr & 0x1FFFF) << 4
@@ -368,7 +381,7 @@ class PackerUnit(TensixBackendUnit):
                 row = idx >> 4
                 col = idx & 0xF
                 val = self.backend.getDst().getDst32b(row, col)
-                # TODO: handle other data types
-                int_val = int(val)
-                self.backend.addressable_memory.write(addr, conv_to_bytes(int_val), 4)
-                addr += 4
+                self.backend.addressable_memory.write(
+                    addr, conv_to_bytes(val, self.packerI[i].outBytes)
+                )
+                addr += self.packerI[i].outBytes
