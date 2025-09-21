@@ -4,6 +4,8 @@ This is a software simulator for the Tenstorrent architecture in large part base
 
 Optional diagnostic information can be provided by each RISC-V baby core, the NoC, the Tensix co-processor and memory, enabling tracing of the execution of a program. This is currently at the instruction and architectural state level, but could be enhanced in the future to provide feedback to developers around potential code bottlenecks or other issues.
 
+This is written in Python, mainly to make it easy for people to hackaround and experiment with things. If you want to add some functionality, or fix a bug, then please feel free to go ahead and raise a PR. 
+
 ## Getting started
 
 The simulator implementation is in the [tt_sim](https://github.com/mesham/tt-sim/tree/main/tt_sim) directory, with the [driver](https://github.com/mesham/tt-sim/tree/main/driver) directory providing a range of examples that illustrate running the simulator. These are individually documented, but to summarise:
