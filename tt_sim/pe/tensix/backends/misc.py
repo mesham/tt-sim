@@ -1,4 +1,5 @@
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
+from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.util.bits import extract_bits, get_nth_bit
 
 
@@ -21,6 +22,7 @@ class MiscellaneousUnit(TensixBackendUnit):
         "SETADC": "handle_setadc",
         "ADDRCRXY": "handle_addrcrxy",
         "ADDRCRZW": "handle_addrcrzw",
+        "SETDVALID": "handle_setdvalid",
     }
 
     def __init__(self, backend):
@@ -38,6 +40,27 @@ class MiscellaneousUnit(TensixBackendUnit):
             )
         )
         return True
+
+    def handle_setdvalid(self, instruction_info, issue_thread, instr_args):
+        flipSrcA = instr_args["setvalid"] & 0x1
+        flipSrcB = (instr_args["setvalid"] >> 1) & 0x1
+
+        if flipSrcA:
+            self.backend.getSrcA(
+                self.backend.unpacker_units[0].srcBank
+            ).allowedClient = SrcRegister.SrcClient.MatrixUnit
+            self.backend.unpacker_units[0].srcBank ^= 1
+            self.backend.unpacker_units[0].srcRow = (
+                self.backend.getThreadConfigValue(issue_thread, "SRCA_SET_Base") << 4
+            )
+        if flipSrcB:
+            self.backend.getSrcB(
+                self.backend.unpacker_units[1].srcBank
+            ).allowedClient = SrcRegister.SrcClient.MatrixUnit
+            self.backend.unpacker_units[1].srcBank ^= 1
+            self.backend.unpacker_units[1].srcRow = (
+                self.backend.getThreadConfigValue(issue_thread, "SRCB_SET_Base") << 4
+            )
 
     def handle_dmanop(self, instruction_info, issue_thread, instr_args):
         # This is a nop (but in documentation says for the scalar unit, but it is
