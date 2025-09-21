@@ -41,7 +41,7 @@ assert conv_to_int32(rv) == 100
 rv = dram.read(0, 4)
 assert conv_to_int32(rv) == 100
 
-# Test adding a lit of values to the second dram area
+# Test adding a list of values to the second dram area
 vals = [10, 20, 30, 40]
 by = conv_to_bytes(vals)
 dm.write(0x16392, by)
@@ -52,3 +52,5 @@ for idx, in_val in enumerate(vals):
     rval2 = dram2.read(0xE + (idx * 4), 4)
     assert conv_to_int32(rval) == in_val
     assert conv_to_int32(rval2) == in_val
+
+print("Completed successfully")

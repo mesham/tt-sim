@@ -4,7 +4,7 @@ from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.pe.rv.rv32 import RV32I
-from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 # Read in binary executable (sets 10 to location 0x512)
 with open("main.bin", "rb") as file:
@@ -28,6 +28,10 @@ cpu = RV32I(0x0, [dm], snoop=True)
 # so therefore set it ourselves
 cpu.getRegisterFile()["sp"].write(conv_to_bytes(0x256))
 
+# Set the output memory to be zero, this is because the compiler has
+# generated an sb, so otherwise there could be garbage
+dram.write(0x512, conv_to_bytes(0))
+
 # Create a clock
 clock = Clock([cpu])
 
@@ -43,4 +47,6 @@ device.run(10)
 
 # Now check the result at location 0x512
 rval = dram.read(0x512, 4)
-assert conv_to_int32(rval) == 10
+assert conv_to_uint32(rval) == 10
+
+print("Completed successfully")

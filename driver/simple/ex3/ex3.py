@@ -4,7 +4,7 @@ from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.pe.rv.rv32 import RV32I
-from tt_sim.util.conversion import conv_to_int32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
 
 # Read in binary executable (sets 10 to location 0x512)
 with open("main.bin", "rb") as file:
@@ -24,6 +24,10 @@ mem_map[ram_range] = dram_ram
 # Create device memory and write executable into this
 dm = DeviceMemory(mem_map)
 dm.write(0x0, data)
+
+# Initialise output memory to be zero
+for i in range(10):
+    dram_ram.write(0x512 + (i * 4), conv_to_bytes(0))
 
 # Create CPU
 cpu = RV32I(0x0, [dm])
@@ -45,3 +49,5 @@ device.run(5000)
 for i in range(10):
     rval = dram_ram.read(0x512 + (i * 4), 4)
     assert conv_to_int32(rval) == i + 100
+
+print("Completed successfully")

@@ -4,7 +4,7 @@ from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.pe.rv.rv32 import RV32IM
-from tt_sim.util.conversion import conv_to_int32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_int32
 
 # This is very similar to ex3, but instantiates RV32IM (rather than RV32I) CPU
 # and the binary executable does integer multiplication and division
@@ -28,6 +28,10 @@ mem_map[ram_range] = dram_ram
 dm = DeviceMemory(mem_map)
 dm.write(0x0, data)
 
+# Initialise output memory to be zero
+for i in range(10):
+    dram_ram.write(0x512 + (i * 4), conv_to_bytes(0))
+
 # Create CPU
 cpu = RV32IM(0x0, [dm])
 
@@ -50,3 +54,5 @@ cpu.stop()
 for i in range(10):
     rval = dram_ram.read(0x512 + (i * 4), 4)
     assert conv_to_int32(rval) == (i * 100) / 2
+
+print("Completed successfully")
