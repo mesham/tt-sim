@@ -21,3 +21,5 @@ run_kernel(wormhole, tt_metal, "four/parameters.json")
 for i in range(256):
     val = conv_to_int32(wormhole.read((16, 16), 0x220 + (i * 4), 4))
     assert val == list1[i] + list2[i]
+
+print("Example four completed successfully")
