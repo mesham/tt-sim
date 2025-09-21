@@ -11,13 +11,46 @@ class MoverUnit(TensixBackendUnit):
         XMOV_L0_TO_L0 = 2
         XMOV_L1_TO_L1 = 3
 
-    OPCODE_TO_HANDLER = {}
+    OPCODE_TO_HANDLER = {
+        "XMOV": "handle_xmov",
+    }
 
     TENSIX_CFG_BASE = 0xFFEF0000
     MEM_NCRISC_IRAM_BASE = 0xFFC00000
 
     def __init__(self, backend):
+        self.tdma_commands = []
         super().__init__(backend, MoverUnit.OPCODE_TO_HANDLER, "Mover")
+
+    def append_command_from_tdma(self, command):
+        self.tdma_commands.append(command)
+
+    def clock_tick(self, cycle_num):
+        if len(self.tdma_commands) > 0:
+            self.move(*self.tdma_commands.pop(0))
+        else:
+            super().clock_tick(cycle_num)
+
+    def checkForOutstandingInstructions(self):
+        if len(self.tdma_commands) > 0:
+            return True
+        if len(self.next_instruction) > 0:
+            return True
+        return False
+
+    def handle_xmov(self, instruction_info, issue_thread, instr_args):
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        dst = self.getConfigValue(stateID, "THCON_SEC0_REG6_Destination_address") << 4
+        src = self.getConfigValue(stateID, "THCON_SEC0_REG6_Source_address") << 4
+        count = (
+            self.getConfigValue(stateID, "THCON_SEC0_REG6_Buffer_size") & 0xFFFF
+        ) << 4
+        mode = self.getConfigValue(stateID, "THCON_SEC0_REG6_Destination_address")
+
+        self.move(dst, src, count, mode)
 
     def move(self, dst, src, count, mode):
         """

@@ -280,7 +280,7 @@ class WaitGate(TensixFrontendUnit):
                     == SrcRegister.SrcClient.MatrixUnit
                 )
             case 12:
-                return True
+                return not self.backend.mover_unit.checkForOutstandingInstructions()
             case 13:
                 return True
             case 14:
