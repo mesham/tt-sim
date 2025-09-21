@@ -1,0 +1,45 @@
+{
+  "brisc_binary_file" : "loopback/brisc_kernel.bin",
+  "brisc_binary_text_addr": "0x71d0",
+  "ncrisc_binary_file" : "loopback/ncrisc_kernel.bin",
+  "ncrisc_binary_text_addr": "0x74c0",
+  "trisc0_binary_file" : "loopback/trisc0_kernel.bin",
+  "trisc0_binary_text_addr": "0x7820",
+  "trisc1_binary_file" : "loopback/trisc1_kernel.bin",
+  "trisc1_binary_text_addr": "0x7d80",
+  "trisc2_binary_file" : "loopback/trisc2_kernel.bin",
+  "trisc2_binary_text_addr": "0x7ff0",
+  "launch": [{
+    "kernel_config": {
+      "watcher_kernel_ids": ["0x4", "0x5", "0x6"],
+      "ncrisc_kernel_size16": "0x36",
+      "kernel_config_base": ["0x7190", "0x3f520", "0x73d0"],
+      "sem_offset": ["0x20", "0x0", "0x0"],
+      "local_cb_offset": "0x20",
+      "remote_cb_offset": "0x40",
+      "rta_offset": [{"rta_offset": "0x0", "crta_offset": "0x20"}, {"rta_offset": "0xc", "crta_offset": "0x20"}, {"rta_offset": "0x18", "crta_offset": "0x20"}],
+      "mode": "0x1",
+      "kernel_text_offset": ["0x40", "0x330", "0x690", "0xbf0", "0xe60"],
+      "local_cb_mask": "0x3",
+      "brisc_noc_id": "0x0",
+      "brisc_noc_mode": "0x0",
+      "min_remote_cb_start_index": "0x20",
+      "exit_erisc_kernel": "0x0",
+      "host_assigned_id": "0x0",
+      "sub_device_origin_x": "0x0",
+      "sub_device_origin_y": "0x0",
+      "enables": "0x7",
+      "preload": "0x0"
+    }
+  }],
+  "go_message": {
+    "dispatch_message_offset": "0x31",
+    "master_x": "0x0",
+    "master_y": "0x0",
+    "signal": "0x80"
+  },
+  "runtime_args_base_addr": "0x7190",
+  "runtime_args": ["0x20", "0x100", "0x40", "0x820", "0x100", "0x40", "0x100", "0x40"],
+  "cb_config_base_addr": "0x71b0",
+  "cb_config": ["0x99744", "0x256", "0x1", "0x256", "0x100000", "0x256", "0x1", "0x256"]
+}
