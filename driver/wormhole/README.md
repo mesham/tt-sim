@@ -56,3 +56,12 @@ Issued SFPCONFIG to SFPU from thread 0
 ```
 
 Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V core 0 (BRISC) at cycle number 1690. _[0x478c]_ is the value of the PC (i.e. the address of the instruction being executed), with the instruction itself and some meta data. The _Issued_ messages are from diagnostics reported by the Tensix coprocessor, here for example the firmware is issuing some instructions to the MATH and vector unit to set them up. You can enable other diagnostics via the boolean values, for example _configurations_set_ reports all values set in the Tensix configuration unit, but the output quickly becomes rather large!
+
+## Provided examples
+
+All the examples are run in the same way as illustrated here for the first one, executed from this base _wormhole_ directory due to the paths being relative to here.
+
+* [one](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/one) is what we have explored here, this is using BRISC only to read data from DRAM, perform addition, and write results back to DRAM.
+* [two](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/two) is similar to the first example, but uses NCRISC to write results back to DRAM. This therefore involves a circular buffer between BRISC and NCRISC.
+* [three](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/three) is similar to the second example, but is chunking up data and operating upon individual chunks passing these then to NCRISC.
+* [four](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/four) brings in TRISC cores and the Tensix unit to use the matrix unit to undertake the element wise addition. This is more interesting as we are now exercising the Tensix co-processor.
