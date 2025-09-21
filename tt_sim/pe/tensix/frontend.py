@@ -229,8 +229,66 @@ class WaitGate(TensixFrontendUnit):
         else:
             for idx in range(15):
                 if self.latchedWaitInstruction.getConditionCheck(idx):
-                    # TODO: For now assume condition is matched
-                    return True
+                    if not self.check_for_semwait_condition_match(idx):
+                        return False
+            return True
+
+    def check_for_semwait_condition_match(self, cond_idx):
+        # Some of these conditions do not apply, as per
+        # https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/STALLWAIT.md
+        match cond_idx:
+            case 0:
+                return True
+            case 1:
+                return not self.backend.unpacker_units[
+                    0
+                ].hasInflightInstructionsFromThread(self.frontend.thread_id)
+            case 2:
+                return not self.backend.unpacker_units[
+                    0
+                ].hasInflightInstructionsFromThread(self.frontend.thread_id)
+            case 3 | 4 | 5 | 6:
+                return not self.backend.packer_unit.hasInflightInstructionsFromThread(
+                    self.frontend.thread_id
+                )
+            case 7:
+                return not self.backend.matrix_unit.hasInflightInstructionsFromThread(
+                    self.frontend.thread_id
+                )
+            case 8:
+                return (
+                    self.backend.getSrcA(
+                        self.backend.unpacker_units[0].srcBank
+                    ).allowedClient
+                    == SrcRegister.SrcClient.Unpackers
+                )
+            case 9:
+                return (
+                    self.backend.getSrcB(
+                        self.backend.unpacker_units[1].srcBank
+                    ).allowedClient
+                    == SrcRegister.SrcClient.Unpackers
+                )
+            case 10:
+                return (
+                    self.backend.getSrcA(self.backend.matrix_unit.srcBank).allowedClient
+                    == SrcRegister.SrcClient.MatrixUnit
+                )
+            case 11:
+                return (
+                    self.backend.getSrcB(self.backend.matrix_unit.srcBank).allowedClient
+                    == SrcRegister.SrcClient.MatrixUnit
+                )
+            case 12:
+                return True
+            case 13:
+                return True
+            case 14:
+                return not self.backend.vector_unit.hasInflightInstructionsFromThread(
+                    self.frontend.thread_id
+                )
+            case _:
+                return True
 
     def clock_tick(self, cycle_num):
         if not self.mutex_stall and not self.backend_enforced_stall:
