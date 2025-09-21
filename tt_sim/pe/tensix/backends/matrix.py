@@ -20,6 +20,7 @@ class MatrixUnit(TensixBackendUnit):
         "ELWMUL": "handle_elwmul",
         "ZEROSRC": "handle_zerosrc",
         "INCRWC": "handle_incrwc",
+        "CLEARDVALID": "handle_cleardvalid",
     }
 
     def __init__(self, backend):
@@ -32,6 +33,35 @@ class MatrixUnit(TensixBackendUnit):
 
     def getSrcB(self):
         return self.backend.getSrcB(self.srcBBank)
+
+    def handle_cleardvalid(self, instruction_info, issue_thread, instr_args):
+        reset = instr_args["reset"] & 0x1
+        keepReadingSameSrc = (instr_args["reset"] >> 1) & 0x1
+        flipSrcA = instr_args["cleardvalid"] & 0x1
+        flipSrcB = (instr_args["cleardvalid"] >> 1) & 0x1
+
+        if reset:
+            self.srcABank = 0
+            self.srcBBank = 0
+            self.backend.unpacker_units[0].srcBank = 0
+            self.backend.unpacker_units[1].srcBank = 0
+            self.backend.getSrcA(0).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.backend.getSrcA(1).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.backend.getSrcB(0).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.backend.getSrcB(1).allowedClient = SrcRegister.SrcClient.Unpackers
+        else:
+            if flipSrcA:
+                self.backend.getSrcA(
+                    self.srcABank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+                if not keepReadingSameSrc:
+                    self.srcABank ^= 1
+            if flipSrcB:
+                self.backend.getSrcB(
+                    self.srcBBank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+                if not keepReadingSameSrc:
+                    self.srcBBank ^= 1
 
     def handle_incrwc(self, instruction_info, issue_thread, instr_args):
         srcAInc = instr_args["rwc_a"]
