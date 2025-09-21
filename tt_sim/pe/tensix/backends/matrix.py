@@ -36,6 +36,11 @@ class MatrixUnit(TensixBackendUnit):
 
         rwc = self.backend.getRWC(issue_thread)
 
+        if self.getDiagnosticSettings().reportFPUCalculations():
+            print(
+                f"FPU incrwc AInc={srcAInc} BInc={srcBInc} dstInc={dstInc} by thread {issue_thread}"
+            )
+
         if srcACr:
             rwc.SrcA_Cr += srcAInc
             rwc.SrcA = rwc.SrcA_Cr
@@ -63,6 +68,11 @@ class MatrixUnit(TensixBackendUnit):
         bothBanks = instr_args["bank_mask"]
         singleBankMatrixUnit = instr_args["write_mode"]
         negativeInfSrcA = instr_args["zero_val"]
+
+        if self.getDiagnosticSettings().reportFPUCalculations():
+            print(
+                f"FPU perform zerosrc for srcA={clearSrcA}, srcB={clearSrcB} by thread {issue_thread}"
+            )
 
         if clearSrcA:
             if bothBanks:
@@ -111,7 +121,7 @@ class MatrixUnit(TensixBackendUnit):
         if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
             srcAStyle = DataFormat.FP16
             useDst32b = False
-        elif self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled"):
+        elif 1 == 1 or self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled"):
             srcAStyle = DataFormat.INT8
             useDst32b = True
         else:
@@ -159,7 +169,8 @@ class MatrixUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportFPUCalculations():
             print(
-                f"Perform FPU compute, dst starts at {dstRow}, srcA starts at {srcARow} and srcB at {srcBRow}"
+                f"Perform FPU element wise op, dst starts at {dstRow}, "
+                f"srcA starts at {srcARow} and srcB at {srcBRow} by thread {issue_thread}"
             )
 
         # Perform the element-wise computation
@@ -175,7 +186,7 @@ class MatrixUnit(TensixBackendUnit):
                 else:
                     result = None
 
-                if 1 == 1 or srcAFmt == DataFormat.INT8:
+                if srcAStyle == DataFormat.INT8:
                     int8_handler(
                         fidelityPhase, addDst, result, srcAVal, srcBVal, dstRow, i, j
                     )
