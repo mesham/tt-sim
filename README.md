@@ -10,8 +10,8 @@ This is written in Python, mainly to make it easy for people to hackaround and e
 
 The simulator implementation is in the [tt_sim](https://github.com/mesham/tt-sim/tree/main/tt_sim) directory, with the [driver](https://github.com/mesham/tt-sim/tree/main/driver) directory providing a range of examples that illustrate running the simulator. These are individually documented, but to summarise:
 
+* [wormhole](https://github.com/mesham/tt-sim/tree/main/driver/wormhole) is where you likely want to go to. It provides an implementation of a Wormhole, currently with one DRAM tile and one Tensix block (although this is easy to expand, although will likely be slow!) There is some abstraction of TT-Metal (currently v0.62.2 is assumed) provided here too, along with the firmware and example codes that will launch and run on the simulator. This also contains instructions around how to build you own binaries, via TT-Metal, for the simulator.
 * [simple](https://github.com/mesham/tt-sim/tree/main/driver/simple) are very basic examples, demonstrating the memory subsystem and running codes on a vanilla RV32IM CPU.
-* [wormhole](https://github.com/mesham/tt-sim/tree/main/driver/wormhole) provides an implementation of a Wormhole, currently with one DRAM tile and one Tensix block (although this is easy to expand, although will likely be slow!) There is some abstraction of TT-Metal (currently v0.62.2 is assumed) provided here too, along with the firmware and example codes that will launch and run on the simulator. This also contains instructions around how to build you own binaries, via TT-Metal, for the simulator.
 
 ## Key parts of the simulator
 
