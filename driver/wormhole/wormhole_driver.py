@@ -6,6 +6,7 @@ from tt_sim.util.conversion import (
 
 
 def launch_firmware(wormhole, tt_metal):
+    print("--> Launching and running firmware")
     go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
         "go_message", "signal"
     )
@@ -55,8 +56,11 @@ def launch_firmware(wormhole, tt_metal):
     ):
         wormhole.run(100)
 
+    print("  --> Done, device is ready")
+
 
 def run_kernel(wormhole, tt_metal, parameters):
+    print("--> Launching and running kernel")
     go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
         "go_message", "signal"
     )
@@ -83,3 +87,5 @@ def run_kernel(wormhole, tt_metal, parameters):
         != run_msg_done
     ):
         wormhole.run(100)
+
+    print("  --> Done")
