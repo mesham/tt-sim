@@ -14,6 +14,7 @@ class DiagnosticsSettings:
         packing=False,
         fpu_calculations=False,
         sfpu_calculations=False,
+        thcon=False,
     ):
         self.issued_instructions = issued_instructions
         self.configurations_set = configurations_set
@@ -21,6 +22,10 @@ class DiagnosticsSettings:
         self.packing = packing
         self.fpu_calculations = fpu_calculations
         self.sfpu_calculations = sfpu_calculations
+        self.thcon = thcon
+
+    def reportThCon(self):
+        return self.thcon
 
     def reportFPUCalculations(self):
         return self.fpu_calculations

@@ -192,6 +192,12 @@ class ScalarUnit(TensixBackendUnit):
         resultReg = instr_args["ResultRegIndex"]
         mode = instr_args["OpBisConst"]
 
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"GPR[{resultReg}] = GPR[leftReg] * {'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"from thread {issue_thread}"
+            )
+
         leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
 
         if mode == 0:
@@ -208,6 +214,12 @@ class ScalarUnit(TensixBackendUnit):
         resultReg = instr_args["ResultRegIndex"]
         mode = instr_args["OpBisConst"]
 
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"GPR[{resultReg}] = GPR[leftReg] - {'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"from thread {issue_thread}"
+            )
+
         leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
 
         if mode == 0:
@@ -223,6 +235,12 @@ class ScalarUnit(TensixBackendUnit):
         rightRegOrImm6 = instr_args["OpBRegIndex"]
         resultReg = instr_args["ResultRegIndex"]
         mode = instr_args["OpBisConst"]
+
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"GPR[{resultReg}] = GPR[leftReg] + {'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"from thread {issue_thread}"
+            )
 
         leftVal = self.gprs.getRegisters(issue_thread)[leftReg]
 
@@ -344,6 +362,13 @@ class ScalarUnit(TensixBackendUnit):
         dataReg = instr_args["TdmaDataRegIndex"]
 
         addr = 0xFFB00000 + (addrLo << 2)
+
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"Write to MMIO at {hex(addr)} from reg {dataReg} "
+                f"from thread {issue_thread}"
+            )
+
         self.backend.getAddressableMemory().write(
             addr, conv_to_bytes(self.gprs.getRegisters(issue_thread)[dataReg])
         )
@@ -455,6 +480,12 @@ class ScalarUnit(TensixBackendUnit):
         addr = 0xFFB00000 + (addrLo << 2)
         assert addr >= 0xFFB11000
 
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"Write to GPR {resultReg} from MMIO at {hex(addr)} "
+                f"from thread {issue_thread}"
+            )
+
         self.gprs.getRegisters(issue_thread)[resultReg] = conv_to_uint32(
             self.backend.getAddressableMemory().read(addr, 4)
         )
@@ -480,6 +511,13 @@ class ScalarUnit(TensixBackendUnit):
                 self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 4
             case 3:
                 self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2] += 16
+
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"Read from L1 address {hex(L1Address)} to GPR {gpr_reg_idx}, number of bytes "
+                f"{16 if sizeSel == 0 else 4 if sizeSel == 1 else 2 if sizeSel == 2 else 1} "
+                f"from thread {issue_thread}"
+            )
 
         match sizeSel:
             case 0:
@@ -654,6 +692,11 @@ class ScalarUnit(TensixBackendUnit):
 
         assert addr >= 0xFFB11000
 
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"Write to MMIO at address {hex(addr)} from GPR {dataReg} from thread {issue_thread}"
+            )
+
         gpr_val = self.gprs.getRegisters(issue_thread)[dataReg]
         self.backend.getAddressableMemory().write(addr, conv_to_bytes(gpr_val))
 
@@ -684,6 +727,13 @@ class ScalarUnit(TensixBackendUnit):
         offset_val = self.gprs.getRegisters(issue_thread)[offsetHalfReg * 2]
         L1Address = (self.gprs.getRegisters(issue_thread)[addrReg] * 16) + offset_val
         assert L1Address < (1464 * 1024)
+
+        if self.getDiagnosticSettings().reportThCon():
+            print(
+                f"Write to L1 address {hex(L1Address)} from GPR {gpr_reg_idx}, number of bytes "
+                f"{16 if size == 0 else 4 if size == 1 else 2 if size == 2 else 1} "
+                f"from thread {issue_thread}"
+            )
 
         match offsetIncrement:
             case 0:
