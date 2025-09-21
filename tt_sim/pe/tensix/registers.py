@@ -1,7 +1,5 @@
 from enum import IntEnum
 
-import numpy as np
-
 
 class DstRegister:
     def __init__(self):
@@ -63,7 +61,7 @@ class SrcRegister:
 
     def __init__(self):
         self.allowedClient = SrcRegister.SrcClient.Unpackers
-        self.data = np.empty([64, 16], dtype=np.uint32)
+        self.data = [[0 for _ in range(16)] for _ in range(64)]
 
     def flipAllowedClient(self):
         if self.allowedClient == SrcRegister.SrcClient.Unpackers:
@@ -76,18 +74,18 @@ class SrcRegister:
 
     def __getitem__(self, key):
         x, y = key
-        return self.data[x, y]
+        return self.data[x][y]
 
     def __setitem__(self, key, value):
         x, y = key
-        self.data[x, y] = value
+        self.data[x][y] = value
 
 
 class LReg:
     def __init__(self):
         self.read_only = False
         self.hard_wired_value = None
-        self.data = np.empty([32], dtype=np.uint32)
+        self.data = [0] * 32
 
     def __setitem__(self, key, value):
         assert not self.read_only
