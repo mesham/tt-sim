@@ -28,7 +28,7 @@ class DstRegister:
         v1 = self.dstBits[r1][idx1]
         v2 = self.dstBits[r2][idx1]
 
-        return (v1 << 16) | (v2 & 0x00FF)
+        return (v1 << 16) | (v2 & 0xFFFF)
 
     def setDst32b(self, idx0, idx1, value):
         r1, r2 = self.to_32b_row(idx0)
@@ -38,7 +38,7 @@ class DstRegister:
             self.undefined_rows.remove(r2)
 
         v1 = value >> 16
-        v2 = value & 0x00FF
+        v2 = value & 0xFFFF
 
         self.dstBits[r1][idx1] = v1
         self.dstBits[r2][idx1] = v2
