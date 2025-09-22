@@ -528,7 +528,7 @@ class UnPackerUnit(TensixBackendUnit):
         if self.unpacker_id == 1:
             inAddr_Datums += 8
         else:
-            pass  # inAddr_Datums += 4
+            inAddr_Datums += 4
 
         start_row = int(outAddr / 16)
         if self.unpacker_id == 0:
