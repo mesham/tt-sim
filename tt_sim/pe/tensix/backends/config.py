@@ -1,7 +1,6 @@
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.util import TensixConfigurationConstants, TensixInstructionDecoder
-from tt_sim.util.bits import replace_bits
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
@@ -164,20 +163,19 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
 
     def handle_rmwcib(self, instruction_info, issue_thread, instr_args, index1):
         index4 = instr_args["CfgRegAddr"]
-        new_value = instr_args["Data"]
-        mask = instr_args["Mask"]
+        new_value = instr_args["Data"] << (8 * index1)
+        mask = instr_args["Mask"] << (8 * index1)
 
         assert index4 < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
 
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
         )
+
         existing_val = self.config[stateID][index4]
+        new_value = (new_value & mask) | (existing_val & ~mask)
 
-        new_value = new_value & mask
-        replaced_value = replace_bits(existing_val, new_value, index1 * 8, 8)
-
-        self.setConfig(stateID, index4, replaced_value, issue_thread)
+        self.setConfig(stateID, index4, new_value, issue_thread)
 
     def get_threadConfig_entry(self, thread, entry_idx):
         return self.threadConfig[thread][entry_idx]
