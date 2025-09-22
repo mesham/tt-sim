@@ -159,7 +159,7 @@ class MatrixUnit(TensixBackendUnit):
         if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
             srcAStyle = DataFormat.FP16
             useDst32b = False
-        elif 1 == 1 or self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled"):
+        elif self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled"):
             srcAStyle = DataFormat.INT8
             useDst32b = True
         else:
