@@ -376,7 +376,6 @@ class PackerUnit(TensixBackendUnit):
             # before the << 4
             addr += 0x10
 
-            addr += 0x2
             if self.getDiagnosticSettings().reportPacking():
                 print(
                     f"Packer {i}: Copy from {self.packerI[i].inputSourceAddr} (row start "

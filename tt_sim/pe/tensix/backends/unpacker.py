@@ -525,11 +525,6 @@ class UnPackerUnit(TensixBackendUnit):
         transpose,
         allDatumsAreZero,
     ):
-        if self.unpacker_id == 1:
-            inAddr_Datums += 8
-        else:
-            inAddr_Datums += 4
-
         start_row = int(outAddr / 16)
         if self.unpacker_id == 0:
             assert start_row >= 4
