@@ -11,7 +11,7 @@ tt_metal = TT_Metal("tt_metal_0.62.2.json")
 launch_firmware(wormhole, tt_metal)
 
 list1 = [i % 128 for i in range(256)]
-list2 = [(256 - i) % 128 for i in range(256)]
+list2 = [(255 - i) % 128 for i in range(256)]
 wormhole.write((16, 16), 0x20, conv_to_bytes(list1, 1))
 wormhole.write((16, 16), 0x120, conv_to_bytes(list2, 1))
 
