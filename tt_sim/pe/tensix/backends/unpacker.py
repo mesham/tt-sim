@@ -6,6 +6,7 @@ from tt_sim.pe.tensix.backends.backend_base import (
     TensixBackendUnit,
 )
 from tt_sim.pe.tensix.registers import SrcRegister
+from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import get_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
@@ -387,6 +388,7 @@ class UnPackerUnit(TensixBackendUnit):
             rowStride,
             discontiguousInputRows,
             isUncompressed,
+            inDataFormat,
         )
 
     def generate_output_address(
@@ -520,6 +522,7 @@ class UnPackerUnit(TensixBackendUnit):
         upsampleZeroes,
         upsampleInterleave,
         colShift,
+        inDataFormat,
         outDataFormat,
         unpackToDst,
         transpose,
@@ -539,18 +542,23 @@ class UnPackerUnit(TensixBackendUnit):
 
         for row in range(int(inputNumDatums / 16)):
             for col in range(16):
-                val = conv_to_uint32(
+                assert datumSizeBytes <= 4
+                raw_datum = conv_to_uint32(
                     self.backend.addressable_memory.read(inAddr_Datums, datumSizeBytes)
                 )
 
+                datum = self.formatConversion(
+                    stateID, inDataFormat, outDataFormat, raw_datum, unpackToDst
+                )
+
                 if allDatumsAreZero:
-                    val = 0
+                    datum = 0
                 inAddr_Datums += datumSizeBytes
 
                 if self.unpacker_id == 1:
                     # always srcB
                     row = (row + self.srcRow[issue_thread] + start_row) & 0x3F
-                    self.backend.getSrcB(self.srcBank)[row, col] = val
+                    self.backend.getSrcB(self.srcBank)[row, col] = datum
                 else:
                     # Always srcA
                     if not unpackToDst:
@@ -567,7 +575,7 @@ class UnPackerUnit(TensixBackendUnit):
                                 rowLowBits = col
                                 col = row & 0xF
                                 row = (row & ~0xF) | rowLowBits
-                        self.backend.getSrcA(self.srcBank)[row, col] = val
+                        self.backend.getSrcA(self.srcBank)[row, col] = datum
                     else:
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
@@ -576,9 +584,9 @@ class UnPackerUnit(TensixBackendUnit):
                         else:
                             row &= 0x3FF
                         if DATA_FORMAT_TO_BITS[outDataFormat] == 32:
-                            self.backend.getDst().setDst32b(row + start_row, col, val)
+                            self.backend.getDst().setDst32b(row + start_row, col, datum)
                         else:
-                            self.backend.getDst().setDst16b(row + start_row, col, val)
+                            self.backend.getDst().setDst16b(row + start_row, col, datum)
                 outAddr += 1
 
     def increment_counter(
@@ -626,6 +634,86 @@ class UnPackerUnit(TensixBackendUnit):
             self.srcRow[issue_thread] = srcRowBase
         else:
             self.srcRow[issue_thread] += 16 + srcRowBase
+
+    def formatConversion(
+        self, stateID, inDataFormat, outDataFormat, raw_datum, unpackToDst
+    ):
+        if inDataFormat == DataFormat.FP32:
+            match outDataFormat:
+                case DataFormat.FP32:
+                    pass
+                case DataFormat.TF32:
+                    if unpackToDst:
+                        # when unpacking to Dst TF32 means FP32
+                        return DataFormatConversions.FP32ToDstFormatFP32(raw_datum)
+                    else:
+                        return DataFormatConversions.TF32ToSrcFormatTF32(
+                            raw_datum >> 13
+                        )
+                case DataFormat.BF16:
+                    if not raw_datum & 0x7F800000:
+                        # Flush denormals to zero
+                        raw_datum &= 0x80000000
+                    raw_datum >>= 16
+                    inDataFormat = DataFormat.BF16
+                case DataFormat.FP16:
+                    d = DataFormatConversions.FP32ToFP16(raw_datum)
+                    inDataFormat = DataFormat.FP16
+                case _:
+                    raise NotImplementedError()
+        else:
+            assert inDataFormat == outDataFormat
+
+            match inDataFormat:
+                case DataFormat.INT8:
+                    # INT8 is either uint8_t or 8 bit sign-magnitude, and becomes "Integer 8",
+                    # which is then overlaid onto FP16
+                    int8MeansUnsigned = (
+                        self.getConfigValue(
+                            stateID, "ALU_FORMAT_SPEC_REG0_SrcBUnsigned"
+                        )
+                        if self.unpacker_id == 1
+                        else self.getConfigValue(
+                            stateID, "ALU_FORMAT_SPEC_REG0_SrcAUnsigned"
+                        )
+                    )
+                    sign = 0 if int8MeansUnsigned else raw_datum & 0x80
+                    raw_datum -= sign
+                    if raw_datum:
+                        raw_datum |= 16 << 10
+                    raw_datum |= sign << 8
+                    inDataFormat = DataFormat.FP16
+                case DataFormat.TF32:
+                    if unpackToDst:
+                        #  When unpacking to Dst, TF32 means FP32
+                        return DataFormatConversions.FP32ToDstFormatFP32(d)
+                    else:
+                        # Otherwise, TF32 is not valid as InDataFormat, but software can instead
+                        # specify InDataFormat == FP32 and OutDataFormat == TF32
+                        raise ValueError()
+
+        # Now rearrange bits to the format expected by Dst or by SrcA / SrcB
+        match inDataFormat:
+            case DataFormat.UINT16:
+                if unpackToDst:
+                    return (raw_datum & 0xFF00) << 3
+                else:
+                    return raw_datum & 0xFF
+            case DataFormat.INT32 | DataFormat.FP32:
+                assert unpackToDst
+                return DataFormatConversions.FP32ToDstFormatFP32(raw_datum)
+            case DataFormat.BF16:
+                if unpackToDst:
+                    return DataFormatConversions.BF16ToDstFormatBF16(raw_datum)
+                else:
+                    return DataFormatConversions.BF16ToSrcBF16(raw_datum)
+            case DataFormat.FP16:
+                if unpackToDst:
+                    return DataFormatConversions.FP16ToDstFormatFP16(raw_datum)
+                else:
+                    return DataFormatConversions.FP16ToSrcFP16(raw_datum)
+            case _:
+                raise NotImplementedError()
 
     def handle_regular(self, instruction_info, issue_thread, instr_args):
         if self.unpacker_id == 0:
@@ -681,6 +769,7 @@ class UnPackerUnit(TensixBackendUnit):
             rowStride,
             discontiguousInputRows,
             isUncompressed,
+            inDataFormat,
         ) = self.generate_input_addresses_and_sizes(
             issue_thread, stateID, multiContextMode, whichContext, whichADC, rowSearch
         )
@@ -733,6 +822,7 @@ class UnPackerUnit(TensixBackendUnit):
             upsampleZeroes,
             upsampleInterleave,
             colShift,
+            inDataFormat,
             outDataFormat,
             unpackToDst,
             transpose,

@@ -6,6 +6,7 @@ from tt_sim.pe.tensix.backends.backend_base import (
     DataFormat,
     TensixBackendUnit,
 )
+from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes
 
@@ -32,9 +33,11 @@ class PackerUnit(TensixBackendUnit):
             self.inputSource = 0
             self.inputSourceAddr = 0
             self.inputSourceStride = 0
+            self.inDataFormat = None
             self.byteAddress = 0
             self.datastreamNeedsNewAddr = 0
             self.outBytes = 0
+            self.outDataFormat = None
 
     class InputSource(IntEnum):
         L1 = 1
@@ -104,12 +107,13 @@ class PackerUnit(TensixBackendUnit):
 
             ADCsToAdvance[whichADC] = True
 
-            match (
-                self.getConfigValue(
-                    stateID, self.getIPackerConfig(i, 4, 1, 8) + "In_data_format"
-                )
-                & 3
-            ):
+            in_df = self.getConfigValue(
+                stateID, self.getIPackerConfig(i, 4, 1, 8) + "In_data_format"
+            )
+
+            self.packerI[i].inDataFormat = DataFormat(in_df)
+
+            match in_df & 3:
                 case 0:
                     # FP32, TF32, I32
                     bytesPerDatum = 4
@@ -301,12 +305,14 @@ class PackerUnit(TensixBackendUnit):
             if outputFormatLessThan16Bits:
                 raise NotImplementedError()
 
-            output_data_format = DataFormat(
+            self.packerI[i].outDataFormat = DataFormat(
                 self.getConfigValue(
                     stateID, self.getIPackerConfig(i, 4, 1, 8) + "Out_data_format"
                 )
             )
-            self.packerI[i].outBytes = ceil(DATA_FORMAT_TO_BITS[output_data_format] / 8)
+            self.packerI[i].outBytes = ceil(
+                DATA_FORMAT_TO_BITS[self.packerI[i].outDataFormat] / 8
+            )
 
             if self.packerI[i].datastreamNeedsNewAddr:
                 self.packerI[i].byteAddress = (addr & 0x1FFFF) << 4
@@ -388,8 +394,67 @@ class PackerUnit(TensixBackendUnit):
                 idx = self.packerI[i].inputSourceAddr + j
                 row = idx >> 4
                 col = idx & 0xF
-                val = self.backend.getDst().getDst32b(row, col)
+                if DATA_FORMAT_TO_BITS[self.packerI[i].outDataFormat] == 32:
+                    raw_datum = self.backend.getDst().getDst32b(row, col)
+                else:
+                    raw_datum = self.backend.getDst().getDst16b(row, col)
+
+                datum = self.formatConversion(
+                    stateID,
+                    self.packerI[i].inDataFormat,
+                    self.packerI[i].outDataFormat,
+                    raw_datum,
+                )
+
                 self.backend.addressable_memory.write(
-                    addr, conv_to_bytes(val, self.packerI[i].outBytes)
+                    addr, conv_to_bytes(datum, self.packerI[i].outBytes)
                 )
                 addr += self.packerI[i].outBytes
+
+    def formatConversion(self, stateID, inDataFormat, outDataFormat, raw_datum):
+        match inDataFormat:
+            case DataFormat.FP32:
+                fp32_data = DataFormatConversions.FP32InDstToFP32(raw_datum)
+                match outDataFormat:
+                    case DataFormat.FP32:
+                        return fp32_data
+                    case DataFormat.FP16:
+                        return DataFormatConversions.FP32ToFP16(fp32_data)
+                    case DataFormat.BF16:
+                        return DataFormatConversions.FP32ToBF16(fp32_data)
+                    case _:
+                        raise NotImplementedError()
+            case DataFormat.TF32:
+                raise NotImplementedError()
+            case DataFormat.BF16:
+                bf16_data = DataFormatConversions.BF16InDstToBF16(raw_datum)
+                match outDataFormat:
+                    case DataFormat.FP32:
+                        return bf16_data << 16
+                    case DataFormat.BF16:
+                        return bf16_data
+                    case DataFormat.FP16:
+                        return DataFormatConversions.FP32ToFP16(bf16_data << 16)
+                    case _:
+                        raise NotImplementedError()
+            case DataFormat.FP16:
+                match outDataFormat:
+                    case DataFormat.FP32:
+                        return DataFormatConversions.FP16InDstToFP32(raw_datum)
+                    case DataFormat.FP16:
+                        return DataFormatConversions.FP16InDstToFP16(raw_datum)
+                    case DataFormat.BF16:
+                        return DataFormatConversions.FP16InDstToFP32(raw_datum) >> 16
+                    case _:
+                        raise NotImplementedError()
+            case DataFormat.INT32:
+                assert outDataFormat == DataFormat.INT32
+                return int(raw_datum)
+            case DataFormat.INT16:
+                assert outDataFormat == DataFormat.INT16
+                return int(raw_datum)
+            case DataFormat.UINT8:
+                assert outDataFormat == DataFormat.UINT8
+                return int(raw_datum)
+            case _:
+                raise NotImplementedError()
