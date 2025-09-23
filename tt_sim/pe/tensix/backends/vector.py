@@ -1,5 +1,6 @@
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
+from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import get_bits, get_nth_bit
 
 
@@ -616,15 +617,61 @@ class VectorUnit(TensixBackendUnit):
 
                     datum = self.lregs[vd][lane]
                     match mod0:
+                        case VectorUnit.MOD0_FMT_FP16:
+                            write_val = DataFormatConversions.FP32ToDstFormatFP32(
+                                DataFormatConversions.FP32ToFP16(datum)
+                            )
+                            self.getDst().setDst16b(row, column, write_val)
+                        case VectorUnit.MOD0_FMT_BF16:
+                            write_val = DataFormatConversions.BF16ToDstFormatBF16(
+                                DataFormatConversions.FP32ToBF16(datum)
+                            )
+                            self.getDst().setDst16b(row, column, write_val)
                         case (
                             VectorUnit.MOD0_FMT_FP32
                             | VectorUnit.MOD0_FMT_INT32
                             | VectorUnit.MOD0_FMT_INT32_ALL
-                            | VectorUnit.MOD0_FMT_INT32_SM
                         ):
+                            self.getDst().setDst32b(
+                                row,
+                                column,
+                                DataFormatConversions.FP32ToDstFormatFP32(datum),
+                            )
+                        case VectorUnit.MOD0_FMT_INT32_SM:
+                            write_val = DataFormatConversions.FP32ToDstFormatFP32(
+                                DataFormatConversions.toSignMag(datum)
+                            )
+                            self.getDst().setDst32b(row, column, write_val)
+                        case VectorUnit.MOD0_FMT_INT8:
+                            write_val = DataFormatConversions.FP16ToDstFormatFP16(
+                                DataFormatConversions.signMag11ToFP16(datum)
+                            )
+                            self.getDst().setDst16b(row, column, write_val)
+                        case VectorUnit.MOD0_FMT_INT8_COMP:
+                            write_val = DataFormatConversions.FP16ToDstFormatFP16(
+                                DataFormatConversions.signMag11ToFP16(
+                                    DataFormatConversions.ToSignMag(datum)
+                                )
+                            )
+                            self.getDst().setDst16b(row, column, write_val)
+                        case VectorUnit.MOD0_FMT_LO16_ONLY | VectorUnit.MOD0_FMT_UINT16:
+                            self.getDst().setDst16b(row, column, datum & 0xFFFF)
+                        case VectorUnit.MOD0_FMT_HI16_ONLY:
+                            self.getDst().setDst16b(row, column, datum >> 16)
+                        case VectorUnit.MOD0_FMT_INT16:
+                            self.getDst().setDst16b(
+                                row, column, ((datum >> 31) << 15) | (datum & 0x7FFF)
+                            )
+                        case VectorUnit.MOD0_FMT_LO16:
+                            self.getDst().setDst32b(
+                                row, column, (datum << 16) | (datum >> 16)
+                            )
+                        case VectorUnit.MOD0_FMT_HI16:
                             self.getDst().setDst32b(row, column, datum)
+                        case VectorUnit.MOD0_FMT_ZERO:
+                            self.getDst().setDst16b(row, column, 0)
                         case _:
-                            self.getDst().setDst16b(row, column, datum)
+                            raise NotImplementedError()
 
         self.backend.getRWC(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
 
@@ -659,15 +706,52 @@ class VectorUnit(TensixBackendUnit):
                         column += 1
 
                     match mod0:
+                        case VectorUnit.MOD0_FMT_FP16:
+                            rd = self.getDst().getDst16b(row, column)
+                            datum = DataFormatConversions.FP16InDstToFP32(
+                                rd,
+                                self.laneConfigValue(lane, VectorUnit.ENABLE_FP16A_INF),
+                            )
+                        case VectorUnit.MOD0_FMT_BF16:
+                            rd = self.getDst().getDst16b(row, column)
+                            datum = DataFormatConversions.BF16InDstToBF16(rd)
                         case (
                             VectorUnit.MOD0_FMT_FP32
                             | VectorUnit.MOD0_FMT_INT32
                             | VectorUnit.MOD0_FMT_INT32_ALL
-                            | VectorUnit.MOD0_FMT_INT32_SM
                         ):
-                            datum = self.getDst().getDst32b(row, column)
+                            rd = self.getDst().getDst32b(row, column)
+                            datum = DataFormatConversions.FP32InDstToFP32(rd)
+                        case VectorUnit.MOD0_FMT_INT32_SM:
+                            rd = self.getDst().getDst32b(row, column)
+                            datum = DataFormatConversions.signMagToTwosComp(
+                                DataFormatConversions.FP32InDstToFP32(rd)
+                            )
+                        case VectorUnit.MOD0_FMT_INT8:
+                            rd = self.getDst().getDst16b(row, column)
+                            datum = DataFormatConversions.signMag8ToSignMag32(rd)
+                        case VectorUnit.MOD0_FMT_INT8_COMP:
+                            rd = self.getDst().getDst16b(row, column)
+                            datum = DataFormatConversions.signMagToTwosComp(
+                                DataFormatConversions.signMag11ToSignMag32(rd)
+                            )
+                        case VectorUnit.MOD0_FMT_LO16_ONLY:
+                            rd = self.getDst().getDst16b(row, column)
+                            datum = (self.lregs[vd][lane] & 0xFFFF0000) | rd
+                        case VectorUnit.MOD0_FMT_HI16_ONLY:
+                            rd = self.getDst().getDst16b(row, column)
+                            datum = (rd << 16) | (self.lregs[vd][lane] & 0xFFFF)
+                        case VectorUnit.MOD0_FMT_HI16_ONLY:
+                            rd = self.getDst().getDst16b(row, column)
+                            datum = DataFormatConversions.signMag16ToSignMag32(rd)
+                        case VectorUnit.MOD0_FMT_UINT16 | VectorUnit.MOD0_FMT_LO16:
+                            datum = DataFormatConversions.signMag16ToSignMag32(rd)
+                        case VectorUnit.MOD0_FMT_HI16:
+                            datum = DataFormatConversions.signMag16ToSignMag32(rd) << 16
+                        case VectorUnit.MOD0_FMT_ZERO:
+                            datum = 0
                         case _:
-                            datum = self.getDst().getDst16b(row, column)
+                            raise NotImplementedError()
 
                     self.lregs[vd][lane] = datum
                     if (
