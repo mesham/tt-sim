@@ -1,5 +1,6 @@
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import SrcRegister
+from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import extract_bits, get_nth_bit
 
 
@@ -219,19 +220,21 @@ class MatrixUnit(TensixBackendUnit):
                     srcBRow + (0 if broadcastSrcBRow else i),
                     0 if broadcastSrcBCol0 else j,
                 ]
-                if op_handler is not None:
-                    result = op_handler(srcAVal, srcBVal)
-                else:
-                    result = None
 
                 if srcAStyle == DataFormat.INT8:
                     int8_handler(
-                        fidelityPhase, addDst, result, srcAVal, srcBVal, dstRow, i, j
+                        fidelityPhase,
+                        addDst,
+                        srcAVal,
+                        srcBVal,
+                        dstRow,
+                        i,
+                        j,
+                        op_handler,
                     )
                 else:
                     other_handler(
                         fidelityPhase,
-                        result,
                         useDst32b,
                         addDst,
                         srcAStyle,
@@ -240,6 +243,7 @@ class MatrixUnit(TensixBackendUnit):
                         dstRow,
                         i,
                         j,
+                        op_handler,
                     )
 
         # Possibly flip source banks
@@ -261,12 +265,17 @@ class MatrixUnit(TensixBackendUnit):
         rwc.applyAddrMod(issue_thread, addrMode)
 
     def elementwise_addsub_int8(
-        self, fidelityPhase, addDst, result, srcAVal, srcBVal, dstRow, i, j
+        self, fidelityPhase, addDst, srcA, srcB, dstRow, i, j, op_handler
     ):
+        srcAInt = DataFormatConversions.Int8InSrcToInt8(srcA)
+        srcBInt = DataFormatConversions.Int8InSrcToInt8(srcB)
+        result = op_handler(srcAInt, srcBInt)
         if addDst:
             result += self.backend.getDst().getDst32b(dstRow + i, j)
 
-        self.backend.getDst().setDst32b(dstRow + i, j, result)
+        self.backend.getDst().setDst32b(
+            dstRow + i, j, DataFormatConversions.FP32ToDstFormatFP32(result)
+        )
 
     def elementwise_addsub_other(
         self,
@@ -275,12 +284,26 @@ class MatrixUnit(TensixBackendUnit):
         useDst32b,
         addDst,
         srcAStyle,
-        srcAVal,
-        srcBVal,
+        srcA,
+        srcB,
         dstRow,
         i,
         j,
+        op_handler,
     ):
+        match srcAStyle:
+            case DataFormat.BF16:
+                srcAValFP = DataFormatConversions.BF16InSrcToBF16(srcA)
+                srcBValFP = DataFormatConversions.BF16InSrcToBF16(srcB)
+            case DataFormat.FP16:
+                srcAValFP = DataFormatConversions.FP16InSrcToFP16(srcA)
+                srcBValFP = DataFormatConversions.FP16InSrcToFP16(srcB)
+            case DataFormat.TF32:
+                srcAValFP = DataFormatConversions.TF32InSrcToTF32(srcA)
+                srcBValFP = DataFormatConversions.TF32InSrcToTF32(srcB)
+
+        result = op_handler(srcAValFP, srcBValFP)
+
         # These divisions are rarely desirable, so software
         # is encouraged to ensure that FidelityPhase == 0
         if fidelityPhase & 1:
@@ -291,65 +314,111 @@ class MatrixUnit(TensixBackendUnit):
         if useDst32b:
             # Dst is FP32, regardless of SrcAStyle
             if addDst:
-                result += self.backend.getDst().getDst32b(dstRow + i, j)
-            self.backend.getDst().setDst32b(dstRow + i, j, result)
+                result += DataFormatConversions.FP32InDstToFP32(
+                    self.backend.getDst().getDst32b(dstRow + i, j)
+                )
+            self.backend.getDst().setDst32b(
+                dstRow + i, j, DataFormatConversions.FP32ToDstFormatFP32(result)
+            )
         elif srcAStyle == DataFormat.FP16:
             # Dst is FP16, just like SrcAStyle
             if addDst:
-                result += self.backend.getDst().getDst16b(dstRow + i, j)
-            self.backend.getDst().setDst16b(dstRow + i, j, result)
+                result += DataFormatConversions.FP16InDstToFP16(
+                    self.backend.getDst().getDst16b(dstRow + i, j)
+                )
+            self.backend.getDst().setDst16b(
+                dstRow + i, j, DataFormatConversions.FP16ToDstFormatFP16(result)
+            )
         else:
             # Dst is BF16 (SrcAStyle is either BF16 or TF32)
             if addDst:
-                result += self.backend.getDst().getDst16b(dstRow + i, j)
-            self.backend.getDst().setDst16b(dstRow + i, j, result)
+                result += DataFormatConversions.BF16InDstToBF16(
+                    self.backend.getDst().getDst16b(dstRow + i, j)
+                )
+            self.backend.getDst().setDst16b(
+                dstRow + i, j, DataFormatConversions.BF16ToDstFormatBF16(result)
+            )
 
     def elementwise_mul_int8(
-        self, fidelityPhase, addDst, result, srcAVal, srcBVal, dstRow, i, j
+        self,
+        fidelityPhase,
+        addDst,
+        srcA,
+        srcB,
+        dstRow,
+        i,
+        j,
+        _,
     ):
-        srcAValInt = self.readSrcInt8(
-            srcAVal & (0x41FFF if fidelityPhase & 1 else 0x4E0FF)
+        srcAValInt = self.DataFormatConversions.Int8InSrcToInt8(
+            srcA & (0x41FFF if fidelityPhase & 1 else 0x4E0FF)
         )
-        srcBValInt = self.readSrcInt8(
-            srcBVal & (0x40FFF if fidelityPhase & 2 else 0x7F0FF)
+        srcBValInt = self.DataFormatConversions.Int8InSrcToInt8(
+            srcB & (0x40FFF if fidelityPhase & 2 else 0x7F0FF)
         )
 
         result = srcAValInt * srcBValInt
+        result += self.backend.getDst().getDst32b(dstRow + i, j)
 
-        # Dst is INT32
-        # Result = SaturateAddInt32(Result, ReadDstInt32(Dst32b[DstRow + i][j]));
-
-        self.backend.getDst().setDst32b(dstRow + i, j, result)
+        self.backend.getDst().setDst32b(
+            dstRow + i, j, DataFormatConversions.FP32ToDstFormatFP32(result)
+        )
 
     def elementwise_mul_other(
         self,
         fidelityPhase,
-        result,
         useDst32b,
         addDst,
         srcAStyle,
-        srcAVal,
-        srcBVal,
+        srcA,
+        srcB,
         dstRow,
         i,
         j,
+        _,
     ):
-        result = self.srcAFidelityBits(srcAVal, fidelityPhase) * self.srcBFidelityBits(
-            srcBVal, fidelityPhase
-        )
+        match srcAStyle:
+            case DataFormat.BF16:
+                srcAValFP = DataFormatConversions.BF16InSrcToBF16(srcA)
+                srcBValFP = DataFormatConversions.BF16InSrcToBF16(srcB)
+            case DataFormat.FP16:
+                srcAValFP = DataFormatConversions.FP16InSrcToFP16(srcA)
+                srcBValFP = DataFormatConversions.FP16InSrcToFP16(srcB)
+            case DataFormat.TF32:
+                srcAValFP = DataFormatConversions.TF32InSrcToTF32(srcA)
+                srcBValFP = DataFormatConversions.TF32InSrcToTF32(srcB)
+
+        result = self.srcAFidelityBits(
+            srcAValFP, fidelityPhase
+        ) * self.srcBFidelityBits(srcBValFP, fidelityPhase)
 
         if useDst32b:
             # Dst is FP32, regardless of SrcAStyle
-            result += self.backend.getDst().getDst32b(dstRow + i, j)
-            self.backend.getDst().setDst32b(dstRow + i, j, result)
+            if addDst:
+                result += DataFormatConversions.FP32InDstToFP32(
+                    self.backend.getDst().getDst32b(dstRow + i, j)
+                )
+            self.backend.getDst().setDst32b(
+                dstRow + i, j, DataFormatConversions.FP32ToDstFormatFP32(result)
+            )
         elif srcAStyle == DataFormat.FP16:
             # Dst is FP16, just like SrcAStyle
-            result += self.backend.getDst().getDst16b(dstRow + i, j)
-            self.backend.getDst().setDst16b(dstRow + i, j, result)
+            if addDst:
+                result += DataFormatConversions.FP16InDstToFP16(
+                    self.backend.getDst().getDst16b(dstRow + i, j)
+                )
+            self.backend.getDst().setDst16b(
+                dstRow + i, j, DataFormatConversions.FP16ToDstFormatFP16(result)
+            )
         else:
-            #  Dst is BF16 (SrcAStyle is either BF16 or TF32)
-            result += self.backend.getDst().getDst16b(dstRow + i, j)
-            self.backend.getDst().setDst16b(dstRow + i, j, result)
+            # Dst is BF16 (SrcAStyle is either BF16 or TF32)
+            if addDst:
+                result += DataFormatConversions.BF16InDstToBF16(
+                    self.backend.getDst().getDst16b(dstRow + i, j)
+                )
+            self.backend.getDst().setDst16b(
+                dstRow + i, j, DataFormatConversions.BF16ToDstFormatBF16(result)
+            )
 
     def handle_elwmul(self, instruction_info, issue_thread, instr_args):
         stateID = self.backend.getThreadConfigValue(
@@ -564,12 +633,6 @@ class MatrixUnit(TensixBackendUnit):
         if mode == ZEROACC_MODE_ONE_ROW or mode == ZEROACC_MODE_16_ROWS:
             addr_mod = extract_bits(instr_args["AddrMode"], 2, 0)
             self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)
-
-    def readSrcInt8(self, x):
-        # src holds INT8 as Sign,Mag(10b),Zero(3b),Exp(5b)
-        sign = x >> 18
-        mag = (x >> 8) & 0x3FF
-        return -mag if sign else mag
 
     def srcAFidelityBits(self, x, fidelityPhase):
         if fidelityPhase & 1 == 0:
