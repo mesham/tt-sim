@@ -1,9 +1,11 @@
 from enum import IntEnum
 
+import numpy as np
+
 
 class DstRegister:
     def __init__(self):
-        self.dstBits = [[0 for _ in range(16)] for _ in range(1024)]
+        self.dstBits = np.empty([1024, 16], dtype=np.uint32)
         self.undefined_rows = []
 
     def getDst16b(self, idx0, idx1):
@@ -61,7 +63,7 @@ class SrcRegister:
 
     def __init__(self):
         self.allowedClient = SrcRegister.SrcClient.Unpackers
-        self.data = [[0 for _ in range(16)] for _ in range(64)]
+        self.data = np.empty([64, 16], dtype=np.uint32)
 
     def flipAllowedClient(self):
         if self.allowedClient == SrcRegister.SrcClient.Unpackers:
