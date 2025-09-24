@@ -1,4 +1,5 @@
 import importlib.resources as resources
+from copy import copy
 
 import yaml
 
@@ -134,7 +135,12 @@ class TensixInstructionDecoder:
         cls.init()
         opcode = extract_bits(instruction, 8, 24)
         assert opcode in cls.opcodes
-        instruction_info = cls.opcodes[opcode]
+        # Create a copy of the top level object here as will insert the
+        # instruction arguments. If we don't create a copy then the underlying
+        # object is modified and the next same instruction would get those
+        # arguments. This matters if an instruction is blocked. Only do a shallow
+        # copy as only going to change the top level object (add instr_args)
+        instruction_info = copy(cls.opcodes[opcode])
         instr_args = {}
         if "arguments" in instruction_info and isinstance(
             instruction_info["arguments"], list
@@ -163,6 +169,8 @@ class DataFormatConversions:
     This is heavily based on the functional implementations at
     https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor
     """
+
+    # Conversion to Dst register format routines
 
     @classmethod
     def FP16ToDstFormatFP16(cls, x):
@@ -193,27 +201,21 @@ class DataFormatConversions:
         return (hi << 16) | lo
 
     @classmethod
-    def TF32ToSrcFormatTF32(cls, x):
-        # Rearrange fields from Sign,Exp,Man to Sign,Man,Exp as Src holds
-        # TF32 data in this rearranged form.
-        sign = x & 0x40000
-        exp = x & 0x3FC00
-        mantissa = x & 0x003FF
-        return sign | (mantissa << 8) | (exp >> 10)
+    def FP32ToDstFormatFP16(cls, x):
+        return DataFormatConversions.FP16ToDstFormatFP16(
+            DataFormatConversions.FP32ToFP16(x)
+        )
 
     @classmethod
-    def FP32ToBF16(cls, x):
-        # Flush denormals to signed zero, then truncate toward zero
-        sign = x & 0x80000000
-        exp = x & 0x7F800000
-        man = x & 0x007FFFFF
-        if exp == 0:
-            man = 0
+    def FP32ToDstFormatBF16(cls, x):
+        return DataFormatConversions.BF16ToDstFormatBF16(
+            DataFormatConversions.FP32ToBF16(x)
+        )
 
-        return (sign | exp | man) >> 16
+    # Conversion from dst register format routines
 
     @classmethod
-    def FP16InDstToFP32(cls, x, enable_fp16a_inf):
+    def FP16InDstToFP32(cls, x, enable_fp16a_inf=False):
         # Dst contained Sign,Man(10b),Exp(5b)
         sign = x >> 15
         man = (x >> 5) & 0x3FF
@@ -228,61 +230,6 @@ class DataFormatConversions:
             exp += 112
 
         return (sign << 31) | (exp << 23) | (man << 13)
-
-    @classmethod
-    def TF32InSrcToTF32(cls, x):
-        # Rearrange fields from Sign,Man,Exp in src to Sign,Exp,Man
-        sign = x & 0x40000
-        exp = x & 0xFF
-        man = x & 0x3FF00
-
-        return sign | (exp << 10) | (man >> 8)
-
-    @classmethod
-    def BF16InSrcToBF16(cls, x):
-        return DataFormatConversions.TF32InSrcToTF32(x) >> 3
-
-    @classmethod
-    def FP16InSrcToFP16(cls, x):
-        tf32 = DataFormatConversions.TF32InSrcToTF32(x)
-        return (tf32 >> 3) | (tf32 & 0x7FFF)
-
-    @classmethod
-    def FP32ToFP16(cls, x):
-        sign = x >> 31
-        exponent = ((x >> 23) & 0xFF) - 112
-        mantissa = x & 0x7FFFFF
-
-        if exponent <= 0:
-            # Flush underflow and denormals to signed zero
-            exponent = 0
-            mantissa = 0
-        elif exponent > 31:
-            # Saturate on overflow
-            # As dst does not handle infinite, the number is a huge one
-            exp = 31
-            mantissa = 0x7FFFFF
-
-        # Truncate toward zero
-        mantissa >>= 13
-        return (sign << 15) | (exp << 10) | mantissa
-
-    @classmethod
-    def TF32ToSrcTF32(cls, x):
-        # Rearrange fields from Sign,Exp,Man to Sign,Man,Exp as Src holds
-        # TF32 data in this rearranged form
-        sign = x & 0x40000
-        exp = x & 0x3FC00
-        man = x & 0x003FF
-        return sign | (man << 8) | (exp >> 10)
-
-    @classmethod
-    def BF16ToSrcBF16(cls, x):
-        return DataFormatConversions.TF32ToSrcTF32(x << 3)
-
-    @classmethod
-    def FP16ToSrcFP16(cls, x):
-        return DataFormatConversions.TF32ToSrcTF32(((x & 0x8000) << 3) | (x & 0x7FFF))
 
     @classmethod
     def FP32InDstToFP32(cls, x):
@@ -314,12 +261,120 @@ class DataFormatConversions:
         man = x & 0x7FE0
         return sign | (exp << 10) | (man >> 5)
 
+    # Conversion to src register format routines
+
+    @classmethod
+    def TF32ToSrcTF32(cls, x):
+        # Rearrange fields from Sign,Exp,Man to Sign,Man,Exp as Src holds
+        # TF32 data in this rearranged form
+        sign = x & 0x40000
+        exp = x & 0x3FC00
+        man = x & 0x003FF
+        return sign | (man << 8) | (exp >> 10)
+
+    @classmethod
+    def BF16ToSrcBF16(cls, x):
+        return DataFormatConversions.TF32ToSrcTF32(x << 3)
+
+    @classmethod
+    def FP16ToSrcFP16(cls, x):
+        return DataFormatConversions.TF32ToSrcTF32(((x & 0x8000) << 3) | (x & 0x7FFF))
+
     @classmethod
     def Int8InSrcToInt8(cls, x):
         # src holds INT8 as Sign,Mag(10b),Zero(3b),Exp(5b)
         sign = x >> 18
         mag = (x >> 8) & 0x3FF
         return -mag if sign else mag
+
+    # Conversion from src register format
+
+    @classmethod
+    def TF32InSrcToTF32(cls, x):
+        # Rearrange fields from Sign,Man,Exp in src to Sign,Exp,Man
+        sign = x & 0x40000
+        exp = x & 0xFF
+        man = x & 0x3FF00
+
+        return sign | (exp << 10) | (man >> 8)
+
+    @classmethod
+    def BF16InSrcToBF16(cls, x):
+        return DataFormatConversions.TF32InSrcToTF32(x) >> 3
+
+    @classmethod
+    def FP16InSrcToFP16(cls, x):
+        tf32 = DataFormatConversions.TF32InSrcToTF32(x)
+        return ((tf32 & 0x40000) >> 3) | (tf32 & 0x7FFF)
+
+    @classmethod
+    def FP16InSrcToFP32(cls, srcv):
+        return DataFormatConversions.FP16ToFP32(
+            DataFormatConversions.FP16InSrcToFP16(srcv)
+        )
+
+    @classmethod
+    def BF16InSrcToFP32(cls, srcv):
+        return DataFormatConversions.BF16InSrcToBF16(srcv) << 16
+
+    @classmethod
+    def TF32InSrcToFP32(cls, srcv):
+        return DataFormatConversions.BF16InSrcToBF16(srcv) << 13
+
+    # General number format and precision conversion routines
+
+    @classmethod
+    def FP16ToFP32(cls, x):
+        # Widens the exponent field from 5b to 8b and rebiases
+
+        sign = x >> 15
+        exp = (x >> 10) & 0x1F
+        man = x & 0x3FF
+
+        exp += 112  # Rebias 5b exponent to 8b
+        return (sign << 31) | (exp << 23) | (man << 13)
+
+    @classmethod
+    def FP32ToFP16(cls, x):
+        sign = x >> 31
+        exponent = ((x >> 23) & 0xFF) - 112
+        mantissa = x & 0x7FFFFF
+
+        if exponent <= 0:
+            # Flush underflow and denormals to signed zero
+            exponent = 0
+            mantissa = 0
+        elif exponent > 31:
+            # Saturate on overflow
+            # As dst does not handle infinite, the number is a huge one
+            exponent = 31
+            mantissa = 0x7FFFFF
+
+        # Truncate toward zero
+        mantissa >>= 13
+        return (sign << 15) | (exponent << 10) | mantissa
+
+    @classmethod
+    def TF32ToSrcFormatTF32(cls, x):
+        # Rearrange fields from Sign,Exp,Man to Sign,Man,Exp as Src holds
+        # TF32 data in this rearranged form.
+        sign = x & 0x40000
+        exp = x & 0x3FC00
+        mantissa = x & 0x003FF
+        return sign | (mantissa << 8) | (exp >> 10)
+
+    @classmethod
+    def FP32ToBF16(cls, x):
+        # Flush denormals to signed zero, then truncate toward zero
+        sign = x & 0x80000000
+        exp = x & 0x7F800000
+        man = x & 0x007FFFFF
+        if exp == 0:
+            man = 0
+
+        return (sign | exp | man) >> 16
+
+    # Integer manipulation routines
 
     @classmethod
     def signMagToTwosComp(cls, x):
@@ -356,6 +411,8 @@ class DataFormatConversions:
         mag = -x if sign else x
         return sign | (mag & 0x7FFFFFFF)
 
+    # FP manipulation routines
+
     @classmethod
     def signMag11ToFP16(cls, x):
         # Converts to the type dst/srca/srcb refers to as int8
@@ -363,3 +420,23 @@ class DataFormatConversions:
         exp = 16 << 10
         man = x & 0x3FF
         return sign | exp | man
+
+    @classmethod
+    def removeLowMantissa(cls, x):
+        # input is sign,man(10b),exp(8b)
+        # output is sign,man(7b),exp(8b) with man taken from high 7b of input man
+
+        sign = x & (1 << 18)
+        manhi = x & (0x7F << 11)
+        exp = x & 0xFF
+        return (sign >> 3) | (manhi >> 3) | exp
+
+    @classmethod
+    def removeHighExponent(cls, x):
+        # input is sign,man(10b),exp(8b)
+        # output is sign,man(10b),exp(5b) with exp taken from low 5b of input exp
+
+        sign = x & (1 << 18)
+        man = x & (0x3FF << 8)
+        explo = x & 0x1F
+        return (sign >> 3) | (man >> 3) | explo
