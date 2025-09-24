@@ -1,4 +1,5 @@
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
+from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import extract_bits, get_nth_bit
@@ -27,6 +28,7 @@ class MatrixUnit(TensixBackendUnit):
         "ZEROSRC": "handle_zerosrc",
         "INCRWC": "handle_incrwc",
         "CLEARDVALID": "handle_cleardvalid",
+        "MOVA2D": "handle_mova2d",
     }
 
     def __init__(self, backend):
@@ -68,6 +70,97 @@ class MatrixUnit(TensixBackendUnit):
                 ).allowedClient = SrcRegister.SrcClient.Unpackers
                 if not keepReadingSameSrc:
                     self.srcBBank ^= 1
+
+    def handle_mova2d(self, instruction_info, issue_thread, instr_args):
+        dstRow = instr_args["dst"]
+        move8Rows = (instr_args["instr_mod"] >> 1) & 0x1
+        addrMod = instr_args["addr_mode"]
+        srcRow = instr_args["src"]
+        useDst32bLo = instr_args["dest_32b_lo"]
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_override"):
+            srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
+        else:
+            srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+
+        if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
+            use8bExponent = False
+        elif srcAFmt in [
+            DataFormat.FP32,
+            DataFormat.TF32,
+            DataFormat.BF16,
+            DataFormat.BFP8,
+            DataFormat.BFP4,
+            DataFormat.BFP2,
+            DataFormat.INT32,
+            DataFormat.UINT16,
+        ]:
+            use8bExponent = True
+        else:
+            use8bExponent = False
+
+        flushDenormals = not self.getConfigValue(
+            stateID, "ALU_ACC_CTRL_Zero_Flag_disabled_src"
+        )
+        rwc = self.backend.getRWC(issue_thread)
+
+        # Determine the row range
+        dstRow += self.getThreadConfigValue(
+            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+        )
+        dstRow += rwc.Dst + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
+        srcRow += rwc.SrcA
+
+        if move8Rows:
+            numRows = 8
+            dstRow &= 0x3F8
+            srcRow &= 0x38
+        else:
+            numRows = 1
+            dstRow &= 0x3FF
+            srcRow &= 0x3F
+
+        # Now copy the row(s)
+        for i in range(numRows):
+            for j in range(16):
+                if get_nth_bit(
+                    self.backend.vector_unit.laneConfigValue(
+                        int(j / 2), VectorUnit.BLOCK_DEST_MOV
+                    ),
+                    j & 1,
+                ):
+                    continue
+                srcAVal = self.backend.getSrcA(self.srcABank)[srcRow, j]
+                if flushDenormals and not (srcAVal & 0xFF):
+                    srcAVal = 0
+                val16b = (
+                    DataFormatConversions.removeLowMantissa(srcAVal)
+                    if use8bExponent
+                    else DataFormatConversions.removeHighExponent(srcAVal)
+                )
+                if srcAFmt == DataFormat.TF32:
+                    lowMantissa = ((srcAVal >> 8) & 7) << 13
+                    if useDst32bLo:
+                        lowMantissa |= val16b
+                    # dst holds TF32 as sign,himan(7b),exp(8b),loman(3b),zeros(13b)
+                    self.getDst().setDst32b(dstRow, j, (val16b << 16) | lowMantissa)
+                elif useDst32bLo:
+                    self.getDst().setDst32b(
+                        dstRow,
+                        j,
+                        (self.getDst().getDst32b(dstRow, j) & 0xFFFF0000) | val16b,
+                    )
+                else:
+                    self.getDst().setDst16b(dstRow, j, val16b)
+            dstRow += 1
+            srcRow += 1
+
+        # Advance the RWCs
+        rwc.applyAddrMod(issue_thread, addrMod)
 
     def handle_incrwc(self, instruction_info, issue_thread, instr_args):
         srcAInc = instr_args["rwc_a"]
