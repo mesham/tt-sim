@@ -394,7 +394,7 @@ class PackerUnit(TensixBackendUnit):
                 idx = self.packerI[i].inputSourceAddr + j
                 row = idx >> 4
                 col = idx & 0xF
-                if DATA_FORMAT_TO_BITS[self.packerI[i].outDataFormat] == 32:
+                if DATA_FORMAT_TO_BITS[self.packerI[i].inDataFormat] == 32:
                     raw_datum = self.backend.getDst().getDst32b(row, col)
                 else:
                     raw_datum = self.backend.getDst().getDst16b(row, col)
@@ -449,12 +449,12 @@ class PackerUnit(TensixBackendUnit):
                         raise NotImplementedError()
             case DataFormat.INT32:
                 assert outDataFormat == DataFormat.INT32
-                return int(raw_datum)
+                return raw_datum
             case DataFormat.INT16:
                 assert outDataFormat == DataFormat.INT16
-                return int(raw_datum)
+                return raw_datum
             case DataFormat.UINT8:
                 assert outDataFormat == DataFormat.UINT8
-                return int(raw_datum)
+                return raw_datum
             case _:
                 raise NotImplementedError()

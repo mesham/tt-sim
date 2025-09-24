@@ -657,7 +657,7 @@ class UnPackerUnit(TensixBackendUnit):
                     raw_datum >>= 16
                     inDataFormat = DataFormat.BF16
                 case DataFormat.FP16:
-                    d = DataFormatConversions.FP32ToFP16(raw_datum)
+                    raw_datum = DataFormatConversions.FP32ToFP16(raw_datum)
                     inDataFormat = DataFormat.FP16
                 case _:
                     raise NotImplementedError()
@@ -686,7 +686,7 @@ class UnPackerUnit(TensixBackendUnit):
                 case DataFormat.TF32:
                     if unpackToDst:
                         #  When unpacking to Dst, TF32 means FP32
-                        return DataFormatConversions.FP32ToDstFormatFP32(d)
+                        return DataFormatConversions.FP32ToDstFormatFP32(raw_datum)
                     else:
                         # Otherwise, TF32 is not valid as InDataFormat, but software can instead
                         # specify InDataFormat == FP32 and OutDataFormat == TF32
