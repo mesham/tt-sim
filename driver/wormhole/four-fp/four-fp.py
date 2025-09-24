@@ -1,4 +1,3 @@
-
 from driver.wormhole.tt_metal import TT_Metal
 from driver.wormhole.wormhole_driver import launch_firmware, run_kernel
 from tt_sim.device.tt_device import Wormhole
