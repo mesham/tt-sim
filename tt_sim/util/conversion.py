@@ -38,3 +38,5 @@ def conv_to_float(val):
         return struct.unpack("f", conv_to_bytes(val))[0]
     elif isinstance(val, bytes):
         return struct.unpack("f", val)[0]
+    else:
+        raise ValueError()
