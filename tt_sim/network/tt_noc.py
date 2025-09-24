@@ -12,6 +12,7 @@ from tt_sim.util.conversion import (
 class NoCOverlay(MemMapable):
     NOC_NUM_STREAMS = 64
     NOC_STREAM_REG_SPACE_SIZE = 0x1000
+    STREAM_MSG_DATA_CLEAR_REG_INDEX = 22
 
     def __init__(self):
         self.stream_regs = [
