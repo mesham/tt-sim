@@ -3,6 +3,7 @@ from math import ceil
 
 from tt_sim.pe.tensix.backends.backend_base import (
     DATA_FORMAT_TO_BITS,
+    DATA_FORMAT_TO_NAME,
     DataFormat,
     TensixBackendUnit,
 )
@@ -384,9 +385,11 @@ class PackerUnit(TensixBackendUnit):
 
             if self.getDiagnosticSettings().reportPacking():
                 print(
-                    f"Packer {i}: Copy from {self.packerI[i].inputSourceAddr} (row start "
-                    f"= {row_start}, num rows= {rows}) total size "
-                    f"{self.packerI[i].inputNumDatums} to {hex(addr)}"
+                    f"Packer {i}: Copy from dst at {self.packerI[i].inputSourceAddr} (row start "
+                    f"= {row_start}, num rows= {rows}) total size="
+                    f"{self.packerI[i].inputNumDatums}, to L1 {hex(addr)}, read data type "
+                    f"{DATA_FORMAT_TO_NAME[self.packerI[i].inDataFormat]} -> write data type "
+                    f"{DATA_FORMAT_TO_NAME[self.packerI[i].outDataFormat]}"
                 )
 
             # For example four need an extra two for alignment also

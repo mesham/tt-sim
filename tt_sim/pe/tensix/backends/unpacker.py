@@ -3,6 +3,7 @@ from math import ceil, floor
 from tt_sim.network.tt_noc import NoCOverlay
 from tt_sim.pe.tensix.backends.backend_base import (
     DATA_FORMAT_TO_BITS,
+    DATA_FORMAT_TO_NAME,
     DataFormat,
     TensixBackendUnit,
 )
@@ -671,10 +672,12 @@ class UnPackerUnit(TensixBackendUnit):
             start_row -= 4
 
         if self.getDiagnosticSettings().reportUnpacking():
+            tgt = "srcB" if self.unpacker_id == 1 else "dst" if unpackToDst else "srcA"
             print(
                 f"Starting unpacker {self.unpacker_id} read at {hex(inAddr_Datums)} for "
                 f"{inputNumDatums} datums of bytes size {datumSizeBytes} "
-                f"starting at row {start_row}"
+                f"starting write to {tgt} at row {start_row}, read data type "
+                f"{DATA_FORMAT_TO_NAME[inDataFormat]} -> write data type {DATA_FORMAT_TO_NAME[outDataFormat]}"
             )
 
         for row in range(int(inputNumDatums / 16)):

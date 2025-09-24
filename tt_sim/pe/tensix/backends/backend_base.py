@@ -46,6 +46,25 @@ DATA_FORMAT_TO_BITS = {
     DataFormat.BF16: 16,
 }
 
+DATA_FORMAT_TO_NAME = {
+    DataFormat.FP32: "FP32",
+    DataFormat.FP16: "FP16",
+    DataFormat.BFP8: "BFP8",
+    DataFormat.BFP4: "BFP4",
+    DataFormat.BFP2: "BFP2",
+    DataFormat.FP16_b: "FP16_b",
+    DataFormat.BFP8_b: "BFP8_b",
+    DataFormat.BFP4_b: "BFP4_b",
+    DataFormat.BFP2_b: "BFP2_b",
+    DataFormat.INT8: "INT8",
+    DataFormat.UINT8: "UINT8",
+    DataFormat.UINT16: "UINT16",
+    DataFormat.UINT32: "UINT32",
+    DataFormat.INT32: "INT32",
+    DataFormat.TF32: "TF32",
+    DataFormat.BF16: "BF16",
+}
+
 
 class TensixBackendUnit(Clockable, ABC):
     def __init__(self, backend, opcode_to_method_map, unit_name):
