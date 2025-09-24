@@ -319,7 +319,7 @@ class DataFormatConversions:
 
     @classmethod
     def TF32InSrcToFP32(cls, srcv):
-        return DataFormatConversions.BF16InSrcToBF16(srcv) << 13
+        return DataFormatConversions.TF32InSrcToTF32(srcv) << 13
 
     # General number format and precision conversion routines
 
