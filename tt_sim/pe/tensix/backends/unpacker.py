@@ -1,5 +1,7 @@
+from copy import deepcopy
 from math import ceil, floor
 
+from tt_sim.network.tt_noc import NoCOverlay
 from tt_sim.pe.tensix.backends.backend_base import (
     DATA_FORMAT_TO_BITS,
     DataFormat,
@@ -8,7 +10,7 @@ from tt_sim.pe.tensix.backends.backend_base import (
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import get_bits, get_nth_bit
-from tt_sim.util.conversion import conv_to_uint32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
 class UnPackerUnit(TensixBackendUnit):
@@ -19,7 +21,7 @@ class UnPackerUnit(TensixBackendUnit):
     https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/UNPACR.md
     """
 
-    OPCODE_TO_HANDLER = {"UNPACR": "handle_unpacr"}
+    OPCODE_TO_HANDLER = {"UNPACR": "handle_unpacr", "UNPACR_NOP": "handle_unpacr_nop"}
 
     def __init__(self, backend, unpacker_id):
         self.unpacker_id = unpacker_id
@@ -28,17 +30,153 @@ class UnPackerUnit(TensixBackendUnit):
         self.srcRow = [0] * 3
         self.blocked = False
         self.repeat_instruction = None
+        self.setRegBase = 0
+        self.setRegAcc = 0
         super().__init__(backend, UnPackerUnit.OPCODE_TO_HANDLER, "Unpacker")
+
+    def issueInstruction(self, instruction, from_thread):
+        if self.blocked:
+            return False
+        else:
+            return super().issueInstruction(instruction, from_thread)
 
     def clock_tick(self, cycle_num):
         if self.blocked:
             assert self.repeat_instruction is not None
             instruction_info, issue_thread = self.repeat_instruction
-            self.handle_regular(
+            assert instruction_info["name"] in UnPackerUnit.OPCODE_TO_HANDLER
+            getattr(self, UnPackerUnit.OPCODE_TO_HANDLER[instruction_info["name"]])(
                 instruction_info, issue_thread, instruction_info["instr_args"]
             )
         else:
             super().clock_tick(cycle_num)
+
+    def handle_unpacr_nop(self, instruction_info, issue_thread, instr_args):
+        args = instr_args["NoOp"]
+
+        mode1 = args & 0x3
+        mode2 = args & 0x7
+
+        if mode1 == 0x1:
+            # Set srcA or srcB to zero
+            self.handle_set_src_to_zero(instruction_info, issue_thread, args)
+        else:
+            match mode2:
+                case 0x2:
+                    # Occupy Unpacker for one cycle
+                    pass
+                case 0x3 | 0x0:
+                    # MMIO register write to Overlay STREAM_MSG_DATA_CLEAR_REG_INDEX
+                    self.handle_write_stream_data_clear_reg_index(issue_thread, args)
+                case 0x4:
+                    # MMIO register write
+                    self.handle_mmio_register_write(args)
+                case 0x7:
+                    # Give srcA or srcB banks to matrix unit
+                    self.handle_give_src_to_fpu(issue_thread, args)
+                case _:
+                    raise NotImplementedError()
+
+    def handle_give_src_to_fpu(self, issue_thread, args):
+        if self.unpacker_id == 0:
+            self.backend.getSrcA(self.srcBank).setAllowedClient(
+                SrcRegister.SrcClient.MatrixUnit
+            )
+            self.srcBank ^= 1
+            self.srcRow[issue_thread] = (
+                self.backend.getThreadConfigValue(issue_thread, "SRCA_SET_Base") << 4
+            )
+        else:
+            self.backend.getSrcB(self.srcBank).setAllowedClient(
+                SrcRegister.SrcClient.MatrixUnit
+            )
+            self.srcBank ^= 1
+            self.srcRow[issue_thread] = (
+                self.backend.getThreadConfigValue(issue_thread, "SRCB_SET_Base") << 4
+            )
+
+    def handle_mmio_register_write(self, args):
+        accumulate = get_nth_bit(args, 3)
+        value11 = (args >> 4) & 0x3FF
+        addrMid = (args >> 16) & 0x3F
+        addrSel = get_nth_bit(args, 22)
+
+        addr = 0xFFB00000 + self.setRegBase[addrSel] + (addrMid << 12)
+        if accumulate:
+            accValue = self.setRegAcc
+            if value11 == 0:
+                accValue = 0
+            else:
+                accValue = (accValue + value11) & 0x1FFFF
+                self.backend.getAddressableMemory().write(addr, conv_to_bytes(accValue))
+            self.setRegAcc = accValue
+        else:
+            self.backend.getAddressableMemory().write(addr, conv_to_bytes(value11))
+
+    def handle_write_stream_data_clear_reg_index(self, issue_thread, args):
+        clearCount = (args >> 4) & 0x3FF
+        whichStream = (args >> 16) & 0x1F
+
+        if clearCount != 0:
+            streamId = whichStream
+        else:
+            streamId = self.backend.getThreadConfigValue(
+                issue_thread, "NOC_OVERLAY_MSG_CLEAR_StreamId_" + str(self.unpacker_id)
+            )
+
+        overlay_addr = NoCOverlay.NOC_STREAM_REG_SPACE_SIZE * streamId + (
+            NoCOverlay.STREAM_MSG_DATA_CLEAR_REG_INDEX << 2
+        )
+        self.backend.getAddressableMemory().write(
+            0xFFB40000 + overlay_addr, conv_to_bytes(1)
+        )
+
+    def handle_set_src_to_zero(self, instruction_info, issue_thread, args):
+        negativeInfSrcA = get_nth_bit(args, 2)
+        bothBanks = get_nth_bit(args, 3)
+        waitLikeUnpacr = get_nth_bit(args, 4)
+
+        unpackBank = self.srcBank
+
+        if self.unpacker_id == 0:
+            if waitLikeUnpacr:
+                srcBank = self.srcBank
+            else:
+                srcBank = self.backend.matrix_unit.srcABank
+            if (
+                self.backend.getSrcA(srcBank).getAllowedClient()
+                != SrcRegister.SrcClient.Unpackers
+            ):
+                self.blocked = True
+                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
+                return
+        else:
+            if waitLikeUnpacr:
+                srcBank = self.srcBank
+            else:
+                srcBank = self.backend.matrix_unit.srcBBank
+            if (
+                self.backend.getSrcB(srcBank).getAllowedClient()
+                != SrcRegister.SrcClient.Unpackers
+            ):
+                self.blocked = True
+                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
+                return
+
+        self.blocked = False
+        self.repeat_instruction = None
+
+        for bank in range(2):
+            if bothBanks or bank == unpackBank:
+                if self.unpacker_id == 0:
+                    clearVal = ~0 if negativeInfSrcA else 0
+                    for i in range(64):
+                        for j in range(16):
+                            self.backend.getSrcA(bank)[i, j] = clearVal
+                else:
+                    for i in range(64):
+                        for j in range(16):
+                            self.backend.getSrcB(bank)[i, j] = 0
 
     def handle_unpacr(self, instruction_info, issue_thread, instr_args):
         one_bit = instr_args["SearchCacheFlush"]
@@ -722,7 +860,7 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
-                self.repeat_instruction = (instruction_info, issue_thread)
+                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
                 return
         elif self.unpacker_id == 1:
             if (
@@ -730,7 +868,7 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
-                self.repeat_instruction = (instruction_info, issue_thread)
+                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
                 return
 
         self.blocked = False
