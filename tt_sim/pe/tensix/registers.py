@@ -11,7 +11,7 @@ class DstRegister:
     def getDst16b(self, idx0, idx1):
         if idx0 in self.undefined_rows:
             return None
-        return self.dstBits[idx0][idx1]
+        return int(self.dstBits[idx0][idx1])
 
     def setDst16b(self, idx0, idx1, value):
         if idx0 in self.undefined_rows:
@@ -30,7 +30,7 @@ class DstRegister:
         v1 = self.dstBits[r1][idx1]
         v2 = self.dstBits[r2][idx1]
 
-        return (v1 << 16) | (v2 & 0xFFFF)
+        return int((v1 << 16) | (v2 & 0xFFFF))
 
     def setDst32b(self, idx0, idx1, value):
         r1, r2 = self.to_32b_row(idx0)
@@ -76,7 +76,7 @@ class SrcRegister:
 
     def __getitem__(self, key):
         x, y = key
-        return self.data[x][y]
+        return int(self.data[x][y])
 
     def __setitem__(self, key, value):
         x, y = key
