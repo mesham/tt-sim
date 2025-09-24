@@ -2,6 +2,7 @@ from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
 from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import get_bits, get_nth_bit
+from tt_sim.util.conversion import conv_to_float, conv_to_uint32
 
 
 class VectorUnit(TensixBackendUnit):
@@ -559,7 +560,7 @@ class VectorUnit(TensixBackendUnit):
                     DataFormat.BFP4,
                     DataFormat.BFP2,
                     DataFormat.INT32,
-                    DataFormat.INT16,
+                    DataFormat.UINT16,
                 ]:
                     mod0 = VectorUnit.MOD0_FMT_BF16
                 else:
@@ -583,7 +584,7 @@ class VectorUnit(TensixBackendUnit):
                 stateID, "DEST_REGW_BASE_Base"
             )
 
-        return addr
+        return addr, mod0
 
     def handle_sfpstore(self, instruction_info, issue_thread, instr_args):
         imm10 = instr_args["dest_reg_addr"]
@@ -591,7 +592,7 @@ class VectorUnit(TensixBackendUnit):
         mod0 = instr_args["instr_mod0"]
         vd = instr_args["lreg_ind"]
 
-        addr = self.get_dst_address(issue_thread, mod0, imm10)
+        addr, mod0 = self.get_dst_address(issue_thread, mod0, imm10)
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
             if addr & 2:
@@ -618,13 +619,13 @@ class VectorUnit(TensixBackendUnit):
                     datum = self.lregs[vd][lane]
                     match mod0:
                         case VectorUnit.MOD0_FMT_FP16:
-                            write_val = DataFormatConversions.FP32ToDstFormatFP32(
-                                DataFormatConversions.FP32ToFP16(datum)
+                            write_val = DataFormatConversions.FP16ToDstFormatFP16(
+                                DataFormatConversions.FP32ToFP16(conv_to_uint32(datum))
                             )
                             self.getDst().setDst16b(row, column, write_val)
                         case VectorUnit.MOD0_FMT_BF16:
                             write_val = DataFormatConversions.BF16ToDstFormatBF16(
-                                DataFormatConversions.FP32ToBF16(datum)
+                                DataFormatConversions.FP32ToBF16(conv_to_uint32(datum))
                             )
                             self.getDst().setDst16b(row, column, write_val)
                         case (
@@ -635,7 +636,9 @@ class VectorUnit(TensixBackendUnit):
                             self.getDst().setDst32b(
                                 row,
                                 column,
-                                DataFormatConversions.FP32ToDstFormatFP32(datum),
+                                DataFormatConversions.FP32ToDstFormatFP32(
+                                    conv_to_uint32(datum)
+                                ),
                             )
                         case VectorUnit.MOD0_FMT_INT32_SM:
                             write_val = DataFormatConversions.FP32ToDstFormatFP32(
@@ -681,7 +684,7 @@ class VectorUnit(TensixBackendUnit):
         mod0 = instr_args["instr_mod0"]
         vd = instr_args["lreg_ind"]
 
-        addr = self.get_dst_address(issue_thread, mod0, imm10)
+        addr, mod0 = self.get_dst_address(issue_thread, mod0, imm10)
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
             if addr & 2:
@@ -708,18 +711,25 @@ class VectorUnit(TensixBackendUnit):
                     match mod0:
                         case VectorUnit.MOD0_FMT_FP16:
                             rd = self.getDst().getDst16b(row, column)
-                            datum = DataFormatConversions.FP16InDstToFP32(
-                                rd,
-                                self.laneConfigValue(lane, VectorUnit.ENABLE_FP16A_INF),
+                            datum = conv_to_float(
+                                DataFormatConversions.FP16InDstToFP32(
+                                    rd,
+                                    self.laneConfigValue(
+                                        lane, VectorUnit.ENABLE_FP16A_INF
+                                    ),
+                                )
                             )
                         case VectorUnit.MOD0_FMT_BF16:
                             rd = self.getDst().getDst16b(row, column)
-                            datum = DataFormatConversions.BF16InDstToBF16(rd)
-                        case (
-                            VectorUnit.MOD0_FMT_FP32
-                            | VectorUnit.MOD0_FMT_INT32
-                            | VectorUnit.MOD0_FMT_INT32_ALL
-                        ):
+                            datum = conv_to_float(
+                                DataFormatConversions.BF16InDstToBF16(rd) << 16
+                            )
+                        case VectorUnit.MOD0_FMT_FP32:
+                            rd = self.getDst().getDst32b(row, column)
+                            datum = conv_to_float(
+                                DataFormatConversions.FP32InDstToFP32(rd)
+                            )
+                        case VectorUnit.MOD0_FMT_INT32 | VectorUnit.MOD0_FMT_INT32_ALL:
                             rd = self.getDst().getDst32b(row, column)
                             datum = DataFormatConversions.FP32InDstToFP32(rd)
                         case VectorUnit.MOD0_FMT_INT32_SM:
