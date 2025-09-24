@@ -1,4 +1,3 @@
-from copy import deepcopy
 from math import ceil, floor
 
 from tt_sim.network.tt_noc import NoCOverlay
@@ -148,7 +147,7 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
-                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
+                self.repeat_instruction = (instruction_info, issue_thread)
                 return
         else:
             if waitLikeUnpacr:
@@ -160,7 +159,7 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
-                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
+                self.repeat_instruction = (instruction_info, issue_thread)
                 return
 
         self.blocked = False
@@ -860,7 +859,7 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
-                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
+                self.repeat_instruction = (instruction_info, issue_thread)
                 return
         elif self.unpacker_id == 1:
             if (
@@ -868,7 +867,7 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
-                self.repeat_instruction = (deepcopy(instruction_info), issue_thread)
+                self.repeat_instruction = (instruction_info, issue_thread)
                 return
 
         self.blocked = False
