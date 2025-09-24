@@ -20,6 +20,8 @@ def conv_to_bytes(val, width=4, signed=False):
 def conv_to_int32(val, signed=True):
     if isinstance(val, bytes):
         return int.from_bytes(val, byteorder="little", signed=signed)
+    elif isinstance(val, int):
+        return val
     else:
         raise NotImplementedError()
 
