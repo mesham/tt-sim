@@ -74,6 +74,9 @@ class SrcRegister:
     def getAllowedClient(self):
         return self.allowedClient
 
+    def setAllowedClient(self, c):
+        self.allowedClient = c
+
     def __getitem__(self, key):
         x, y = key
         return int(self.data[x][y])
