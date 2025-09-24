@@ -2,13 +2,17 @@ from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import extract_bits, get_nth_bit
-from tt_sim.util.conversion import conv_to_uint32, uint32_to_float
+from tt_sim.util.conversion import conv_to_float, conv_to_uint32
 
 
 class MatrixUnit(TensixBackendUnit):
     """
     Performs operations on srcA and srcB, writing results to dst register. Most obvious
-    is matrix multiplication, but other element wise operations supported too.
+    is matrix multiplication, but other element wise operations supported too. This implementation
+    performs all real number calculations in FP32, converting from the data format in srcA and srcB
+    (e.g. BF16, TF32, FP16) into FP32, and then the result is converted back to the data format
+    and then written to dst. This will give slightly different results than on the Tenstorrent
+    hardware.
 
     Based on description and code snippets at
     https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/MatrixUnit.md
@@ -365,11 +369,11 @@ class MatrixUnit(TensixBackendUnit):
     def get_elementwise_fp_src_type(self, srcStyle, src):
         match srcStyle:
             case DataFormat.BF16:
-                return uint32_to_float(DataFormatConversions.BF16InSrcToFP32(src))
+                return conv_to_float(DataFormatConversions.BF16InSrcToFP32(src))
             case DataFormat.FP16:
-                return uint32_to_float(DataFormatConversions.FP16InSrcToFP32(src))
+                return conv_to_float(DataFormatConversions.FP16InSrcToFP32(src))
             case DataFormat.TF32:
-                return uint32_to_float(DataFormatConversions.TF32InSrcToFP32(src))
+                return conv_to_float(DataFormatConversions.TF32InSrcToFP32(src))
             case _:
                 raise NotImplementedError()
 
