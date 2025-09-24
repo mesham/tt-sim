@@ -1,6 +1,11 @@
+import struct
+
+
 def conv_to_bytes(val, width=4, signed=False):
     if isinstance(val, int):
         return val.to_bytes(width, byteorder="little", signed=signed)
+    elif isinstance(val, float):
+        return struct.pack("f", val)
     elif isinstance(val, list):
         byte_data = bytearray()
         for el in val:
@@ -20,4 +25,14 @@ def conv_to_int32(val, signed=True):
 
 
 def conv_to_uint32(val):
-    return conv_to_int32(val, False)
+    if isinstance(val, float):
+        return struct.unpack("I", conv_to_bytes(val))[0]
+    else:
+        return conv_to_int32(val, False)
+
+
+def conv_to_float(val):
+    if isinstance(val, int):
+        return struct.unpack("f", conv_to_bytes(val))[0]
+    elif isinstance(val, bytes):
+        return struct.unpack("f", val)[0]
