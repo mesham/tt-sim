@@ -672,7 +672,9 @@ class UnPackerUnit(TensixBackendUnit):
             start_row -= 4
 
         if self.getDiagnosticSettings().reportUnpacking():
-            tgt = "srcB" if self.unpacker_id == 1 else "dst" if unpackToDst else "srcA"
+            tgt = (
+                "srcB" if self.unpacker_id == 1 else ("dst" if unpackToDst else "srcA")
+            )
             print(
                 f"Starting unpacker {self.unpacker_id} read at {hex(inAddr_Datums)} for "
                 f"{inputNumDatums} datums of bytes size {datumSizeBytes} "
