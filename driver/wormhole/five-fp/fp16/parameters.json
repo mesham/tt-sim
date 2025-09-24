@@ -6,9 +6,9 @@
   "trisc0_binary_file" : "five-fp/trisc0_kernel.bin",
   "trisc0_binary_text_addr": "0x7950",
   "trisc1_binary_file" : "five-fp/trisc1_kernel.bin",
-  "trisc1_binary_text_addr": "0x8070",
+  "trisc1_binary_text_addr": "0x7e40",
   "trisc2_binary_file" : "five-fp/trisc2_kernel.bin",
-  "trisc2_binary_text_addr": "0x83f0",
+  "trisc2_binary_text_addr": "0x8160",
   "launch": [{
     "kernel_config": {
       "watcher_kernel_ids": ["0x4", "0x5", "0x6"],
@@ -19,7 +19,7 @@
       "remote_cb_offset": "0x60",
       "rta_offset": [{"rta_offset": "0x0", "crta_offset": "0x30"}, {"rta_offset": "0x10", "crta_offset": "0x30"}, {"rta_offset": "0x1c", "crta_offset": "0x30"}],
       "mode": "0x1",
-      "kernel_text_offset": ["0x60", "0x460", "0x7c0", "0xee0", "0x1260"],
+      "kernel_text_offset": ["0x60", "0x460", "0x7c0", "0xcb0", "0xfd0"],
       "local_cb_mask": "0x7",
       "brisc_noc_id": "0x0",
       "brisc_noc_mode": "0x0",
