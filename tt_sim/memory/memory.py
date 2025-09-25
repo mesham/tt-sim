@@ -4,7 +4,7 @@ import numpy as np
 
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.memory.memory_map import MemoryMap
-from tt_sim.util.conversion import conv_to_uint32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
 class MemoryStall:
@@ -56,7 +56,7 @@ class MemorySpace(MemMapable, ABC):
                 print(
                     f"->>>>>> Attempt to read at address {hex(addr)} but no memory registered"
                 )
-            return 0
+            return conv_to_bytes(0)
 
     def write(self, addr, value, size=None):
         if len(self.snoop_addresses) > 0 and self.check_is_snoop(addr):
