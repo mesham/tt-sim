@@ -4,14 +4,16 @@ This is the Wormhole driver, and probably what people will use the most. There i
 
 ## Provided examples
 
-All the examples are run in the same way as illustrated here for the first one (see next section), executed from this base _wormhole_ directory due to the paths being relative to here.
+All the examples are run in the same way as illustrated here for the first one (see [Getting Started](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/README.md#getting-started)), executed from this base _wormhole_ directory due to the paths being relative to here.
 
-* [one](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/one) is what we have explored here, this is using BRISC only to read data from DRAM, perform addition, and write results back to DRAM.
+* [one](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/one) is what we explore in the README furtheron here, this is using BRISC only to read data from DRAM, perform addition, and write results back to DRAM.
 * [two](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/two) is similar to the first example, but uses NCRISC to write results back to DRAM. This therefore involves a circular buffer between BRISC and NCRISC.
 * [three](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/three) is similar to the second example, but is chunking up data and operating upon individual chunks passing these then to NCRISC.
 * [loopback](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/loopback) brings in TRISC cores and the Tensix unit to copy data from the CBs into a segment of _dst_ and then copy this out to another CB. This tests the unpackers and packers, and all the associated functionality.
 * [four](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/four) uses the matrix unit in the Tensix coprocessor to do the addition of examples one to three, via the _ELWADD_ instruction. In the Tensix co-processor data is unpacked to _srcA_ and _srcB_, then element wise addition is undertaken and results are in _dst_ which are then packed to L1.
+* * [four-fp](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/four-fp) is the same as the fourth one, but uses FP32 as the input and output type instead, with the FPU computing with FP16.
 * [five](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/five) similar to the fourth example, but uses the vector unit (SFPU) to do the element wise addition. In the Tensix coprocessor data is unpacked to different rows of _dst_, the SFPU executes the _SFPIADD_ instruction storing results to rows of _dst_, with the packer then copying these into L1.
+* [five-fp](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/five-fp) similar to the fifth example, but uses floating point numbers. The _base_ example uses FP32 throughout (the SFPU computes with this), there is also a version where the SFPU computes with TF32 and FP16.
 
 ## Getting started
 
