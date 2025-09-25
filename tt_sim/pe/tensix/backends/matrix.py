@@ -30,6 +30,8 @@ class MatrixUnit(TensixBackendUnit):
         "CLEARDVALID": "handle_cleardvalid",
         "MOVA2D": "handle_mova2d",
         "MVMUL": "handle_mvmul",
+        "DOTPV": "handle_dotpv",
+        "GAPOOL": "handle_gapool",
     }
 
     def __init__(self, backend):
@@ -239,6 +241,22 @@ class MatrixUnit(TensixBackendUnit):
                     if clearSrcBBank[bank]:
                         self.backend.getSrcA(bank)[i, j] = 0
 
+    def handle_gapool(self, instruction_info, issue_thread, instr_args):
+        dstRow = instr_args["dst"]
+        addrMod = instr_args["addr_mode"]
+        flipSrcA = instr_args["clear_dvalid"] & 0x1
+        flipSrcB = instr_args["clear_dvalid"] & 0x2
+
+        self.perform_mvmul(issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4)
+
+    def handle_dotpv(self, instruction_info, issue_thread, instr_args):
+        dstRow = instr_args["dst"]
+        addrMod = instr_args["addr_mode"]
+        flipSrcA = instr_args["clear_dvalid"] & 0x1
+        flipSrcB = instr_args["clear_dvalid"] & 0x2
+
+        self.perform_mvmul(issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4)
+
     def handle_mvmul(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
         addrMod = instr_args["addr_mode"]
@@ -246,6 +264,20 @@ class MatrixUnit(TensixBackendUnit):
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
+        self.perform_mvmul(
+            issue_thread, dstRow, addrMod, broadcastSrcBRow, flipSrcA, flipSrcB, 8
+        )
+
+    def perform_mvmul(
+        self,
+        issue_thread,
+        dstRow,
+        addrMod,
+        broadcastSrcBRow,
+        flipSrcA,
+        flipSrcB,
+        numRows,
+    ):
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
         )
@@ -255,7 +287,8 @@ class MatrixUnit(TensixBackendUnit):
         srcARow, srcBRow, dstRow = self.get_base_row_ranges(
             issue_thread, stateID, rwc, broadcastSrcBRow
         )
-        numRows = 7 if broadcastSrcBRow else 8
+        if broadcastSrcBRow:
+            numRows -= 1
         dstRow &= 0x400 - numRows
 
         fidelityPhase = self.determine_fidelity_phase(issue_thread, rwc)
