@@ -29,6 +29,7 @@ class MatrixUnit(TensixBackendUnit):
         "INCRWC": "handle_incrwc",
         "CLEARDVALID": "handle_cleardvalid",
         "MOVA2D": "handle_mova2d",
+        "MVMUL": "handle_mvmul",
     }
 
     def __init__(self, backend):
@@ -238,29 +239,92 @@ class MatrixUnit(TensixBackendUnit):
                     if clearSrcBBank[bank]:
                         self.backend.getSrcA(bank)[i, j] = 0
 
-    def handle_elementwise_op(
-        self,
-        stateID,
-        issue_thread,
-        rwc,
-        broadcastSrcBCol0,
-        broadcastSrcBRow,
-        dstRow,
-        addDst,
-        flipsrca,
-        flipsrcb,
-        addrMode,
-        op_handler,
-        int8_handler,
-        fp_handler,
-    ):
+    def handle_mvmul(self, instruction_info, issue_thread, instr_args):
+        dstRow = instr_args["dst"]
+        addrMod = instr_args["addr_mode"]
+        broadcastSrcBRow = instr_args["instr_mod19"]
+        flipSrcA = instr_args["clear_dvalid"] & 0x1
+        flipSrcB = instr_args["clear_dvalid"] & 0x2
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+        rwc = self.getRWC(issue_thread)
+
+        srcAStyle, useDst32b = self.get_dataformat_and_useDst(issue_thread, stateID)
+        srcARow, srcBRow, dstRow = self.get_base_row_ranges(
+            issue_thread, stateID, rwc, broadcastSrcBRow
+        )
+        numRows = 7 if broadcastSrcBRow else 8
+        dstRow &= 0x400 - numRows
+
+        fidelityPhase = self.determine_fidelity_phase(issue_thread, rwc)
+
+        srcAMatrix = [[0 for _ in range(16)] for _ in range(16)]
+        srcBMatrix = [[0 for _ in range(16)] for _ in range(numRows)]
+        multipliedMatrix = [[0 for _ in range(16)] for _ in range(numRows)]
+
+        for i in range(numRows):
+            for j in range(16):
+                srcBVal = self.backend.getSrcB(self.srcBBank)[
+                    srcBRow + (0 if broadcastSrcBRow else i), j
+                ]
+                if srcAStyle == DataFormat.INT8:
+                    srcBMatrix[i][j] = self.DataFormatConversions.Int8InSrcToInt8(
+                        srcBVal & (0x40FFF if fidelityPhase & 2 else 0x7F0FF)
+                    )
+                else:
+                    srcBValFP32 = self.get_elementwise_fp_src_type(srcAStyle, srcBVal)
+                    srcBMatrix[i][j] = self.srcBFidelityBits(srcBValFP32, fidelityPhase)
+
+        for i in range(16):
+            for j in range(16):
+                srcAVal = self.backend.getSrcA(self.srcABank)[srcARow + i, j]
+                if srcAStyle == DataFormat.INT8:
+                    srcAMatrix[i][j] = self.DataFormatConversions.Int8InSrcToInt8(
+                        srcAVal & (0x41FFF if fidelityPhase & 2 else 0x4E0FF)
+                    )
+                else:
+                    srcAValFP32 = self.get_elementwise_fp_src_type(srcAStyle, srcAVal)
+                    srcAMatrix[i][j] = self.srcAFidelityBits(srcAValFP32, fidelityPhase)
+
+        for i in range(numRows):
+            for j in range(16):
+                multipliedMatrix[i][j] = 0
+                for k in range(16):
+                    multipliedMatrix[i][j] += srcBMatrix[i][k] * srcAMatrix[k][j]
+
+        for i in range(numRows):
+            for j in range(16):
+                x = multipliedMatrix[i][j]
+                if srcAStyle == DataFormat.INT8:
+                    x = multipliedMatrix[i][j]
+                    x += self.backend.getDst().getDst32b(dstRow + i, j)
+                    self.backend.getDst().setDst32b(
+                        dstRow + i, j, DataFormatConversions.FP32ToDstFormatFP32(x)
+                    )
+                else:
+                    self.store_elementwise_fp_result(
+                        useDst32b, True, srcAStyle, dstRow, i, j, multipliedMatrix[i][j]
+                    )
+            if broadcastSrcBRow:
+                i += 1
+
+        self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB)
+
+        # Advance the RWCs
+        rwc.applyAddrMod(issue_thread, addrMod)
+
+    def get_dataformat_and_useDst(self, issue_thread, stateID):
         # Determine data formats
         if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
             srcAStyle = DataFormat.FP16
             useDst32b = False
+            return srcAStyle, useDst32b
         elif self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled"):
             srcAStyle = DataFormat.INT8
             useDst32b = True
+            return srcAStyle, useDst32b
         else:
             if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_override"):
                 srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
@@ -289,20 +353,65 @@ class MatrixUnit(TensixBackendUnit):
                 srcAStyle = DataFormat.TF32
 
             useDst32b = self.getConfigValue(stateID, "ALU_ACC_CTRL_Fp32_enabled")
+            return srcAStyle, useDst32b
 
+    def get_base_row_ranges(self, issue_thread, stateID, rwc, broadcastSrcBRow):
         # Determine the row range
         srcARow = rwc.SrcA & 0x38
         srcBRow = rwc.SrcB & (0x3F if broadcastSrcBRow else 0x38)
-        dstRow += self.getThreadConfigValue(
+        dstRow = self.getThreadConfigValue(
             issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
         )
         dstRow += rwc.Dst + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
-        dstRow &= 0x3F8
+        return srcARow, srcBRow, dstRow
 
+    def determine_fidelity_phase(self, issue_thread, rwc):
         # Determine the fidelity phase.
         fidelityPhase = rwc.FidelityPhase
         fidelityPhase += self.getThreadConfigValue(issue_thread, "FIDELITY_BASE_Phase")
         fidelityPhase &= 3
+        return fidelityPhase
+
+    def optionally_flip_src_banks(self, issue_thread, flipsrca, flipsrcb):
+        # Possibly flip source banks
+        if flipsrca:
+            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
+                self.backend.getSrcA(
+                    self.srcABank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.srcABank ^= 1
+
+        if flipsrcb:
+            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcB_Disable"):
+                self.backend.getSrcB(
+                    self.srcBBank
+                ).allowedClient = SrcRegister.SrcClient.Unpackers
+            self.srcBBank ^= 1
+
+    def handle_elementwise_op(
+        self,
+        stateID,
+        issue_thread,
+        rwc,
+        broadcastSrcBCol0,
+        broadcastSrcBRow,
+        dstRow,
+        addDst,
+        flipsrca,
+        flipsrcb,
+        addrMode,
+        op_handler,
+        int8_handler,
+        fp_handler,
+    ):
+        srcAStyle, useDst32b = self.get_dataformat_and_useDst(issue_thread, stateID)
+
+        srcARow, srcBRow, dstRow = self.get_base_row_ranges(
+            issue_thread, stateID, rwc, broadcastSrcBRow
+        )
+        dstRow &= 0x3F8
+
+        fidelityPhase = self.determine_fidelity_phase(issue_thread, rwc)
 
         if self.getDiagnosticSettings().reportFPUCalculations():
             print(
@@ -439,9 +548,10 @@ class MatrixUnit(TensixBackendUnit):
         elif srcAStyle == DataFormat.FP16:
             # Dst is FP16, just like SrcAStyle
             if addDst:
-                result += DataFormatConversions.FP16InDstToFP16(
-                    self.backend.getDst().getDst16b(dstRow + i, j)
-                )
+                val = self.backend.getDst().getDst16b(dstRow + i, j)
+
+                if val is not None:
+                    result += DataFormatConversions.FP16InDstToFP16(val)
             self.backend.getDst().setDst16b(
                 dstRow + i,
                 j,
@@ -710,17 +820,19 @@ class MatrixUnit(TensixBackendUnit):
             self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)
 
     def srcAFidelityBits(self, x, fidelityPhase):
+        x = conv_to_uint32(x)
         if fidelityPhase & 1 == 0:
             # Sign, Exp, implicit 1 of Man, next four Man bits
-            return x & 0xFFF80000
+            return conv_to_float(x & 0xFFF80000)
         else:
             # Isolate the next five Man bits not consumed by prior branch
-            return x - (x & 0xFFF83FFF)
+            return conv_to_float(x - (x & 0xFFF83FFF))
 
     def srcBFidelityBits(self, x, fidelityPhase):
+        x = conv_to_uint32(x)
         if fidelityPhase & 2 == 0:
             # Sign, Exp, implicit 1 of Man, next six Man bits
-            return x & 0xFFFE0000
+            return conv_to_float(x & 0xFFFE0000)
         else:
             # Isolate the next four Man bits not consumed by prior branch
-            return x - (x & 0xFFFE1FFF)
+            return conv_to_float(x - (x & 0xFFFE1FFF))
