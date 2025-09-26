@@ -17,7 +17,6 @@ from tt_sim.pe.tensix.tdma import TDMA
 from tt_sim.pe.tensix.tensix import (
     TensixCoProcessor,
 )
-from tt_sim.pe.tensix.util import DiagnosticsSettings
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -109,32 +108,73 @@ class TT_Device(Device):
 
 
 class Wormhole(TT_Device):
-    def __init__(self):
+    def __init__(self, diagnostics=None):
+        if diagnostics is None:
+            # All off by default if no diagnostics provided
+            diagnostics = DeviceTileDiagnostics()
         dram_tile = DRAMTile(16, 16)
         tensix_tile = TensixTile(
             18,
             18,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            False,
-            coprocessor_diagnostics=DiagnosticsSettings(
-                unpacking=False,
-                packing=False,
-                configurations_set=False,
-                issued_instructions=False,
-                fpu_calculations=False,
-                sfpu_calculations=False,
-                thcon=False,
-            ),
+            diagnostics.reportBRISC(),
+            diagnostics.reportNCRISC(),
+            diagnostics.reportTRISC0(),
+            diagnostics.reportTRISC1(),
+            diagnostics.reportTRISC2(),
+            diagnostics.reportNoC0(),
+            diagnostics.reportNoC1(),
+            diagnostics.getTensixCoprocessorDiagnostics(),
         )
 
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
         super().__init__(None, [dram_tile], [tensix_tile])
+
+
+class DeviceTileDiagnostics:
+    def __init__(
+        self,
+        brisc_diagnostics=False,
+        ncrisc_diagnostics=False,
+        trisc0_diagnostics=False,
+        trisc1_diagnostics=False,
+        trisc2_diagnostics=False,
+        noc0_diagnostics=False,
+        noc1_diagnostics=False,
+        coprocessor_diagnostics=None,
+    ):
+        self.brisc_diagnostics = brisc_diagnostics
+        self.ncrisc_diagnostics = ncrisc_diagnostics
+        self.trisc0_diagnostics = trisc0_diagnostics
+        self.trisc1_diagnostics = trisc1_diagnostics
+        self.trisc2_diagnostics = trisc2_diagnostics
+        self.noc0_diagnostics = noc0_diagnostics
+        self.noc1_diagnostics = noc1_diagnostics
+        self.coprocessor_diagnostics = coprocessor_diagnostics
+
+    def reportBRISC(self):
+        return self.brisc_diagnostics
+
+    def reportNCRISC(self):
+        return self.ncrisc_diagnostics
+
+    def reportTRISC0(self):
+        return self.trisc0_diagnostics
+
+    def reportTRISC1(self):
+        return self.trisc1_diagnostics
+
+    def reportTRISC2(self):
+        return self.trisc2_diagnostics
+
+    def reportNoC0(self):
+        return self.noc0_diagnostics
+
+    def reportNoC1(self):
+        return self.noc1_diagnostics
+
+    def getTensixCoprocessorDiagnostics(self):
+        return self.coprocessor_diagnostics
 
 
 class TTDeviceTile(DeviceTile, ABC):
