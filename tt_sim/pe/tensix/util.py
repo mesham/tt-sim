@@ -6,7 +6,7 @@ import yaml
 from tt_sim.util.bits import extract_bits, get_bits
 
 
-class DiagnosticsSettings:
+class TensixCoprocessorDiagnostics:
     def __init__(
         self,
         issued_instructions=False,

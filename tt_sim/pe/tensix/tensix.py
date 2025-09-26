@@ -2,6 +2,7 @@ from tt_sim.memory.memory import VisibleMemory
 from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.tensix.backend import TensixBackend
 from tt_sim.pe.tensix.frontend import TensixFrontend
+from tt_sim.pe.tensix.util import TensixCoprocessorDiagnostics
 
 
 class TensixCoProcessor(ProcessingElement):
@@ -11,6 +12,8 @@ class TensixCoProcessor(ProcessingElement):
     """
 
     def __init__(self, diags_settings=None):
+        if diags_settings is None:
+            diags_settings = TensixCoprocessorDiagnostics()
         self.backend = TensixBackend(diags_settings)
         self.threads = [
             TensixFrontend(i, self.backend, diags_settings) for i in range(3)

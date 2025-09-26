@@ -3,7 +3,7 @@ from abc import ABC
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.registers import SrcRegister
-from tt_sim.pe.tensix.util import DiagnosticsSettings, TensixInstructionDecoder
+from tt_sim.pe.tensix.util import TensixInstructionDecoder
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
@@ -17,7 +17,7 @@ class TensixFrontend(MemMapable):
     https://github.com/tenstorrent/tt-isa-documentation/tree/main/WormholeB0/TensixTile/TensixCoprocessor
     """
 
-    def __init__(self, thread_id, backend, diags_settings=None):
+    def __init__(self, thread_id, backend, diags_settings):
         self.thread_id = thread_id
         self.backend = backend
         self.mop_instruction_fifo = []
@@ -26,9 +26,7 @@ class TensixFrontend(MemMapable):
         self.mop_expander = TensixMOPExpander(self)
         self.replay_expander = TensixReplayExpander(self)
         self.wait_gate = WaitGate(self, backend)
-        self.diags_settings = (
-            diags_settings if diags_settings is not None else DiagnosticsSettings()
-        )
+        self.diags_settings = diags_settings
 
     def getClocks(self):
         return [self.mop_expander, self.replay_expander, self.wait_gate]

@@ -10,7 +10,6 @@ from tt_sim.pe.tensix.backends.unpacker import UnPackerUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import DstRegister, SrcRegister
 from tt_sim.pe.tensix.util import (
-    DiagnosticsSettings,
     TensixConfigurationConstants,
     TensixInstructionDecoder,
 )
@@ -24,7 +23,7 @@ class TensixBackend:
     https://github.com/tenstorrent/tt-isa-documentation/tree/main/WormholeB0/TensixTile/TensixCoprocessor
     """
 
-    def __init__(self, diags_settings=None):
+    def __init__(self, diags_settings):
         self.gpr = TensixGPR()
         self.mover_unit = MoverUnit(self)
         self.sync_unit = TensixSyncUnit(self)
@@ -51,9 +50,7 @@ class TensixBackend:
         self.rwc = [RWC(self) for i in range(3)]
         self.adc = [ADCThread() for i in range(3)]
         self.addressable_memory = None
-        self.diags_settings = (
-            diags_settings if diags_settings is not None else DiagnosticsSettings()
-        )
+        self.diags_settings = diags_settings
 
     def getDiagnosticSettings(self):
         return self.diags_settings
