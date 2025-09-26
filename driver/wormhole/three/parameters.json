@@ -1,7 +1,7 @@
 {
-  "brisc_binary_file" : "three/brisc_kernel.bin",
+  "brisc_binary_file" : "three/binaries/brisc_kernel.bin",
   "brisc_binary_text_addr": "0x71d0",
-  "ncrisc_binary_file" : "three/ncrisc_kernel.bin",
+  "ncrisc_binary_file" : "three/binaries/ncrisc_kernel.bin",
   "ncrisc_binary_text_addr": "0x7600",
   "launch": [{
     "kernel_config": {

@@ -1,5 +1,5 @@
 {
-  "brisc_binary_file" : "one/brisc_kernel.bin",
+  "brisc_binary_file" : "one/binaries/brisc_kernel.bin",
   "brisc_binary_text_addr": "0x71B0",
   "launch": [{
     "kernel_config": {
