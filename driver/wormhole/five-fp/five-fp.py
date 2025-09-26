@@ -12,12 +12,12 @@ from tt_sim.util.conversion import (
 # reporting on and off
 
 coprocessor_diagnostics = TensixCoprocessorDiagnostics(
-    unpacking=True,
+    unpacking=False,
     packing=False,
     configurations_set=False,
     issued_instructions=False,
     fpu_calculations=False,
-    sfpu_calculations=True,
+    sfpu_calculations=False,
     thcon=False,
 )
 
