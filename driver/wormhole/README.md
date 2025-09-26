@@ -45,7 +45,7 @@ The source code of this example is [here](https://github.com/mesham/tt-sim/blob/
 
 The simulator runs until it detects completiong (this is done [here](https://github.com/mesham/tt-sim/blob/9280e5e935f83de0565876e9e57c5367fa77d80b/driver/wormhole/wormhole_driver.py#L79)). The nice thing about Python is that it is trivial to script up exploring and manipulating state, during testing I have found it very useful to run for _n_ cycles only and then through the objects grab out values of registers and memory addresse. 
 
-In [tt_device.Wormhole](https://github.com/mesham/tt-sim/blob/9280e5e935f83de0565876e9e57c5367fa77d80b/tt_sim/device/tt_device.py#L117) you can set diagnostic choices. For example, change the first _False_ to _True_ and _issued_instructions=False_ to _issued_instructions=True_ a few lines down. If you rerun you will see the BRISC Babycore providing diagnostic information about every instruction it executes and the Tensix co-processor reporting instructions that it has issued to the backend (whilst this first example does not use the Tensix co-processor the firmware still issues some instructions at about 1700 cycles in to set it up). For example, looking about half way you will see something like:
+In each example you can set diagnostic settings, these are off by default (turning all of them on results in lots of output!) For example, change _brisc_diagnostics=False_ to _brisc_diagnostics=True_ and _issued_instructions=False_ to _issued_instructions=True_ a few lines higher up in _one.py_. If you rerun you will see the BRISC babycore providing diagnostic information about every instruction it executes and the Tensix co-processor reporting instructions that it has issued to the backend (whilst this first example does not use the Tensix co-processor the firmware still issues some instructions at about 1700 cycles in to set it up). For example, looking about half way you will see something like:
 
 ```bash
 [0-> 1690][0x478c] jalr zero, 0x0(ra)    # jump to 0x39b8
@@ -72,7 +72,7 @@ Issued SFPCONFIG to SFPU from thread 0
 [0-> 1706][0x39f4] lw a5, 0xc(s0)    # a5 = mem[0xffef000c]
 ```
 
-Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V core 0 (BRISC) at cycle number 1690. _[0x478c]_ is the value of the PC (i.e. the address of the instruction being executed), with the instruction itself and some meta data. The _Issued_ messages are from diagnostics reported by the Tensix coprocessor, here for example the firmware is issuing some instructions to the MATH and vector unit to set them up. You can enable other diagnostics via the boolean values, for example _configurations_set_ reports all values set in the Tensix configuration unit, but the output quickly becomes rather large!
+Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V core 0 (BRISC) at cycle number 1690. _[0x478c]_ is the value of the PC (i.e. the address of the instruction being executed), with the instruction itself and some meta data. The _Issued_ messages are from diagnostics reported by the Tensix coprocessor, here for example the firmware is issuing some instructions to the MATH and vector unit to set them up. You can enable other diagnostics via the boolean values, for example _configurations_set_ reports all values set in the Tensix configuration unit. As an aside, it is fine to omit these diagnostic settings (it just assumes they are all off), but they are included in each example explicitly for convenience. 
 
 ### Firmware and kernel launching
 
