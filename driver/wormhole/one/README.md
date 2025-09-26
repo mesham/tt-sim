@@ -1,6 +1,6 @@
 # Example one
 
-This example is very simple and uses BRISC only to read data from DRAM, perform addition, and write results back to DRAM. But crucially it tests and demonstrates quite a few subsystems of the simulator.
+This example is very simple and uses BRISC only to read data from DRAM, perform addition, and write results back to DRAM. But crucially it tests and demonstrates quite a few subsystems of the simulator. The script will check that the computed values are correct.
 
 ```bash
 ~/tt-sim/driver/wormhole $ python3 one/one.py
