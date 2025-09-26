@@ -1,4 +1,4 @@
-# Example one
+# Example two
 
 This example reads data using BRISC, then performs addition and uses a circular buffer to send the results to NCRISC which write these back to DRAM. This therefore involves testing circular buffers and deploying on BRISC and NCRISC. The script will check the computed values are correct.
 
