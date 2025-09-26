@@ -178,7 +178,7 @@ class MatrixUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportFPUCalculations():
             print(
-                f"FPU incrwc AInc={srcAInc} BInc={srcBInc} dstInc={dstInc} by thread {issue_thread}"
+                f"FPU: incrwc AInc={srcAInc} BInc={srcBInc} dstInc={dstInc} by thread {issue_thread}"
             )
 
         if srcACr:
@@ -211,7 +211,7 @@ class MatrixUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportFPUCalculations():
             print(
-                f"FPU perform zerosrc for srcA={clearSrcA}, srcB={clearSrcB} by thread {issue_thread}"
+                f"FPU: perform zerosrc for srcA={clearSrcA}, srcB={clearSrcB} by thread {issue_thread}"
             )
 
         if clearSrcA:
@@ -448,7 +448,7 @@ class MatrixUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportFPUCalculations():
             print(
-                f"Perform FPU element wise op, dst starts at {dstRow}, "
+                f"FPU: perform element wise op, dst starts at {dstRow}, "
                 f"srcA starts at {srcARow} and srcB at {srcBRow} by thread {issue_thread}"
             )
 

@@ -349,7 +349,7 @@ class WaitGate(TensixFrontendUnit):
                         # otherwise retry next cycle
                         if self.getDiagnosticSettings().reportIssuedInstructions():
                             print(
-                                f"Issued {instruction_info['name']} to {instruction_info['ex_resource']} "
+                                f"Wait gate: issued {instruction_info['name']} to {instruction_info['ex_resource']} "
                                 f"from thread {self.frontend.thread_id}"
                             )
                         self.frontend.pop_wait_gate_instruction()

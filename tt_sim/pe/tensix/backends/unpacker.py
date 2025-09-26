@@ -676,7 +676,7 @@ class UnPackerUnit(TensixBackendUnit):
                 "srcB" if self.unpacker_id == 1 else ("dst" if unpackToDst else "srcA")
             )
             print(
-                f"Starting unpacker {self.unpacker_id} read at {hex(inAddr_Datums)} for "
+                f"Unpacker {self.unpacker_id}: start read at {hex(inAddr_Datums)} for "
                 f"{inputNumDatums} datums of bytes size {datumSizeBytes} "
                 f"starting write to {tgt} at row {start_row}, read data type "
                 f"{DATA_FORMAT_TO_NAME[inDataFormat]} -> write data type {DATA_FORMAT_TO_NAME[outDataFormat]}"

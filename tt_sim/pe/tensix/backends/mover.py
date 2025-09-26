@@ -93,7 +93,6 @@ class MoverUnit(TensixBackendUnit):
             # In the "L1_TO_" modes, a memcpy is done, and src must be an address in L1.
             if src >= (1024 * 1464):
                 raise NotImplementedError("")
-            # print(f"Write to {hex(dst)} from {hex(src)} elements {hex(count)}")
             self.backend.getAddressableMemory().write(
                 dst, self.backend.getAddressableMemory().read(src, count)
             )

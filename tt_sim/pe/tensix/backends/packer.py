@@ -385,7 +385,7 @@ class PackerUnit(TensixBackendUnit):
 
             if self.getDiagnosticSettings().reportPacking():
                 print(
-                    f"Packer {i}: Copy from dst at {self.packerI[i].inputSourceAddr} (row start "
+                    f"Packer {i}: copy from dst at {self.packerI[i].inputSourceAddr} (row start "
                     f"= {row_start}, num rows= {rows}) total size="
                     f"{self.packerI[i].inputNumDatums}, to L1 {hex(addr)}, read data type "
                     f"{DATA_FORMAT_TO_NAME[self.packerI[i].inDataFormat]} -> write data type "

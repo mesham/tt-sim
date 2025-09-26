@@ -90,7 +90,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         if self.getDiagnosticSettings().reportConfigurationSet():
             frm_thread = f"from thread {from_thread}"
             print(
-                f"Set config [{stateID}]{TensixConfigurationConstants.get_name(cfgIndex)} "
+                f"Config: set config [{stateID}]{TensixConfigurationConstants.get_name(cfgIndex)} "
                 f"value={hex(value )} {frm_thread if from_thread is not None else ''}"
             )
         self.config[stateID][cfgIndex] = value
@@ -98,7 +98,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
     def setThreadConfig(self, thread_id, cfg_index, value):
         if self.getDiagnosticSettings().reportConfigurationSet():
             print(
-                f"Set threadConfig [{thread_id}]{TensixConfigurationConstants.get_name(cfg_index)} "
+                f"Config: set threadConfig [{thread_id}]{TensixConfigurationConstants.get_name(cfg_index)} "
                 f"value={hex(value)}"
             )
         self.threadConfig[thread_id][cfg_index] = value

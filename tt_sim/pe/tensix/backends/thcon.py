@@ -201,7 +201,8 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"GPR[{resultReg}] = GPR[leftReg] * {'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"ThCon: GPR[{resultReg}] = GPR[leftReg] * "
+                f"{'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
                 f"from thread {issue_thread}"
             )
 
@@ -223,7 +224,8 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"GPR[{resultReg}] = GPR[leftReg] - {'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"ThCon: GPR[{resultReg}] = GPR[leftReg] - "
+                f"{'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
                 f"from thread {issue_thread}"
             )
 
@@ -245,7 +247,8 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"GPR[{resultReg}] = GPR[leftReg] + {'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"ThCon: GPR[{resultReg}] = GPR[leftReg] + "
+                f"{'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
                 f"from thread {issue_thread}"
             )
 
@@ -372,7 +375,7 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"Write to MMIO at {hex(addr)} from reg {dataReg} "
+                f"ThCon: write to MMIO at {hex(addr)} from reg {dataReg} "
                 f"from thread {issue_thread}"
             )
 
@@ -489,7 +492,7 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"Write to GPR {resultReg} from MMIO at {hex(addr)} "
+                f"ThCon: write to GPR {resultReg} from MMIO at {hex(addr)} "
                 f"from thread {issue_thread}"
             )
 
@@ -521,7 +524,7 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"Read from L1 address {hex(L1Address)} to GPR {gpr_reg_idx}, number of bytes "
+                f"ThCon: read from L1 address {hex(L1Address)} to GPR {gpr_reg_idx}, number of bytes "
                 f"{16 if sizeSel == 0 else 4 if sizeSel == 1 else 2 if sizeSel == 2 else 1} "
                 f"from thread {issue_thread}"
             )
@@ -701,7 +704,7 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"Write to MMIO at address {hex(addr)} from GPR {dataReg} from thread {issue_thread}"
+                f"ThCon: write to MMIO at address {hex(addr)} from GPR {dataReg} from thread {issue_thread}"
             )
 
         gpr_val = self.gprs.getRegisters(issue_thread)[dataReg]
@@ -737,7 +740,7 @@ class ScalarUnit(TensixBackendUnit):
 
         if self.getDiagnosticSettings().reportThCon():
             print(
-                f"Write to L1 address {hex(L1Address)} from GPR {gpr_reg_idx}, number of bytes "
+                f"ThCon: write to L1 address {hex(L1Address)} from GPR {gpr_reg_idx}, number of bytes "
                 f"{16 if size == 0 else 4 if size == 1 else 2 if size == 2 else 1} "
                 f"from thread {issue_thread}"
             )

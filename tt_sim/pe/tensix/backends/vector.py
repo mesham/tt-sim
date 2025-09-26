@@ -155,7 +155,7 @@ class VectorUnit(TensixBackendUnit):
         vc = instr_args["lreg_c"]
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = ~ lreg[{vc}]")
+            print(f"SFPU: lreg[{vd}] = ~ lreg[{vc}]")
 
         if vd < 8 or vd == 16:
             for lane in range(32):
@@ -168,7 +168,7 @@ class VectorUnit(TensixBackendUnit):
         vb = vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = lreg[{vb}] ^ lreg[{vc}]")
+            print(f"SFPU: lreg[{vd}] = lreg[{vb}] ^ lreg[{vc}]")
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -180,7 +180,7 @@ class VectorUnit(TensixBackendUnit):
         vb = vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = lreg[{vb}] & lreg[{vc}]")
+            print(f"SFPU: lreg[{vd}] = lreg[{vb}] & lreg[{vc}]")
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
@@ -192,7 +192,7 @@ class VectorUnit(TensixBackendUnit):
         vb = vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = lreg[{vb}] | lreg[{vc}]")
+            print(f"SFPU: lreg[{vd}] = lreg[{vb}] | lreg[{vc}]")
 
         if vd < 8 or vd == 16:
             for lane in range(32):
@@ -225,7 +225,7 @@ class VectorUnit(TensixBackendUnit):
         vc = instr_args["lreg_c"]
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = abs(lreg[{vc}])")
+            print(f"SFPU: lreg[{vd}] = abs(lreg[{vc}])")
 
         if vd < 8 or vd == 16:
             for lane in range(32):
@@ -256,7 +256,7 @@ class VectorUnit(TensixBackendUnit):
         vc = vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = {hex(imm16)} + lreg[{vc}]")
+            print(f"SFPU: lreg[{vd}] = {hex(imm16)} + lreg[{vc}]")
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
@@ -276,7 +276,7 @@ class VectorUnit(TensixBackendUnit):
         vc = vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = {hex(imm16)} * lreg[{vc}]")
+            print(f"SFPU: lreg[{vd}] = {hex(imm16)} * lreg[{vc}]")
 
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
@@ -292,7 +292,7 @@ class VectorUnit(TensixBackendUnit):
 
     def perform_mad(self, va, vb, vc, vd, mod1):
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = lreg[{va}] * lreg[{vb}] + lreg[{vc}]")
+            print(f"SFPU: lreg[{vd}] = lreg[{va}] * lreg[{vb}] + lreg[{vc}]")
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
@@ -511,7 +511,7 @@ class VectorUnit(TensixBackendUnit):
         vb = vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"lreg[{vd}] = lreg[{vc}] + lreg[{vb}]")
+            print(f"SFPU: lreg[{vd}] = lreg[{vc}] + lreg[{vb}]")
 
         if vd < 8 or vd == 16:
             for lane in range(32):
@@ -600,7 +600,7 @@ class VectorUnit(TensixBackendUnit):
             else:
                 col_start = 0
             print(
-                f"Store lreg[{vd}] into between dst[{(addr & ~3)}, {col_start}] and dst"
+                f"SFPU: store lreg[{vd}] into between dst[{(addr & ~3)}, {col_start}] and dst"
                 f"[{(addr & ~3) + int(31 / 8)}, X] from thread{issue_thread}"
             )
 
@@ -692,7 +692,7 @@ class VectorUnit(TensixBackendUnit):
             else:
                 col_start = 0
             print(
-                f"Load between dst[{(addr & ~3)}, {col_start}] and dst[{(addr & ~3) + int(31 / 8)}, "
+                f"SFPU: load between dst[{(addr & ~3)}, {col_start}] and dst[{(addr & ~3) + int(31 / 8)}, "
                 f"X]into lreg[{vd}] from thread{issue_thread}"
             )
 
