@@ -67,10 +67,9 @@ class DramCore:
     DRAM has no reset — assert/deassert are no-ops. Reads/writes still pump
     the device so BRISC progresses on background traffic to DRAM.
 
-    TODO(future): the wormhole soc descriptor enumerates 18 DRAM channels;
-    only (0, 11) is exercised today. Adding more requires entries in
-    ``coords.DRAM_COORD_MAP`` and corresponding ``DRAMTile`` instances in
-    ``Wormhole.__init__``.
+    All 12 DRAM sub-endpoints from the Wormhole B0 SoC descriptor are now
+    registered (see ``coords.DRAM_COORD_MAP``), backed by 6 ``DRAMTile``
+    instances in ``Wormhole.__init__`` — one per physical controller.
     """
 
     def __init__(self, device, unified_coord):

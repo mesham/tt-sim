@@ -93,7 +93,7 @@ def main():
             assert ack.cmd == proto.CMD_EXIT, "expected EXIT ack"
 
             # 1) WRITE to Tensix L1, READ back, verify.
-            payload = bytes.fromhex("deadbeef" "cafebabe" "01020304" "05060708")
+            payload = bytes.fromhex("deadbeefcafebabe0102030405060708")
             sock.send(
                 proto.build_msg(
                     proto.CMD_WRITE,
@@ -118,9 +118,9 @@ def main():
             )
 
             # No pumps yet — nothing has been deasserted.
-            assert (
-                device.wormhole.run_calls == 0
-            ), f"expected 0 pumps before deassert, got {device.wormhole.run_calls}"
+            assert device.wormhole.run_calls == 0, (
+                f"expected 0 pumps before deassert, got {device.wormhole.run_calls}"
+            )
 
             # 2) WRITE to DRAM, READ back, verify.
             dram_payload = bytes.fromhex("11223344" * 4)
@@ -171,16 +171,16 @@ def main():
             proto.parse(sock.recv())
             pumps_after = device.wormhole.run_calls
             # 1 pump on deassert + 1 pump on the subsequent READ = 2.
-            assert (
-                pumps_after - pumps_before >= 2
-            ), f"expected >=2 pumps after deassert+read, got {pumps_after - pumps_before}"
+            assert pumps_after - pumps_before >= 2, (
+                f"expected >=2 pumps after deassert+read, got {pumps_after - pumps_before}"
+            )
 
             # 4) Unmapped coord still works via lazy NullCore allocation.
             sock.send(proto.build_msg(proto.CMD_READ, core=(2, 2), address=0x0, size=4))
             null_rr = proto.parse(sock.recv())
-            assert (
-                null_rr.data[:4] == b"\x00\x00\x00\x00"
-            ), f"unmapped coord should return zeros, got {null_rr.data.hex()}"
+            assert null_rr.data[:4] == b"\x00\x00\x00\x00", (
+                f"unmapped coord should return zeros, got {null_rr.data.hex()}"
+            )
 
             sock.send(proto.build_msg(proto.CMD_EXIT))
 

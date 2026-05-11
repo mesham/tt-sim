@@ -108,11 +108,25 @@ class TT_Device(Device):
 
 
 class Wormhole(TT_Device):
+    # Unified coords assigned to each Wormhole DRAM channel. Picked from the
+    # (16-17, 16-18) band so they stay clear of the Tensix at (18, 18). Each
+    # DRAMTile backs one of the 6 physical DRAM controllers; the two NoC
+    # sub-endpoints serving the same controller alias to the same unified coord
+    # (see driver/wormhole/server/coords.py:DRAM_COORD_MAP).
+    DRAM_CHANNEL_UNIFIED_COORDS = (
+        (16, 16),  # channel 0
+        (17, 16),  # channel 1
+        (16, 17),  # channel 2
+        (17, 17),  # channel 3
+        (16, 18),  # channel 4
+        (17, 18),  # channel 5
+    )
+
     def __init__(self, diagnostics=None):
         if diagnostics is None:
             # All off by default if no diagnostics provided
             diagnostics = DeviceTileDiagnostics()
-        dram_tile = DRAMTile(16, 16)
+        dram_tiles = [DRAMTile(x, y) for (x, y) in Wormhole.DRAM_CHANNEL_UNIFIED_COORDS]
         tensix_tile = TensixTile(
             18,
             18,
@@ -128,7 +142,7 @@ class Wormhole(TT_Device):
 
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
-        super().__init__(None, [dram_tile], [tensix_tile])
+        super().__init__(None, dram_tiles, [tensix_tile])
 
 
 class DeviceTileDiagnostics:

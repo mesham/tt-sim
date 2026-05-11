@@ -5,8 +5,15 @@ sys.path.insert(0, "/tmp/fb_py")
 import DeviceRequestResponse as DRR
 
 WRITE, READ, RESET_DEASSERT, RESET_ASSERT, START, EXIT = 0, 1, 2, 3, 4, 5
-CMD_NAMES = {0: "WRITE", 1: "READ", 2: "RESET_DEASSERT",
-             3: "RESET_ASSERT", 4: "START", 5: "EXIT"}
+CMD_NAMES = {
+    0: "WRITE",
+    1: "READ",
+    2: "RESET_DEASSERT",
+    3: "RESET_ASSERT",
+    4: "START",
+    5: "EXIT",
+}
+
 
 def build_msg(command: int, data=None) -> bytes:
     b = flatbuffers.Builder(256)
@@ -24,6 +31,7 @@ def build_msg(command: int, data=None) -> bytes:
     b.Finish(root)
     return bytes(b.Output())
 
+
 def parse(msg):
     req = DRR.DeviceRequestResponse.GetRootAsDeviceRequestResponse(msg, 0)
     core = req.Core()
@@ -36,6 +44,7 @@ def parse(msg):
         "size": req.Size(),
         "data": data,
     }
+
 
 addr = os.environ["NNG_SOCKET_ADDR"]
 print(f"[stub] listening on {addr}", file=sys.stderr, flush=True)
@@ -52,12 +61,18 @@ with pynng.Pair1(listen=addr) as sock:
         n += 1
         r = parse(msg)
         name = CMD_NAMES.get(r["cmd"], f"?({r['cmd']})")
-        print(f"[stub] #{n} {name} core={r['core']} addr=0x{r['address']:x} "
-              f"size={r['size']} data_len={len(r['data'])}",
-              file=sys.stderr, flush=True)
+        print(
+            f"[stub] #{n} {name} core={r['core']} addr=0x{r['address']:x} "
+            f"size={r['size']} data_len={len(r['data'])}",
+            file=sys.stderr,
+            flush=True,
+        )
 
         if r["cmd"] == READ:
             reply_words = max(1, r["size"] // 4)
             sock.send(build_msg(READ, data=[0] * reply_words))
-            print(f"[stub] -> READ reply: {reply_words} zero words",
-                  file=sys.stderr, flush=True)
+            print(
+                f"[stub] -> READ reply: {reply_words} zero words",
+                file=sys.stderr,
+                flush=True,
+            )

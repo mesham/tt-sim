@@ -125,9 +125,9 @@ def main():
 
         n_recorded = _record_phase(addr_a, trace)
         n_lines = sum(1 for line in trace.open() if line.strip())
-        assert (
-            n_lines == n_recorded
-        ), f"trace has {n_lines} lines but server saw {n_recorded} messages"
+        assert n_lines == n_recorded, (
+            f"trace has {n_lines} lines but server saw {n_recorded} messages"
+        )
 
         stdout = _replay_phase(addr_b, trace)
         if "0 READ mismatches" not in stdout:
