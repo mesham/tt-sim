@@ -9,18 +9,20 @@ classifiers = ["Programming Language :: Python :: 3"]
 dependencies = [
     "numpy",
     "yaml",
-    "json"
+    "json",
+    "pynng",
+    "flatbuffers",
 ]
 
 dynamic = [ "version" ]
 
 [project.optional-dependencies]
-dev=[]
+dev=["ruff"]
 
 [tool.ruff]
 target-version = "py310"
 extend-include = ["*.ipynb", "*.pyi"]
-exclude = [".venv", "docs/marimo"]
+exclude = [".venv", "docs/marimo", "driver/wormhole/server/_flatbuf"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "PT", "TID251", "INP", "PYI"]
