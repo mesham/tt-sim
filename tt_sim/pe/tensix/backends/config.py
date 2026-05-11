@@ -91,7 +91,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             frm_thread = f"from thread {from_thread}"
             print(
                 f"Config: set config [{stateID}]{TensixConfigurationConstants.get_name(cfgIndex)} "
-                f"value={hex(value )} {frm_thread if from_thread is not None else ''}"
+                f"value={hex(value)} {frm_thread if from_thread is not None else ''}"
             )
         self.config[stateID][cfgIndex] = value
 

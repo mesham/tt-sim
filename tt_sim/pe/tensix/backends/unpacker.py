@@ -283,13 +283,15 @@ class UnPackerUnit(TensixBackendUnit):
         else:
             xdim = get_bits(configDescriptor[0], 16, 31)
 
-        ydim = get_bits(configDescriptor[1], 0, 15)
-        zdim = get_bits(configDescriptor[1], 16, 31)
+        ydim = get_bits(configDescriptor[1], 0, 7)
+        zdim = get_bits(configDescriptor[1], 16, 23)
         if not zdim:
             zdim = 1
-        wdim = get_bits(configDescriptor[2], 0, 15)
+        wdim = get_bits(configDescriptor[2], 0, 7)
         if not wdim:
             wdim = 1
+        if not ydim:
+            ydim = 1
 
         return xdim, ydim, zdim, wdim
 
