@@ -56,6 +56,16 @@ python3 driver/wormhole/replay.py traces/some.trace
 | `--cycles-per-poll N` | Run `wormhole.run(N)` after every wire message once any BRISC is out of reset (default 100). Tune this if tt-metal's poll budget expires before BRISC reaches a "done" state, or if the simulator is unnecessarily slow. |
 | `--record FILE` | Append every host→sim message (and READ reply) to FILE in the trace format. Replayable with `replay.py`. |
 
+When UMD spawns `run.sh`, the same flags can be set via env vars (UMD inherits
+the parent env). `run.sh` translates these into CLI args:
+
+| Env var | Flag equivalent |
+| --- | --- |
+| `TT_SIM_RECORD=<path>` | `--record <path>` |
+| `TT_SIM_LOG_PROTOCOL=1` | `--log-protocol` |
+| `TT_SIM_MOCK_TENSIX=1` | `--mock-tensix` |
+| `TT_SIM_CYCLES_PER_POLL=N` | `--cycles-per-poll N` |
+
 ## Package layout
 
 ```
@@ -104,27 +114,34 @@ EXIT core=0,0 addr=0x0 size=0 data=-
 
 ## Capturing a real tt-metal trace
 
-```bash
-# Use --record to capture, NullCore mode to keep replay deterministic.
-NNG_SOCKET_ADDR=ipc:///tmp/cap.sock python3 -m driver.wormhole.server \
-    --addr ipc:///tmp/cap.sock --mock-tensix \
-    --record traces/one.trace --log-protocol &
+UMD spawns `run.sh` itself, so capture is driven by env vars that `run.sh`
+forwards to the server:
 
-TT_METAL_SIMULATOR=$(pwd)/driver/wormhole <your tt-metal program>
+```bash
+# Real-Wormhole capture — replies reflect actual simulator state, so this
+# trace verifies end-to-end correctness on replay.
+TT_SIM_RECORD=$(pwd)/driver/wormhole/server/traces/one.trace \
+TT_METAL_SIMULATOR=$(pwd)/driver/wormhole \
+    <your tt-metal program>
+
+# NullCore capture — all replies are zeros; verifies only transport + init.
+TT_SIM_MOCK_TENSIX=1 \
+TT_SIM_RECORD=$(pwd)/driver/wormhole/server/traces/one_mocktensix.trace \
+TT_METAL_SIMULATOR=$(pwd)/driver/wormhole \
+    <your tt-metal program>
 ```
 
 Then replay against any future server build to check regressions:
 
 ```bash
 NNG_SOCKET_ADDR=ipc:///tmp/replay.sock python3 -m driver.wormhole.server \
-    --addr ipc:///tmp/replay.sock --mock-tensix &
+    --addr ipc:///tmp/replay.sock &
 python3 driver/wormhole/replay.py driver/wormhole/server/traces/one.trace
 ```
 
-(Traces captured against `--mock-tensix` should re-verify cleanly against
-`--mock-tensix`. Traces captured against the real `Wormhole` will match a
-real-Wormhole server but may diverge against `--mock-tensix` for any READ
-whose value depended on simulator state.)
+Traces are server-mode specific: a real-Wormhole trace replays cleanly only
+against another real-Wormhole server (or one whose state matches), and a
+`--mock-tensix` trace replays cleanly only against `--mock-tensix`.
 
 ## Regenerating flatbuffer bindings
 
