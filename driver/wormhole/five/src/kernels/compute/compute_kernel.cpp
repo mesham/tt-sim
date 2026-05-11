@@ -1,6 +1,6 @@
 #include "compute_kernel_api/eltwise_unary/eltwise_unary.h"
 #include "compute_kernel_api/tile_move_copy.h"
-#include "compute_kernel_api/add_int_sfpu.h"
+#include "compute_kernel_api/eltwise_binary_sfpu.h"
 
 namespace NAMESPACE {
 void MAIN {
@@ -14,7 +14,7 @@ void MAIN {
     uint32_t num_chunks = data_size / chunk_size;
 
     init_sfpu(cb_in0, cb_out0);
-    add_int_tile_init();
+    add_binary_tile_init();
 
     for (uint32_t i=0;i<num_chunks;i++) {
         // Wait for a block of tiles in each of input CBs
@@ -34,7 +34,7 @@ void MAIN {
         // Instruct the SFPU to add the tiles in segments
         // zero and one in the dst register, the first 
         // (0) dst register index is overwritten with results
-        add_int32_tile(0, 1); 
+        add_binary_tile(0, 1);
 
         // Commit the dst registers so they can be consumed
         tile_regs_commit();
