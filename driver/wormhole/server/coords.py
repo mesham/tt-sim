@@ -24,3 +24,15 @@ second Tensix or extra DRAM channels don't require code edits.
 
 TENSIX_COORD_MAP = {(1, 1): (18, 18)}
 DRAM_COORD_MAP = {(0, 11): (16, 16)}
+
+# Wormhole NoC grid is 10 cols x 12 rows. NoC 1's origin is the bottom-right
+# tile (data flows leftwards/upwards), so a NoC 0 logical coord (x, y) is the
+# same physical tile as NoC 1 logical (NOC_GRID_X - 1 - x, NOC_GRID_Y - 1 - y).
+# See tt-isa-documentation/WormholeB0/NoC/Coordinates.md.
+NOC_GRID_X = 10
+NOC_GRID_Y = 12
+
+
+def noc1_mirror(noc0_coord):
+    x, y = noc0_coord
+    return (NOC_GRID_X - 1 - x, NOC_GRID_Y - 1 - y)

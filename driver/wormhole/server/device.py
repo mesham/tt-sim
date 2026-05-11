@@ -9,7 +9,7 @@ BRISC is out of reset. Mirrors the existing
 from tt_sim.device.tt_device import DeviceTileDiagnostics, Wormhole
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 
-from .coords import DRAM_COORD_MAP, TENSIX_COORD_MAP
+from .coords import DRAM_COORD_MAP, TENSIX_COORD_MAP, noc1_mirror
 
 
 class Device:
@@ -25,9 +25,10 @@ class Device:
 
         tt-sim's ``Wormhole`` only registers unified coords (16-25). But
         tt-metal-over-the-wire writes the DRAM bank → NoC-XY mapping table to
-        L1 in *translated* coords — so the kernel running on BRISC emits NoC
-        traffic targeting translated coords like (0, 11), which would
-        otherwise miss the directory and abort.
+        L1 with each NoC's own logical coord — NoC 0 uses (0, 11) for DRAM
+        channel 0; NoC 1 uses the mirror (9, 0) because its origin is the
+        bottom-right tile. The kernel emits NoC traffic targeting those
+        coords, which would otherwise miss the directory and abort.
 
         Both NoC 0 and NoC 1 share their directory by reference across all
         NUIs on that NoC, so mutating once is enough.
@@ -37,8 +38,9 @@ class Device:
         for noc_idx in (0, 1):
             directory = any_tile.get_noc_nui(noc_idx).noc_directory
             for translated, unified in coord_map.items():
+                key = translated if noc_idx == 0 else noc1_mirror(translated)
                 target_nui = self.wormhole.tile_directory[unified].get_noc_nui(noc_idx)
-                directory[translated] = target_nui
+                directory[key] = target_nui
 
     def register_tensix(self, unified):
         self._brisc_running.setdefault(unified, False)
