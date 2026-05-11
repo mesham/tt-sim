@@ -80,6 +80,64 @@ Before launching kernels tt-metal runs firmware on each of the Tensix tiles whic
 
 It should be highlighted that tt-metal has two flows when launching kernels, a direct approach and a command queue approach. We currently only support the simpler, direct, approach. By contrast the command queue approach uses two Tensix tiles to marshal and control the execution of kernels across other Tensix tiles, and for simplicity we have avoided supporting this so far. Therefore kernels need to be launched via tt-metal using the _tt:tt_metal::detail::LaunchProgram_ API call.
 
+### Enabling diagnostics in the tt-metal flow
+
+The diagnostic flags shown above (_brisc_diagnostics=True_, _issued_instructions=True_, etc.) are constructed in Python at the top of each standalone example. When tt-metal launches the simulator the user does not own the entry point — UMD spawns _run.sh_ — so the same controls are exposed via _TT_SIM_DIAG_*_ environment variables. All default to off; set any of them to a truthy value (_1_, _true_, _yes_, _on_, case-insensitive) to turn the matching diagnostic on. Output goes to stderr, alongside the other server log messages.
+
+Per baby-RISC-V core (instruction trace):
+
+| Env var | Field |
+| --- | --- |
+| _TT_SIM_DIAG_BRISC_  | _brisc_diagnostics_ |
+| _TT_SIM_DIAG_NCRISC_ | _ncrisc_diagnostics_ |
+| _TT_SIM_DIAG_TRISC0_ | _trisc0_diagnostics_ |
+| _TT_SIM_DIAG_TRISC1_ | _trisc1_diagnostics_ |
+| _TT_SIM_DIAG_TRISC2_ | _trisc2_diagnostics_ |
+
+Per NoC (transaction trace):
+
+| Env var | Field |
+| --- | --- |
+| _TT_SIM_DIAG_NOC0_ | _noc0_diagnostics_ |
+| _TT_SIM_DIAG_NOC1_ | _noc1_diagnostics_ |
+
+Tensix coprocessor:
+
+| Env var | Field |
+| --- | --- |
+| _TT_SIM_DIAG_CO_ISSUED_ | _issued_instructions_ |
+| _TT_SIM_DIAG_CO_CONFIG_ | _configurations_set_ |
+| _TT_SIM_DIAG_CO_UNPACK_ | _unpacking_ |
+| _TT_SIM_DIAG_CO_PACK_   | _packing_ |
+| _TT_SIM_DIAG_CO_FPU_    | _fpu_calculations_ |
+| _TT_SIM_DIAG_CO_SFPU_   | _sfpu_calculations_ |
+| _TT_SIM_DIAG_CO_THCON_  | _thcon_ |
+
+Aggregates (shortcuts that fan out to several of the individual flags above):
+
+| Env var | Expands to |
+| --- | --- |
+| _TT_SIM_DIAG_TRISC_ | TRISC0 + TRISC1 + TRISC2 |
+| _TT_SIM_DIAG_NOC_   | NOC0 + NOC1 |
+| _TT_SIM_DIAG_CO_    | every CO\_\* flag |
+| _TT_SIM_DIAG_ALL_   | every individual flag |
+
+Individual vars win over aggregates when both are present, so you can use an aggregate to turn things on broadly and then mask specific flags back off. Examples:
+
+```bash
+# Trace BRISC instructions only.
+TT_SIM_DIAG_BRISC=1 \
+TT_METAL_SIMULATOR=$(pwd)/driver/wormhole \
+    <your tt-metal program>
+
+# Everything on except NCRISC.
+TT_SIM_DIAG_ALL=1 TT_SIM_DIAG_NCRISC=0 \
+TT_METAL_SIMULATOR=$(pwd)/driver/wormhole \
+    <your tt-metal program>
+```
+
+The server prints a one-line summary at startup (e.g. _[server] diagnostics: BRISC, CO_FPU_, or _none_ when nothing is enabled) so you can confirm the variables were picked up.
+
 ## Building your own kernels to run
 
 The simulator is not currently integrated with tt-metal, although that could be fairly easy to do in the future, so this is a fairly manual (albeit rather simple) process. Before we explain how to do this, it's useful to understand tt-metal support provided here.

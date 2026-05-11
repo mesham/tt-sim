@@ -65,6 +65,7 @@ the parent env). `run.sh` translates these into CLI args:
 | `TT_SIM_LOG_PROTOCOL=1` | `--log-protocol` |
 | `TT_SIM_MOCK_TENSIX=1` | `--mock-tensix` |
 | `TT_SIM_CYCLES_PER_POLL=N` | `--cycles-per-poll N` |
+| `TT_SIM_DIAG_*=1` | enable per-component diagnostics (BRISC/NCRISC/TRISC0-2, NOC0/1, CO_ISSUED/CONFIG/UNPACK/PACK/FPU/SFPU/THCON, plus `_TRISC` / `_NOC` / `_CO` / `_ALL` aggregates) — see the top-level [driver/wormhole/README.md](../README.md#enabling-diagnostics-in-the-tt-metal-flow). Ignored under `--mock-tensix`. |
 
 ## Package layout
 

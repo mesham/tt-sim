@@ -61,17 +61,24 @@ def main(argv=None):
         # Late import so --mock-tensix avoids the (slow) Wormhole construction.
         from .coords import DRAM_COORD_MAP, TENSIX_COORD_MAP
         from .cores import DramCore, TensixCore
-        from .device import Device
+        from .device import Device, diagnostics_from_env, enabled_diagnostic_names
 
-        device = Device(cycles_per_poll=args.cycles_per_poll)
+        diagnostics = diagnostics_from_env()
+        device = Device(cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics)
         for translated, unified in TENSIX_COORD_MAP.items():
             fabric.register(translated, TensixCore(device, unified))
         for translated, unified in DRAM_COORD_MAP.items():
             fabric.register(translated, DramCore(device, unified))
+        enabled = enabled_diagnostic_names(diagnostics)
         print(
             f"[server] tt-sim Wormhole ready "
             f"(tensix={list(TENSIX_COORD_MAP)}, dram={list(DRAM_COORD_MAP)}, "
             f"cycles_per_poll={args.cycles_per_poll})",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            f"[server] diagnostics: {', '.join(enabled) if enabled else 'none'}",
             file=sys.stderr,
             flush=True,
         )
