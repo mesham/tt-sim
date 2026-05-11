@@ -11,6 +11,10 @@ class DataFormat(IntEnum):
     BFP8 = 2
     BFP4 = 3
     BFP2 = 11
+    # BF16 is the canonical Wormhole name for code 5 (per the ISA docs'
+    # FormatConversion.md table); FP16_b is tt-metal's name for the same
+    # format, kept here as a Python IntEnum alias.
+    BF16 = 5
     FP16_b = 5
     BFP8_b = 6
     BFP4_b = 7
@@ -21,7 +25,6 @@ class DataFormat(IntEnum):
     INT32 = 8
     UINT32 = 24
     TF32 = 4
-    BF16 = 10
 
     def isBFPFormat(self):
         return self.value == 2 or self.value == 3 or self.value == 11
@@ -33,7 +36,7 @@ DATA_FORMAT_TO_BITS = {
     DataFormat.BFP8: 8,
     DataFormat.BFP4: 4,
     DataFormat.BFP2: 2,
-    DataFormat.FP16_b: 16,
+    DataFormat.BF16: 16,
     DataFormat.BFP8_b: 8,
     DataFormat.BFP4_b: 4,
     DataFormat.BFP2_b: 2,
@@ -43,7 +46,6 @@ DATA_FORMAT_TO_BITS = {
     DataFormat.UINT32: 32,
     DataFormat.INT32: 32,
     DataFormat.TF32: 32,
-    DataFormat.BF16: 16,
 }
 
 DATA_FORMAT_TO_NAME = {
@@ -52,7 +54,7 @@ DATA_FORMAT_TO_NAME = {
     DataFormat.BFP8: "BFP8",
     DataFormat.BFP4: "BFP4",
     DataFormat.BFP2: "BFP2",
-    DataFormat.FP16_b: "FP16_b",
+    DataFormat.BF16: "BF16",
     DataFormat.BFP8_b: "BFP8_b",
     DataFormat.BFP4_b: "BFP4_b",
     DataFormat.BFP2_b: "BFP2_b",
@@ -62,7 +64,6 @@ DATA_FORMAT_TO_NAME = {
     DataFormat.UINT32: "UINT32",
     DataFormat.INT32: "INT32",
     DataFormat.TF32: "TF32",
-    DataFormat.BF16: "BF16",
 }
 
 
