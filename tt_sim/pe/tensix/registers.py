@@ -5,17 +5,12 @@ import numpy as np
 
 class DstRegister:
     def __init__(self):
-        self.dstBits = np.empty([1024, 16], dtype=np.uint32)
-        self.undefined_rows = []
+        self.dstBits = np.zeros([1024, 16], dtype=np.uint32)
 
     def getDst16b(self, idx0, idx1):
-        if idx0 in self.undefined_rows:
-            return None
         return int(self.dstBits[idx0][idx1])
 
     def setDst16b(self, idx0, idx1, value):
-        if idx0 in self.undefined_rows:
-            self.undefined_rows.remove(idx0)
         self.dstBits[idx0][idx1] = value
 
     def to_32b_row(self, r_16b):
@@ -24,36 +19,23 @@ class DstRegister:
 
     def getDst32b(self, idx0, idx1):
         r1, r2 = self.to_32b_row(idx0)
-        if r1 in self.undefined_rows or r2 in self.undefined_rows:
-            return None
-
         v1 = self.dstBits[r1][idx1]
         v2 = self.dstBits[r2][idx1]
-
         return int((v1 << 16) | (v2 & 0xFFFF))
 
     def setDst32b(self, idx0, idx1, value):
         r1, r2 = self.to_32b_row(idx0)
-        if r1 in self.undefined_rows:
-            self.undefined_rows.remove(r1)
-        if r2 in self.undefined_rows:
-            self.undefined_rows.remove(r2)
-
-        v1 = value >> 16
-        v2 = value & 0xFFFF
-
-        self.dstBits[r1][idx1] = v1
-        self.dstBits[r2][idx1] = v2
+        self.dstBits[r1][idx1] = value >> 16
+        self.dstBits[r2][idx1] = value & 0xFFFF
 
     def setUndefinedRow(self, row, isDst32=False):
+        # ZEROACC zeroes the accumulator. On real hardware reads after this
+        # return zero bits, so just clear the backing storage.
         if isDst32:
-            if row * 2 not in self.undefined_rows:
-                self.undefined_rows.append(row * 2)
-            if (row * 2) + 1 not in self.undefined_rows:
-                self.undefined_rows.append((row * 2) + 1)
+            self.dstBits[row * 2, :] = 0
+            self.dstBits[row * 2 + 1, :] = 0
         else:
-            if row not in self.undefined_rows:
-                self.undefined_rows.append(row)
+            self.dstBits[row, :] = 0
 
 
 class SrcRegister:

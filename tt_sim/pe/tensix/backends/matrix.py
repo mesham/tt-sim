@@ -582,9 +582,7 @@ class MatrixUnit(TensixBackendUnit):
             # Dst is FP16, just like SrcAStyle
             if addDst:
                 val = self.backend.getDst().getDst16b(dstRow + i, j)
-
-                if val is not None:
-                    result += DataFormatConversions.FP16InDstToFP16(val)
+                result += DataFormatConversions.FP16InDstToFP16(val)
             self.backend.getDst().setDst16b(
                 dstRow + i,
                 j,
