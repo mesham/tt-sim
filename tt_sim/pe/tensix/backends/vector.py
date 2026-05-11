@@ -160,7 +160,7 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    self.lregs[vd][lane] = ~self.lregs[vc][lane]
+                    self.lregs[vd][lane] = ~conv_to_uint32(self.lregs[vc][lane])
 
     def handle_sfpxor(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
@@ -172,7 +172,9 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    self.lregs[vd][lane] = self.lregs[vb][lane] ^ self.lregs[vc][lane]
+                    self.lregs[vd][lane] = conv_to_uint32(
+                        self.lregs[vb][lane]
+                    ) ^ conv_to_uint32(self.lregs[vc][lane])
 
     def handle_sfpand(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
@@ -184,7 +186,9 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    self.lregs[vd][lane] = self.lregs[vb][lane] & self.lregs[vc][lane]
+                    self.lregs[vd][lane] = conv_to_uint32(
+                        self.lregs[vb][lane]
+                    ) & conv_to_uint32(self.lregs[vc][lane])
 
     def handle_sfpor(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
@@ -197,7 +201,9 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    self.lregs[vd][lane] = self.lregs[vb][lane] | self.lregs[vc][lane]
+                    self.lregs[vd][lane] = conv_to_uint32(
+                        self.lregs[vb][lane]
+                    ) | conv_to_uint32(self.lregs[vc][lane])
 
     def handle_sfpsetsgn(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -209,15 +215,17 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    c = self.lregs[vc][lane]
+                    c = conv_to_uint32(self.lregs[vc][lane])
                     exp = (c >> 23) & 0xFF
                     man = c & 0x7FFFFF
                     if mod1 & VectorUnit.SFPSETSGN_MOD1_ARG_IMM:
                         sign = imm1 & 0x1
                     else:
-                        b = self.lregs[vb][lane]
+                        b = conv_to_uint32(self.lregs[vb][lane])
                         sign = b >> 31
-                    self.lregs[vd][lane] = (sign << 31) | (exp << 23) | man
+                    self.lregs[vd][lane] = conv_to_float(
+                        (sign << 31) | (exp << 23) | man
+                    )
 
     def handle_sfpabs(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -230,10 +238,11 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    x = self.lregs[vc][lane]
+                    x = conv_to_uint32(self.lregs[vc][lane])
+                    is_float = bool(mod1 & VectorUnit.SFPABS_MOD1_FLOAT)
                     if x >= 0x80000000:
                         # Sign bit is set, i.e. value is negative.
-                        if mod1 & VectorUnit.SFPABS_MOD1_FLOAT:
+                        if is_float:
                             if x > 0xFF800000:
                                 # Value is -NaN; leave it as -NaN
                                 pass
@@ -247,7 +256,7 @@ class VectorUnit(TensixBackendUnit):
                     else:
                         # Value is positive (or zero); leave it as-is
                         pass
-                    self.lregs[vd][lane] = x
+                    self.lregs[vd][lane] = conv_to_float(x) if is_float else x
 
     def handle_addi(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
