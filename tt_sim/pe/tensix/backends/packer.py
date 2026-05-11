@@ -219,11 +219,13 @@ class PackerUnit(TensixBackendUnit):
     ):
         ADCsToAdvance = [False, False, False]
         for i in range(4):
-            # was ! on the second arg below
-            addr = self.getConfigValue(
-                stateID, self.getIPackerConfig(i, 4, 1, 8) + "L1_Dest_addr"
-            ) + self.getConfigValue(
-                stateID, self.getIPackerConfig(i, 4, 1, 8) + "Sub_l1_tile_header_size"
+            # Per the ISA OutputAddressGenerator.md pseudocode:
+            #   Addr = L1_Dest_addr + !Sub_l1_tile_header_size
+            # Sub_l1_tile_header_size is a 1-bit field; the +1 (when it is
+            # 0) is what skips the per-tile header.
+            pfx = self.getIPackerConfig(i, 4, 1, 8)
+            addr = self.getConfigValue(stateID, pfx + "L1_Dest_addr") + (
+                1 - self.getConfigValue(stateID, pfx + "Sub_l1_tile_header_size")
             )
 
             if i == 0:
@@ -370,7 +372,7 @@ class PackerUnit(TensixBackendUnit):
             stateID, issue_thread, packMask, flush, last, addrMod, ovrdThreadId
         )
 
-        for i in range(1):
+        for i in range(4):
             if not (get_nth_bit(packMask, i) or (i == 0 and packMask == 0x0)):
                 continue
 
@@ -378,10 +380,6 @@ class PackerUnit(TensixBackendUnit):
 
             row_start = int(self.packerI[i].inputSourceAddr / (16))
             rows = int(self.packerI[i].inputNumDatums / 16)
-
-            # Are offset by this amount (packer does the same, but +1 is added
-            # before the << 4
-            addr += 0x10
 
             if self.getDiagnosticSettings().reportPacking():
                 print(

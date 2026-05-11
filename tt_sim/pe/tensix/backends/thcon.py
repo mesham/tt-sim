@@ -202,7 +202,7 @@ class ScalarUnit(TensixBackendUnit):
         if self.getDiagnosticSettings().reportThCon():
             print(
                 f"ThCon: GPR[{resultReg}] = GPR[leftReg] * "
-                f"{'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"{'GPR' + str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
                 f"from thread {issue_thread}"
             )
 
@@ -225,7 +225,7 @@ class ScalarUnit(TensixBackendUnit):
         if self.getDiagnosticSettings().reportThCon():
             print(
                 f"ThCon: GPR[{resultReg}] = GPR[leftReg] - "
-                f"{'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"{'GPR' + str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
                 f"from thread {issue_thread}"
             )
 
@@ -248,7 +248,7 @@ class ScalarUnit(TensixBackendUnit):
         if self.getDiagnosticSettings().reportThCon():
             print(
                 f"ThCon: GPR[{resultReg}] = GPR[leftReg] + "
-                f"{'GPR'+str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
+                f"{'GPR' + str(rightRegOrImm6) if mode == 0 else str(hex(rightRegOrImm6))} "
                 f"from thread {issue_thread}"
             )
 
