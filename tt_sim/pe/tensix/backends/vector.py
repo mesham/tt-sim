@@ -590,7 +590,7 @@ class VectorUnit(TensixBackendUnit):
                 break
 
         if do_push:
-            assert self.flagStack.Size() < 8
+            assert len(self.flagStack) < 8
             self.flagStack.append((self.laneFlags, self.useLaneFlagsForLaneEnable))
 
     def handle_sfpsetcc(self, instruction_info, issue_thread, instr_args):
@@ -938,11 +938,11 @@ class VectorUnit(TensixBackendUnit):
                         self.lregs[vd][lane] = imm16
                     case VectorUnit.SFPLOADI_MOD0_UPPER:
                         self.lregs[vd][lane] = (imm16 << 16) | (
-                            self.lregs[vd][lane] & 0x0000FFFF
+                            conv_to_uint32(self.lregs[vd][lane]) & 0x0000FFFF
                         )
                     case VectorUnit.SFPLOADI_MOD0_LOWER:
                         self.lregs[vd][lane] = (
-                            self.lregs[vd][lane] & 0xFFFF0000
+                            conv_to_uint32(self.lregs[vd][lane]) & 0xFFFF0000
                         ) | imm16
                     case _:
                         raise ValueError()
