@@ -42,7 +42,7 @@ class RV_M_ISA(RV_ISA):
                 # mulh
                 rs1_val = conv_to_int32(register_file[rs1].read())
                 rs2_val = conv_to_int32(register_file[rs2].read())
-                result = (rs1_val * rs2_val) >> 16
+                result = (rs1_val * rs2_val) >> 32
                 signed = True
                 snoop_str = "mulh"
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
@@ -50,7 +50,7 @@ class RV_M_ISA(RV_ISA):
                 # mulhsu
                 rs1_val = conv_to_int32(register_file[rs1].read())
                 rs2_val = conv_to_uint32(register_file[rs2].read())
-                result = (rs1_val * rs2_val) >> 16
+                result = (rs1_val * rs2_val) >> 32
                 signed = True
                 snoop_str = "mulhsu"
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
@@ -58,7 +58,7 @@ class RV_M_ISA(RV_ISA):
                 # mulhu
                 rs1_val = conv_to_uint32(register_file[rs1].read())
                 rs2_val = conv_to_uint32(register_file[rs2].read())
-                result = (rs1_val * rs2_val) >> 16
+                result = (rs1_val * rs2_val) >> 32
                 snoop_str = "mulhu"
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} * {cls.get_reg_name(rs2)}"
             case 0x4:
