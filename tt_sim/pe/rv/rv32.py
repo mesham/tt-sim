@@ -139,7 +139,7 @@ class RV32I(ProcessingElement):
         nextpc = self.register_file["nextpc"]
         pc_val = conv_to_uint32(pc.read())
         nextpc.write(conv_to_bytes(pc_val + 4))
-        self.visible_memory.caller_context = (self.core_label, pc_val)
+        self.visible_memory.caller_context = (self.unit_id, self.core_label, pc_val)
 
         if self.snoop:
             print(f"[{self.core_id}-> {cycle_num}][{hex(pc_val)}] ", end="")

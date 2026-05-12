@@ -1,6 +1,7 @@
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.memory.memory import MemoryStall
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
+from tt_sim.trace import EventCategory, SyncEvent, get_bus
 
 
 class Mailbox(MemMapable):
@@ -13,6 +14,20 @@ class Mailbox(MemMapable):
         self.core_id = core_id
         self.mailboxes = [[], [], [], []]
         self.other_mbs = None
+        self.unit_id: tuple | None = None
+
+    def _publish_sync(self, kind: str, detail: str = ""):
+        bus = get_bus()
+        if self.unit_id is None or not bus.is_enabled(EventCategory.SYNC):
+            return
+        bus.publish(
+            SyncEvent(
+                cycle=0,
+                unit_id=self.unit_id,
+                kind=kind,
+                detail=detail,
+            )
+        )
 
     def setOtherMBs(self, other_mbs):
         self.other_mbs = other_mbs
@@ -20,6 +35,7 @@ class Mailbox(MemMapable):
     def sendValue(self, idx, value):
         if len(self.mailboxes[idx]) < 3:
             self.mailboxes[idx].append(value)
+            self._publish_sync("mailbox_send", detail=f"from_idx={idx}")
             return True
         else:
             return False
@@ -69,6 +85,7 @@ class Mailbox(MemMapable):
 
         if isRead:
             if len(self.mailboxes[mb_idx]) > 0:
+                self._publish_sync("mailbox_recv", detail=f"from_idx={mb_idx}")
                 return self.mailboxes[mb_idx].pop(0)
             else:
                 return MemoryStall

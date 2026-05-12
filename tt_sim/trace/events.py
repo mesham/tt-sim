@@ -34,9 +34,16 @@ class Unit(Enum):
     MATRIX = "MATRIX"
     MOVER = "MOVER"
     THCON = "THCON"
+    SYNC = "SYNC"
+    TDMA = "TDMA"
+    CFG = "CFG"
+    MISC = "MISC"
+    MAILBOX = "MAILBOX"
+    TTSYNC = "TTSYNC"
     NOC0 = "NOC0"
     NOC1 = "NOC1"
     HOST = "HOST"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,4 +85,29 @@ class NoCEvent(Event):
 class LifecycleEvent(Event):
     CATEGORY: ClassVar[EventCategory] = EventCategory.LIFECYCLE
     kind: str
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MemEvent(Event):
+    CATEGORY: ClassVar[EventCategory] = EventCategory.MEM
+    op: str  # "read" or "write"
+    address: int
+    size: int
+    region: str = ""  # "L1", "DRAM", "MMIO", etc. — coarse classifier
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeEvent(Event):
+    CATEGORY: ClassVar[EventCategory] = EventCategory.COMPUTE
+    op: str  # opcode name (ELWADD, SFPCONFIG, PACK, UNPACK, ...)
+    target_unit: str  # FPU / SFPU / PACKER / UNPACKER / MATRIX / MOVER / THCON
+    thread_id: int = -1  # -1 when not thread-attributed
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SyncEvent(Event):
+    CATEGORY: ClassVar[EventCategory] = EventCategory.SYNC
+    kind: str  # "mailbox_send" / "mailbox_recv" / "ttsync_signal" / "ttsync_wait"
     detail: str = ""

@@ -408,9 +408,25 @@ class TensixReplayExpander(TensixFrontendUnit):
         self.replay_idx = 0
         super().__init__(frontend)
 
+    def _publish_replay_dispatch(self, cycle_num, instruction):
+        bus = get_bus()
+        if self.frontend.unit_id is None or not bus.is_enabled(EventCategory.DISPATCH):
+            return
+        instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+        bus.publish(
+            DispatchEvent(
+                cycle=cycle_num,
+                unit_id=self.frontend.unit_id,
+                opcode=instruction_info["name"],
+                target_unit=instruction_info["ex_resource"],
+                thread_id=self.frontend.thread_id,
+            )
+        )
+
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_replay_instruction()
         if instruction is not None:
+            self._publish_replay_dispatch(cycle_num, instruction)
             if self.append_instruction_to_buffer:
                 if self.replay_idx < self.replay_len:
                     self.replay_buffer[
@@ -471,6 +487,20 @@ class TensixMOPExpander(TensixFrontendUnit, MemMapable):
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_mop_instruction()
         if instruction is not None:
+            bus = get_bus()
+            if self.frontend.unit_id is not None and bus.is_enabled(
+                EventCategory.DISPATCH
+            ):
+                mop_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+                bus.publish(
+                    DispatchEvent(
+                        cycle=cycle_num,
+                        unit_id=self.frontend.unit_id,
+                        opcode=mop_info["name"],
+                        target_unit=mop_info["ex_resource"],
+                        thread_id=self.frontend.thread_id,
+                    )
+                )
             instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
             if instruction_info["name"] == "MOP":
                 instr_args = instruction_info["instr_args"]

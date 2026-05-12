@@ -1,5 +1,6 @@
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.memory.memory import MemoryStall
+from tt_sim.trace import EventCategory, SyncEvent, get_bus
 from tt_sim.util.bits import get_bits
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -12,6 +13,20 @@ class TTSync(MemMapable):
         self.tile_ctrl = tile_ctrl
         self.thread_id = thread_id
         self.tensix_coprocessor = tensix_coprocessor
+        self.unit_id: tuple | None = None
+
+    def _publish_sync(self, kind: str, detail: str = ""):
+        bus = get_bus()
+        if self.unit_id is None or not bus.is_enabled(EventCategory.SYNC):
+            return
+        bus.publish(
+            SyncEvent(
+                cycle=0,
+                unit_id=self.unit_id,
+                kind=kind,
+                detail=detail,
+            )
+        )
 
     def read(self, address, size):
         if address == 0x0:
@@ -31,6 +46,9 @@ class TTSync(MemMapable):
                 if not self.tensix_coprocessor.CoprocessorDoneCheck(self.thread_id) or (
                     overrideEn and overrideBusy
                 ):
+                    self._publish_sync(
+                        "ttsync_wait_coproc_done", detail=f"thread={self.thread_id}"
+                    )
                     return conv_to_bytes(0)  # an undefined value
                 else:
                     return MemoryStall
@@ -38,6 +56,9 @@ class TTSync(MemMapable):
                 if not self.tensix_coprocessor.MOPExpanderDoneCheck(self.thread_id) or (
                     overrideEn and overrideBusy
                 ):
+                    self._publish_sync(
+                        "ttsync_wait_mop_done", detail=f"thread={self.thread_id}"
+                    )
                     return conv_to_bytes(0)  # an undefined value
                 else:
                     return MemoryStall

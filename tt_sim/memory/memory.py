@@ -4,7 +4,10 @@ import numpy as np
 
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.memory.memory_map import MemoryMap
+from tt_sim.trace import EventCategory, MemEvent, Unit, get_bus
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
+
+_UNKNOWN_UNIT_ID = (0, 0, 0, Unit.UNKNOWN.value)
 
 
 class MemoryStall:
@@ -16,11 +19,47 @@ class MemorySpace(MemMapable, ABC):
         self.memory_map = memory_map
         self.safe = safe
         self.snoop_addresses = [] if snoop_addresses is None else snoop_addresses
-        self.caller_context: tuple[str, int] | None = None
+        # caller_context is set by callers (typically RV cores) before an
+        # access so error messages and trace events can attribute the
+        # access. Layout: (unit_id_tuple_or_None, core_label, pc).
+        self.caller_context: tuple | None = None
 
     def add_snoop(self, snoop_addr_low, snoop_addr_high):
         self.snoop_addresses.append((snoop_addr_low, snoop_addr_high))
         return len(self.snoop_addresses)
+
+    def _resolve_caller_unit_id(self) -> tuple:
+        ctx = self.caller_context
+        if ctx is None:
+            return _UNKNOWN_UNIT_ID
+        # ctx is (unit_id, core_label, pc); unit_id may be None during
+        # construction-period accesses.
+        unit_id = ctx[0]
+        if unit_id is None:
+            return _UNKNOWN_UNIT_ID
+        return unit_id
+
+    def _classify_region(self, addr: int) -> str:
+        if addr >= 0xFF000000:
+            return "MMIO"
+        if addr >= 0xFFB00000:
+            return "MMIO"
+        return "L1"
+
+    def _publish_mem_event(self, op: str, addr: int, size: int):
+        bus = get_bus()
+        if not bus.is_enabled(EventCategory.MEM):
+            return
+        bus.publish(
+            MemEvent(
+                cycle=0,
+                unit_id=self._resolve_caller_unit_id(),
+                op=op,
+                address=int(addr),
+                size=int(size),
+                region=self._classify_region(addr),
+            )
+        )
 
     def _locate_memory_space(self, addr):
         for addr_range, memory_space in self.memory_map.items():
@@ -30,7 +69,10 @@ class MemorySpace(MemMapable, ABC):
         if self.safe:
             msg = f"Provided address '{hex(addr)}' does not match any registered memory spaces"
             if self.caller_context is not None:
-                core_id, pc = self.caller_context
+                core_id = (
+                    self.caller_context[1] if len(self.caller_context) > 1 else "?"
+                )
+                pc = self.caller_context[2] if len(self.caller_context) > 2 else 0
                 msg += f" (accessed by {core_id} at PC={hex(pc)})"
             if addr >= 0xFF000000:
                 msg += (
@@ -52,6 +94,7 @@ class MemorySpace(MemMapable, ABC):
         return False
 
     def read(self, addr, size):
+        self._publish_mem_event("read", addr, size)
         addr_range, memory_space = self._locate_memory_space(addr)
         if addr_range is not None and memory_space is not None:
             target_addr = self.convert_addr_to_target_range(addr_range, addr)
@@ -68,6 +111,12 @@ class MemorySpace(MemMapable, ABC):
             return conv_to_bytes(0)
 
     def write(self, addr, value, size=None):
+        write_size = (
+            size
+            if size is not None
+            else (len(value) if hasattr(value, "__len__") else 0)
+        )
+        self._publish_mem_event("write", addr, write_size)
         if len(self.snoop_addresses) > 0 and self.check_is_snoop(addr):
             print(
                 f"->>>>>> Write value {hex(conv_to_uint32(value))} at address {hex(addr)}"

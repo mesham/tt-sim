@@ -3,6 +3,7 @@ from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
+from tt_sim.trace import ComputeEvent, EventCategory, get_bus
 
 
 class DataFormat(IntEnum):
@@ -73,6 +74,7 @@ class TensixBackendUnit(Clockable, ABC):
         self.next_instruction = []
         self.opcode_to_method_map = opcode_to_method_map
         self.unit_name = unit_name
+        self.unit_id: tuple | None = None
 
     def issueInstruction(self, instruction, from_thread):
         # The default issuing of instructions here, which applies to most
@@ -114,6 +116,17 @@ class TensixBackendUnit(Clockable, ABC):
                 getattr(self, self.opcode_to_method_map[instruction_name])(
                     instruction_info, issue_thread, instr_args
                 )
+                bus = get_bus()
+                if self.unit_id is not None and bus.is_enabled(EventCategory.COMPUTE):
+                    bus.publish(
+                        ComputeEvent(
+                            cycle=cycle_num,
+                            unit_id=self.unit_id,
+                            op=instruction_name,
+                            target_unit=self.unit_name,
+                            thread_id=issue_thread,
+                        )
+                    )
             else:
                 raise NotImplementedError(
                     f"{self.unit_name} unit can not handle instruction '{instruction_info['name']}'"

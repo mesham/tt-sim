@@ -18,7 +18,7 @@ from tt_sim.pe.tensix.tdma import TDMA
 from tt_sim.pe.tensix.tensix import (
     TensixCoProcessor,
 )
-from tt_sim.trace import Unit, get_registry
+from tt_sim.trace import Unit, enable_from_env, get_registry
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -128,6 +128,10 @@ class Wormhole(TT_Device):
         if diagnostics is None:
             # All off by default if no diagnostics provided
             diagnostics = DeviceTileDiagnostics()
+        # Opt-in structured tracing: if TT_SIM_TRACE=<path> is set in the
+        # environment, the bus is enabled and a JSONLLogger is registered
+        # before any device-construction events are missed.
+        enable_from_env()
         dram_tiles = [DRAMTile(x, y) for (x, y) in Wormhole.DRAM_CHANNEL_UNIFIED_COORDS]
         tensix_tile = TensixTile(
             18,
@@ -265,10 +269,14 @@ class TensixTile(TTDeviceTile):
     ):
         self.tensix_coprocessor = TensixCoProcessor(coprocessor_diagnostics)
 
-        mb_brisc = Mailbox(BabyRISCVCoreType.BRISC)
-        mb_trisc0 = Mailbox(BabyRISCVCoreType.TRISC0)
-        mb_trisc1 = Mailbox(BabyRISCVCoreType.TRISC1)
-        mb_trisc2 = Mailbox(BabyRISCVCoreType.TRISC2)
+        self._mb_brisc = Mailbox(BabyRISCVCoreType.BRISC)
+        self._mb_trisc0 = Mailbox(BabyRISCVCoreType.TRISC0)
+        self._mb_trisc1 = Mailbox(BabyRISCVCoreType.TRISC1)
+        self._mb_trisc2 = Mailbox(BabyRISCVCoreType.TRISC2)
+        mb_brisc = self._mb_brisc
+        mb_trisc0 = self._mb_trisc0
+        mb_trisc1 = self._mb_trisc1
+        mb_trisc2 = self._mb_trisc2
 
         mb_brisc.setOtherMBs([mb_brisc, mb_trisc0, mb_trisc1, mb_trisc2])
         mb_trisc0.setOtherMBs([mb_brisc, mb_trisc0, mb_trisc1, mb_trisc2])
@@ -503,6 +511,32 @@ class TensixTile(TTDeviceTile):
         self.tensix_coprocessor.getThread(0).unit_id = trisc0_uid.as_tuple()
         self.tensix_coprocessor.getThread(1).unit_id = trisc1_uid.as_tuple()
         self.tensix_coprocessor.getThread(2).unit_id = trisc2_uid.as_tuple()
+
+        # Tensix backend units — each gets the per-tile unit_id matching
+        # its architectural block; the ComputeEvent base-class publish in
+        # TensixBackendUnit.clock_tick picks this up.
+        backend = self.tensix_coprocessor.getBackend()
+        assign(backend.matrix_unit, Unit.MATRIX)
+        assign(backend.vector_unit, Unit.SFPU)
+        assign(backend.packer_unit, Unit.PACKER)
+        for u in backend.unpacker_units:
+            uid = registry.register(chip_id, coord_y, coord_x, Unit.UNPACKER)
+            u.unit_id = uid.as_tuple()
+        assign(backend.mover_unit, Unit.MOVER)
+        assign(backend.scalar_unit, Unit.THCON)
+        assign(backend.sync_unit, Unit.SYNC)
+        assign(backend.misc_unit, Unit.TDMA)
+        assign(backend.config_unit, Unit.CFG)
+
+        # Sync infrastructure (mailboxes, ttsync registers) gets MAILBOX
+        # / TTSYNC unit ids so SyncEvents are attributable to their
+        # architectural origin within the tile.
+        for mb in (self._mb_brisc, self._mb_trisc0, self._mb_trisc1, self._mb_trisc2):
+            uid = registry.register(chip_id, coord_y, coord_x, Unit.MAILBOX)
+            mb.unit_id = uid.as_tuple()
+        for ts in (self.ttsync_0, self.ttsync_1, self.ttsync_2):
+            uid = registry.register(chip_id, coord_y, coord_x, Unit.TTSYNC)
+            ts.unit_id = uid.as_tuple()
 
     def get_clocks(self):
         return self.tensix_coprocessor.getClocks() + [
