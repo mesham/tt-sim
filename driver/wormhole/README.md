@@ -138,6 +138,43 @@ TT_METAL_SIMULATOR=$(pwd)/driver/wormhole \
 
 The server prints a one-line summary at startup (e.g. _[server] diagnostics: BRISC, CO_FPU_, or _none_ when nothing is enabled) so you can confirm the variables were picked up.
 
+### Deadlock detection
+
+Some kernels and bits of firmware can wedge — a NoC read with no matching response, a circular buffer counter that never gets bumped, a Tensix backend instruction that never completes, a mailbox read with nothing on the other end. Because each driver script polls a go-signal mailbox via `wormhole.run(100)` in a tight loop until it sees _RUN_MSG_DONE_, a wedge of this kind shows up as a silent hang of the Python process with no indication of what went wrong.
+
+The simulator runs a per-cycle progress watchdog by default. If nothing observable has changed for a configured number of cycles (default 50000), a multi-line _[DEADLOCK]_ block is printed to stderr describing what it can see. The watchdog does not stop the simulation — it simply warns and keeps running, and re-prints once per window for as long as the stall continues, so a long stall is visible without flooding output. It is dormant while every BabyRISC-V core is in soft reset (the normal state before firmware launch).
+
+The signals that the watchdog tracks each cycle are:
+
+* The program counter of every BabyRISC-V core that is out of reset (frozen, oscillating, or moving through a wider range).
+* The NoC counters on every NUI of the Tensix tile and the DRAM tiles (read requests sent and outstanding, write requests outgoing).
+* The Tensix coprocessor's three frontends and the busy-state of its backend on each thread.
+* The unknown-instruction count on each core (in case it has jumped into data).
+
+When it fires, the report names the responsible component. A frozen-PC stall (most often a `MemoryStall` on a mailbox or `ttsync` wait gate) looks like:
+
+```
+[DEADLOCK cycle=50000] no observable progress for 50000 cycles
+  BRISC: frozen at 0x4b80 (memory stall or `j .`)
+  (TT_SIM_DEADLOCK=0 to disable, TT_SIM_DEADLOCK_THRESHOLD=N to tune window)
+```
+
+A NoC stall where a read request was issued but the response never arrived looks like:
+
+```
+[DEADLOCK cycle=50000] no observable progress for 50000 cycles
+  NCRISC: oscillating in [0x12010, 0x12018] (3 unique PCs) — likely polling
+  NoC tile=(18, 18) nui=0: 1 read(s), 0 write(s) outstanding (1 unresolved)
+  (TT_SIM_DEADLOCK=0 to disable, TT_SIM_DEADLOCK_THRESHOLD=N to tune window)
+```
+
+The two env vars below control the watchdog. Both apply equally to the standalone _python3 one/one.py_-style flow and to the tt-metal server flow, so the same controls work in both places.
+
+| Env var | Effect |
+| --- | --- |
+| _TT_SIM_DEADLOCK_ | Set to a falsy value (_0_, _false_, _no_, _off_) to disable the watchdog entirely. On by default. |
+| _TT_SIM_DEADLOCK_THRESHOLD_ | Integer number of cycles of no observable progress before a warning fires. Defaults to _50000_; raise it if a long-running compute loop trips a false positive, lower it to surface stalls sooner. |
+
 ## Building your own kernels to run
 
 The simulator is not currently integrated with tt-metal, although that could be fairly easy to do in the future, so this is a fairly manual (albeit rather simple) process. Before we explain how to do this, it's useful to understand tt-metal support provided here.

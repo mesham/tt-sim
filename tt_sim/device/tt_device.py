@@ -2,6 +2,7 @@ import itertools
 from abc import ABC
 
 from tt_sim.device.clock import Clock
+from tt_sim.device.deadlock import DeadlockDetector, deadlock_config_from_env
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
 from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
@@ -143,6 +144,16 @@ class Wormhole(TT_Device):
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
         super().__init__(None, dram_tiles, [tensix_tile])
+
+        enabled, threshold = deadlock_config_from_env()
+        self.deadlock_detector = DeadlockDetector(
+            threshold,
+            enabled,
+            tensix_tile,
+            dram_tiles,
+            tensix_tile.tensix_coprocessor,
+        )
+        self.clocks[0].on_tick = self.deadlock_detector.tick
 
 
 class DeviceTileDiagnostics:

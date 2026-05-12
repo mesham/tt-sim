@@ -10,13 +10,16 @@ class Clockable(ABC):
 
 
 class Clock(Resetable):
-    def __init__(self, clockables):
+    def __init__(self, clockables, on_tick=None):
         self.clock_items = clockables
         self.clock_tick_num = 0
+        self.on_tick = on_tick
 
     def clock_tick(self, cycle):
         for item in self.clock_items:
             item.clock_tick(cycle)
+        if self.on_tick is not None:
+            self.on_tick(cycle)
 
     def reset(self):
         self.clock_tick_num = 0
