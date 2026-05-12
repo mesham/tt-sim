@@ -26,6 +26,11 @@ class VectorUnit(TensixBackendUnit):
         "SFPADDI": "handle_addi",
         "SFPMULI": "handle_muli",
         "SFPABS": "handle_sfpabs",
+        "SFPEXEXP": "handle_sfpexexp",
+        "SFPEXMAN": "handle_sfpexman",
+        "SFPSETEXP": "handle_sfpsetexp",
+        "SFPSETMAN": "handle_sfpsetman",
+        "SFPSHFT": "handle_sfpshft",
         "SFPSETSGN": "handle_sfpsetsgn",
         "SFPAND": "handle_sfpand",
         "SFPOR": "handle_sfpor",
@@ -92,6 +97,14 @@ class VectorUnit(TensixBackendUnit):
     SFPMAD_MOD1_INDIRECT_VD = 8
     SFPABS_MOD1_FLOAT = 1
     SFPSETSGN_MOD1_ARG_IMM = 1
+    SFPEXEXP_MOD1_NODEBIAS = 1
+    SFPEXEXP_MOD1_SET_CC_SGN_EXP = 2
+    SFPEXEXP_MOD1_SET_CC_COMP_EXP = 8
+    SFPEXMAN_MOD1_PAD9 = 1
+    SFPSETEXP_MOD1_ARG_IMM = 1
+    SFPSETEXP_MOD1_ARG_EXPONENT = 2
+    SFPSETMAN_MOD1_ARG_IMM = 1
+    SFPSHFT_MOD1_ARG_IMM = 1
 
     ENABLE_FP16A_INF = (0, 1)
     DISABLE_BACKDOOR_LOAD = (1, 1)
@@ -257,6 +270,128 @@ class VectorUnit(TensixBackendUnit):
                         # Value is positive (or zero); leave it as-is
                         pass
                     self.lregs[vd][lane] = conv_to_float(x) if is_float else x
+
+    def handle_sfpexexp(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        bias = 0 if (mod1 & VectorUnit.SFPEXEXP_MOD1_NODEBIAS) else 127
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = exponent(lreg[{vc}]) - {bias}")
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    c = conv_to_uint32(self.lregs[vc][lane])
+                    exp = (c >> 23) & 0xFF
+                    result = exp - bias
+                    self.lregs[vd][lane] = result
+                    if vd < 8:
+                        if mod1 & VectorUnit.SFPEXEXP_MOD1_SET_CC_SGN_EXP:
+                            self.laneFlags[lane] = result < 0
+                        if mod1 & VectorUnit.SFPEXEXP_MOD1_SET_CC_COMP_EXP:
+                            self.laneFlags[lane] = not self.laneFlags[lane]
+
+    def handle_sfpexman(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        hidden_bit = 0 if (mod1 & VectorUnit.SFPEXMAN_MOD1_PAD9) else (1 << 23)
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = mantissa(lreg[{vc}]) + {hex(hidden_bit)}")
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    c = conv_to_uint32(self.lregs[vc][lane])
+                    man = c & 0x7FFFFF
+                    self.lregs[vd][lane] = hidden_bit + man
+
+    def handle_sfpsetexp(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        imm = instr_args["imm12_math"] & 0xFF
+        vb = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = setexp(lreg[{vc}])")
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    c = conv_to_uint32(self.lregs[vc][lane])
+                    sign = c >> 31
+                    man = c & 0x7FFFFF
+                    if mod1 & VectorUnit.SFPSETEXP_MOD1_ARG_IMM:
+                        exp = imm
+                    else:
+                        b = conv_to_uint32(self.lregs[vb][lane])
+                        if mod1 & VectorUnit.SFPSETEXP_MOD1_ARG_EXPONENT:
+                            exp = (b >> 23) & 0xFF
+                        else:
+                            exp = b & 0xFF
+                    self.lregs[vd][lane] = conv_to_float(
+                        (sign << 31) | (exp << 23) | man
+                    )
+
+    def handle_sfpsetman(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        imm12 = instr_args["imm12_math"] & 0xFFF
+        vb = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = setman(lreg[{vc}])")
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    c = conv_to_uint32(self.lregs[vc][lane])
+                    sign = c >> 31
+                    exp = (c >> 23) & 0xFF
+                    if mod1 & VectorUnit.SFPSETMAN_MOD1_ARG_IMM:
+                        man = (imm12 << 11) & 0x7FFFFF
+                    else:
+                        b = conv_to_uint32(self.lregs[vb][lane])
+                        man = b & 0x7FFFFF
+                    self.lregs[vd][lane] = conv_to_float(
+                        (sign << 31) | (exp << 23) | man
+                    )
+
+    def handle_sfpshft(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"] & 1  # spec: high bits reserved, mask to 1
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        imm12 = instr_args["imm12_math"] & 0xFFF
+        if imm12 >= 0x800:
+            imm12 -= 0x1000  # sign-extend 12-bit immediate
+        vb = vd
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(
+                f"SFPU: lreg[{vd}] = lreg[{vb}] shift {imm12 if mod1 else f'lreg[{vc}]'}"
+            )
+
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    if mod1 & VectorUnit.SFPSHFT_MOD1_ARG_IMM:
+                        shift_amount = imm12
+                    else:
+                        u = conv_to_uint32(self.lregs[vc][lane])
+                        shift_amount = u - 0x100000000 if u >= 0x80000000 else u
+                    b = conv_to_uint32(self.lregs[vb][lane])
+                    if shift_amount >= 0:
+                        result = (b << (shift_amount & 31)) & 0xFFFFFFFF
+                    else:
+                        result = b >> ((-shift_amount) & 31)
+                    self.lregs[vd][lane] = result
 
     def handle_addi(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
