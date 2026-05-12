@@ -26,6 +26,7 @@ class VectorUnit(TensixBackendUnit):
         "SFPADDI": "handle_addi",
         "SFPMULI": "handle_muli",
         "SFPABS": "handle_sfpabs",
+        "SFPMOV": "handle_sfpmov",
         "SFPEXEXP": "handle_sfpexexp",
         "SFPEXMAN": "handle_sfpexman",
         "SFPSETEXP": "handle_sfpsetexp",
@@ -96,6 +97,9 @@ class VectorUnit(TensixBackendUnit):
     SFPMAD_MOD1_INDIRECT_VA = 4
     SFPMAD_MOD1_INDIRECT_VD = 8
     SFPABS_MOD1_FLOAT = 1
+    SFPMOV_MOD1_NEGATE = 1
+    SFPMOV_MOD1_ALL_LANES_ENABLED = 2
+    SFPMOV_MOD1_FROM_SPECIAL = 8
     SFPSETSGN_MOD1_ARG_IMM = 1
     SFPEXEXP_MOD1_NODEBIAS = 1
     SFPEXEXP_MOD1_SET_CC_SGN_EXP = 2
@@ -270,6 +274,34 @@ class VectorUnit(TensixBackendUnit):
                         # Value is positive (or zero); leave it as-is
                         pass
                     self.lregs[vd][lane] = conv_to_float(x) if is_float else x
+
+    def handle_sfpmov(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+
+        if mod1 & VectorUnit.SFPMOV_MOD1_FROM_SPECIAL:
+            raise NotImplementedError(
+                "SFPMOV with FROM_SPECIAL (mod1 bit 3) is not yet supported"
+            )
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            src = (
+                f"-lreg[{vc}]"
+                if mod1 & VectorUnit.SFPMOV_MOD1_NEGATE
+                else f"lreg[{vc}]"
+            )
+            print(f"SFPU: lreg[{vd}] = {src}")
+
+        bypass_mask = bool(mod1 & VectorUnit.SFPMOV_MOD1_ALL_LANES_ENABLED)
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if bypass_mask or self.isLaneEnabled(lane):
+                    value = self.lregs[vc][lane]
+                    if mod1 & VectorUnit.SFPMOV_MOD1_NEGATE:
+                        x = conv_to_uint32(value) ^ 0x80000000
+                        value = conv_to_float(x) if isinstance(value, float) else x
+                    self.lregs[vd][lane] = value
 
     def handle_sfpexexp(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
