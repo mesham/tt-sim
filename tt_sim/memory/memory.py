@@ -16,6 +16,7 @@ class MemorySpace(MemMapable, ABC):
         self.memory_map = memory_map
         self.safe = safe
         self.snoop_addresses = [] if snoop_addresses is None else snoop_addresses
+        self.caller_context: tuple[str, int] | None = None
 
     def add_snoop(self, snoop_addr_low, snoop_addr_high):
         self.snoop_addresses.append((snoop_addr_low, snoop_addr_high))
@@ -27,9 +28,17 @@ class MemorySpace(MemMapable, ABC):
                 return addr_range, memory_space
 
         if self.safe:
-            raise IndexError(
-                f"Provided address '{hex(addr)}' does not match any registered memory spaces"
-            )
+            msg = f"Provided address '{hex(addr)}' does not match any registered memory spaces"
+            if self.caller_context is not None:
+                core_id, pc = self.caller_context
+                msg += f" (accessed by {core_id} at PC={hex(pc)})"
+            if addr >= 0xFF000000:
+                msg += (
+                    "\nIf the program uses tt-metal CommandQueue dispatch "
+                    "(e.g. EnqueueProgram), note that CQ dispatch is unsupported "
+                    "in tt-sim — see ROADMAP.md §E."
+                )
+            raise IndexError(msg)
         else:
             return None, None
 

@@ -42,6 +42,7 @@ class BabyRISCV(RV32IM_TT):
             core_id = 3
             start_addr = 0x0E000
         super().__init__(start_addr, memory_spaces, [], snoop=snoop, core_id=core_id)
+        self.core_label = core_type.name
 
     def get_start_address(self):
         """

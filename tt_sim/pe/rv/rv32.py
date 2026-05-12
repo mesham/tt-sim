@@ -97,6 +97,7 @@ class RV32I(ProcessingElement):
         self.unknown_instructions = 0
         self.snoop = snoop
         self.core_id = core_id
+        self.core_label = str(core_id)
 
         # 32 registers plus the PC
         registers = []
@@ -136,6 +137,7 @@ class RV32I(ProcessingElement):
         nextpc = self.register_file["nextpc"]
         pc_val = conv_to_uint32(pc.read())
         nextpc.write(conv_to_bytes(pc_val + 4))
+        self.visible_memory.caller_context = (self.core_label, pc_val)
 
         if self.snoop:
             print(f"[{self.core_id}-> {cycle_num}][{hex(pc_val)}] ", end="")
