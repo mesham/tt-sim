@@ -72,7 +72,17 @@ Issued SFPCONFIG to SFPU from thread 0
 [0-> 1706][0x39f4] lw a5, 0xc(s0)    # a5 = mem[0xffef000c]
 ```
 
-Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V core 0 (BRISC) at cycle number 1690. _[0x478c]_ is the value of the PC (i.e. the address of the instruction being executed), with the instruction itself and some meta data. The _Issued_ messages are from diagnostics reported by the Tensix coprocessor, here for example the firmware is issuing some instructions to the MATH and vector unit to set them up. You can enable other diagnostics via the boolean values, for example _configurations_set_ reports all values set in the Tensix configuration unit. As an aside, it is fine to omit these diagnostic settings (it just assumes they are all off), but they are included in each example explicitly for convenience. 
+Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V core 0 (BRISC) at cycle number 1690. _[0x478c]_ is the value of the PC (i.e. the address of the instruction being executed), with the instruction itself and some meta data. The _Issued_ messages are from diagnostics reported by the Tensix coprocessor, here for example the firmware is issuing some instructions to the MATH and vector unit to set them up. You can enable other diagnostics via the boolean values, for example _configurations_set_ reports all values set in the Tensix configuration unit. As an aside, it is fine to omit these diagnostic settings (it just assumes they are all off), but they are included in each example explicitly for convenience.
+
+### Structured tracing (JSONL)
+
+The diagnostics above are stderr text for human reading. For machine-readable output suitable for downstream tooling, set `TT_SIM_TRACE` to a file path before running an example:
+
+```bash
+TT_SIM_TRACE=/tmp/run.jsonl python3 one/one.py
+```
+
+This produces a streaming JSONL file (one event per line) and a `*.ids.json` sidecar mapping every `unit_id` tuple in the trace. Events cover instruction retirement on the baby cores, Tensix instruction dispatch, NoC request/response, and kernel-lifecycle boundaries. The full schema, the event taxonomy, and how to add your own publish call or writer are documented in [tt_sim/trace/README.md](../../tt_sim/trace/README.md). This is Phase 1 of the broader tracing plan in [ROADMAP §H](../../ROADMAP.md); later phases add Perfetto, Spike-compatible commitlog, Parquet, and LCOV writers as consumers of the same bus.
 
 ### Firmware and kernel launching
 
