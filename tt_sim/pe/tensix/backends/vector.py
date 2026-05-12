@@ -405,7 +405,7 @@ class VectorUnit(TensixBackendUnit):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
                     c = self.lregs[vc][lane]
-                    d = self.BF16ToFP32(imm16) + c
+                    d = conv_to_float(self.BF16toFP32(imm16)) + c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
@@ -426,7 +426,7 @@ class VectorUnit(TensixBackendUnit):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
                     c = self.lregs[vc][lane]
-                    d = self.BF16ToFP32(imm16) * c
+                    d = conv_to_float(self.BF16toFP32(imm16)) * c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
@@ -929,9 +929,9 @@ class VectorUnit(TensixBackendUnit):
             if self.isLaneEnabled(lane):
                 match mod0:
                     case VectorUnit.SFPLOADI_MOD0_FLOATB:
-                        self.lregs[vd][lane] = self.BF16toFP32(imm16)
+                        self.lregs[vd][lane] = conv_to_float(self.BF16toFP32(imm16))
                     case VectorUnit.SFPLOADI_MOD0_FLOATA:
-                        self.lregs[vd][lane] = self.FP16toFP32(imm16)
+                        self.lregs[vd][lane] = conv_to_float(self.FP16toFP32(imm16))
                     case VectorUnit.SFPLOADI_MOD0_USHORT:
                         self.lregs[vd][lane] = imm16
                     case VectorUnit.SFPLOADI_MOD0_SHORT:
