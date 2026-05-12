@@ -570,9 +570,10 @@ class MatrixUnit(TensixBackendUnit):
         if useDst32b:
             # Dst is FP32, regardless of SrcAStyle
             if addDst:
-                result += DataFormatConversions.FP32InDstToFP32(
+                fp32_bits = DataFormatConversions.FP32InDstToFP32(
                     self.backend.getDst().getDst32b(dstRow + i, j)
                 )
+                result += conv_to_float(fp32_bits)
             self.backend.getDst().setDst32b(
                 dstRow + i,
                 j,
@@ -582,7 +583,8 @@ class MatrixUnit(TensixBackendUnit):
             # Dst is FP16, just like SrcAStyle
             if addDst:
                 val = self.backend.getDst().getDst16b(dstRow + i, j)
-                result += DataFormatConversions.FP16InDstToFP16(val)
+                fp16_bits = DataFormatConversions.FP16InDstToFP16(val)
+                result += conv_to_float(DataFormatConversions.FP16ToFP32(fp16_bits))
             self.backend.getDst().setDst16b(
                 dstRow + i,
                 j,
@@ -591,9 +593,10 @@ class MatrixUnit(TensixBackendUnit):
         else:
             # Dst is BF16 (SrcAStyle is either BF16 or TF32)
             if addDst:
-                result += DataFormatConversions.BF16InDstToBF16(
+                bf16_bits = DataFormatConversions.BF16InDstToBF16(
                     self.backend.getDst().getDst16b(dstRow + i, j)
                 )
+                result += conv_to_float(bf16_bits << 16)
             self.backend.getDst().setDst16b(
                 dstRow + i,
                 j,
