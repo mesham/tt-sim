@@ -40,6 +40,48 @@ class NoCOverlay(MemMapable):
         return 0x3FFFF
 
 
+class NullEndpoint:
+    """Stand-in for an unregistered NoC destination.
+
+    Real Wormhole NoC routers forward to whichever tile sits at the target
+    coord. If a kernel addresses a coord whose tile we haven't modelled (e.g.
+    an Ethernet core, or the hardcoded ``(1, 0)`` in tt-metal's
+    ``hello_world_datatypes_kernel`` example), this endpoint completes the
+    transaction the way the requester expects — reads come back zero-filled,
+    marked writes get acknowledged, posted writes are silently dropped — so
+    the simulated NoC doesn't deadlock the calling kernel.
+    """
+
+    def __init__(self, coord, noc_directory):
+        self.coord = coord
+        self.noc_directory = noc_directory
+
+    def transmit(self, request):
+        # The requester is always a real NUI registered at device init time,
+        # so noc_directory[request.source] is guaranteed to resolve.
+        source = self.noc_directory[request.source]
+        if request.action == NUI.NoCDataRequest.DataRequestAction.READ:
+            response = NUI.NoCDataRequest(
+                None,
+                NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ,
+                request.data_length_bytes,
+                self.coord,
+                request.request_id,
+                bytes(request.data_length_bytes),
+            )
+            source.transmit(response)
+        elif request.action == NUI.NoCDataRequest.DataRequestAction.WRITE:
+            if request.noc_cmd_resp_marked:
+                response = NUI.NoCDataRequest(
+                    None,
+                    NUI.NoCDataRequest.DataRequestAction.ACK,
+                    request.data_length_bytes,
+                    self.coord,
+                    request.request_id,
+                )
+                source.transmit(response)
+
+
 class NUI(MemMapable, Clockable):
     class NoCDataRequest:
         class DataRequestAction(IntEnum):
@@ -96,10 +138,7 @@ class NUI(MemMapable, Clockable):
 
             target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
             target_tile_y = extract_bits(self.target_addr_mid, 6, 10)
-            if (target_tile_x, target_tile_y) not in self.nui.noc_directory:
-                raise ValueError(
-                    f"{target_tile_x},{target_tile_y} NUI index not in NOC directory when reading via NoC {self.nui.noc_number}"
-                )
+            destination = self.nui.resolve_destination((target_tile_x, target_tile_y))
 
             read_req = NUI.NoCDataRequest(
                 self.target_addr_low,
@@ -112,7 +151,7 @@ class NUI(MemMapable, Clockable):
                 noc_packet_transaction_id, self.ret_addr_low
             )
 
-            self.nui.noc_directory[(target_tile_x, target_tile_y)].transmit(read_req)
+            destination.transmit(read_req)
             self.nui.nui_counters.increment(
                 NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_SENT
             )
@@ -158,10 +197,7 @@ class NUI(MemMapable, Clockable):
             # Send write request
             ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
             ret_tile_y = extract_bits(self.ret_addr_mid, 6, 10)
-            if (ret_tile_x, ret_tile_y) not in self.nui.noc_directory:
-                raise ValueError(
-                    f"{ret_tile_x},{ret_tile_y} NUI index not in NOC directory when writing via NoC {self.nui.noc_number}"
-                )
+            destination = self.nui.resolve_destination((ret_tile_x, ret_tile_y))
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
 
@@ -177,7 +213,7 @@ class NUI(MemMapable, Clockable):
             self.nui.add_outstanding_noc_request(
                 noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
             )
-            self.nui.noc_directory[(ret_tile_x, ret_tile_y)].transmit(write_req)
+            destination.transmit(write_req)
 
             if self.nui.snoop:
                 print(
@@ -219,10 +255,7 @@ class NUI(MemMapable, Clockable):
             # Send write request
             ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
             ret_tile_y = extract_bits(self.ret_addr_mid, 6, 10)
-            if (ret_tile_x, ret_tile_y) not in self.nui.noc_directory:
-                raise ValueError(
-                    f"{ret_tile_x},{ret_tile_y} NUI index not in NOC directory when writing on NoC {self.nui.noc_number}"
-                )
+            destination = self.nui.resolve_destination((ret_tile_x, ret_tile_y))
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
 
@@ -238,7 +271,7 @@ class NUI(MemMapable, Clockable):
             self.nui.add_outstanding_noc_request(
                 noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
             )
-            self.nui.noc_directory[(ret_tile_x, ret_tile_y)].transmit(write_req)
+            destination.transmit(write_req)
 
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
@@ -566,6 +599,17 @@ class NUI(MemMapable, Clockable):
 
     def set_noc_directory(self, noc_directory):
         self.noc_directory = noc_directory
+
+    def resolve_destination(self, coord):
+        dest = self.noc_directory.get(coord)
+        if dest is None:
+            dest = NullEndpoint(coord, self.noc_directory)
+            self.noc_directory[coord] = dest
+            if self.snoop:
+                print(
+                    f"[NoC {self.id_pair}]: null-route installed for unknown destination {coord}"
+                )
+        return dest
 
     def generate_NIU_and_NoC_config(self):
         # https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/NoC/MemoryMap.md#niu-and-noc-router-configuration
