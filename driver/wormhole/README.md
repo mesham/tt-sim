@@ -74,15 +74,18 @@ Issued SFPCONFIG to SFPU from thread 0
 
 Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V core 0 (BRISC) at cycle number 1690. _[0x478c]_ is the value of the PC (i.e. the address of the instruction being executed), with the instruction itself and some meta data. The _Issued_ messages are from diagnostics reported by the Tensix coprocessor, here for example the firmware is issuing some instructions to the MATH and vector unit to set them up. You can enable other diagnostics via the boolean values, for example _configurations_set_ reports all values set in the Tensix configuration unit. As an aside, it is fine to omit these diagnostic settings (it just assumes they are all off), but they are included in each example explicitly for convenience.
 
-### Structured tracing (JSONL)
+### Structured tracing (JSONL and Perfetto)
 
-The diagnostics above are stderr text for human reading. For machine-readable output suitable for downstream tooling, set `TT_SIM_TRACE` to a file path before running an example:
+The diagnostics above are stderr text for human reading. For machine-readable output suitable for downstream tooling, set one or both env vars:
 
 ```bash
-TT_SIM_TRACE=/tmp/run.jsonl python3 one/one.py
+TT_SIM_TRACE=/tmp/run.jsonl python3 one/one.py            # JSONL — every event, one per line
+TT_SIM_TRACE_PERFETTO=/tmp/run.json.gz python3 one/one.py  # Chrome Trace Event Format for ui.perfetto.dev
 ```
 
-This produces a streaming JSONL file (one event per line) and a `*.ids.json` sidecar mapping every `unit_id` tuple in the trace. Events cover instruction retirement on the baby cores, Tensix instruction dispatch, NoC request/response, and kernel-lifecycle boundaries. The full schema, the event taxonomy, and how to add your own publish call or writer are documented in [tt_sim/trace/README.md](../../tt_sim/trace/README.md). This is Phase 1 of the broader tracing plan in [ROADMAP §H](../../ROADMAP.md); later phases add Perfetto, Spike-compatible commitlog, Parquet, and LCOV writers as consumers of the same bus.
+The JSONL form streams every event (instruction retirement, Tensix dispatch, NoC request/response, mem accesses, sync points, kernel lifecycle) into a file plus a `*.ids.json` sidecar mapping `unit_id` tuples back to `(chip_id, core_y, core_x, unit)`. The Perfetto form writes a zoomable timeline file you can drag onto [ui.perfetto.dev](https://ui.perfetto.dev) — NoC transactions render as arrows between source and destination NUIs (flow events), and lifecycle events appear as global markers. Both writers can be enabled simultaneously and subscribe independently.
+
+Full schema, design principles, and canned Perfetto SQL queries live in [tt_sim/trace/README.md](../../tt_sim/trace/README.md). Phases 1–2 of the broader tracing plan in [ROADMAP §H](../../ROADMAP.md) are now complete; later phases add Spike-compatible commitlog, Parquet, Cachegrind, and LCOV writers as additional consumers of the same bus.
 
 ### Firmware and kernel launching
 

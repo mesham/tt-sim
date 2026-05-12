@@ -234,6 +234,12 @@ class DRAMTile(TTDeviceTile):
         r0 = NUI(0, coord_x, coord_y, self.dram_memory)
         r1 = NUI(1, coord_x, coord_y, self.dram_memory)
 
+        # Register DRAM-tile NoC routers so their NoCEvents (request-phase
+        # arrivals at the destination tile) appear in the trace.
+        registry = get_registry()
+        r0.unit_id = registry.register(0, coord_y, coord_x, Unit.NOC0).as_tuple()
+        r1.unit_id = registry.register(0, coord_y, coord_x, Unit.NOC1).as_tuple()
+
         super().__init__(coord_x, coord_y, r0, r1)
 
     def get_clocks(self):

@@ -3,28 +3,35 @@
 A typed pub/sub event bus. The simulator publishes architectural events
 (instruction retirement, Tensix dispatch, NoC traffic, kernel lifecycle);
 external consumers subscribe and turn the stream into whatever they
-need — JSONL today, Perfetto / Spike commitlog / Parquet / LCOV in later
-phases. tt-sim does not build viewers.
+need. Today: JSONL for ad-hoc analysis and Perfetto / Chrome Trace
+Event Format for visual timelines on `ui.perfetto.dev`. Later phases
+add Spike commitlog, Parquet counters, Cachegrind, and LCOV writers
+as additional consumers of the same bus. tt-sim does not build viewers.
 
-This is Phase 1 of the broader tracing plan in [ROADMAP §H](../../ROADMAP.md);
-read that for the full picture (Perfetto, DuckDB, source-level
-attribution, differential testing).
+Phase 1 (event bus + taxonomy) and Phase 2 (Perfetto writer) of
+[ROADMAP §H](../../ROADMAP.md) are complete; read that for the full
+plan.
 
 ## Quick start
 
 ```bash
 export PYTHONPATH=~/tt-sim:$PYTHONPATH
 cd driver/wormhole
-TT_SIM_TRACE=/tmp/one.trace.jsonl python3 one/one.py
+TT_SIM_TRACE=/tmp/one.jsonl python3 one/one.py            # JSONL for ad-hoc
+TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz python3 one/one.py  # visual timeline
+# Or both at once — they subscribe independently:
+TT_SIM_TRACE=/tmp/one.jsonl TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz \
+    python3 one/one.py
 ```
 
-Produces two files:
+### JSONL output
 
-- `/tmp/one.trace.jsonl` — one JSON object per line, every event the
-  simulator published during the run.
-- `/tmp/one.trace.jsonl.ids.json` — sidecar mapping every `unit_id`
-  tuple in the trace to its `(chip_id, core_y, core_x, unit)`
-  decomposition. Same scheme will be reused by all later writers.
+`TT_SIM_TRACE=<path>` produces two files:
+
+- `<path>` — one JSON object per line, every event the simulator
+  published.
+- `<path>.ids.json` — sidecar mapping every `unit_id` tuple in the
+  trace to its `(chip_id, core_y, core_x, unit)` decomposition.
 
 Inspect with `jq` / `duckdb` / `pandas`. Example: count events per
 category:
@@ -33,13 +40,45 @@ category:
 python3 -c "
 import json
 from collections import Counter
-print(Counter(json.loads(l)['category'] for l in open('/tmp/one.trace.jsonl')))
+print(Counter(json.loads(l)['category'] for l in open('/tmp/one.jsonl')))
 "
 ```
 
 A `four/four.py` run reports roughly
 `{mem: 65k, instr: 13.5k, dispatch: 864, compute: 309, noc: 12,
 lifecycle: 4, sync: 4}` — all seven categories populated.
+
+### Perfetto / Chrome trace output
+
+`TT_SIM_TRACE_PERFETTO=<path>` writes Chrome Trace Event Format JSON.
+A `.gz` extension enables gzip compression (Perfetto loads it
+natively; traces compress 10-20×).
+
+1. Visit <https://ui.perfetto.dev>.
+2. Drag-and-drop your `*.json.gz` file onto the page.
+3. The timeline renders one row per Tensix tile, with per-unit lanes
+   (BRISC / NCRISC / TRISCn / MATRIX / SFPU / NOC0 / NOC1 / etc.).
+   NoC transactions render as **arrows** from the requesting NUI to
+   the responding NUI (flow events). Lifecycle events (firmware /
+   kernel start / done) render as global instant markers.
+
+Canned SQL queries that run in Perfetto's **Query (SQL)** tab live in
+[`queries/README.md`](queries/README.md) — top slices by duration,
+per-unit event counts, and NoC roundtrip latency. The schema is
+documented at <https://perfetto.dev/docs/analysis/sql-tables>.
+
+**Cycle-as-time mapping:** events are stamped with `ts = cycle` and
+`dur = 1`. The simulator isn't cycle-accurate today, so durations are
+synthetic placeholders — useful for spatial reasoning ("what happened
+on the SFPU around cycle 3000?") but not for absolute timing. Once §I
+cycle accuracy lands, durations become meaningful and the writer
+needs no schema change. Events with `cycle == 0` (mem / sync /
+lifecycle) are stamped with the highest cycle seen so far, so they
+appear at the "current time" rather than collapsing onto t=0.
+
+**`mem` events are skipped** from the Perfetto stream — their volume
+(~50k+ per kernel) would swamp the UI without adding slice-level
+signal. They remain in the JSONL output.
 
 ## Programmatic use
 

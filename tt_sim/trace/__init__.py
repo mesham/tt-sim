@@ -14,6 +14,7 @@ from tt_sim.trace.events import (
 )
 from tt_sim.trace.ids import IDRegistry, UnitID, get_registry
 from tt_sim.trace.writers.jsonl import JSONLLogger
+from tt_sim.trace.writers.perfetto import PerfettoWriter
 
 __all__ = [
     "ComputeEvent",
@@ -27,6 +28,7 @@ __all__ = [
     "LifecycleEvent",
     "MemEvent",
     "NoCEvent",
+    "PerfettoWriter",
     "SyncEvent",
     "Unit",
     "UnitID",
