@@ -269,7 +269,8 @@ class RWC:
         if self.backend.getThreadConfigValue(thread_id, Bias_key + "_BiasClear"):
             self.ExtraAddrModBit = 0
         elif self.backend.getThreadConfigValue(thread_id, Bias_key + "_BiasIncr") & 3:
-            self.ExtraAddrModBit += 1
+            # Per ISA RWCs.md, ExtraAddrModBit is uint1_t — it wraps modulo 2.
+            self.ExtraAddrModBit = (self.ExtraAddrModBit + 1) & 1
 
     def applyPartialAddrMod(self, thread_id, addrMod):
         self.applyAddrMod(thread_id, addrMod, False)
