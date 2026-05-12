@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-import os, sys, flatbuffers, pynng
+import os
+import sys
+
+import flatbuffers
+import pynng
 
 sys.path.insert(0, "/tmp/fb_py")
 import DeviceRequestResponse as DRR

@@ -4,6 +4,7 @@ from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
+from tt_sim.trace import DispatchEvent, EventCategory, get_bus
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
@@ -27,6 +28,7 @@ class TensixFrontend(MemMapable):
         self.replay_expander = TensixReplayExpander(self)
         self.wait_gate = WaitGate(self, backend)
         self.diags_settings = diags_settings
+        self.unit_id: tuple | None = None
 
     def getClocks(self):
         return [self.mop_expander, self.replay_expander, self.wait_gate]
@@ -351,6 +353,19 @@ class WaitGate(TensixFrontendUnit):
                             print(
                                 f"Wait gate: issued {instruction_info['name']} to {instruction_info['ex_resource']} "
                                 f"from thread {self.frontend.thread_id}"
+                            )
+                        bus = get_bus()
+                        if self.frontend.unit_id is not None and bus.is_enabled(
+                            EventCategory.DISPATCH
+                        ):
+                            bus.publish(
+                                DispatchEvent(
+                                    cycle=cycle_num,
+                                    unit_id=self.frontend.unit_id,
+                                    opcode=instruction_info["name"],
+                                    target_unit=instruction_info["ex_resource"],
+                                    thread_id=self.frontend.thread_id,
+                                )
                             )
                         self.frontend.pop_wait_gate_instruction()
 

@@ -1,7 +1,10 @@
+import os
+
 from driver.wormhole.tt_metal import TT_Metal
 from driver.wormhole.wormhole_driver import launch_firmware, run_kernel
 from tt_sim.device.tt_device import DeviceTileDiagnostics, Wormhole
 from tt_sim.pe.tensix.util import TensixCoprocessorDiagnostics
+from tt_sim.trace import JSONLLogger, get_bus, get_registry
 from tt_sim.util.conversion import (
     conv_to_bytes,
     conv_to_int32,
@@ -34,6 +37,15 @@ tile_diags = DeviceTileDiagnostics(
 
 
 wormhole = Wormhole(tile_diags)
+
+# Optional structured tracing — set TT_SIM_TRACE=path/to/trace.jsonl to enable.
+trace_path = os.environ.get("TT_SIM_TRACE")
+trace_logger = None
+if trace_path:
+    bus = get_bus()
+    bus.enabled = True
+    trace_logger = JSONLLogger(trace_path)
+
 tt_metal = TT_Metal("tt_metal_0.62.2.json")
 launch_firmware(wormhole, tt_metal)
 
@@ -49,5 +61,9 @@ run_kernel(wormhole, tt_metal, "one/parameters.json")
 for i in range(100):
     val = conv_to_int32(wormhole.read((16, 16), 0x360 + (i * 4), 4))
     assert val == list1[i] + list2[i]
+
+if trace_logger is not None:
+    trace_logger.close()
+    get_registry().dump(trace_path + ".ids.json")
 
 print("Example one completed successfully")

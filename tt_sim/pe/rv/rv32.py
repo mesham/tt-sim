@@ -5,6 +5,7 @@ from tt_sim.pe.register.register_file import RegisterFile
 from tt_sim.pe.rv.isa.i_isa import RV_I_ISA
 from tt_sim.pe.rv.isa.m_isa import RV_M_ISA
 from tt_sim.pe.rv.isa.tt_isa import RV_TT_ISA
+from tt_sim.trace import EventCategory, InstrEvent, get_bus
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 REGISTER_NAME_MAPPING = {
@@ -98,6 +99,7 @@ class RV32I(ProcessingElement):
         self.snoop = snoop
         self.core_id = core_id
         self.core_label = str(core_id)
+        self.unit_id: tuple | None = None
 
         # 32 registers plus the PC
         registers = []
@@ -165,6 +167,19 @@ class RV32I(ProcessingElement):
             if pe_stall:
                 print("[Stalled]")
             print("")
+
+        bus = get_bus()
+        if self.unit_id is not None and bus.is_enabled(EventCategory.INSTR):
+            instr_raw = self.visible_memory.read(pc_val, 4)
+            bus.publish(
+                InstrEvent(
+                    cycle=cycle_num,
+                    unit_id=self.unit_id,
+                    pc=pc_val,
+                    instruction=conv_to_uint32(instr_raw),
+                    stalled=pe_stall,
+                )
+            )
 
         if not pe_stall:
             pc.write(nextpc.read())

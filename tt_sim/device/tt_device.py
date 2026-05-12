@@ -18,6 +18,7 @@ from tt_sim.pe.tensix.tdma import TDMA
 from tt_sim.pe.tensix.tensix import (
     TensixCoProcessor,
 )
+from tt_sim.trace import Unit, get_registry
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -476,7 +477,32 @@ class TensixTile(TTDeviceTile):
         # Set addressable memory for Tensix co-processor
         self.tensix_coprocessor.setAddressableMemory([self.tensix_mem, self.ncrisc_mem])
 
+        self._register_trace_ids(coord_x, coord_y, noc0_router, noc1_router)
+
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
+
+    def _register_trace_ids(self, coord_x, coord_y, noc0_router, noc1_router):
+        registry = get_registry()
+        chip_id = 0
+
+        def assign(component, unit):
+            uid = registry.register(chip_id, coord_y, coord_x, unit)
+            component.unit_id = uid.as_tuple()
+            return uid
+
+        assign(self.brisc, Unit.BRISC)
+        assign(self.ncrisc, Unit.NCRISC)
+        trisc0_uid = assign(self.trisc0, Unit.TRISC0)
+        trisc1_uid = assign(self.trisc1, Unit.TRISC1)
+        trisc2_uid = assign(self.trisc2, Unit.TRISC2)
+        assign(noc0_router, Unit.NOC0)
+        assign(noc1_router, Unit.NOC1)
+
+        # TensixCoprocessor threads issue from TRISC0/1/2 — wire so the
+        # dispatch event's unit_id reflects the issuing TRISC.
+        self.tensix_coprocessor.getThread(0).unit_id = trisc0_uid.as_tuple()
+        self.tensix_coprocessor.getThread(1).unit_id = trisc1_uid.as_tuple()
+        self.tensix_coprocessor.getThread(2).unit_id = trisc2_uid.as_tuple()
 
     def get_clocks(self):
         return self.tensix_coprocessor.getClocks() + [

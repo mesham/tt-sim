@@ -1,12 +1,33 @@
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
+from tt_sim.trace import EventCategory, LifecycleEvent, Unit, get_bus, get_registry
 from tt_sim.util.conversion import (
     conv_to_bytes,
     conv_to_uint32,
 )
 
+_HOST_UNIT_ID = (0, 0, 0, Unit.HOST.value)
+
+
+def _emit_lifecycle(kind, detail=""):
+    bus = get_bus()
+    if not bus.is_enabled(EventCategory.LIFECYCLE):
+        return
+    # Register the host pseudo-unit lazily on first emit.
+    registry = get_registry()
+    registry.register(0, 0, 0, Unit.HOST)
+    bus.publish(
+        LifecycleEvent(
+            cycle=0,
+            unit_id=_HOST_UNIT_ID,
+            kind=kind,
+            detail=detail,
+        )
+    )
+
 
 def launch_firmware(wormhole, tt_metal):
     print("--> Launching and running firmware")
+    _emit_lifecycle("firmware_launch_start")
     go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
         "go_message", "signal"
     )
@@ -57,10 +78,12 @@ def launch_firmware(wormhole, tt_metal):
         wormhole.run(100)
 
     print("  --> Done, device is ready")
+    _emit_lifecycle("firmware_launch_done")
 
 
 def run_kernel(wormhole, tt_metal, parameters):
     print("--> Launching and running kernel")
+    _emit_lifecycle("kernel_start", detail=str(parameters))
     go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
         "go_message", "signal"
     )
@@ -89,3 +112,4 @@ def run_kernel(wormhole, tt_metal, parameters):
         wormhole.run(100)
 
     print("  --> Done")
+    _emit_lifecycle("kernel_done")

@@ -2,6 +2,7 @@ from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.trace import EventCategory, NoCEvent, get_bus
 from tt_sim.util.bits import clear_bit, extract_bits, replace_bits
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -452,6 +453,7 @@ class NUI(MemMapable, Clockable):
         self.noc_requests_to_handle = []
         self.noc_new_requests_to_handle = []
         self.snoop = snoop
+        self.unit_id: tuple | None = None
 
     def get_id_pair(self):
         # Return the ID in this NoC coordinate system
@@ -470,6 +472,15 @@ class NUI(MemMapable, Clockable):
                         f"{noc_request.source} at {hex(noc_request.tgt_address)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
+                self._publish_noc_event(
+                    cycle_num,
+                    phase="request",
+                    txn_type="read",
+                    src=noc_request.source,
+                    dst=self.id_pair,
+                    size_bytes=noc_request.data_length_bytes,
+                    txn_id=noc_request.request_id,
+                )
                 self.nui_counters.increment(
                     [
                         NUI.NUICounters.CounterNames.NIU_SLV_REQ_ACCEPTED,
@@ -508,6 +519,15 @@ class NUI(MemMapable, Clockable):
                         f"{noc_request.source} to {hex(noc_request.tgt_address)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
+                self._publish_noc_event(
+                    cycle_num,
+                    phase="request",
+                    txn_type="write",
+                    src=noc_request.source,
+                    dst=self.id_pair,
+                    size_bytes=noc_request.data_length_bytes,
+                    txn_id=noc_request.request_id,
+                )
                 if noc_request.noc_cmd_resp_marked:
                     self.nui_counters.increment(
                         [
@@ -551,6 +571,15 @@ class NUI(MemMapable, Clockable):
                         f"{noc_request.source}, stored in to {hex(tgt_addr)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
+                self._publish_noc_event(
+                    cycle_num,
+                    phase="response",
+                    txn_type="read",
+                    src=noc_request.source,
+                    dst=self.id_pair,
+                    size_bytes=noc_request.data_length_bytes,
+                    txn_id=noc_request.request_id,
+                )
 
                 self.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_RD_RESP_RECEIVED
@@ -572,6 +601,15 @@ class NUI(MemMapable, Clockable):
                         f"[NoC {self.id_pair}]: Write acknowledge to response id "
                         f"{noc_request.request_id} from NUI {noc_request.source}"
                     )
+                self._publish_noc_event(
+                    cycle_num,
+                    phase="response",
+                    txn_type="write",
+                    src=noc_request.source,
+                    dst=self.id_pair,
+                    size_bytes=noc_request.data_length_bytes,
+                    txn_id=noc_request.request_id,
+                )
 
                 self.nui_counters.decrement(
                     NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
@@ -593,6 +631,27 @@ class NUI(MemMapable, Clockable):
         # Now copy over the new requests to the requests to handle
         self.noc_requests_to_handle = self.noc_new_requests_to_handle
         self.noc_new_requests_to_handle = []
+
+    def _publish_noc_event(
+        self, cycle_num, phase, txn_type, src, dst, size_bytes, txn_id
+    ):
+        if self.unit_id is None:
+            return
+        bus = get_bus()
+        if not bus.is_enabled(EventCategory.NOC):
+            return
+        bus.publish(
+            NoCEvent(
+                cycle=cycle_num,
+                unit_id=self.unit_id,
+                phase=phase,
+                txn_type=txn_type,
+                src=tuple(src) if not isinstance(src, tuple) else src,
+                dst=tuple(dst) if not isinstance(dst, tuple) else dst,
+                size_bytes=int(size_bytes),
+                txn_id=int(txn_id),
+            )
+        )
 
     def transmit(self, data_request):
         self.noc_new_requests_to_handle.append(data_request)
