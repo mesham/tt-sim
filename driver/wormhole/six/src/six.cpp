@@ -77,9 +77,9 @@ int main(int argc, char** argv) {
     constexpr CoreCoord core = {0, 0};
 
     // Matrix dimensions (must each be divisible by the tile size)
-    constexpr uint32_t M = 640;
-    constexpr uint32_t N = 640;
-    constexpr uint32_t K = 640;
+    constexpr uint32_t M = 128;
+    constexpr uint32_t N = 128;
+    constexpr uint32_t K = 128;
 
     static_assert(M % TILE_HEIGHT == 0, "M must be divisible by TILE_HEIGHT");
     static_assert(N % TILE_WIDTH == 0, "N must be divisible by TILE_WIDTH");
