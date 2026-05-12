@@ -293,7 +293,7 @@ class TensixGPR(MemMapable):
             return 0xFFF
 
     def __init__(self):
-        self.registers = [[0] * 64] * 3
+        self.registers = [[0] * 64 for _ in range(3)]
         self.GPRPerTRISC = [TensixGPR.TensixGPRPerTRISCInMem(i, self) for i in range(3)]
 
     def getGPRPerTRISC(self, trisc_id):
