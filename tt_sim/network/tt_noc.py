@@ -94,6 +94,33 @@ class NullEndpoint:
                 source.transmit(response)
 
 
+# Maximum NoC packet payload per Wormhole's
+# ``tt_metal/hw/inc/wormhole/noc/noc_parameters.h``
+# (``NOC_MAX_BURST_WORDS * NOC_WORD_BYTES = 256 * 32``). Reads or writes
+# larger than this need the NIU to split the request into multiple flits;
+# each lands on its own slice of L1 and produces its own response.
+# tt-metal's ``ncrisc_noc_fast_read_any_len`` / ``_fast_write_any_len``
+# chunk on the kernel side, so in practice the NIU only sees ``<=`` this
+# size from real kernels — but modelling the split at the NIU level
+# preserves the semantics for any caller that does write a single larger
+# request directly to the NIU registers.
+NOC_MAX_BURST_SIZE = 8192
+
+
+def _split_burst(total_size: int) -> list[tuple[int, int]]:
+    """Return ``[(offset, size), ...]`` chunks covering ``total_size`` bytes,
+    each at most :data:`NOC_MAX_BURST_SIZE` bytes."""
+    if total_size <= NOC_MAX_BURST_SIZE:
+        return [(0, total_size)]
+    chunks = []
+    offset = 0
+    while offset < total_size:
+        chunk = min(NOC_MAX_BURST_SIZE, total_size - offset)
+        chunks.append((offset, chunk))
+        offset += chunk
+    return chunks
+
+
 class NUI(MemMapable, Clockable):
     class NoCDataRequest:
         class DataRequestAction(IntEnum):
@@ -141,44 +168,58 @@ class NUI(MemMapable, Clockable):
 
         def handle_read_transfer(self):
             noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
+            total_size = self.at_len_be
+            # Split into NOC_MAX_BURST_SIZE chunks; each becomes its own
+            # read request + response, sharing the trid. The per-trid
+            # FIFO carries the L1 destination offset per chunk so each
+            # response writes into the right slice. OUTSTANDING bumps by
+            # the chunk count so ``noc_async_read_barrier`` waits for all
+            # responses.
+            chunks = _split_burst(total_size)
+            num_chunks = len(chunks)
 
             self.nui.nui_counters.increment(
                 [
-                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
-                    + noc_packet_transaction_id,
                     NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED,
                     NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_STARTED,
                 ]
             )
-
-            # TODO: handle request splitting when message > 8192
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                + noc_packet_transaction_id,
+                num_chunks,
+            )
             self.cmd_ctrl = 0
 
             target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
             target_tile_y = extract_bits(self.target_addr_mid, 6, 10)
             destination = self.nui.resolve_destination((target_tile_x, target_tile_y))
 
-            read_req = NUI.NoCDataRequest(
-                self.target_addr_low,
-                NUI.NoCDataRequest.DataRequestAction.READ,
-                self.at_len_be,
-                self.nui.id_pair,
-                noc_packet_transaction_id,
-            )
-            self.nui.add_outstanding_noc_request(
-                noc_packet_transaction_id, self.ret_addr_low
-            )
+            for chunk_offset, chunk_size in chunks:
+                read_req = NUI.NoCDataRequest(
+                    self.target_addr_low + chunk_offset,
+                    NUI.NoCDataRequest.DataRequestAction.READ,
+                    chunk_size,
+                    self.nui.id_pair,
+                    noc_packet_transaction_id,
+                )
+                self.nui.add_outstanding_noc_request(
+                    noc_packet_transaction_id, self.ret_addr_low + chunk_offset
+                )
+                destination.transmit(read_req)
 
-            destination.transmit(read_req)
             self.nui.nui_counters.increment(
-                NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_SENT
+                NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_SENT, num_chunks
             )
 
             if self.nui.snoop:
                 print(
-                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue read request id {read_req.request_id} to NUI "
-                    f"{(target_tile_x, target_tile_y)}, reading at {hex(read_req.tgt_address)} of size "
-                    f"{hex(read_req.data_length_bytes)} and store in {hex(self.ret_addr_low)}"
+                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue read request id "
+                    f"{noc_packet_transaction_id} to NUI "
+                    f"{(target_tile_x, target_tile_y)}, reading at "
+                    f"{hex(self.target_addr_low)} of total size "
+                    f"{hex(total_size)} ({num_chunks} chunk(s)) and store in "
+                    f"{hex(self.ret_addr_low)}"
                 )
 
         def handle_inline_write_transfer(
@@ -244,12 +285,22 @@ class NUI(MemMapable, Clockable):
             self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
         ):
             noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
+            total_size = self.at_len_be
+            chunks = _split_burst(total_size)
+            num_chunks = len(chunks)
 
             if noc_cmd_resp_marked:
+                # One outstanding entry per chunk — ``noc_async_write_barrier``
+                # polls OUTSTANDING and waits for 0, so it must match the
+                # ACK count exactly. (The pre-split code multiplied by
+                # noc_cmd_wr_be here, but that's the byte-enable bit and
+                # is 0 in tt-metal's noc_async_write — a latent bug that
+                # was masked because tt-sim resolves responses within the
+                # same cycle pump as the request.)
                 self.nui.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
                     + noc_packet_transaction_id,
-                    noc_cmd_wr_be,
+                    num_chunks,
                 )
 
             self.nui.nui_counters.increment(
@@ -270,42 +321,49 @@ class NUI(MemMapable, Clockable):
                 )
             self.cmd_ctrl = 0
 
-            # Send write request
+            # Send N write requests, one per chunk. Each carries its slice
+            # of the source data + writes into a contiguous slice of the
+            # destination. The per-trid FIFO gains N entries so each ACK
+            # decrements OUTSTANDING by one.
             ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
             ret_tile_y = extract_bits(self.ret_addr_mid, 6, 10)
             destination = self.nui.resolve_destination((ret_tile_x, ret_tile_y))
 
-            data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
-
-            write_req = NUI.NoCDataRequest(
-                self.ret_addr_low,
-                NUI.NoCDataRequest.DataRequestAction.WRITE,
-                self.at_len_be,
-                self.nui.id_pair,
-                noc_packet_transaction_id,
-                data,
-                noc_cmd_resp_marked,
-            )
-            self.nui.add_outstanding_noc_request(
-                noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
-            )
-            destination.transmit(write_req)
+            for chunk_offset, chunk_size in chunks:
+                data = self.nui.attached_memory.read(
+                    self.target_addr_low + chunk_offset, chunk_size
+                )
+                write_req = NUI.NoCDataRequest(
+                    self.ret_addr_low + chunk_offset,
+                    NUI.NoCDataRequest.DataRequestAction.WRITE,
+                    chunk_size,
+                    self.nui.id_pair,
+                    noc_packet_transaction_id,
+                    data,
+                    noc_cmd_resp_marked,
+                )
+                self.nui.add_outstanding_noc_request(
+                    noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
+                )
+                destination.transmit(write_req)
 
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_SENT
+                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_SENT,
+                    num_chunks,
                 )
                 self.nui.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_DATA_WORD_SENT,
-                    self.at_len_be / 4,
+                    total_size / 4,
                 )
             else:
                 self.nui.nui_counters.increment(
-                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_SENT
+                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_SENT,
+                    num_chunks,
                 )
                 self.nui.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_DATA_WORD_SENT,
-                    self.at_len_be / 4,
+                    total_size / 4,
                 )
             self.nui.nui_counters.decrement(
                 NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
@@ -313,9 +371,12 @@ class NUI(MemMapable, Clockable):
 
             if self.nui.snoop:
                 print(
-                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
-                    f"{(ret_tile_x, ret_tile_y)}, writing from {hex(self.target_addr_low)} to "
-                    f"{hex(write_req.tgt_address)} of size {hex(write_req.data_length_bytes)}"
+                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue write request id "
+                    f"{noc_packet_transaction_id} to NUI "
+                    f"{(ret_tile_x, ret_tile_y)}, writing from "
+                    f"{hex(self.target_addr_low)} to "
+                    f"{hex(self.ret_addr_low)} of total size "
+                    f"{hex(total_size)} ({num_chunks} chunk(s))"
                 )
 
         def handle_write_transfer(self):
