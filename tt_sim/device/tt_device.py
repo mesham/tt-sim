@@ -1,4 +1,3 @@
-import itertools
 from abc import ABC
 
 from tt_sim.device.clock import Clock
@@ -28,31 +27,57 @@ from tt_sim.util.conversion import (
 
 class TT_Device(Device):
     def __init__(self, device_memory, dram_tiles, tensix_tiles):
-        self.dram_tiles = dram_tiles
-        self.tensix_tiles = tensix_tiles
+        self.dram_tiles = list(dram_tiles)
+        self.tensix_tiles = []
 
-        components_to_clock = []
-        components_to_reset = []
         self.tile_directory = {}
-        noc_0_directory = {}
-        noc_1_directory = {}
-        for tile in itertools.chain(dram_tiles, tensix_tiles):
-            components_to_clock += tile.get_clocks()
-            components_to_reset += tile.get_resets()
-            self.tile_directory[tile.get_coord_pair()] = tile
-            # Add entry to NoC directory
-            noc_0_directory[tile.get_noc_nui(0).get_id_pair()] = tile.get_noc_nui(0)
-            noc_1_directory[tile.get_noc_nui(1).get_id_pair()] = tile.get_noc_nui(1)
+        # NoC directories are shared by reference across every NUI on the
+        # corresponding NoC. Storing them as instance attrs lets
+        # ``add_tensix_tile`` extend them post-construction.
+        self.noc_0_directory = {}
+        self.noc_1_directory = {}
 
-        # Set NoC directory for each tile
-        for tile in itertools.chain(dram_tiles, tensix_tiles):
-            tile.get_noc_nui(0).set_noc_directory(noc_0_directory)
-            tile.get_noc_nui(1).set_noc_directory(noc_1_directory)
+        self.clocks = [Clock([])]
+        self.resets = [Reset([])]
 
-        self.clocks = [Clock(components_to_clock)]
-        self.resets = [Reset(components_to_reset)]
+        for tile in self.dram_tiles:
+            self._register_tile_internals(tile)
+        for tile in tensix_tiles:
+            self.tensix_tiles.append(tile)
+            self._register_tile_internals(tile)
 
         super().__init__(device_memory, self.clocks, self.resets)
+
+    def _register_tile_internals(self, tile):
+        """Insert a tile into the directory, NoCs, clocks, and resets.
+
+        Used by ``__init__`` for the initial fan-out and by
+        ``add_tensix_tile`` for tiles materialised later. The NoC directories
+        are shared by reference, so inserting once per NoC makes the new tile
+        reachable from every existing NUI on the same NoC.
+        """
+        coord = tile.get_coord_pair()
+        assert coord not in self.tile_directory, f"tile already registered at {coord}"
+        self.tile_directory[coord] = tile
+        nui0 = tile.get_noc_nui(0)
+        nui1 = tile.get_noc_nui(1)
+        self.noc_0_directory[nui0.get_id_pair()] = nui0
+        self.noc_1_directory[nui1.get_id_pair()] = nui1
+        nui0.set_noc_directory(self.noc_0_directory)
+        nui1.set_noc_directory(self.noc_1_directory)
+        self.clocks[0].add_clockables(tile.get_clocks())
+        self.resets[0].add_resetables(tile.get_resets())
+
+    def register_tensix_tile(self, tile):
+        """Register a TensixTile constructed after device __init__.
+
+        Mirrors what ``__init__`` does for one tile: stitches the tile into
+        the directory, both NoC directories, and the central Clock / Reset
+        aggregators. Subclasses (e.g. ``Wormhole.add_tensix_tile``) layer a
+        coord-based constructor on top.
+        """
+        self.tensix_tiles.append(tile)
+        self._register_tile_internals(tile)
 
     def read(self, coordinate_pair, address, size):
         assert coordinate_pair in self.tile_directory
@@ -147,6 +172,9 @@ class Wormhole(TT_Device):
         if diagnostics is None:
             # All off by default if no diagnostics provided
             diagnostics = DeviceTileDiagnostics()
+        # Saved so ``add_tensix_tile`` can construct lazily-materialised tiles
+        # with the same diagnostic flags as the originals.
+        self.diagnostics = diagnostics
         if tensix_coords is None:
             tensix_coords = Wormhole.TENSIX_UNIFIED_COORDS
         # Opt-in structured tracing: if TT_SIM_TRACE*=<...> is set in the
@@ -157,21 +185,7 @@ class Wormhole(TT_Device):
         # after tiles are constructed.
         enable_from_env()
         dram_tiles = [DRAMTile(x, y) for (x, y) in Wormhole.DRAM_CHANNEL_UNIFIED_COORDS]
-        tensix_tiles = [
-            TensixTile(
-                x,
-                y,
-                diagnostics.reportBRISC(),
-                diagnostics.reportNCRISC(),
-                diagnostics.reportTRISC0(),
-                diagnostics.reportTRISC1(),
-                diagnostics.reportTRISC2(),
-                diagnostics.reportNoC0(),
-                diagnostics.reportNoC1(),
-                diagnostics.getTensixCoprocessorDiagnostics(),
-            )
-            for (x, y) in tensix_coords
-        ]
+        tensix_tiles = [self._build_tensix_tile(coord) for coord in tensix_coords]
 
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
@@ -187,6 +201,35 @@ class Wormhole(TT_Device):
         self.clocks[0].on_tick = self.deadlock_detector.tick
         # Second call wires the state-dump writer now that we have tiles.
         enable_from_env(wormhole=self)
+
+    def _build_tensix_tile(self, coord):
+        x, y = coord
+        return TensixTile(
+            x,
+            y,
+            self.diagnostics.reportBRISC(),
+            self.diagnostics.reportNCRISC(),
+            self.diagnostics.reportTRISC0(),
+            self.diagnostics.reportTRISC1(),
+            self.diagnostics.reportTRISC2(),
+            self.diagnostics.reportNoC0(),
+            self.diagnostics.reportNoC1(),
+            self.diagnostics.getTensixCoprocessorDiagnostics(),
+        )
+
+    def add_tensix_tile(self, coord):
+        """Construct and register a TensixTile at the given unified coord.
+
+        Used by the wire bridge for lazy multi-Tensix materialisation: when
+        tt-metal addresses a worker the simulator hasn't built yet, this
+        method stands up the matching ``TensixTile`` and wires it into the
+        directory, NoC topology, clock/reset aggregators, and deadlock
+        detector. Returns the new tile.
+        """
+        tile = self._build_tensix_tile(coord)
+        self.register_tensix_tile(tile)
+        self.deadlock_detector.add_tensix_tile(tile)
+        return tile
 
 
 class DeviceTileDiagnostics:

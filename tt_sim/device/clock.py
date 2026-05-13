@@ -11,9 +11,15 @@ class Clockable(ABC):
 
 class Clock(Resetable):
     def __init__(self, clockables, on_tick=None):
-        self.clock_items = clockables
+        self.clock_items = list(clockables)
         self.clock_tick_num = 0
         self.on_tick = on_tick
+
+    def add_clockable(self, clockable):
+        self.clock_items.append(clockable)
+
+    def add_clockables(self, clockables):
+        self.clock_items.extend(clockables)
 
     def clock_tick(self, cycle):
         for item in self.clock_items:

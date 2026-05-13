@@ -61,31 +61,41 @@ class DeadlockDetector:
     def __init__(self, threshold, enabled, tensix_tiles, dram_tiles):
         self.threshold = threshold
         self.enabled = enabled
-        self.tensix_tiles = list(tensix_tiles)
+        self.tensix_tiles = []
         self.dram_tiles = list(dram_tiles)
 
         # Per-tile bookkeeping: keep (coord, tile, cores) tuples so multi-Tensix
-        # reports can attribute stalls back to a specific tile.
+        # reports can attribute stalls back to a specific tile. recent_pcs key
+        # is (tile_coord, core_type) so cores on different tiles don't collide.
         self.tile_cores = []
-        for tile in self.tensix_tiles:
-            coord = tile.get_coord_pair()
-            cores = [tile.brisc, tile.ncrisc, tile.trisc0, tile.trisc1, tile.trisc2]
-            self.tile_cores.append((coord, tile, cores))
-
         self.nuis = []
-        for tile in self.tensix_tiles + self.dram_tiles:
+        for tile in self.dram_tiles:
             coord = tile.get_coord_pair()
             self.nuis.append((coord, 0, tile.get_noc_nui(0)))
             self.nuis.append((coord, 1, tile.get_noc_nui(1)))
-
-        # recent_pcs key is (tile_coord, core_type) so cores on different tiles
-        # don't collide.
         self.recent_pcs = {}
-        for coord, _tile, cores in self.tile_cores:
-            for core in cores:
-                self.recent_pcs[(coord, core.core_type)] = deque(
-                    maxlen=_RECENT_PC_WINDOW
-                )
+
+        for tile in tensix_tiles:
+            self.add_tensix_tile(tile)
+
+        self.last_signature = None
+        self.stalled_for = 0
+
+    def add_tensix_tile(self, tile):
+        """Register a TensixTile added after device construction.
+
+        Extends ``tile_cores``, ``nuis``, ``recent_pcs`` for the new tile and
+        invalidates the cached signature so the watchdog re-baselines against
+        the larger tile set rather than reporting a spurious stall.
+        """
+        self.tensix_tiles.append(tile)
+        coord = tile.get_coord_pair()
+        cores = [tile.brisc, tile.ncrisc, tile.trisc0, tile.trisc1, tile.trisc2]
+        self.tile_cores.append((coord, tile, cores))
+        self.nuis.append((coord, 0, tile.get_noc_nui(0)))
+        self.nuis.append((coord, 1, tile.get_noc_nui(1)))
+        for core in cores:
+            self.recent_pcs[(coord, core.core_type)] = deque(maxlen=_RECENT_PC_WINDOW)
         self.last_signature = None
         self.stalled_for = 0
 
