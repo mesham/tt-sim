@@ -669,7 +669,12 @@ class NUI(MemMapable, Clockable):
                     NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
                     + noc_request.request_id
                 )
-                del self.outstanding_noc_requests[noc_request.request_id]
+                # NB: do NOT del self.outstanding_noc_requests[trid]. The FIFO
+                # may still hold writes / atomics queued under the same trid;
+                # callers also collide on a single trid when multiple cores
+                # share a NUI (e.g. ROADMAP §A multi-Tensix nine/, with reader
+                # and sender both on NoC 0). Leaving an empty list around is
+                # safe — add_outstanding_noc_request just appends.
             elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.ATOMIC:
                 if self.snoop:
                     print(
