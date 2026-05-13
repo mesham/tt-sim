@@ -58,10 +58,12 @@ int main(int argc, char** argv) {
         .page_size = l1_recv_size,
         .buffer_type = BufferType::L1,
         .buffer_layout = TensorMemoryLayout::HEIGHT_SHARDED,
-        .shard_parameters = ShardSpec(
+        .shard_parameters = ShardSpecBuffer(
             CoreRangeSet(std::set<CoreRange>{CoreRange(core_b)}),
             {1, l1_recv_size},
-            ShardOrientation::ROW_MAJOR)};
+            ShardOrientation::ROW_MAJOR,
+            {1, l1_recv_size},
+            {1, 1})};
     auto l1_recv_buffer = CreateBuffer(l1_recv_config);
 
     // Tile A's local pipeline — same shape as example four. CB0/CB1 take
@@ -134,15 +136,22 @@ int main(int argc, char** argv) {
         core_a,
         {DATA_SIZE, CHUNK_SIZE});
 
-    // Tile A: sender (NCRISC, NOC 1). Targets Tile B by its translated NoC
-    // coord — for {1, 0} that's physical (2, 1) per the SoC descriptor.
+    // Tile A: sender (NCRISC). Routes via NOC 0 deliberately — tt-metal's
+    // `get_noc_addr(x, y, addr)` macros bake the kernel-supplied coord
+    // straight into the NoC packet (DYNAMIC_NOC_X is identity, the hardware
+    // translation table fixes things up on real silicon with
+    // translation_id_enabled). tt-sim doesn't model NoC translation, so on
+    // NoC 1 the destination directory key is the noc1-mirror and the kernel
+    // misses. NOC 0 keeps the kernel-supplied (x, y) consistent with the
+    // tile's NoC 0 id_pair. Tracked under ROADMAP §C "Coord-system
+    // abstraction".
     KernelHandle sender_kernel_id = CreateKernel(
         program,
         "kernels/dataflow/sender_kernel.cpp",
         core_a,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
-            .noc = NOC::RISCV_1_default});
+            .noc = NOC::NOC_0});
     CoreCoord core_b_phys = device->worker_core_from_logical_core(core_b);
     SetRuntimeArgs(
         program,
