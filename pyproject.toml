@@ -8,8 +8,7 @@ authors = [ { name = "Nick Brown" } ]
 classifiers = ["Programming Language :: Python :: 3"]
 dependencies = [
     "numpy",
-    "yaml",
-    "json",
+    "pyyaml",
     "pynng",
     "flatbuffers",
     "pyarrow",
