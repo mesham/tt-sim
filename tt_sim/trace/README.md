@@ -17,10 +17,13 @@ plan.
 ```bash
 export PYTHONPATH=~/tt-sim:$PYTHONPATH
 cd driver/wormhole
-TT_SIM_TRACE=/tmp/one.jsonl python3 one/one.py            # JSONL for ad-hoc
+TT_SIM_TRACE=/tmp/one.jsonl python3 one/one.py             # JSONL for ad-hoc
 TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz python3 one/one.py  # visual timeline
-# Or both at once — they subscribe independently:
-TT_SIM_TRACE=/tmp/one.jsonl TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz \
+TT_SIM_TRACE_COMMITLOG=/tmp/one/ python3 one/one.py        # Spike-compat per-core
+# All three can be enabled at once — writers subscribe independently:
+TT_SIM_TRACE=/tmp/one.jsonl \
+TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz \
+TT_SIM_TRACE_COMMITLOG=/tmp/one/ \
     python3 one/one.py
 ```
 
@@ -79,6 +82,40 @@ appear at the "current time" rather than collapsing onto t=0.
 **`mem` events are skipped** from the Perfetto stream — their volume
 (~50k+ per kernel) would swamp the UI without adding slice-level
 signal. They remain in the JSONL output.
+
+### Spike-compatible commitlog (RISC-V)
+
+`TT_SIM_TRACE_COMMITLOG=<dir>` writes one file per baby core
+(`brisc.commitlog`, `ncrisc.commitlog`, `trisc0.commitlog`, …) in the
+exact format `spike --log-commits` produces:
+
+```
+core   0: 3 0x00003780 (0xffb001b7) x 3 0xffb00000
+core   0: 3 0x00003784 (0x7f018193) x 3 0xffb007f0
+core   0: 3 0x00003788 (0xffb01137) x 2 0xffb01000
+```
+
+The trailing `x<N> 0x<value>` is omitted on instructions that don't
+write to an architectural register (stores, branches, jumps without
+link, writes to `x0`). All files report `core   0:` and machine-mode
+privilege `3` — tt-sim's per-unit commitlog files are drop-in
+comparable against a single-hart Spike run via plain `diff`.
+
+**Differential testing.** A small helper compares two commitlog files
+and reports the first divergence with five lines of context:
+
+```bash
+spike --log-commits ./test.elf > /tmp/spike.commitlog
+TT_SIM_TRACE_COMMITLOG=/tmp/ttsim/ python3 your_driver.py
+python3 -m tt_sim.trace.diff_spike /tmp/ttsim/brisc.commitlog /tmp/spike.commitlog
+```
+
+Caveat: the diff workflow is only meaningful for pure-RV32IM ELFs that
+run identically under both simulators. tt-metal firmware kernels touch
+Tensix / NoC MMIO that Spike has no concept of, so a diff there would
+diverge on the first such access — useful for catching specific RV
+mistakes (e.g. when the §B RV pipeline modelling lands), not for
+end-to-end kernel correctness.
 
 ## Programmatic use
 

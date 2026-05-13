@@ -48,7 +48,7 @@ class Unit(Enum):
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
     CATEGORY: ClassVar[EventCategory | None] = None
     cycle: int
     unit_id: tuple
@@ -60,6 +60,12 @@ class InstrEvent(Event):
     pc: int
     instruction: int
     stalled: bool = False
+    # Destination register write captured at retirement.
+    # reg_write_idx == -1 means no architectural register was written
+    # (stores, branches, jumps without link). x0 writes are not
+    # recorded (Spike's commitlog format excludes them).
+    reg_write_idx: int = -1
+    reg_write_value: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -140,6 +140,9 @@ class RV32I(ProcessingElement):
         pc_val = conv_to_uint32(pc.read())
         nextpc.write(conv_to_bytes(pc_val + 4))
         self.visible_memory.caller_context = (self.unit_id, self.core_label, pc_val)
+        # Clear last-write record so the InstrEvent below captures only
+        # this instruction's destination register write.
+        self.register_file.clear_write_record()
 
         if self.snoop:
             print(f"[{self.core_id}-> {cycle_num}][{hex(pc_val)}] ", end="")
@@ -171,6 +174,16 @@ class RV32I(ProcessingElement):
         bus = get_bus()
         if self.unit_id is not None and bus.is_enabled(EventCategory.INSTR):
             instr_raw = self.visible_memory.read(pc_val, 4)
+            # Capture the architectural register write (x1-x31). Index 0
+            # (x0) is read-only and not logged by Spike-style commitlogs;
+            # indices 32+ are PC/nextpc, not architectural state.
+            wi = self.register_file.last_write_idx
+            if 1 <= wi <= 31:
+                reg_idx = wi
+                reg_val = conv_to_uint32(self.register_file.last_write_value)
+            else:
+                reg_idx = -1
+                reg_val = 0
             bus.publish(
                 InstrEvent(
                     cycle=cycle_num,
@@ -178,6 +191,8 @@ class RV32I(ProcessingElement):
                     pc=pc_val,
                     instruction=conv_to_uint32(instr_raw),
                     stalled=pe_stall,
+                    reg_write_idx=reg_idx,
+                    reg_write_value=reg_val,
                 )
             )
 

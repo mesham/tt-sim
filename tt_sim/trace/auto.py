@@ -10,9 +10,13 @@ Supported env vars (all optional, all default-off):
 - ``TT_SIM_TRACE_PERFETTO`` — Chrome Trace Event Format writer; output
   loads directly into ``ui.perfetto.dev``. Use a ``.json.gz`` extension
   for gzip compression (Perfetto loads it natively).
+- ``TT_SIM_TRACE_COMMITLOG`` — RISC-V Spike-compatible commitlog
+  writer; output is a directory containing one ``<unit>.commitlog``
+  file per baby core, drop-in comparable to a ``spike --log-commits``
+  run via ``diff`` for differential testing.
 
-Both writers can be enabled simultaneously; they subscribe to disjoint
-event handling and write independent files.
+All writers can be enabled simultaneously; they subscribe to disjoint
+event handling and write independent outputs.
 """
 
 import atexit
@@ -20,11 +24,13 @@ import os
 
 from tt_sim.trace.bus import get_bus
 from tt_sim.trace.ids import get_registry
+from tt_sim.trace.writers.commitlog import SpikeCommitlogWriter
 from tt_sim.trace.writers.jsonl import JSONLLogger
 from tt_sim.trace.writers.perfetto import PerfettoWriter
 
 _JSONL: JSONLLogger | None = None
 _PERFETTO: PerfettoWriter | None = None
+_COMMITLOG: SpikeCommitlogWriter | None = None
 
 
 def enable_from_env() -> None:
@@ -33,11 +39,12 @@ def enable_from_env() -> None:
     Idempotent — calling more than once is safe; only the first call
     per process actually opens files.
     """
-    global _JSONL, _PERFETTO
+    global _JSONL, _PERFETTO, _COMMITLOG
     jsonl_path = os.environ.get("TT_SIM_TRACE")
     perfetto_path = os.environ.get("TT_SIM_TRACE_PERFETTO")
+    commitlog_path = os.environ.get("TT_SIM_TRACE_COMMITLOG")
 
-    if not jsonl_path and not perfetto_path:
+    if not jsonl_path and not perfetto_path and not commitlog_path:
         return
 
     bus = get_bus()
@@ -49,6 +56,9 @@ def enable_from_env() -> None:
     if perfetto_path and _PERFETTO is None:
         _PERFETTO = PerfettoWriter(perfetto_path)
 
+    if commitlog_path and _COMMITLOG is None:
+        _COMMITLOG = SpikeCommitlogWriter(commitlog_path)
+
     if not getattr(enable_from_env, "_atexit_registered", False):
 
         def _on_exit():
@@ -58,6 +68,8 @@ def enable_from_env() -> None:
                     get_registry().dump(jsonl_path + ".ids.json")
             if _PERFETTO is not None:
                 _PERFETTO.close()
+            if _COMMITLOG is not None:
+                _COMMITLOG.close()
 
         atexit.register(_on_exit)
         enable_from_env._atexit_registered = True  # type: ignore[attr-defined]

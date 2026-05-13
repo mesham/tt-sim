@@ -13,6 +13,7 @@ from tt_sim.trace.events import (
     Unit,
 )
 from tt_sim.trace.ids import IDRegistry, UnitID, get_registry
+from tt_sim.trace.writers.commitlog import SpikeCommitlogWriter
 from tt_sim.trace.writers.jsonl import JSONLLogger
 from tt_sim.trace.writers.perfetto import PerfettoWriter
 
@@ -29,6 +30,7 @@ __all__ = [
     "MemEvent",
     "NoCEvent",
     "PerfettoWriter",
+    "SpikeCommitlogWriter",
     "SyncEvent",
     "Unit",
     "UnitID",
