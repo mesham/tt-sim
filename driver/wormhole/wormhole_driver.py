@@ -5,6 +5,8 @@ from tt_sim.util.conversion import (
     conv_to_uint32,
 )
 
+DEFAULT_TENSIX_COORD = (18, 18)
+
 _HOST_UNIT_ID = (0, 0, 0, Unit.HOST.value)
 
 
@@ -25,9 +27,9 @@ def _emit_lifecycle(kind, detail=""):
     )
 
 
-def launch_firmware(wormhole, tt_metal):
-    print("--> Launching and running firmware")
-    _emit_lifecycle("firmware_launch_start")
+def launch_firmware(wormhole, tt_metal, coord=DEFAULT_TENSIX_COORD):
+    print(f"--> Launching and running firmware on {coord}")
+    _emit_lifecycle("firmware_launch_start", detail=str(coord))
     go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
         "go_message", "signal"
     )
@@ -40,7 +42,7 @@ def launch_firmware(wormhole, tt_metal):
     dram_to_noc_xy_transfers = tt_metal.generate_dram_noc_mapping_transfers()
     for data_transfer in dram_to_noc_xy_transfers:
         wormhole.write(
-            (18, 18),
+            coord,
             data_transfer[0],
             conv_to_bytes(data_transfer[2], data_transfer[1]),
             data_transfer[1],
@@ -48,42 +50,45 @@ def launch_firmware(wormhole, tt_metal):
 
     # Write firmware binaries to correct locations in tensix
     for firmware in firmware_package:
-        wormhole.write((18, 18), firmware.get_text_addr(), firmware.get_text_bin())
+        wormhole.write(coord, firmware.get_text_addr(), firmware.get_text_bin())
         if firmware.get_data_addr() is not None and firmware.get_data_bin() is not None:
-            wormhole.write((18, 18), firmware.get_data_addr(), firmware.get_data_bin())
+            wormhole.write(coord, firmware.get_data_addr(), firmware.get_data_bin())
 
     # Set jal for BRISC to jump to its firmware from 0x0 start point
     wormhole.write(
-        (18, 18),
+        coord,
         tt_metal.get_config_value("l1_memory_map", "MEM_BOOT_CODE_BASE"),
         conv_to_bytes(0x7800306F),
     )
 
-    wormhole.assert_soft_reset()
-    wormhole.deassert_soft_reset((18, 18), BabyRISCVCoreType.BRISC)
+    # Scope the reset to the target tile so sibling tiles' running firmware is
+    # left alone — important for multi-Tensix flows that bring up tiles serially.
+    wormhole.assert_soft_reset(coord)
+    wormhole.deassert_soft_reset(coord, BabyRISCVCoreType.BRISC)
 
-    wormhole.reset()
+    # Reset baby-core execution state on the target tile only. The generic
+    # wormhole.reset() would clobber every tile's PCs, including siblings
+    # already running firmware.
+    wormhole.reset_tile(coord)
 
     # Set the go signal and then loop round whilst this is not done, the firmware will
     # set it to be done when it has finished and is ready for a kernel
     wormhole.write(
-        (18, 18), go_signal_start_addr, conv_to_bytes(run_msg_go, go_signal_byte_len)
+        coord, go_signal_start_addr, conv_to_bytes(run_msg_go, go_signal_byte_len)
     )
     while (
-        conv_to_uint32(
-            wormhole.read((18, 18), go_signal_start_addr, go_signal_byte_len)
-        )
+        conv_to_uint32(wormhole.read(coord, go_signal_start_addr, go_signal_byte_len))
         != run_msg_done
     ):
         wormhole.run(100)
 
     print("  --> Done, device is ready")
-    _emit_lifecycle("firmware_launch_done")
+    _emit_lifecycle("firmware_launch_done", detail=str(coord))
 
 
-def run_kernel(wormhole, tt_metal, parameters):
-    print("--> Launching and running kernel")
-    _emit_lifecycle("kernel_start", detail=str(parameters))
+def run_kernel(wormhole, tt_metal, parameters, coord=DEFAULT_TENSIX_COORD):
+    print(f"--> Launching and running kernel on {coord}")
+    _emit_lifecycle("kernel_start", detail=f"{coord} {parameters}")
     go_signal_start_addr, go_signal_byte_len = tt_metal.get_mailbox_config_details(
         "go_message", "signal"
     )
@@ -100,16 +105,14 @@ def run_kernel(wormhole, tt_metal, parameters):
             d = conv_to_bytes(data_transfer[2], data_transfer[1])
         else:
             d = data_transfer[2]
-        wormhole.write((18, 18), data_transfer[0], d, data_transfer[1])
+        wormhole.write(coord, data_transfer[0], d, data_transfer[1])
 
     ## Run cycles to process the kernel, continue until MSG_DONE is written
     while (
-        conv_to_uint32(
-            wormhole.read((18, 18), go_signal_start_addr, go_signal_byte_len)
-        )
+        conv_to_uint32(wormhole.read(coord, go_signal_start_addr, go_signal_byte_len))
         != run_msg_done
     ):
         wormhole.run(100)
 
     print("  --> Done")
-    _emit_lifecycle("kernel_done")
+    _emit_lifecycle("kernel_done", detail=str(coord))

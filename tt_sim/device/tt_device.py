@@ -78,6 +78,19 @@ class TT_Device(Device):
         else:
             self.perform_soft_reset_change(set_bit, coordinate_pair, core_type)
 
+    def reset_tile(self, coordinate_pair):
+        """Reset only the baby cores on a single tile.
+
+        ``wormhole.reset()`` (the generic Device.reset) resets every baby
+        core on every tile, which is fine for single-Tensix flows but
+        clobbers PCs on tiles already running firmware in multi-Tensix
+        setups. Callers bringing up one tile at a time should use this
+        scoped variant.
+        """
+        tile = self.tile_directory[coordinate_pair]
+        for core in tile.get_resets():
+            core.reset()
+
     def perform_soft_reset_change(
         self, bit_change_method, coordinate_pair, core_type=None
     ):
@@ -127,12 +140,15 @@ class Wormhole(TT_Device):
     # Unified coords of each instantiated Tensix tile, in the same order as
     # the SoC descriptor's ``functional_workers``. ``coords.py`` pairs entry i
     # here with ``functional_workers[i]`` to build the wire-bridge translation.
+    # Overridable via the ``tensix_coords`` kwarg on ``Wormhole.__init__``.
     TENSIX_UNIFIED_COORDS = ((18, 18),)
 
-    def __init__(self, diagnostics=None):
+    def __init__(self, diagnostics=None, tensix_coords=None):
         if diagnostics is None:
             # All off by default if no diagnostics provided
             diagnostics = DeviceTileDiagnostics()
+        if tensix_coords is None:
+            tensix_coords = Wormhole.TENSIX_UNIFIED_COORDS
         # Opt-in structured tracing: if TT_SIM_TRACE*=<...> is set in the
         # environment, the bus is enabled and writers are registered
         # before any device-construction events are missed. The
@@ -154,7 +170,7 @@ class Wormhole(TT_Device):
                 diagnostics.reportNoC1(),
                 diagnostics.getTensixCoprocessorDiagnostics(),
             )
-            for (x, y) in Wormhole.TENSIX_UNIFIED_COORDS
+            for (x, y) in tensix_coords
         ]
 
         # For now don't provide any memory, in future this will be the memory
@@ -162,15 +178,11 @@ class Wormhole(TT_Device):
         super().__init__(None, dram_tiles, tensix_tiles)
 
         enabled, threshold = deadlock_config_from_env()
-        # DeadlockDetector takes a single Tensix tile; revisit when
-        # multi-Tensix expansion (ROADMAP §A) lands.
-        primary_tensix = tensix_tiles[0]
         self.deadlock_detector = DeadlockDetector(
             threshold,
             enabled,
-            primary_tensix,
+            tensix_tiles,
             dram_tiles,
-            primary_tensix.tensix_coprocessor,
         )
         self.clocks[0].on_tick = self.deadlock_detector.tick
         # Second call wires the state-dump writer now that we have tiles.
@@ -337,6 +349,13 @@ class TensixTile(TTDeviceTile):
         tensix_mem_map[tdma_range] = self.tdma
 
         self.tile_ctrl = TensixTileControl()
+        # All 5 baby cores (BRISC=11, TRISC0=12, TRISC1=13, TRISC2=14,
+        # NCRISC=18) come out of power-on held in soft reset on real silicon.
+        # Without this, multi-tile setups would have sibling tiles' cores
+        # running from PC=0 while only the target tile's BRISC is brought up
+        # by launch_firmware.
+        initial_reset = (1 << 11) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 18)
+        self.tile_ctrl.RISCV_DEBUG_REG_SOFT_RESET_0 = conv_to_bytes(initial_reset)
         tile_ctrl_range = AddressRange(0xFFB12000, self.tile_ctrl.getSize())
         tensix_mem_map[tile_ctrl_range] = self.tile_ctrl
 

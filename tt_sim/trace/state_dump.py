@@ -46,9 +46,9 @@ def dump_device_state(wormhole, kind: str = "snapshot") -> dict[str, Any]:
         "noc_counters": {},
     }
 
-    # Tensix-tile baby cores. The first Tensix tile is the only one
-    # today (see ROADMAP §A multi-Tensix); iterate defensively in case
-    # that changes.
+    # Tensix-tile baby cores. Multi-Tensix instances are keyed by
+    # coord in the output so two tiles at different positions don't
+    # collide.
     for tensix_tile in getattr(wormhole, "tensix_tiles", []) or []:
         coord = f"{tensix_tile.coord_x}_{tensix_tile.coord_y}"
         for attr in ("brisc", "ncrisc", "trisc0", "trisc1", "trisc2"):
