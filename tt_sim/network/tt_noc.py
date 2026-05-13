@@ -81,6 +81,17 @@ class NullEndpoint:
                     request.request_id,
                 )
                 source.transmit(response)
+        elif request.action == NUI.NoCDataRequest.DataRequestAction.ATOMIC:
+            if request.noc_cmd_resp_marked:
+                response = NUI.NoCDataRequest(
+                    None,
+                    NUI.NoCDataRequest.DataRequestAction.RESPONSE_ATOMIC,
+                    request.data_length_bytes,
+                    self.coord,
+                    request.request_id,
+                    data=bytes(request.data_length_bytes),
+                )
+                source.transmit(response)
 
 
 class NUI(MemMapable, Clockable):
@@ -90,6 +101,8 @@ class NUI(MemMapable, Clockable):
             WRITE = 1
             RESPONSE_READ = 2
             ACK = 3
+            ATOMIC = 4
+            RESPONSE_ATOMIC = 5
 
         def __init__(
             self,
@@ -100,6 +113,7 @@ class NUI(MemMapable, Clockable):
             request_id,
             data=None,
             noc_cmd_resp_marked=True,
+            at_data=0,
         ):
             self.tgt_address = tgt_address
             self.action = action
@@ -108,6 +122,9 @@ class NUI(MemMapable, Clockable):
             self.source = source
             self.data = data
             self.noc_cmd_resp_marked = noc_cmd_resp_marked
+            # Immediate operand for ATOMIC requests (increment value for
+            # atomic add). Unused for non-atomic ops.
+            self.at_data = at_data
 
     class RequestInitiator:
         def __init__(self, nui):
@@ -315,6 +332,60 @@ class NUI(MemMapable, Clockable):
                     noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
                 )
 
+        def handle_atomic_transfer(self):
+            """Atomic add to a remote 32-bit word — what ``noc_semaphore_inc``
+            issues. Per the ISA docs, the operation kind is encoded in
+            ``at_len_be`` (ATINC / ATCAS / ATSWAP / ATINCGET); we model
+            atomic-add only here because that's what semaphore signalling
+            needs. Bigger ops are §D ThCon scope.
+            """
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
+            noc_cmd_resp_marked = extract_bits(self.ctrl, 1, 4)
+
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    [
+                        NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                        + noc_packet_transaction_id,
+                        NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_ATOMIC_STARTED,
+                        NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_ATOMIC_SENT,
+                        NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED,
+                    ]
+                )
+            else:
+                self.nui.nui_counters.increment(
+                    [
+                        NUI.NUICounters.CounterNames.NIU_MST_POSTED_ATOMIC_SENT,
+                        NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED,
+                    ]
+                )
+
+            self.cmd_ctrl = 0
+
+            target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
+            target_tile_y = extract_bits(self.target_addr_mid, 6, 10)
+            destination = self.nui.resolve_destination((target_tile_x, target_tile_y))
+
+            atomic_req = NUI.NoCDataRequest(
+                self.target_addr_low,
+                NUI.NoCDataRequest.DataRequestAction.ATOMIC,
+                4,
+                self.nui.id_pair,
+                noc_packet_transaction_id,
+                noc_cmd_resp_marked=bool(noc_cmd_resp_marked),
+                at_data=self.at_data,
+            )
+            if noc_cmd_resp_marked:
+                self.nui.add_outstanding_noc_request(noc_packet_transaction_id, None)
+            destination.transmit(atomic_req)
+
+            if self.nui.snoop:
+                print(
+                    f"[NoC {self.nui.id_pair}]: Issue atomic-add id {atomic_req.request_id} "
+                    f"to NUI {(target_tile_x, target_tile_y)} at "
+                    f"{hex(atomic_req.tgt_address)} += {self.at_data}"
+                )
+
         def initiate(self):
             if self.cmd_ctrl == 1:
                 # Following the protocol at
@@ -336,9 +407,7 @@ class NUI(MemMapable, Clockable):
                 if mode == 0:
                     self.handle_read_transfer()
                 elif mode == 1:
-                    raise NotImplementedError(
-                        "NoC does not support atomic data transfers"
-                    )
+                    self.handle_atomic_transfer()
                 elif mode == 2:
                     self.handle_write_transfer()
 
@@ -601,6 +670,83 @@ class NUI(MemMapable, Clockable):
                     + noc_request.request_id
                 )
                 del self.outstanding_noc_requests[noc_request.request_id]
+            elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.ATOMIC:
+                if self.snoop:
+                    print(
+                        f"[NoC {self.id_pair}]: Atomic-add id "
+                        f"{noc_request.request_id} from NUI {noc_request.source} "
+                        f"at {hex(noc_request.tgt_address)} += {noc_request.at_data}"
+                    )
+                self._publish_noc_event(
+                    cycle_num,
+                    phase="request",
+                    txn_type="atomic",
+                    src=noc_request.source,
+                    dst=self.id_pair,
+                    size_bytes=noc_request.data_length_bytes,
+                    txn_id=noc_request.request_id,
+                )
+                if noc_request.noc_cmd_resp_marked:
+                    self.nui_counters.increment(
+                        [
+                            NUI.NUICounters.CounterNames.NIU_SLV_REQ_ACCEPTED,
+                            NUI.NUICounters.CounterNames.NIU_SLV_NONPOSTED_ATOMIC_RECEIVED,
+                        ]
+                    )
+                else:
+                    self.nui_counters.increment(
+                        [
+                            NUI.NUICounters.CounterNames.NIU_SLV_REQ_ACCEPTED,
+                            NUI.NUICounters.CounterNames.NIU_SLV_POSTED_ATOMIC_RECEIVED,
+                        ]
+                    )
+
+                old_bytes = self.attached_memory.read(noc_request.tgt_address, 4)
+                old_val = conv_to_uint32(old_bytes)
+                new_val = (old_val + noc_request.at_data) & 0xFFFFFFFF
+                self.attached_memory.write(
+                    noc_request.tgt_address, conv_to_bytes(new_val)
+                )
+
+                if noc_request.noc_cmd_resp_marked:
+                    self.nui_counters.increment(
+                        NUI.NUICounters.CounterNames.NIU_SLV_ATOMIC_RESP_SENT
+                    )
+                    response = NUI.NoCDataRequest(
+                        None,
+                        NUI.NoCDataRequest.DataRequestAction.RESPONSE_ATOMIC,
+                        noc_request.data_length_bytes,
+                        self.id_pair,
+                        noc_request.request_id,
+                        data=conv_to_bytes(old_val),
+                    )
+                    self.noc_directory[noc_request.source].transmit(response)
+            elif (
+                noc_request.action
+                == NUI.NoCDataRequest.DataRequestAction.RESPONSE_ATOMIC
+            ):
+                if self.snoop:
+                    print(
+                        f"[NoC {self.id_pair}]: Atomic response id "
+                        f"{noc_request.request_id} from NUI {noc_request.source}"
+                    )
+                self._publish_noc_event(
+                    cycle_num,
+                    phase="response",
+                    txn_type="atomic",
+                    src=noc_request.source,
+                    dst=self.id_pair,
+                    size_bytes=noc_request.data_length_bytes,
+                    txn_id=noc_request.request_id,
+                )
+                self.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_ATOMIC_RESP_RECEIVED
+                )
+                self.nui_counters.decrement(
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                    + noc_request.request_id
+                )
+                self.outstanding_noc_requests[noc_request.request_id].pop(0)
             elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.ACK:
                 if self.snoop:
                     print(
