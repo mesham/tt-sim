@@ -24,6 +24,9 @@ Supported env vars (all optional, all default-off):
 - ``TT_SIM_TRACE_MEMORY`` — Callgrind/Cachegrind text writer for
   memory accesses (L1 / MMIO). Output is a single file consumable by
   ``kcachegrind`` / ``qcachegrind`` / ``callgrind_annotate``.
+- ``TT_SIM_TRACE_LCOV`` — LCOV coverage-format writer for source-level
+  attribution. Requires ``TT_SIM_TRACE_LCOV_ELFS`` (comma-separated
+  paths to ELFs with DWARF info) to map PCs back to source lines.
 
 All writers can be enabled simultaneously; they subscribe to disjoint
 event handling and write independent outputs.
@@ -34,10 +37,12 @@ import os
 
 from tt_sim.trace.bus import get_bus
 from tt_sim.trace.counters import DEFAULT_FLUSH_INTERVAL_CYCLES, CounterAggregator
+from tt_sim.trace.dwarf import DwarfIndex
 from tt_sim.trace.ids import get_registry
 from tt_sim.trace.writers.cachegrind import MemoryTraceWriter
 from tt_sim.trace.writers.commitlog import SpikeCommitlogWriter
 from tt_sim.trace.writers.jsonl import JSONLLogger
+from tt_sim.trace.writers.lcov import LCOVWriter
 from tt_sim.trace.writers.noc_parquet import NoCParquetWriter
 from tt_sim.trace.writers.parquet import ParquetCounterWriter
 from tt_sim.trace.writers.perfetto import PerfettoWriter
@@ -49,6 +54,7 @@ _COUNTERS_AGG: CounterAggregator | None = None
 _COUNTERS_WRITER: ParquetCounterWriter | None = None
 _NOC_WRITER: NoCParquetWriter | None = None
 _MEMORY_WRITER: MemoryTraceWriter | None = None
+_LCOV_WRITER: LCOVWriter | None = None
 
 
 def enable_from_env() -> None:
@@ -58,13 +64,14 @@ def enable_from_env() -> None:
     per process actually opens files.
     """
     global _JSONL, _PERFETTO, _COMMITLOG, _COUNTERS_AGG, _COUNTERS_WRITER
-    global _NOC_WRITER, _MEMORY_WRITER
+    global _NOC_WRITER, _MEMORY_WRITER, _LCOV_WRITER
     jsonl_path = os.environ.get("TT_SIM_TRACE")
     perfetto_path = os.environ.get("TT_SIM_TRACE_PERFETTO")
     commitlog_path = os.environ.get("TT_SIM_TRACE_COMMITLOG")
     counters_path = os.environ.get("TT_SIM_TRACE_COUNTERS")
     noc_path = os.environ.get("TT_SIM_TRACE_NOC")
     memory_path = os.environ.get("TT_SIM_TRACE_MEMORY")
+    lcov_path = os.environ.get("TT_SIM_TRACE_LCOV")
 
     if not any(
         (
@@ -74,6 +81,7 @@ def enable_from_env() -> None:
             counters_path,
             noc_path,
             memory_path,
+            lcov_path,
         )
     ):
         return
@@ -108,6 +116,13 @@ def enable_from_env() -> None:
     if memory_path and _MEMORY_WRITER is None:
         _MEMORY_WRITER = MemoryTraceWriter(memory_path)
 
+    if lcov_path and _LCOV_WRITER is None:
+        elfs_env = os.environ.get("TT_SIM_TRACE_LCOV_ELFS", "")
+        index = DwarfIndex()
+        for elf_path in (p.strip() for p in elfs_env.split(",") if p.strip()):
+            index.load(elf_path)
+        _LCOV_WRITER = LCOVWriter(lcov_path, index)
+
     if not getattr(enable_from_env, "_atexit_registered", False):
 
         def _on_exit():
@@ -127,6 +142,8 @@ def enable_from_env() -> None:
                 _NOC_WRITER.close()
             if _MEMORY_WRITER is not None:
                 _MEMORY_WRITER.close()
+            if _LCOV_WRITER is not None:
+                _LCOV_WRITER.close()
 
         atexit.register(_on_exit)
         enable_from_env._atexit_registered = True  # type: ignore[attr-defined]

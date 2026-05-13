@@ -178,7 +178,14 @@ class TileMemory(MemorySpace):
 
 class AddressableMemory(MemMapable):
     def __init__(self, size, alignment=None):
-        self.memory = np.empty(size, dtype=np.uint8)
+        # Zero-init: silicon L1/DRAM is uninitialised at power-on but
+        # kernels assume zero in places (e.g. mailbox state checks).
+        # np.empty would inherit whatever was in the underlying memory
+        # pages, which is non-deterministic and process-pattern
+        # sensitive (e.g. loading a large ELF for DWARF/LCOV would
+        # change the allocator's reuse pattern and start surfacing
+        # garbage reads).
+        self.memory = np.zeros(size, dtype=np.uint8)
         self.size = size
         self.alignment = alignment
 

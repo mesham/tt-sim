@@ -13,6 +13,7 @@ dependencies = [
     "pynng",
     "flatbuffers",
     "pyarrow",
+    "pyelftools",
 ]
 
 dynamic = [ "version" ]

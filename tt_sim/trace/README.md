@@ -8,9 +8,10 @@ Event Format for visual timelines on `ui.perfetto.dev`. Later phases
 add Spike commitlog, Parquet counters, Cachegrind, and LCOV writers
 as additional consumers of the same bus. tt-sim does not build viewers.
 
-Phases 1–5 of [ROADMAP §H](../../ROADMAP.md) are complete (event bus,
+Phases 1–6 of [ROADMAP §H](../../ROADMAP.md) are complete (event bus,
 Perfetto, Spike-compatible commitlog, Parquet/DuckDB counters, NoC
-Parquet + Cachegrind memory trace); read that for the full plan.
+Parquet + Cachegrind memory trace, LCOV source-level attribution);
+read that for the full plan.
 
 ## Quick start
 
@@ -23,7 +24,10 @@ TT_SIM_TRACE_COMMITLOG=/tmp/one/ python3 one/one.py            # Spike-compat pe
 TT_SIM_TRACE_COUNTERS=/tmp/one-counters/ python3 one/one.py    # Parquet counters / DuckDB
 TT_SIM_TRACE_NOC=/tmp/one-noc/ python3 one/one.py              # Parquet NoC transactions
 TT_SIM_TRACE_MEMORY=/tmp/one-mem.callgrind python3 one/one.py  # KCachegrind memory hotspots
-# All six can be enabled at once — writers subscribe independently:
+TT_SIM_TRACE_LCOV=/tmp/one.lcov \
+  TT_SIM_TRACE_LCOV_ELFS=path/to/kernel.elf,path/to/firmware.elf \
+  python3 one/one.py                                            # Source-level coverage
+# All seven can be enabled at once — writers subscribe independently:
 TT_SIM_TRACE=/tmp/one.jsonl \
 TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz \
 TT_SIM_TRACE_COMMITLOG=/tmp/one/ \
@@ -197,10 +201,51 @@ fn=L1_pc_0x00003780
 Open with `kcachegrind /tmp/run.callgrind` and the source-attribution
 tree shows hottest PCs, with addresses underneath. Accesses without a
 PC (NoC-driven or internal-engine traffic; ~10% of the typical trace)
-group under a synthetic `<region>_no_pc` function. When §H Phase 6
-(DWARF / LCOV source-level attribution) lands, the `<region>_pc_…`
-function names are replaced with real source/function coordinates
-with no change to the writer's contract.
+group under a synthetic `<region>_no_pc` function.
+
+### Source-level attribution (LCOV)
+
+`TT_SIM_TRACE_LCOV=<file>` plus `TT_SIM_TRACE_LCOV_ELFS=<elf1,elf2>`
+writes an LCOV-format coverage file mapping retired-instruction counts
+back to source lines via DWARF info parsed from the supplied ELFs.
+Output is consumable by:
+
+- `genhtml file.lcov -o report/` → static HTML report with hot-line
+  heatmap.
+- The VS Code [Coverage Gutters extension](https://marketplace.visualstudio.com/items?itemName=ryanluker.vscode-coverage-gutters)
+  renders inline decorations next to source.
+- GitHub Codecov and most CI coverage reporters accept LCOV directly.
+
+```bash
+# Build kernels with -g, then:
+TT_SIM_TRACE_LCOV=/tmp/run.lcov \
+TT_SIM_TRACE_LCOV_ELFS=build/brisc_kernel.elf,build/trisc0_compute.elf \
+  python3 four/four.py
+genhtml /tmp/run.lcov -o /tmp/cov/
+xdg-open /tmp/cov/index.html
+```
+
+"Coverage" semantics: the `DA:<line>,<count>` value is the number of
+retirements at any PC mapping to that line — i.e. cycles spent at that
+line, not "executed at least once". Tools render this identically to
+standard coverage (heatmap on the source view), but hot lines stand
+out instead of just covered lines.
+
+Caveats:
+
+- Source files need to live at the paths DWARF embedded into the
+  ELFs (typically absolute paths from the build host). Copy or
+  symlink the source tree to match, or post-process the LCOV file
+  with `sed`.
+- Stripped ELFs (no `-g`) load cleanly but contribute zero
+  attribution. Build the kernel/firmware you care about with debug
+  info.
+- ELFs are loaded once at sim init; lookup is a single dict access
+  per `InstrEvent` — negligible runtime cost.
+- PC ranges from multiple ELFs may overlap (firmware + kernel share
+  L1 space). The index uses last-load-wins; list kernel ELFs after
+  firmware ELFs in `TT_SIM_TRACE_LCOV_ELFS` if you want kernel
+  attribution to take priority on collisions.
 
 ## Programmatic use
 
