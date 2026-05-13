@@ -7,6 +7,9 @@
 #   TT_SIM_LOG_PROTOCOL=1     print every wire message to stderr
 #   TT_SIM_CYCLES_PER_POLL=N  cycles to run after each message (default 100)
 #   TT_SIM_MOCK_TENSIX=1      skip building Wormhole; every core is NullCore
+#   TT_SIM_TENSIX_COORDS=1-1,2-1  comma-separated physical worker coords to
+#                                 pre-construct as TensixCores (default 1-1).
+#                                 Unlisted worker coords stay as NullCore.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

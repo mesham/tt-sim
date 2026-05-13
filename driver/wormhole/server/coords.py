@@ -16,15 +16,18 @@ How the pairing works:
   baked into the buffer address by the tt-metal allocator selects
   ``ddr_bank_0`` vs ``ddr_bank_1`` inside that tile.
 
-- **Tensix.** ``Wormhole.TENSIX_UNIFIED_COORDS[i]`` is paired with
-  ``functional_workers[i]``. With one Tensix tile today the map is just
-  ``(1, 1) → (18, 18)``; extending ``TENSIX_UNIFIED_COORDS`` plus the
-  matching ``TensixTile`` construction in ``Wormhole.__init__`` is all that
-  multi-Tensix expansion (ROADMAP §A) needs from this file.
+- **Tensix.** Every ``functional_workers[i]`` entry maps to a unified coord
+  in the 8×10 worker band ``(18-25, 16-25)`` (DRAM occupies ``(16-17, 16-18)``
+  so worker x starts at 18). The y-axis is offset by ``+2 mod 10`` so that
+  physical ``(1, 1)`` lands on unified ``(18, 18)`` — preserving the
+  default single-tile coord the existing examples and ``Wormhole.__init__``
+  hardcode. The full 80-entry map is materialised eagerly so callers can
+  resolve any worker coord; tt-sim ``TensixTile`` instances are only built
+  on demand (see ``server/device.py:Device.ensure_tensix_tile``).
 
-Anything else (workers, eth, pcie, arc, router-only) is intentionally left
-out — the fabric falls back to ``NullCore`` (zero-fills reads, swallows
-writes), which has proven sufficient for tt-metal device-init traffic.
+Anything else (eth, pcie, arc, router-only) is intentionally left out — the
+fabric falls back to ``NullCore`` (zero-fills reads, swallows writes), which
+has proven sufficient for tt-metal device-init traffic.
 """
 
 import pathlib
@@ -68,9 +71,29 @@ def _build_dram_map(soc):
 
 
 def _build_tensix_map(soc):
-    """Pair the first ``len(Wormhole.TENSIX_UNIFIED_COORDS)`` workers with their tiles."""
+    """Pair every ``functional_workers`` entry with a unified coord.
+
+    The mapping is derived by indexing each axis into the unified worker
+    band: ``unified_x = 18 + x_idx`` (8 columns → 18..25) and
+    ``unified_y = (y_idx + 2) % 10 + 16``. The y offset of 2 puts
+    physical ``(1, 1)`` at unified ``(18, 18)``, which is the coord
+    ``Wormhole.TENSIX_UNIFIED_COORDS`` defaults to and every existing
+    single-tile example bakes in.
+    """
     workers = [_parse_coord(w) for w in soc["functional_workers"]]
-    return {workers[i]: u for i, u in enumerate(Wormhole.TENSIX_UNIFIED_COORDS)}
+    xs = sorted({x for x, _ in workers})
+    ys = sorted({y for _, y in workers})
+    x_to_idx = {x: i for i, x in enumerate(xs)}
+    y_to_idx = {y: i for i, y in enumerate(ys)}
+    coord_map = {
+        (x, y): (18 + x_to_idx[x], (y_to_idx[y] + 2) % len(ys) + 16)
+        for (x, y) in workers
+    }
+    assert coord_map.get((1, 1)) == Wormhole.TENSIX_UNIFIED_COORDS[0], (
+        f"physical (1, 1) maps to {coord_map.get((1, 1))!r}, "
+        f"expected {Wormhole.TENSIX_UNIFIED_COORDS[0]!r}"
+    )
+    return coord_map
 
 
 _SOC = _load_soc_descriptor()

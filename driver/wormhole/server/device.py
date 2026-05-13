@@ -116,29 +116,52 @@ class Device:
         self.cycles_per_poll = cycles_per_poll
         # unified_coord -> True if BRISC has been deasserted.
         self._brisc_running: dict[tuple[int, int], bool] = {}
-        self._install_noc_coord_aliases()
+        # Reverse-lookup table for lazy alias install on demand.
+        self._unified_to_physical = {u: p for p, u in TENSIX_COORD_MAP.items()}
+        # Eagerly install aliases for the DRAM tiles and any Tensix tiles
+        # Wormhole already built — additional Tensix tiles install their
+        # aliases through ``ensure_tensix_tile`` when materialised lazily.
+        for translated, unified in DRAM_COORD_MAP.items():
+            self._install_alias(translated, unified)
+        for unified in self.wormhole.tile_directory:
+            translated = self._unified_to_physical.get(unified)
+            if translated is not None:
+                self._install_alias(translated, unified)
 
-    def _install_noc_coord_aliases(self):
-        """Make tt-sim's NoC directory accept translated coords as aliases.
+    def _install_alias(self, translated, unified):
+        """Make tt-sim's NoC directory accept a translated coord as an alias.
 
         tt-sim's ``Wormhole`` only registers unified coords (16-25). But
-        tt-metal-over-the-wire writes the DRAM bank → NoC-XY mapping table to
-        L1 with each NoC's own logical coord — NoC 0 uses (0, 11) for DRAM
-        channel 0; NoC 1 uses the mirror (9, 0) because its origin is the
-        bottom-right tile. The kernel emits NoC traffic targeting those
+        tt-metal-over-the-wire writes the DRAM bank → NoC-XY mapping table
+        to L1 with each NoC's own logical coord — NoC 0 uses (0, 11) for
+        DRAM channel 0; NoC 1 uses the mirror (9, 0) because its origin is
+        the bottom-right tile. The kernel emits NoC traffic targeting those
         coords, which would otherwise miss the directory and abort.
 
         Both NoC 0 and NoC 1 share their directory by reference across all
-        NUIs on that NoC, so mutating once is enough.
+        NUIs on that NoC, so a single insert per NoC suffices.
         """
-        any_tile = next(iter(self.wormhole.tile_directory.values()))
-        coord_map = {**TENSIX_COORD_MAP, **DRAM_COORD_MAP}
+        target_tile = self.wormhole.tile_directory[unified]
         for noc_idx in (0, 1):
-            directory = any_tile.get_noc_nui(noc_idx).noc_directory
-            for translated, unified in coord_map.items():
-                key = translated if noc_idx == 0 else noc1_mirror(translated)
-                target_nui = self.wormhole.tile_directory[unified].get_noc_nui(noc_idx)
-                directory[key] = target_nui
+            key = translated if noc_idx == 0 else noc1_mirror(translated)
+            target_nui = target_tile.get_noc_nui(noc_idx)
+            target_nui.noc_directory[key] = target_nui
+
+    def ensure_tensix_tile(self, translated):
+        """Lazily materialise the TensixTile addressed by a translated coord.
+
+        Called by the fabric on first access to a Tensix worker coord that
+        isn't yet backed by a tt-sim tile. Builds the tile through
+        ``Wormhole.add_tensix_tile``, installs its translated-coord NoC
+        aliases on both NoCs, and registers it for BRISC-reset tracking.
+        Idempotent — returns the existing tile on repeat calls.
+        """
+        unified = TENSIX_COORD_MAP[translated]
+        if unified not in self.wormhole.tile_directory:
+            self.wormhole.add_tensix_tile(unified)
+            self._install_alias(translated, unified)
+        self.register_tensix(unified)
+        return unified
 
     def register_tensix(self, unified):
         self._brisc_running.setdefault(unified, False)

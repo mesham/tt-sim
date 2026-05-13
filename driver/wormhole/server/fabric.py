@@ -1,13 +1,9 @@
 """Routes (core, address, ...) protocol operations to the right Core instance.
 
-Unknown coordinates lazily allocate a NullCore — matches the observed behaviour
-of the zero-stub against tt-metal init traffic.
-
-TODO(future): multi-Tensix support. Today ``__main__.py`` registers exactly one
-``TensixCore`` from ``TENSIX_COORD_MAP``. Adding more entries here is mechanical
-but also requires extending ``Wormhole.__init__`` in
-``tt_sim/device/tt_device.py`` to instantiate additional ``TensixTile``s —
-currently it hard-codes one tile at unified (18, 18).
+Unknown coordinates lazily allocate a ``NullCore`` — matches the observed
+behaviour of the zero-stub against tt-metal init traffic for eth / pcie /
+arc / router-only endpoints and for worker coords the user didn't list in
+``TT_SIM_TENSIX_COORDS`` (see ``__main__.py``).
 """
 
 from .cores import NullCore

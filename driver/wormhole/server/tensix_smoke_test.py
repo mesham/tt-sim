@@ -70,10 +70,16 @@ def _build_server(addr, cycles_per_poll):
     # Wrap wormhole so we can count pumps.
     device.wormhole = _CountingWormhole(device.wormhole)
     fabric = Fabric()
-    for t, u in TENSIX_COORD_MAP.items():
-        fabric.register(t, TensixCore(device, u))
+    # Mirror __main__.py: DRAM eager (small, always touched); Tensix only
+    # the default worker (1, 1) — matching the single-tile bridge default
+    # since unlisted worker coords intentionally stay as NullCore (see
+    # the TT_SIM_TENSIX_COORDS env var in __main__.py).
     for t, u in DRAM_COORD_MAP.items():
         fabric.register(t, DramCore(device, u))
+    default_translated = (1, 1)
+    default_unified = TENSIX_COORD_MAP[default_translated]
+    device.ensure_tensix_tile(default_translated)
+    fabric.register(default_translated, TensixCore(device, default_unified))
     return fabric, device
 
 
@@ -176,7 +182,11 @@ def main():
             )
 
             # 4) Unmapped coord still works via lazy NullCore allocation.
-            sock.send(proto.build_msg(proto.CMD_READ, core=(2, 2), address=0x0, size=4))
+            # (5, 5) is router-only / unallocated in the SoC descriptor —
+            # outside the functional_workers grid (which skips x=0,5 and
+            # y=0,6) so the core_factory returns None and we fall through
+            # to NullCore.
+            sock.send(proto.build_msg(proto.CMD_READ, core=(5, 5), address=0x0, size=4))
             null_rr = proto.parse(sock.recv())
             assert null_rr.data[:4] == b"\x00\x00\x00\x00", (
                 f"unmapped coord should return zeros, got {null_rr.data.hex()}"
