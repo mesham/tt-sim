@@ -108,6 +108,28 @@ def main(argv=None):
             unified = TENSIX_COORD_MAP[physical]
             device.ensure_tensix_tile(physical)
             fabric.register(physical, TensixCore(device, unified))
+
+        # Surface the most common "silent zero-fill" config bug: host
+        # traffic addresses a functional_worker that wasn't pre-built via
+        # TT_SIM_TENSIX_COORDS. Without this warning the user sees
+        # mismatch output (or just zeros) with no hint that a missing
+        # coord was the cause.
+        _tensix_pool_set = set(tensix_pool)
+
+        def _warn_unmapped_worker(coord):
+            if coord in TENSIX_COORD_MAP and coord not in _tensix_pool_set:
+                print(
+                    f"[server] WARNING: wire traffic to functional worker "
+                    f"{coord[0]}-{coord[1]} (unified {TENSIX_COORD_MAP[coord]}) "
+                    f"— not in TT_SIM_TENSIX_COORDS, traffic silently "
+                    f"NullCore-swallowed. Add `{coord[0]}-{coord[1]}` to "
+                    f"TT_SIM_TENSIX_COORDS to materialise it.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        fabric.unmapped_callback = _warn_unmapped_worker
+
         enabled = enabled_diagnostic_names(diagnostics)
         print(
             f"[server] tt-sim Wormhole ready "

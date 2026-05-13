@@ -12,14 +12,34 @@ phase-1 zero-stub behaviour without rebuilding the simulator.
 
 
 class NullCore:
-    """Accepts all writes silently, returns zeros for all reads."""
+    """Accepts all writes silently, returns zeros for all reads.
 
-    def __init__(self, coord):
+    Used both for genuinely unmodelled tiles (eth / pcie / arc /
+    router-only) and as the fallback for worker coords the user didn't
+    list in ``TT_SIM_TENSIX_COORDS``. The optional
+    ``on_user_data_write`` hook fires the first time a write targets
+    L1 above 0x10000 — that's past the kernel firmware / init scratch
+    region, so traffic landing there means tt-metal is treating this
+    core as a real worker. ``__main__.py`` uses this to warn about the
+    most common silent-config bug.
+    """
+
+    USER_DATA_ADDR_THRESHOLD = 0x10000
+
+    def __init__(self, coord, on_user_data_write=None):
         self.coord = coord
         self.in_reset = True
+        self._on_user_data_write = on_user_data_write
+        self._user_write_seen = False
 
     def write(self, addr, data):
-        pass
+        if (
+            not self._user_write_seen
+            and self._on_user_data_write is not None
+            and addr >= NullCore.USER_DATA_ADDR_THRESHOLD
+        ):
+            self._user_write_seen = True
+            self._on_user_data_write(self.coord)
 
     def read(self, addr, size):
         return b"\x00" * size
