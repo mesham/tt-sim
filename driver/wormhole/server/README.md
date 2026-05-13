@@ -80,7 +80,7 @@ driver/wormhole/
     ├── protocol.py              # build_msg / parse — bytes at the boundary
     ├── fabric.py                # coord → Core dispatch, lazy NullCore
     ├── cores.py                 # NullCore / TensixCore / DramCore
-    ├── coords.py                # translated ↔ unified coord map
+    ├── coords.py                # SoC-descriptor parser: physical NoC ↔ unified coord
     ├── device.py                # Wormhole wrapper + cycle pumping + reset tracking
     ├── trace.py                 # line-oriented trace writer + parser
     ├── regen_flatbuf.sh         # regenerate Python bindings from the .fbs schema
@@ -185,11 +185,10 @@ PYTHONPATH=. python3 -m driver.wormhole.server.one_replay_test
 
 Search for `TODO(future)` in the package; the current ones:
 
-- `coords.py` — derive the translated↔unified map from `soc_descriptor.yaml`.
 - `cores.py:TensixCore.deassert_reset` — fan reset deassertion out to
   NCRISC/TRISC0/1/2 keyed off the launch message's `enables` field.
-- `cores.py:DramCore` — extend to all 18 DRAM channels enumerated in the SoC
-  descriptor.
-- `fabric.py` — multi-Tensix expansion (needs `Wormhole.__init__` to
-  instantiate more tiles).
+- `fabric.py` — multi-Tensix expansion. Today `Wormhole.TENSIX_UNIFIED_COORDS`
+  is a single-entry tuple; extending it (plus matching `TensixTile`
+  construction in `Wormhole.__init__`) is enough for `coords.py` to wire
+  additional workers automatically.
 - `transport.py` — `START` command handler (cmd=4); currently log-and-skip.

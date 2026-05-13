@@ -67,9 +67,9 @@ class DramCore:
     DRAM has no reset — assert/deassert are no-ops. Reads/writes still pump
     the device so BRISC progresses on background traffic to DRAM.
 
-    All 12 DRAM sub-endpoints from the Wormhole B0 SoC descriptor are now
-    registered (see ``coords.DRAM_COORD_MAP``), backed by 6 ``DRAMTile``
-    instances in ``Wormhole.__init__`` — one per physical controller.
+    All 12 DRAM sub-endpoints from the Wormhole B0 SoC descriptor are
+    registered (see ``coords.py``), backed by 6 ``DRAMTile`` instances in
+    ``Wormhole.__init__`` — one per physical controller.
     """
 
     def __init__(self, device, unified_coord):

@@ -114,7 +114,7 @@ class Wormhole(TT_Device):
     # (16-17, 16-18) band so they stay clear of the Tensix at (18, 18). Each
     # DRAMTile backs one of the 6 physical DRAM controllers; the two NoC
     # sub-endpoints serving the same controller alias to the same unified coord
-    # (see driver/wormhole/server/coords.py:DRAM_COORD_MAP).
+    # (see driver/wormhole/server/coords.py).
     DRAM_CHANNEL_UNIFIED_COORDS = (
         (16, 16),  # channel 0
         (17, 16),  # channel 1
@@ -123,6 +123,11 @@ class Wormhole(TT_Device):
         (16, 18),  # channel 4
         (17, 18),  # channel 5
     )
+
+    # Unified coords of each instantiated Tensix tile, in the same order as
+    # the SoC descriptor's ``functional_workers``. ``coords.py`` pairs entry i
+    # here with ``functional_workers[i]`` to build the wire-bridge translation.
+    TENSIX_UNIFIED_COORDS = ((18, 18),)
 
     def __init__(self, diagnostics=None):
         if diagnostics is None:
@@ -136,30 +141,36 @@ class Wormhole(TT_Device):
         # after tiles are constructed.
         enable_from_env()
         dram_tiles = [DRAMTile(x, y) for (x, y) in Wormhole.DRAM_CHANNEL_UNIFIED_COORDS]
-        tensix_tile = TensixTile(
-            18,
-            18,
-            diagnostics.reportBRISC(),
-            diagnostics.reportNCRISC(),
-            diagnostics.reportTRISC0(),
-            diagnostics.reportTRISC1(),
-            diagnostics.reportTRISC2(),
-            diagnostics.reportNoC0(),
-            diagnostics.reportNoC1(),
-            diagnostics.getTensixCoprocessorDiagnostics(),
-        )
+        tensix_tiles = [
+            TensixTile(
+                x,
+                y,
+                diagnostics.reportBRISC(),
+                diagnostics.reportNCRISC(),
+                diagnostics.reportTRISC0(),
+                diagnostics.reportTRISC1(),
+                diagnostics.reportTRISC2(),
+                diagnostics.reportNoC0(),
+                diagnostics.reportNoC1(),
+                diagnostics.getTensixCoprocessorDiagnostics(),
+            )
+            for (x, y) in Wormhole.TENSIX_UNIFIED_COORDS
+        ]
 
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
-        super().__init__(None, dram_tiles, [tensix_tile])
+        super().__init__(None, dram_tiles, tensix_tiles)
 
         enabled, threshold = deadlock_config_from_env()
+        # DeadlockDetector takes a single Tensix tile; revisit when
+        # multi-Tensix expansion (ROADMAP §A) lands.
+        primary_tensix = tensix_tiles[0]
         self.deadlock_detector = DeadlockDetector(
             threshold,
             enabled,
-            tensix_tile,
+            primary_tensix,
             dram_tiles,
-            tensix_tile.tensix_coprocessor,
+            primary_tensix.tensix_coprocessor,
         )
         self.clocks[0].on_tick = self.deadlock_detector.tick
         # Second call wires the state-dump writer now that we have tiles.

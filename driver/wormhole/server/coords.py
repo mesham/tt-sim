@@ -1,60 +1,91 @@
-"""Translated NoC coord -> tt-sim unified coord mapping.
+"""Translation tables derived from ``driver/wormhole/soc_descriptor.yaml``.
 
-Hand-rolled table covering the coordinates the supported tt-metal examples
-hit end-to-end:
+The wire bridge receives messages addressed to **physical NoC coordinates**
+(the workers / dram / eth grid positions enumerated in the SoC descriptor).
+tt-sim packs the same hardware into a **unified coordinate** band (16-25)
+defined by ``Wormhole`` in ``tt_sim/device/tt_device.py``. This module pairs
+the two by reading the descriptor — no hand-rolled tables.
 
-    translated (1, 1)  -> unified (18, 18)   # the single Tensix
+How the pairing works:
 
-DRAM: Wormhole B0 has 6 controllers, each reachable via 2 NoC sub-endpoints
-serving the same physical memory (the two halves are distinguished by the
-1 GB ``address_offset`` baked into the buffer address by the tt-metal
-allocator — see ``wormhole_b0_80_arch.yaml`` ``dram_views:``). Both
-sub-endpoints alias to the same simulator ``DRAMTile`` because that tile's
-two banks (at ``0x0`` and ``0x4000_0000``) already model the same controller's
-two halves.
+- **DRAM.** Each ``dram_views[i]`` entry pins a sub-endpoint of a controller
+  to the wire: ``dram[channel][worker_endpoint[0]]`` is the physical NoC
+  coord; ``Wormhole.DRAM_CHANNEL_UNIFIED_COORDS[channel]`` is the
+  ``DRAMTile`` that backs it. The two sub-endpoints serving the same
+  controller alias to the same ``DRAMTile`` — the 1 GB ``address_offset``
+  baked into the buffer address by the tt-metal allocator selects
+  ``ddr_bank_0`` vs ``ddr_bank_1`` inside that tile.
 
-For all other translated coords the fabric falls back to ``NullCore`` (which
-swallows writes and returns zeros) — proven sufficient to keep tt-metal's
-device-init loop happy.
+- **Tensix.** ``Wormhole.TENSIX_UNIFIED_COORDS[i]`` is paired with
+  ``functional_workers[i]``. With one Tensix tile today the map is just
+  ``(1, 1) → (18, 18)``; extending ``TENSIX_UNIFIED_COORDS`` plus the
+  matching ``TensixTile`` construction in ``Wormhole.__init__`` is all that
+  multi-Tensix expansion (ROADMAP §A) needs from this file.
 
-TODO(future): derive the full mapping from ``soc_descriptor.yaml``. The
-``functional_workers`` / ``dram`` / ``eth`` lists in the YAML are in
-non-translated NoC coords; the translation rules (TENSIX/DRAM routing
-through NoC translation tables, ranges 16-25 for unified coords) need
-spelling out in code before this can land. Multi-Tensix support also needs
-``Wormhole.__init__`` in ``tt_sim/device/tt_device.py`` extended — currently
-it still hard-codes a single ``TensixTile(18,18)``.
+Anything else (workers, eth, pcie, arc, router-only) is intentionally left
+out — the fabric falls back to ``NullCore`` (zero-fills reads, swallows
+writes), which has proven sufficient for tt-metal device-init traffic.
 """
 
-TENSIX_COORD_MAP = {(1, 1): (18, 18)}
+import pathlib
 
-# 12 DRAM banks (2 sub-endpoints per controller) -> 6 simulator DRAMTiles.
-# Pairs sharing a unified coord are the two NoC paths into the same physical
-# controller; the bank-offset that tt-metal bakes into the buffer address
-# selects ``ddr_bank_0`` vs ``ddr_bank_1`` inside that DRAMTile.
-DRAM_COORD_MAP = {
-    (0, 11): (16, 16),  # channel 0, address_offset 0
-    (0, 1): (16, 16),  # channel 0, address_offset 1 GB
-    (0, 5): (17, 16),  # channel 1, address_offset 0
-    (0, 7): (17, 16),  # channel 1, address_offset 1 GB
-    (5, 1): (16, 17),  # channel 2, address_offset 0
-    (5, 11): (16, 17),  # channel 2, address_offset 1 GB
-    (5, 2): (17, 17),  # channel 3, address_offset 0
-    (5, 9): (17, 17),  # channel 3, address_offset 1 GB
-    (5, 8): (16, 18),  # channel 4, address_offset 0
-    (5, 3): (16, 18),  # channel 4, address_offset 1 GB
-    (5, 5): (17, 18),  # channel 5, address_offset 0
-    (5, 7): (17, 18),  # channel 5, address_offset 1 GB
-}
+import yaml
 
-# Wormhole NoC grid is 10 cols x 12 rows. NoC 1's origin is the bottom-right
-# tile (data flows leftwards/upwards), so a NoC 0 logical coord (x, y) is the
-# same physical tile as NoC 1 logical (NOC_GRID_X - 1 - x, NOC_GRID_Y - 1 - y).
-# See tt-isa-documentation/WormholeB0/NoC/Coordinates.md.
-NOC_GRID_X = 10
-NOC_GRID_Y = 12
+from tt_sim.device.tt_device import Wormhole
+
+_SOC_DESCRIPTOR_PATH = (
+    pathlib.Path(__file__).resolve().parents[1] / "soc_descriptor.yaml"
+)
+
+
+def _parse_coord(spec):
+    """Parse a SoC-descriptor coord, accepting either ``"x-y"`` or ``[x, y]``."""
+    if isinstance(spec, (list, tuple)):
+        return (int(spec[0]), int(spec[1]))
+    x, y = spec.split("-")
+    return (int(x), int(y))
+
+
+def _load_soc_descriptor(path=_SOC_DESCRIPTOR_PATH):
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def _build_dram_map(soc):
+    """Pair every ``dram_views`` sub-endpoint with its ``DRAMTile`` unified coord."""
+    dram = [[_parse_coord(c) for c in ch] for ch in soc["dram"]]
+    coord_map = {}
+    for view in soc["dram_views"]:
+        channel = view["channel"]
+        n0, n1 = view["worker_endpoint"]
+        # Both NoCs use the same sub-index inside a worker's dram view; the
+        # descriptor would have to grow asymmetric routing for this to differ,
+        # which Wormhole B0 does not today.
+        assert n0 == n1, f"asymmetric worker_endpoint {view['worker_endpoint']}"
+        physical = dram[channel][n0]
+        coord_map[physical] = Wormhole.DRAM_CHANNEL_UNIFIED_COORDS[channel]
+    return coord_map
+
+
+def _build_tensix_map(soc):
+    """Pair the first ``len(Wormhole.TENSIX_UNIFIED_COORDS)`` workers with their tiles."""
+    workers = [_parse_coord(w) for w in soc["functional_workers"]]
+    return {workers[i]: u for i, u in enumerate(Wormhole.TENSIX_UNIFIED_COORDS)}
+
+
+_SOC = _load_soc_descriptor()
+TENSIX_COORD_MAP = _build_tensix_map(_SOC)
+DRAM_COORD_MAP = _build_dram_map(_SOC)
+
+# Wormhole NoC grid dimensions, sourced from the descriptor.
+NOC_GRID_X = int(_SOC["grid"]["x_size"])
+NOC_GRID_Y = int(_SOC["grid"]["y_size"])
 
 
 def noc1_mirror(noc0_coord):
+    """NoC 1 origin is the bottom-right tile, so its coords are mirrored.
+
+    See ``tt-isa-documentation/WormholeB0/NoC/Coordinates.md``.
+    """
     x, y = noc0_coord
     return (NOC_GRID_X - 1 - x, NOC_GRID_Y - 1 - y)
