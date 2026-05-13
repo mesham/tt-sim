@@ -99,16 +99,3 @@ def _build_tensix_map(soc):
 _SOC = _load_soc_descriptor()
 TENSIX_COORD_MAP = _build_tensix_map(_SOC)
 DRAM_COORD_MAP = _build_dram_map(_SOC)
-
-# Wormhole NoC grid dimensions, sourced from the descriptor.
-NOC_GRID_X = int(_SOC["grid"]["x_size"])
-NOC_GRID_Y = int(_SOC["grid"]["y_size"])
-
-
-def noc1_mirror(noc0_coord):
-    """NoC 1 origin is the bottom-right tile, so its coords are mirrored.
-
-    See ``tt-isa-documentation/WormholeB0/NoC/Coordinates.md``.
-    """
-    x, y = noc0_coord
-    return (NOC_GRID_X - 1 - x, NOC_GRID_Y - 1 - y)

@@ -55,14 +55,25 @@ class TT_Device(Device):
         ``add_tensix_tile`` for tiles materialised later. The NoC directories
         are shared by reference, so inserting once per NoC makes the new tile
         reachable from every existing NUI on the same NoC.
+
+        Both NoC directories key by the tile's canonical (SoC-physical
+        NoC 0) coord — kernels supply that coord on either NoC when
+        ``translation_id_enabled`` is set in the SoC descriptor. Extra
+        sub-endpoint aliases (e.g. DRAM channels with two worker-visible
+        endpoints) are registered as additional keys pointing at the same
+        NUI so kernels addressing either alias hit the right tile.
         """
         coord = tile.get_coord_pair()
         assert coord not in self.tile_directory, f"tile already registered at {coord}"
         self.tile_directory[coord] = tile
         nui0 = tile.get_noc_nui(0)
         nui1 = tile.get_noc_nui(1)
-        self.noc_0_directory[nui0.get_id_pair()] = nui0
-        self.noc_1_directory[nui1.get_id_pair()] = nui1
+        primary = nui0.get_id_pair()
+        self.noc_0_directory[primary] = nui0
+        self.noc_1_directory[primary] = nui1
+        for alias in getattr(tile, "noc_aliases", ()):
+            self.noc_0_directory[alias] = nui0
+            self.noc_1_directory[alias] = nui1
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
         self.clocks[0].add_clockables(tile.get_clocks())
@@ -162,11 +173,58 @@ class Wormhole(TT_Device):
         (17, 18),  # channel 5
     )
 
+    # Parallel to DRAM_CHANNEL_UNIFIED_COORDS — the two worker-side
+    # SoC-physical NoC 0 coords per channel (from ``dram_views`` in
+    # ``soc_descriptor.yaml``). Both sub-endpoints route to the same DRAMTile;
+    # the 1 GB address_offset baked into the buffer address selects which bank
+    # within. Used as the NUI's id_pair primary + as aliases the NoC directory
+    # registers so kernels addressing either sub-endpoint hit the right tile.
+    DRAM_CHANNEL_PHYSICAL_NOC0_COORDS = (
+        ((0, 11), (0, 1)),  # channel 0
+        ((0, 5), (0, 7)),  # channel 1
+        ((5, 1), (5, 11)),  # channel 2
+        ((5, 2), (5, 9)),  # channel 3
+        ((5, 8), (5, 3)),  # channel 4
+        ((5, 5), (5, 7)),  # channel 5
+    )
+
     # Unified coords of each instantiated Tensix tile, in the same order as
     # the SoC descriptor's ``functional_workers``. ``coords.py`` pairs entry i
     # here with ``functional_workers[i]`` to build the wire-bridge translation.
     # Overridable via the ``tensix_coords`` kwarg on ``Wormhole.__init__``.
     TENSIX_UNIFIED_COORDS = ((18, 18),)
+
+    # SoC descriptor `functional_workers` grid: x ∈ {1,2,3,4,6,7,8,9},
+    # y ∈ {1,2,3,4,5,7,8,9,10,11}. Used to map unified worker coord
+    # (18..25, 16..25) ↔ SoC-physical NoC 0 coord. The y offset of +2 (mod 10)
+    # in the unified→physical formula puts physical (1, 1) at unified (18, 18)
+    # — the historical default every single-tile example bakes in.
+    _TENSIX_PHYSICAL_X_VALUES = (1, 2, 3, 4, 6, 7, 8, 9)
+    _TENSIX_PHYSICAL_Y_VALUES = (1, 2, 3, 4, 5, 7, 8, 9, 10, 11)
+
+    @classmethod
+    def physical_noc0_coord_from_unified_worker(cls, unified):
+        """Map a unified worker coord (18..25, 16..25) to SoC-physical NoC 0.
+
+        The inverse of ``server/coords.py:_build_tensix_map`` — exposed in
+        tt-sim core so ``NUI``s can be keyed by canonical NoC 0 coord without
+        the Python-driver path having to round-trip through the wire bridge.
+        """
+        ux, uy = unified
+        if not (18 <= ux <= 25):
+            raise ValueError(
+                f"unified worker x={ux} out of band (18..25); coord {unified!r}"
+            )
+        if not (16 <= uy <= 25):
+            raise ValueError(
+                f"unified worker y={uy} out of band (16..25); coord {unified!r}"
+            )
+        x_idx = ux - 18
+        y_idx = (uy - 18) % 10
+        return (
+            cls._TENSIX_PHYSICAL_X_VALUES[x_idx],
+            cls._TENSIX_PHYSICAL_Y_VALUES[y_idx],
+        )
 
     def __init__(self, diagnostics=None, tensix_coords=None):
         if diagnostics is None:
@@ -184,7 +242,16 @@ class Wormhole(TT_Device):
         # so we call enable_from_env again at the bottom of __init__
         # after tiles are constructed.
         enable_from_env()
-        dram_tiles = [DRAMTile(x, y) for (x, y) in Wormhole.DRAM_CHANNEL_UNIFIED_COORDS]
+        dram_tiles = []
+        for unified, physicals in zip(
+            Wormhole.DRAM_CHANNEL_UNIFIED_COORDS,
+            Wormhole.DRAM_CHANNEL_PHYSICAL_NOC0_COORDS,
+        ):
+            primary = physicals[0]
+            aliases = physicals[1:]
+            dram_tiles.append(
+                DRAMTile(unified[0], unified[1], primary[0], primary[1], aliases)
+            )
         tensix_tiles = [self._build_tensix_tile(coord) for coord in tensix_coords]
 
         # For now don't provide any memory, in future this will be the memory
@@ -204,9 +271,12 @@ class Wormhole(TT_Device):
 
     def _build_tensix_tile(self, coord):
         x, y = coord
+        physical_x, physical_y = Wormhole.physical_noc0_coord_from_unified_worker(coord)
         return TensixTile(
             x,
             y,
+            physical_x,
+            physical_y,
             self.diagnostics.reportBRISC(),
             self.diagnostics.reportNCRISC(),
             self.diagnostics.reportTRISC0(),
@@ -286,10 +356,23 @@ class TTDeviceTile(DeviceTile, ABC):
                 f"(16 to 25), whereas ({coord_x}, {coord_y}) provided"
             )
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
+        # Extra SoC-physical NoC 0 coords that ``TT_Device`` registers as
+        # noc-directory aliases on both NoCs (so kernels addressing either
+        # sub-endpoint hit the same tile). Default empty; DRAMTile populates.
+        self.noc_aliases: tuple[tuple[int, int], ...] = ()
 
 
 class DRAMTile(TTDeviceTile):
-    def __init__(self, coord_x, coord_y, safe=True, snoop_addresses=None):
+    def __init__(
+        self,
+        coord_x,
+        coord_y,
+        physical_x,
+        physical_y,
+        physical_aliases=(),
+        safe=True,
+        snoop_addresses=None,
+    ):
         dram_tile_mem_map = MemoryMap()
 
         self.ddr_bank_0 = DRAM(10 * 1024 * 1024)
@@ -302,8 +385,8 @@ class DRAMTile(TTDeviceTile):
 
         self.dram_memory = TileMemory(dram_tile_mem_map, safe, snoop_addresses)
 
-        r0 = NUI(0, coord_x, coord_y, self.dram_memory)
-        r1 = NUI(1, coord_x, coord_y, self.dram_memory)
+        r0 = NUI(0, physical_x, physical_y, self.dram_memory)
+        r1 = NUI(1, physical_x, physical_y, self.dram_memory)
 
         # Register DRAM-tile NoC routers so their NoCEvents (request-phase
         # arrivals at the destination tile) appear in the trace.
@@ -312,6 +395,7 @@ class DRAMTile(TTDeviceTile):
         r1.unit_id = registry.register(0, coord_y, coord_x, Unit.NOC1).as_tuple()
 
         super().__init__(coord_x, coord_y, r0, r1)
+        self.noc_aliases = tuple(physical_aliases)
 
     def get_clocks(self):
         return [self.noc0_router, self.noc1_router]
@@ -335,6 +419,8 @@ class TensixTile(TTDeviceTile):
         self,
         coord_x,
         coord_y,
+        physical_x,
+        physical_y,
         brisc_snoop=False,
         ncrisc_snoop=False,
         trisc0_snoop=False,
@@ -375,11 +461,11 @@ class TensixTile(TTDeviceTile):
         )
         tensix_mem_map[tensix_config_range] = self.tensix_coprocessor_be_config
 
-        noc0_router = NUI(0, coord_x, coord_y, self.L1_mem, noc0_snoop)
+        noc0_router = NUI(0, physical_x, physical_y, self.L1_mem, noc0_snoop)
         noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
         tensix_mem_map[noc0_range] = noc0_router
 
-        noc1_router = NUI(1, coord_x, coord_y, self.L1_mem, noc1_snoop)
+        noc1_router = NUI(1, physical_x, physical_y, self.L1_mem, noc1_snoop)
         noc1_range = AddressRange(0xFFB30000, noc1_router.getSize())
         tensix_mem_map[noc1_range] = noc1_router
 

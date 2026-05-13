@@ -106,36 +106,35 @@ class TT_Metal:
         )
         self.parameter_file = None
 
+    # Twelve worker-visible DRAM sub-endpoints in SoC-physical NoC 0 coords —
+    # the order is ``dram_views[*].channel`` (6 channels × 2 sub-endpoints).
+    # Matches ``Wormhole.DRAM_CHANNEL_PHYSICAL_NOC0_COORDS`` in tt-sim core.
+    # Since tt-sim's NoC directory now keys by canonical NoC 0 physical on
+    # both NoCs (ROADMAP §C "Coord-system abstraction"), both halves of the
+    # bank-to-noc table get the *same* values — kernels reading from either
+    # NoC end up sending requests with the canonical coord, which both NoC
+    # directories accept.
+    # fmt: off
+    _DRAM_BANK_NOC0_COORDS = (
+        (0, 11), (0, 1),   # channel 0
+        (0, 5),  (0, 7),   # channel 1
+        (5, 1),  (5, 11),  # channel 2
+        (5, 2),  (5, 9),   # channel 3
+        (5, 8),  (5, 3),   # channel 4
+        (5, 5),  (5, 7),   # channel 5
+    )
+    # fmt: on
+
     def generate_dram_noc_mapping_transfers(self):
         base_addr = self.get_config_value("l1_memory_map", "MEM_BANK_TO_NOC_SCRATCH")
         data_transfers = []
-        # Noc 0
-        data_transfers.append([base_addr + 0, 2, 0x0])
-        data_transfers.append([base_addr + 2, 2, 0x0])
-        data_transfers.append([base_addr + 4, 2, ((5 << 10) + (0 << 4))])
-        data_transfers.append([base_addr + 6, 2, ((5 << 10) + (0 << 4))])
-        data_transfers.append([base_addr + 8, 2, ((0 << 10) + (5 << 4))])
-        data_transfers.append([base_addr + 10, 2, ((0 << 10) + (5 << 4))])
-        data_transfers.append([base_addr + 12, 2, ((2 << 10) + (5 << 4))])
-        data_transfers.append([base_addr + 14, 2, ((2 << 10) + (5 << 4))])
-        data_transfers.append([base_addr + 16, 2, ((3 << 10) + (5 << 4))])
-        data_transfers.append([base_addr + 18, 2, ((3 << 10) + (5 << 4))])
-        data_transfers.append([base_addr + 20, 2, ((5 << 10) + (5 << 4))])
-        data_transfers.append([base_addr + 22, 2, ((5 << 10) + (5 << 4))])
-        # Noc 1
-        data_transfers.append([base_addr + 24, 2, ((11 << 10) + (9 << 4))])
-        data_transfers.append([base_addr + 26, 2, ((11 << 10) + (9 << 4))])
-        data_transfers.append([base_addr + 28, 2, ((6 << 10) + (9 << 4))])
-        data_transfers.append([base_addr + 30, 2, ((6 << 10) + (9 << 4))])
-        data_transfers.append([base_addr + 32, 2, ((4 << 10) + (9 << 4))])
-        data_transfers.append([base_addr + 34, 2, ((4 << 10) + (9 << 4))])
-        data_transfers.append([base_addr + 36, 2, ((2 << 10) + (4 << 4))])
-        data_transfers.append([base_addr + 38, 2, ((2 << 10) + (4 << 4))])
-        data_transfers.append([base_addr + 40, 2, ((8 << 10) + (4 << 4))])
-        data_transfers.append([base_addr + 42, 2, ((8 << 10) + (4 << 4))])
-        data_transfers.append([base_addr + 44, 2, ((5 << 10) + (4 << 4))])
-        data_transfers.append([base_addr + 46, 2, ((5 << 10) + (4 << 4))])
-
+        # Each table half is 12 entries × 2 bytes = 24 bytes. The y/x bit
+        # packing matches what tt-sim's ``RequestInitiator`` extracts from
+        # ``target_addr_mid``: x at bits 4..10, y at bits 10..16.
+        for noc_half in range(2):
+            for i, (x, y) in enumerate(TT_Metal._DRAM_BANK_NOC0_COORDS):
+                offset = noc_half * 24 + i * 2
+                data_transfers.append([base_addr + offset, 2, (y << 10) | (x << 4)])
         return data_transfers
 
     def load_kernel(self, parameter_file):

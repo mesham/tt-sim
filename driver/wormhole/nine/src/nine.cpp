@@ -136,22 +136,18 @@ int main(int argc, char** argv) {
         core_a,
         {DATA_SIZE, CHUNK_SIZE});
 
-    // Tile A: sender (NCRISC). Routes via NOC 0 deliberately — tt-metal's
-    // `get_noc_addr(x, y, addr)` macros bake the kernel-supplied coord
-    // straight into the NoC packet (DYNAMIC_NOC_X is identity, the hardware
-    // translation table fixes things up on real silicon with
-    // translation_id_enabled). tt-sim doesn't model NoC translation, so on
-    // NoC 1 the destination directory key is the noc1-mirror and the kernel
-    // misses. NOC 0 keeps the kernel-supplied (x, y) consistent with the
-    // tile's NoC 0 id_pair. Tracked under ROADMAP §C "Coord-system
-    // abstraction".
+    // Tile A: sender (NCRISC, NOC 1 default). tt-sim now keys NoC directories
+    // by the canonical SoC-physical NoC 0 coord on both NoCs (ROADMAP §C
+    // "Coord-system abstraction"), so kernels can use the same coord on
+    // either NoC — matching real Wormhole behaviour under
+    // ``translation_id_enabled``.
     KernelHandle sender_kernel_id = CreateKernel(
         program,
         "kernels/dataflow/sender_kernel.cpp",
         core_a,
         DataMovementConfig{
             .processor = DataMovementProcessor::RISCV_1,
-            .noc = NOC::NOC_0});
+            .noc = NOC::RISCV_1_default});
     CoreCoord core_b_phys = device->worker_core_from_logical_core(core_b);
     SetRuntimeArgs(
         program,
