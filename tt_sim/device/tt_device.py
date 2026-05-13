@@ -58,10 +58,17 @@ class TT_Device(Device):
 
         Both NoC directories key by the tile's canonical (SoC-physical
         NoC 0) coord — kernels supply that coord on either NoC when
-        ``translation_id_enabled`` is set in the SoC descriptor. Extra
-        sub-endpoint aliases (e.g. DRAM channels with two worker-visible
-        endpoints) are registered as additional keys pointing at the same
-        NUI so kernels addressing either alias hit the right tile.
+        translation is enabled (which is how tt-metal kernels under our
+        ``driver/wormhole/<n>/`` tree address tiles). Real tt-metal's
+        bank-to-noc table (consulted by ``TensorAccessor`` and friends in
+        the canonical ``programming_examples/``) instead writes per-NoC
+        *mirror* coords directly into NoC 1's half of the table — so on
+        NoC 1 the kernel actually emits the noc1-mirror of the canonical
+        coord. We register both forms as keys: canonical on both NoCs,
+        plus the noc1-mirror as an additional alias on NoC 1 so the
+        bank-table flow resolves the right tile. Extra sub-endpoint
+        aliases (e.g. DRAM channels with two worker-visible endpoints)
+        get the same canonical + noc1-mirror pair of keys.
         """
         coord = tile.get_coord_pair()
         assert coord not in self.tile_directory, f"tile already registered at {coord}"
@@ -71,13 +78,25 @@ class TT_Device(Device):
         primary = nui0.get_id_pair()
         self.noc_0_directory[primary] = nui0
         self.noc_1_directory[primary] = nui1
+        self.noc_1_directory[self._noc1_mirror(primary)] = nui1
         for alias in getattr(tile, "noc_aliases", ()):
             self.noc_0_directory[alias] = nui0
             self.noc_1_directory[alias] = nui1
+            self.noc_1_directory[self._noc1_mirror(alias)] = nui1
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
         self.clocks[0].add_clockables(tile.get_clocks())
         self.resets[0].add_resetables(tile.get_resets())
+
+    @staticmethod
+    def _noc1_mirror(canonical):
+        """Mirror a canonical (NoC 0 physical) coord to NoC 1's coord space.
+
+        NoC 1's origin is the bottom-right tile of the grid, so the same
+        physical tile lives at ``(GRID_X-1-x, GRID_Y-1-y)`` on NoC 1. We use
+        the Wormhole grid dims (10 × 12) that ``NUI`` carries.
+        """
+        return (NUI.NOC_GRID_X - 1 - canonical[0], NUI.NOC_GRID_Y - 1 - canonical[1])
 
     def register_tensix_tile(self, tile):
         """Register a TensixTile constructed after device __init__.

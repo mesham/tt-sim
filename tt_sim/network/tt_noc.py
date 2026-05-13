@@ -176,7 +176,7 @@ class NUI(MemMapable, Clockable):
 
             if self.nui.snoop:
                 print(
-                    f"[NoC {self.nui.id_pair}]: Issue read request id {read_req.request_id} to NUI "
+                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue read request id {read_req.request_id} to NUI "
                     f"{(target_tile_x, target_tile_y)}, reading at {hex(read_req.tgt_address)} of size "
                     f"{hex(read_req.data_length_bytes)} and store in {hex(self.ret_addr_low)}"
                 )
@@ -235,7 +235,7 @@ class NUI(MemMapable, Clockable):
 
             if self.nui.snoop:
                 print(
-                    f"[NoC {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
+                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
                     f"{(ret_tile_x, ret_tile_y)}, writing from {hex(self.target_addr_low)} "
                     f" to {hex(write_req.tgt_address)} of size {hex(write_req.data_length_bytes)}"
                 )
@@ -313,7 +313,7 @@ class NUI(MemMapable, Clockable):
 
             if self.nui.snoop:
                 print(
-                    f"[NoC {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
+                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue write request id {write_req.request_id} to NUI "
                     f"{(ret_tile_x, ret_tile_y)}, writing from {hex(self.target_addr_low)} to "
                     f"{hex(write_req.tgt_address)} of size {hex(write_req.data_length_bytes)}"
                 )
@@ -381,7 +381,7 @@ class NUI(MemMapable, Clockable):
 
             if self.nui.snoop:
                 print(
-                    f"[NoC {self.nui.id_pair}]: Issue atomic-add id {atomic_req.request_id} "
+                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue atomic-add id {atomic_req.request_id} "
                     f"to NUI {(target_tile_x, target_tile_y)} at "
                     f"{hex(atomic_req.tgt_address)} += {self.at_data}"
                 )
@@ -561,7 +561,7 @@ class NUI(MemMapable, Clockable):
             if noc_request.action == NUI.NoCDataRequest.DataRequestAction.READ:
                 if self.snoop:
                     print(
-                        f"[NoC {self.id_pair}]: Read request id {noc_request.request_id} from NUI "
+                        f"[NoC{self.noc_number} {self.id_pair}]: Read request id {noc_request.request_id} from NUI "
                         f"{noc_request.source} at {hex(noc_request.tgt_address)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
@@ -608,7 +608,7 @@ class NUI(MemMapable, Clockable):
                 # as NIU_SLV_NONPOSTED_WR_REQ_RECEIVED is incremented only for the last flit
                 if self.snoop:
                     print(
-                        f"[NoC {self.id_pair}]: Write request id {noc_request.request_id} from NUI "
+                        f"[NoC{self.noc_number} {self.id_pair}]: Write request id {noc_request.request_id} from NUI "
                         f"{noc_request.source} to {hex(noc_request.tgt_address)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
@@ -660,7 +660,7 @@ class NUI(MemMapable, Clockable):
 
                 if self.snoop:
                     print(
-                        f"[NoC {self.id_pair}]: Read response id {noc_request.request_id} from NUI "
+                        f"[NoC{self.noc_number} {self.id_pair}]: Read response id {noc_request.request_id} from NUI "
                         f"{noc_request.source}, stored in to {hex(tgt_addr)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
@@ -696,7 +696,7 @@ class NUI(MemMapable, Clockable):
             elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.ATOMIC:
                 if self.snoop:
                     print(
-                        f"[NoC {self.id_pair}]: Atomic-add id "
+                        f"[NoC{self.noc_number} {self.id_pair}]: Atomic-add id "
                         f"{noc_request.request_id} from NUI {noc_request.source} "
                         f"at {hex(noc_request.tgt_address)} += {noc_request.at_data}"
                     )
@@ -750,7 +750,7 @@ class NUI(MemMapable, Clockable):
             ):
                 if self.snoop:
                     print(
-                        f"[NoC {self.id_pair}]: Atomic response id "
+                        f"[NoC{self.noc_number} {self.id_pair}]: Atomic response id "
                         f"{noc_request.request_id} from NUI {noc_request.source}"
                     )
                 self._publish_noc_event(
@@ -773,7 +773,7 @@ class NUI(MemMapable, Clockable):
             elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.ACK:
                 if self.snoop:
                     print(
-                        f"[NoC {self.id_pair}]: Write acknowledge to response id "
+                        f"[NoC{self.noc_number} {self.id_pair}]: Write acknowledge to response id "
                         f"{noc_request.request_id} from NUI {noc_request.source}"
                     )
                 self._publish_noc_event(
@@ -840,7 +840,7 @@ class NUI(MemMapable, Clockable):
             self.noc_directory[coord] = dest
             if self.snoop:
                 print(
-                    f"[NoC {self.id_pair}]: null-route installed for unknown destination {coord}"
+                    f"[NoC{self.noc_number} {self.id_pair}]: null-route installed for unknown destination {coord}"
                 )
         return dest
 
