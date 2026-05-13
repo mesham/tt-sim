@@ -322,14 +322,122 @@ class NUI(MemMapable, Clockable):
             noc_cmd_wr_be = extract_bits(self.ctrl, 1, 2)
             noc_cmd_wr_inline = extract_bits(self.ctrl, 1, 3)
             noc_cmd_resp_marked = extract_bits(self.ctrl, 1, 4)
+            noc_cmd_brcst_packet = extract_bits(self.ctrl, 1, 5)
 
-            if noc_cmd_wr_inline:
+            if noc_cmd_brcst_packet:
+                # noc_async_write_multicast / noc_semaphore_set_multicast.
+                # Real hardware fans the packet out internally; we model it
+                # as N back-to-back unicast writes, one per destination in
+                # the (x_start..x_end, y_start..y_end) rectangle.
+                self.handle_multicast_write_transfer(
+                    noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
+                )
+            elif noc_cmd_wr_inline:
                 self.handle_inline_write_transfer(
                     noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
                 )
             else:
                 self.handle_none_inline_write(
                     noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
+                )
+
+        def handle_multicast_write_transfer(
+            self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
+        ):
+            """Multicast write — fan one packet out to every tile in the
+            destination rectangle.
+
+            For multicast packets, ``ret_addr_mid`` encodes a rectangle
+            instead of a single coord:
+
+            * bits [4:10]   = x_end
+            * bits [10:16]  = y_end
+            * bits [16:22]  = x_start
+            * bits [22:28]  = y_start
+
+            (This is the bit packing of ``NOC_MULTICAST_ADDR`` in
+            ``tt_metal/hw/inc/wormhole/noc/noc_parameters.h``.) On real
+            silicon the NoC routes a single packet that the routers split
+            along the rectangle; tt-sim transmits one ``WRITE`` request
+            per destination. The master's ``REQS_OUTSTANDING`` counter
+            (and the per-trid FIFO) is bumped by ``num_dests`` so the
+            kernel's ``noc_async_write_barrier`` waits for all N ACKs.
+            """
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
+
+            x_end = extract_bits(self.ret_addr_mid, 6, 4)
+            y_end = extract_bits(self.ret_addr_mid, 6, 10)
+            x_start = extract_bits(self.ret_addr_mid, 6, 16)
+            y_start = extract_bits(self.ret_addr_mid, 6, 22)
+
+            destinations = [
+                (x, y)
+                for x in range(x_start, x_end + 1)
+                for y in range(y_start, y_end + 1)
+            ]
+            num_dests = len(destinations)
+
+            if noc_cmd_resp_marked:
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
+                    + noc_packet_transaction_id,
+                    num_dests,
+                )
+                self.nui.nui_counters.increment(
+                    [
+                        NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_STARTED,
+                        NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_REQ_SENT,
+                    ]
+                )
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_NONPOSTED_WR_DATA_WORD_SENT,
+                    self.at_len_be / 4,
+                )
+            else:
+                self.nui.nui_counters.increment(
+                    [
+                        NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_STARTED,
+                        NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_REQ_SENT,
+                    ]
+                )
+                self.nui.nui_counters.increment(
+                    NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_DATA_WORD_SENT,
+                    self.at_len_be / 4,
+                )
+
+            self.nui.nui_counters.increment(
+                NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED
+            )
+            self.cmd_ctrl = 0
+
+            data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
+
+            for dest_coord in destinations:
+                destination = self.nui.resolve_destination(dest_coord)
+                write_req = NUI.NoCDataRequest(
+                    self.ret_addr_low,
+                    NUI.NoCDataRequest.DataRequestAction.WRITE,
+                    self.at_len_be,
+                    self.nui.id_pair,
+                    noc_packet_transaction_id,
+                    data,
+                    bool(noc_cmd_resp_marked),
+                )
+                # Each destination's ACK pops one entry from the FIFO.
+                self.nui.add_outstanding_noc_request(
+                    noc_packet_transaction_id,
+                    (noc_cmd_wr_inline, noc_cmd_resp_marked),
+                )
+                destination.transmit(write_req)
+
+            if self.nui.snoop:
+                print(
+                    f"[NoC{self.nui.noc_number} {self.nui.id_pair}]: Issue "
+                    f"multicast write id {noc_packet_transaction_id} to "
+                    f"rectangle ({x_start}, {y_start})..({x_end}, {y_end}) "
+                    f"= {num_dests} dests, writing from "
+                    f"{hex(self.target_addr_low)} to {hex(self.ret_addr_low)} "
+                    f"of size {hex(self.at_len_be)}"
                 )
 
         def handle_atomic_transfer(self):
