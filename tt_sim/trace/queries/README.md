@@ -1,4 +1,16 @@
-# Perfetto SQL queries for tt-sim traces
+# Canned queries for tt-sim traces
+
+Two query sets:
+
+- **Perfetto** (below) — SQL run in the **Query (SQL)** tab of
+  `ui.perfetto.dev` against a loaded `*.json.gz` trace.
+- **DuckDB / Parquet** — see [`counters.sql`](counters.sql) for queries
+  against the Parquet dataset produced by
+  `TT_SIM_TRACE_COUNTERS=<dir>`. Run with
+  `duckdb -c ".read tt_sim/trace/queries/counters.sql"` or copy into
+  any DuckDB / pandas / Polars session.
+
+## Perfetto SQL queries for tt-sim traces
 
 After loading a `*.json.gz` trace into [ui.perfetto.dev](https://ui.perfetto.dev),
 open the **Query (SQL)** tab and run any of the queries below. The

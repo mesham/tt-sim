@@ -12,6 +12,7 @@ dependencies = [
     "json",
     "pynng",
     "flatbuffers",
+    "pyarrow",
 ]
 
 dynamic = [ "version" ]

@@ -1,0 +1,123 @@
+"""Counter aggregator — derives running performance counters from the
+event stream and emits :class:`CounterSnapshot` events at a configurable
+cadence.
+
+Subscribes to every category except :class:`EventCategory.COUNTER`
+(would recurse). Only :class:`InstrEvent` drives flush decisions —
+it's the highest-frequency event with a real ``cycle`` field; the
+other categories either share the cycle field or carry no clock
+context (``cycle == 0``).
+
+Counters today are event-derived (instruction counts, dispatch
+breakdowns, NoC throughput, mem op counts per region). As §I cycle
+accuracy lands, more counters can be added without changing the
+aggregator's external contract.
+"""
+
+from collections import defaultdict
+
+from tt_sim.trace.bus import get_bus
+from tt_sim.trace.events import (
+    ComputeEvent,
+    CounterSnapshot,
+    DispatchEvent,
+    EventCategory,
+    InstrEvent,
+    LifecycleEvent,
+    MemEvent,
+    NoCEvent,
+    SyncEvent,
+)
+
+DEFAULT_FLUSH_INTERVAL_CYCLES = 100
+
+
+class CounterAggregator:
+    def __init__(self, flush_interval_cycles: int = DEFAULT_FLUSH_INTERVAL_CYCLES):
+        self._interval = max(1, flush_interval_cycles)
+        self._last_flush_cycle = 0
+        self._max_cycle = 0
+        self._kernel_id = 0
+        self._counters: dict[tuple[tuple, str], int] = defaultdict(int)
+        bus = get_bus()
+        bus.subscribe(EventCategory.INSTR, self._on_instr)
+        bus.subscribe(EventCategory.DISPATCH, self._on_dispatch)
+        bus.subscribe(EventCategory.COMPUTE, self._on_compute)
+        bus.subscribe(EventCategory.NOC, self._on_noc)
+        bus.subscribe(EventCategory.MEM, self._on_mem)
+        bus.subscribe(EventCategory.SYNC, self._on_sync)
+        bus.subscribe(EventCategory.LIFECYCLE, self._on_lifecycle)
+
+    def _on_instr(self, e: InstrEvent):
+        self._counters[(e.unit_id, "instr_retired")] += 1
+        if e.stalled:
+            self._counters[(e.unit_id, "instr_stalled")] += 1
+        self._maybe_flush(e.cycle)
+
+    def _on_dispatch(self, e: DispatchEvent):
+        self._counters[(e.unit_id, "dispatch_total")] += 1
+        self._counters[(e.unit_id, f"dispatch_to_{e.target_unit}")] += 1
+        self._maybe_flush(e.cycle)
+
+    def _on_compute(self, e: ComputeEvent):
+        self._counters[(e.unit_id, "compute_ops")] += 1
+        self._maybe_flush(e.cycle)
+
+    def _on_noc(self, e: NoCEvent):
+        self._counters[(e.unit_id, f"noc_{e.phase}_{e.txn_type}")] += 1
+        if e.phase == "response":
+            self._counters[(e.unit_id, "noc_bytes_total")] += e.size_bytes
+        self._maybe_flush(e.cycle)
+
+    def _on_mem(self, e: MemEvent):
+        # MemEvents carry cycle=0; they accumulate into whatever the
+        # most-recent real-cycle bucket is.
+        self._counters[(e.unit_id, f"mem_{e.op}_{e.region}")] += 1
+        self._counters[(e.unit_id, f"mem_bytes_{e.op}")] += e.size
+
+    def _on_sync(self, e: SyncEvent):
+        self._counters[(e.unit_id, f"sync_{e.kind}")] += 1
+
+    def _on_lifecycle(self, e: LifecycleEvent):
+        # Always flush at lifecycle boundaries; bump kernel_id at each
+        # kernel_start so the next snapshots are attributed to the new
+        # kernel.
+        if e.kind == "kernel_start":
+            self._flush(self._max_cycle)
+            self._kernel_id += 1
+        else:
+            self._flush(self._max_cycle)
+
+    def _maybe_flush(self, cycle: int):
+        if cycle > self._max_cycle:
+            self._max_cycle = cycle
+        if cycle - self._last_flush_cycle >= self._interval:
+            self._flush(cycle)
+
+    def _flush(self, cycle: int):
+        if not self._counters:
+            return
+        bus = get_bus()
+        if not bus.is_enabled(EventCategory.COUNTER):
+            # Still reset so we don't accumulate unboundedly when the
+            # category is disabled.
+            self._counters.clear()
+            self._last_flush_cycle = cycle
+            return
+        for (unit_id, name), value in self._counters.items():
+            bus.publish(
+                CounterSnapshot(
+                    cycle=cycle,
+                    unit_id=unit_id,
+                    counter_name=name,
+                    value=value,
+                    kernel_id=self._kernel_id,
+                )
+            )
+        self._counters.clear()
+        self._last_flush_cycle = cycle
+
+    def flush(self):
+        """Force a flush of any pending counters at the current max
+        cycle. Called by the writer at close-time."""
+        self._flush(self._max_cycle)

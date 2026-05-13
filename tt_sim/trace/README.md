@@ -8,9 +8,9 @@ Event Format for visual timelines on `ui.perfetto.dev`. Later phases
 add Spike commitlog, Parquet counters, Cachegrind, and LCOV writers
 as additional consumers of the same bus. tt-sim does not build viewers.
 
-Phase 1 (event bus + taxonomy) and Phase 2 (Perfetto writer) of
-[ROADMAP §H](../../ROADMAP.md) are complete; read that for the full
-plan.
+Phases 1–4 of [ROADMAP §H](../../ROADMAP.md) are complete (event bus,
+Perfetto, Spike-compatible commitlog, Parquet/DuckDB counters); read
+that for the full plan.
 
 ## Quick start
 
@@ -20,10 +20,12 @@ cd driver/wormhole
 TT_SIM_TRACE=/tmp/one.jsonl python3 one/one.py             # JSONL for ad-hoc
 TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz python3 one/one.py  # visual timeline
 TT_SIM_TRACE_COMMITLOG=/tmp/one/ python3 one/one.py        # Spike-compat per-core
-# All three can be enabled at once — writers subscribe independently:
+TT_SIM_TRACE_COUNTERS=/tmp/one-counters/ python3 one/one.py # Parquet counters / DuckDB
+# All four can be enabled at once — writers subscribe independently:
 TT_SIM_TRACE=/tmp/one.jsonl \
 TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz \
 TT_SIM_TRACE_COMMITLOG=/tmp/one/ \
+TT_SIM_TRACE_COUNTERS=/tmp/one-counters/ \
     python3 one/one.py
 ```
 
@@ -116,6 +118,37 @@ Tensix / NoC MMIO that Spike has no concept of, so a diff there would
 diverge on the first such access — useful for catching specific RV
 mistakes (e.g. when the §B RV pipeline modelling lands), not for
 end-to-end kernel correctness.
+
+### Performance counters (Parquet)
+
+`TT_SIM_TRACE_COUNTERS=<dir>` writes a Hive-partitioned Parquet
+dataset (`chip=N/kernel_id=N/*.parquet`) of running performance
+counters derived from the existing event stream — per-unit instruction
+counts, per-target dispatch breakdowns, NoC bytes, memory op counts
+per region (L1 / MMIO), and sync-event tallies. Flush cadence is
+configurable via `TT_SIM_TRACE_COUNTERS_INTERVAL=N` (default: every
+100 cycles). Kernel boundaries always force a flush and bump
+`kernel_id` so per-kernel deltas are easy to query.
+
+DuckDB reads the dataset directly:
+
+```bash
+duckdb -c "
+  SELECT counter_name, SUM(value) AS total
+  FROM read_parquet('/tmp/counters/**/*.parquet', hive_partitioning=true)
+  GROUP BY counter_name
+  ORDER BY total DESC
+  LIMIT 10
+"
+```
+
+Canned queries (top counters by total, per-unit instruction counts,
+kernel-to-kernel diff, NoC hotspot detection) live in
+[`queries/counters.sql`](queries/counters.sql).
+
+As §I cycle accuracy lands, more counters (FPU stall reasons, packer
+back-pressure, L1 bank conflicts) drop into the same long-format
+schema with no consumer changes needed.
 
 ## Programmatic use
 

@@ -19,6 +19,7 @@ class EventCategory(Enum):
     SYNC = "sync"
     DISPATCH = "dispatch"
     LIFECYCLE = "lifecycle"
+    COUNTER = "counter"
 
 
 class Unit(Enum):
@@ -117,3 +118,18 @@ class SyncEvent(Event):
     CATEGORY: ClassVar[EventCategory] = EventCategory.SYNC
     kind: str  # "mailbox_send" / "mailbox_recv" / "ttsync_signal" / "ttsync_wait"
     detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CounterSnapshot(Event):
+    """Periodic performance-counter sample, emitted by CounterAggregator.
+
+    Long-format row — one CounterSnapshot per (unit, counter_name) at
+    each flush boundary. Parquet writer materialises columns from
+    unit_id (chip/core_y/core_x/unit) for SQL convenience.
+    """
+
+    CATEGORY: ClassVar[EventCategory] = EventCategory.COUNTER
+    counter_name: str
+    value: int
+    kernel_id: int = 0
