@@ -8,10 +8,10 @@ Event Format for visual timelines on `ui.perfetto.dev`. Later phases
 add Spike commitlog, Parquet counters, Cachegrind, and LCOV writers
 as additional consumers of the same bus. tt-sim does not build viewers.
 
-Phases 1–6 of [ROADMAP §H](../../ROADMAP.md) are complete (event bus,
-Perfetto, Spike-compatible commitlog, Parquet/DuckDB counters, NoC
-Parquet + Cachegrind memory trace, LCOV source-level attribution);
-read that for the full plan.
+All seven phases of [ROADMAP §H](../../ROADMAP.md) are complete (event
+bus, Perfetto, Spike-compatible commitlog, Parquet/DuckDB counters, NoC
+Parquet + Cachegrind memory trace, LCOV source-level attribution,
+invariants + state-dump diff testing); read that for the full plan.
 
 ## Quick start
 
@@ -246,6 +246,72 @@ Caveats:
   L1 space). The index uses last-load-wins; list kernel ELFs after
   firmware ELFs in `TT_SIM_TRACE_LCOV_ELFS` if you want kernel
   attribution to take priority on collisions.
+
+### Architectural invariants
+
+`TT_SIM_TRACE_INVARIANTS=<file>` enables a small set of seed
+invariants that check architectural rules over the event stream and
+write violations to a JSONL file. Each invariant subscribes to one
+or more event categories and is implemented as a subclass of
+`Invariant`. Today's catalogue:
+
+- `PCAlignmentInvariant` — RV32 instructions must be 4-byte aligned.
+- `MemAlignmentInvariant` — power-of-two-sized memory accesses align
+  to their size.
+- `LifecycleOrderInvariant` — `firmware_launch_done` must follow
+  `firmware_launch_start`; same for `kernel_start`/`kernel_done`.
+- `NoCRequestResponseInvariant` — every NoC response pairs with a
+  prior outstanding request for the same `(txn_id, src, dst,
+  txn_type)`.
+
+By default violations are collected and logged at exit. Set
+`TT_SIM_TRACE_INVARIANTS_STRICT=1` to additionally raise on the first
+violation (useful in CI where you want a hard fail). All 8 wormhole
+examples run cleanly today (zero violations), so the seed catalogue
+also serves as a regression guard — any new violations on these
+workloads indicate a real bug.
+
+Adding a new invariant: subclass `Invariant`, declare which
+`EventCategory` lanes to subscribe to in `CATEGORIES`, implement
+`check(event) -> str | None`, return a message on violation. Add to
+`DEFAULT_INVARIANTS` to have `enable_from_env` pick it up.
+
+### State dumps and diff testing
+
+`TT_SIM_TRACE_STATE_DUMP=<dir>` captures a JSON snapshot of relevant
+device state at every lifecycle boundary (firmware/kernel
+start/done). Today the snapshot includes per-baby-core register
+files (32 GPRs + PC) and per-NUI counter sets. Schema is versioned
+(`schema_version: 1`).
+
+Compare two dumps with the included tool:
+
+```bash
+python3 -m tt_sim.trace.diff_state \
+    /tmp/before/kernel_done_0003.json \
+    /tmp/after/kernel_done_0003.json
+```
+
+Clean runs report `state matches`; divergences pinpoint the first
+field that differs (e.g.
+`cores.18_18_BRISC.gpr[4]: 0xc8000000 != 0xa868`) and exit non-zero.
+The typical workflow: capture a dump on a known-good run, capture
+another on a candidate commit/branch, diff. Catches regressions that
+perturb counter trajectories or L1 contents without changing visible
+kernel results.
+
+Cross-simulator diffing (vs `libttsim.so`) is documented in §H Phase
+7 as the strategic goal; the orchestration to drive both simulators
+on the same kernel isn't wired here — generate dumps via your own
+script and feed both files to `diff_state`.
+
+**Caveat on determinism:** state at "kernel_done" is non-deterministic
+between runs today because the host-side polling loop in
+`wormhole_driver.py` checks every 100 cycles, so `kernel_done` fires
+somewhere in a 100-cycle window after the kernel actually completes.
+For byte-exact regression checks, dump at a deterministic
+sub-checkpoint instead (or tighten the polling loop). The diff tool
+itself is exact; the noise is in *when* the snapshot is taken.
 
 ## Programmatic use
 
@@ -518,18 +584,22 @@ LCOV (genhtml / Codecov / VS Code).
 
 ## What's not modelled yet
 
-Phase 1 is complete (ROADMAP §H Phase 1). Items deliberately deferred
-out of scope:
+All seven phases are complete. The major items deliberately deferred
+out of scope across phases:
 
 - **Register-file accesses** as `MemEvent` — multiple per instruction
-  with low marginal signal vs. trace volume cost. The `InstrEvent`'s
-  raw `instruction` field already lets consumers decode register
-  operands.
+  with low marginal signal vs. trace volume cost.
 - **Multi-Tensix / multi-chip identity.** `chip_id` is hard-coded to
   `0`; `core_y/core_x` are the unified tile coords for the single
   Tensix at `(18, 18)`. Falls out of ROADMAP §A multi-Tensix.
+- **Cycle-accurate fields:** Perfetto durations (`dur = 1`
+  synthetic), NoC per-transaction `vc` / `issue_cycle` /
+  `arrival_cycle`, FPU/SFPU stalled-cycles-with-reason counters,
+  packer back-pressure, L1 bank conflicts. All gated on ROADMAP §I.
 - **Inline-print migration.** Events are additive today — existing
   `if self.snoop: print(...)` sites still run alongside bus publish.
-  Routing `DeviceTileDiagnostics` flags through bus subscribers is a
-  separate refactor, queued until Phase 2's Perfetto writer reveals
-  what data consumers actually need.
+- **VS Code coverage extension** and **end-to-end `libttsim.so`
+  differential testing** — both ROADMAP-flagged as out of scope for
+  the initial Phase 6/7 cuts.
+- **Property tests with `hypothesis`** — would need a kernel
+  generator to drive useful workloads, which is a separate project.

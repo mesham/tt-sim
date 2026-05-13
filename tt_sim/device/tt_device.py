@@ -128,9 +128,12 @@ class Wormhole(TT_Device):
         if diagnostics is None:
             # All off by default if no diagnostics provided
             diagnostics = DeviceTileDiagnostics()
-        # Opt-in structured tracing: if TT_SIM_TRACE=<path> is set in the
-        # environment, the bus is enabled and a JSONLLogger is registered
-        # before any device-construction events are missed.
+        # Opt-in structured tracing: if TT_SIM_TRACE*=<...> is set in the
+        # environment, the bus is enabled and writers are registered
+        # before any device-construction events are missed. The
+        # state-dump writer specifically needs a device reference,
+        # so we call enable_from_env again at the bottom of __init__
+        # after tiles are constructed.
         enable_from_env()
         dram_tiles = [DRAMTile(x, y) for (x, y) in Wormhole.DRAM_CHANNEL_UNIFIED_COORDS]
         tensix_tile = TensixTile(
@@ -159,6 +162,8 @@ class Wormhole(TT_Device):
             tensix_tile.tensix_coprocessor,
         )
         self.clocks[0].on_tick = self.deadlock_detector.tick
+        # Second call wires the state-dump writer now that we have tiles.
+        enable_from_env(wormhole=self)
 
 
 class DeviceTileDiagnostics:

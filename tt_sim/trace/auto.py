@@ -27,6 +27,14 @@ Supported env vars (all optional, all default-off):
 - ``TT_SIM_TRACE_LCOV`` — LCOV coverage-format writer for source-level
   attribution. Requires ``TT_SIM_TRACE_LCOV_ELFS`` (comma-separated
   paths to ELFs with DWARF info) to map PCs back to source lines.
+- ``TT_SIM_TRACE_INVARIANTS`` — write violations of the seed
+  architectural invariants (PC alignment, mem alignment, lifecycle
+  ordering, NoC request/response pairing) to a JSONL file. Set
+  ``TT_SIM_TRACE_INVARIANTS_STRICT=1`` to additionally raise on
+  first violation.
+- ``TT_SIM_TRACE_STATE_DUMP`` — capture a JSON state dump at each
+  lifecycle boundary (kernel start/done) for cross-run / cross-sim
+  diffing via ``python3 -m tt_sim.trace.diff_state``.
 
 All writers can be enabled simultaneously; they subscribe to disjoint
 event handling and write independent outputs.
@@ -39,6 +47,8 @@ from tt_sim.trace.bus import get_bus
 from tt_sim.trace.counters import DEFAULT_FLUSH_INTERVAL_CYCLES, CounterAggregator
 from tt_sim.trace.dwarf import DwarfIndex
 from tt_sim.trace.ids import get_registry
+from tt_sim.trace.invariants import InvariantRunner
+from tt_sim.trace.state_dump import StateDumpWriter
 from tt_sim.trace.writers.cachegrind import MemoryTraceWriter
 from tt_sim.trace.writers.commitlog import SpikeCommitlogWriter
 from tt_sim.trace.writers.jsonl import JSONLLogger
@@ -55,16 +65,20 @@ _COUNTERS_WRITER: ParquetCounterWriter | None = None
 _NOC_WRITER: NoCParquetWriter | None = None
 _MEMORY_WRITER: MemoryTraceWriter | None = None
 _LCOV_WRITER: LCOVWriter | None = None
+_INVARIANTS: InvariantRunner | None = None
+_STATE_WRITER: StateDumpWriter | None = None
 
 
-def enable_from_env() -> None:
+def enable_from_env(wormhole=None) -> None:
     """Wire up any tracing writers configured via environment variables.
 
     Idempotent — calling more than once is safe; only the first call
-    per process actually opens files.
+    per process actually opens files. The ``wormhole`` argument is
+    used by the state-dump writer (which needs to poll device state at
+    lifecycle boundaries); other writers don't need it.
     """
     global _JSONL, _PERFETTO, _COMMITLOG, _COUNTERS_AGG, _COUNTERS_WRITER
-    global _NOC_WRITER, _MEMORY_WRITER, _LCOV_WRITER
+    global _NOC_WRITER, _MEMORY_WRITER, _LCOV_WRITER, _INVARIANTS, _STATE_WRITER
     jsonl_path = os.environ.get("TT_SIM_TRACE")
     perfetto_path = os.environ.get("TT_SIM_TRACE_PERFETTO")
     commitlog_path = os.environ.get("TT_SIM_TRACE_COMMITLOG")
@@ -72,6 +86,8 @@ def enable_from_env() -> None:
     noc_path = os.environ.get("TT_SIM_TRACE_NOC")
     memory_path = os.environ.get("TT_SIM_TRACE_MEMORY")
     lcov_path = os.environ.get("TT_SIM_TRACE_LCOV")
+    invariants_path = os.environ.get("TT_SIM_TRACE_INVARIANTS")
+    state_dump_path = os.environ.get("TT_SIM_TRACE_STATE_DUMP")
 
     if not any(
         (
@@ -82,6 +98,8 @@ def enable_from_env() -> None:
             noc_path,
             memory_path,
             lcov_path,
+            invariants_path,
+            state_dump_path,
         )
     ):
         return
@@ -123,6 +141,18 @@ def enable_from_env() -> None:
             index.load(elf_path)
         _LCOV_WRITER = LCOVWriter(lcov_path, index)
 
+    if invariants_path and _INVARIANTS is None:
+        strict = os.environ.get("TT_SIM_TRACE_INVARIANTS_STRICT", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        _INVARIANTS = InvariantRunner(strict=strict)
+
+    if state_dump_path and _STATE_WRITER is None and wormhole is not None:
+        _STATE_WRITER = StateDumpWriter(state_dump_path, wormhole)
+
     if not getattr(enable_from_env, "_atexit_registered", False):
 
         def _on_exit():
@@ -144,6 +174,16 @@ def enable_from_env() -> None:
                 _MEMORY_WRITER.close()
             if _LCOV_WRITER is not None:
                 _LCOV_WRITER.close()
+            if _INVARIANTS is not None and invariants_path is not None:
+                n = _INVARIANTS.report(invariants_path)
+                if n > 0:
+                    print(
+                        f"[tt-sim trace] {n} invariant violation(s) recorded "
+                        f"to {invariants_path}",
+                        file=__import__("sys").stderr,
+                    )
+            if _STATE_WRITER is not None:
+                _STATE_WRITER.close()
 
         atexit.register(_on_exit)
         enable_from_env._atexit_registered = True  # type: ignore[attr-defined]
