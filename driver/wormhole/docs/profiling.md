@@ -1,22 +1,28 @@
 # Profiling and analysing tt-sim runs
 
 This is a walkthrough of every profiling and tracing output the
-simulator can produce, from the point of view of a user running a
-tt-metal program against tt-sim. By the end you'll know what each
-output gives you, how to enable it, and which downstream tool to feed
-it into.
+simulator can produce. The intended user is someone running a real
+tt-metal program against tt-sim — i.e. a C++ binary built against
+`libtt_metal` that, instead of touching silicon, is transparently
+backed by the simulator. By the end you'll know what each output
+gives you, how to enable it, and which downstream tool to feed it
+into.
 
 The flow assumed throughout:
 
 ```
-tt-metal CLI ──spawns──▶ UMD ──spawns──▶ driver/wormhole/run.sh
-                                              │
-                                              ▼
-                                  python3 -m driver.wormhole.server
-                                              │
-                                              ▼
-                                       Wormhole device
-                                       (reads TT_SIM_TRACE_* env vars)
+your tt-metal binary  ──▶  UMD's tt_SimulationDevice
+                                   │
+                                   │ spawns (when TT_METAL_SIMULATOR is set)
+                                   ▼
+                          driver/wormhole/run.sh
+                                   │
+                                   ▼
+                       python3 -m driver.wormhole.server
+                                   │
+                                   ▼
+                            Wormhole device
+                            (reads TT_SIM_TRACE_* env vars)
 ```
 
 Every profiling control is a `TT_SIM_TRACE_*` environment variable.
@@ -27,44 +33,75 @@ reads the variables and wires up the right writers automatically.
 You don't change any code; you don't change any tt-metal source; the
 runtime opts in based on environment alone.
 
-Throughout this tutorial we'll use the bundled standalone example
-`driver/wormhole/one/one.py` (BRISC reads two vectors from DRAM, adds
-them, writes the result back) as the concrete subject. **The same env
-vars apply identically when your driver is a real tt-metal program
-invoked via UMD** — the simulator's entry point is the same in both
-cases.
+The concrete worked example throughout is
+`driver/wormhole/one/src/one` — a tiny tt-metal program that has
+BRISC read two vectors from DRAM, add them elementwise, and write
+the result back. Build it once with `make`; everything else is just
+env vars and shell.
 
 ## Prerequisites
 
+You need three things in place once before profiling any run:
+
+1. **`tt-metal` built and exported as `TT_METAL_HOME`** — the C++
+   example links against `libtt_metal`. See the mesham fork of
+   tt-metal for build instructions.
+
+2. **`tt-sim` installed.** From the repo root:
+
+   ```bash
+   pip install -e .       # pulls numpy, pyyaml, pynng, flatbuffers,
+                          # pyarrow, pyelftools
+   ```
+
+   The tracing infrastructure is always compiled in. With no env
+   vars set, the bus disables itself and each publish call costs
+   ~88 ns (a single attribute check) — leaving tracing off has
+   essentially zero runtime impact.
+
+3. **The `./one` binary built:**
+
+   ```bash
+   cd driver/wormhole/one/src
+   make
+   # produces ./one
+   ```
+
+For the downstream tools that consume each output, you'll also want
+(only the ones you'll actually use):
+
+- `duckdb` — SQL over Parquet outputs.
+- `kcachegrind` (or `qcachegrind`) — memory hotspot viewer.
+- `genhtml` (from the `lcov` package) — source-coverage HTML report.
+- `spike` — only if you want to do RISC-V differential testing.
+
+## Pointing the binary at the simulator
+
+UMD inside tt-metal decides between real silicon and a simulator
+based on the `TT_METAL_SIMULATOR` env var. If set to a directory
+containing a `run.sh` (the tt-sim repo provides one at
+`driver/wormhole/run.sh`), UMD spawns it and connects over an `nng`
+IPC socket instead of opening a PCIe device. tt-metal then drives
+the simulator with exactly the same API calls it would use against
+silicon.
+
+So the always-set-once-per-shell prep is:
+
 ```bash
-cd ~/tt-sim
-pip install -e .                   # picks up numpy, yaml, pynng,
-                                   # flatbuffers, pyarrow, pyelftools
+export TT_METAL_HOME=$HOME/tt-metal              # wherever you built tt-metal
+export TT_METAL_SIMULATOR=$HOME/tt-sim/driver/wormhole
 ```
 
-The tracing infrastructure is always compiled in. With no env vars
-set, the bus disables itself and each publish call costs ~88 ns (a
-single attribute check) — leaving tracing off has essentially zero
-runtime impact.
-
-For some downstream tools you'll also want, in addition:
-
-- `duckdb` — for SQL-querying the Parquet outputs.
-- `kcachegrind` (or `qcachegrind`) — for the memory hotspot viewer.
-- `genhtml` (from the `lcov` package) — for the source-coverage HTML
-  report.
-- `spike` — the official Spike RISC-V simulator, only if you want to
-  do RISC-V differential testing.
-
-The simulator works fine with none of them installed; you only need
-each one for the matching output format.
+The first tells the example where the tt-metal headers/libraries
+live (used at build time); the second tells UMD to spawn tt-sim at
+run time. After this, every run of `./one` is simulator-backed.
 
 ## A 30-second smoke test
 
 Enable everything at once and run the example:
 
 ```bash
-cd driver/wormhole
+cd driver/wormhole/one/src
 
 TT_SIM_TRACE=/tmp/out/events.jsonl \
 TT_SIM_TRACE_PERFETTO=/tmp/out/timeline.json.gz \
@@ -74,18 +111,19 @@ TT_SIM_TRACE_NOC=/tmp/out/noc/ \
 TT_SIM_TRACE_MEMORY=/tmp/out/memory.callgrind \
 TT_SIM_TRACE_INVARIANTS=/tmp/out/invariants.jsonl \
 TT_SIM_TRACE_STATE_DUMP=/tmp/out/states/ \
-python3 one/one.py
+./one
 ```
 
-After ~5 seconds the example finishes; `ls /tmp/out` shows eight
-outputs (a JSONL file, a gzipped Perfetto trace, a commitlog
-directory, three Parquet datasets, a Callgrind text file, an
-invariants log, and a state-dump directory). The rest of this
-tutorial unpacks what each one is for.
+After the kernel finishes, `ls /tmp/out` shows eight outputs (a
+JSONL file, a gzipped Perfetto trace, a commitlog directory, three
+Parquet datasets, a Callgrind text file, an invariants log, and a
+state-dump directory). The rest of this tutorial unpacks what each
+one is for.
 
-In the **tt-metal flow**, the same `export` commands precede whatever
-tt-metal binary spawns the simulator — exactly the same env vars
-flow through UMD into run.sh into the simulator.
+The same env vars apply to **any** tt-metal binary — `./one` here is
+just convenient because it's small and predictable. Substitute your
+own binary at the end of the env-var block and everything else stays
+the same.
 
 ---
 
@@ -104,7 +142,7 @@ from this same stream. Best for ad-hoc queries with `jq` /
 **Enable:**
 
 ```bash
-TT_SIM_TRACE=/tmp/out/events.jsonl python3 one/one.py
+TT_SIM_TRACE=/tmp/out/events.jsonl ./one
 ```
 
 Produces two files:
@@ -139,7 +177,7 @@ print(Counter(brisc).most_common(5))
 ```
 
 The JSONL file scales linearly with the run length — a typical
-single-kernel example is ~10 MB.
+single-kernel run is ~10 MB.
 
 ---
 
@@ -160,7 +198,7 @@ visually.
 **Enable:**
 
 ```bash
-TT_SIM_TRACE_PERFETTO=/tmp/out/timeline.json.gz python3 one/one.py
+TT_SIM_TRACE_PERFETTO=/tmp/out/timeline.json.gz ./one
 ```
 
 The `.gz` extension turns on gzip compression automatically; Perfetto
@@ -215,7 +253,7 @@ bug; both outcomes are valuable to surface.
 **Enable:**
 
 ```bash
-TT_SIM_TRACE_COMMITLOG=/tmp/out/commitlog/ python3 one/one.py
+TT_SIM_TRACE_COMMITLOG=/tmp/out/commitlog/ ./one
 ```
 
 **Analyse:**
@@ -262,7 +300,7 @@ performance analysis — DuckDB reads it directly without any ETL.
 **Enable:**
 
 ```bash
-TT_SIM_TRACE_COUNTERS=/tmp/out/counters/ python3 one/one.py
+TT_SIM_TRACE_COUNTERS=/tmp/out/counters/ ./one
 
 # Optional: tighten the flush cadence (default 100 cycles)
 TT_SIM_TRACE_COUNTERS_INTERVAL=50 ...
@@ -324,7 +362,7 @@ queries.
 **Enable:**
 
 ```bash
-TT_SIM_TRACE_NOC=/tmp/out/noc/ python3 one/one.py
+TT_SIM_TRACE_NOC=/tmp/out/noc/ ./one
 ```
 
 **Analyse:**
@@ -364,7 +402,7 @@ instructions touch memory hottest. Accesses without a PC
 **Enable:**
 
 ```bash
-TT_SIM_TRACE_MEMORY=/tmp/out/memory.callgrind python3 one/one.py
+TT_SIM_TRACE_MEMORY=/tmp/out/memory.callgrind ./one
 ```
 
 **Analyse:**
@@ -403,7 +441,7 @@ lines stand out as a heatmap on your kernel source view.
 ```bash
 TT_SIM_TRACE_LCOV=/tmp/out/coverage.lcov \
 TT_SIM_TRACE_LCOV_ELFS=build/brisc_kernel.elf,build/trisc0_compute.elf \
-python3 one/one.py
+./one
 ```
 
 `TT_SIM_TRACE_LCOV_ELFS` is a comma-separated list of ELFs whose
@@ -436,10 +474,8 @@ lines.
   symlink the source tree to match, or post-process the LCOV file
   with `sed`.
 - Stripped ELFs (no `-g`) load cleanly but contribute zero
-  attribution. Build kernels you care about with debug info.
-- The firmware bundled in `driver/wormhole/firmware/` is stripped,
-  so to use this for tt-metal flows you'll want to rebuild
-  firmware/kernels with `-g` from the tt-metal fork.
+  attribution. Build kernels you care about with debug info — the
+  tt-metal Makefile defaults already include `-g` for kernel ELFs.
 
 ---
 
@@ -452,23 +488,24 @@ ordering, NoC request/response pairing.
 
 **Why:** Catches "the kernel produced the right output but did
 something nominally illegal along the way" — broken alignment,
-orphan NoC responses, etc. All 8 bundled examples run cleanly with
-zero violations, so a non-empty violations log on those workloads is
-a real regression.
+orphan NoC responses, etc. A non-empty violations log on a
+known-good workload is a real regression.
 
 **Enable:**
 
 ```bash
-TT_SIM_TRACE_INVARIANTS=/tmp/out/invariants.jsonl python3 one/one.py
+TT_SIM_TRACE_INVARIANTS=/tmp/out/invariants.jsonl ./one
 ```
 
 For CI use, set `TT_SIM_TRACE_INVARIANTS_STRICT=1` to additionally
-raise on the first violation (the simulator will exit non-zero):
+raise on the first violation (the simulator will exit non-zero,
+which causes UMD to surface the error back to your tt-metal
+program):
 
 ```bash
 TT_SIM_TRACE_INVARIANTS=/tmp/out/invariants.jsonl \
 TT_SIM_TRACE_INVARIANTS_STRICT=1 \
-python3 one/one.py
+./one
 ```
 
 **Analyse:**
@@ -505,13 +542,14 @@ versioned (`schema_version: 1`).
    divergence is either a regression or a real semantic change.
 2. **Cross-simulator differential testing** — the long-term goal is
    to drive both tt-sim and `libttsim.so` (the official closed
-   simulator) on the same kernel and diff state dumps. tt-sim ships
-   the comparison primitive today; you provide the orchestration.
+   simulator) on the same tt-metal binary and diff state dumps.
+   tt-sim ships the comparison primitive today; you provide the
+   orchestration (swap `TT_METAL_SIMULATOR` accordingly).
 
 **Enable:**
 
 ```bash
-TT_SIM_TRACE_STATE_DUMP=/tmp/out/states/ python3 one/one.py
+TT_SIM_TRACE_STATE_DUMP=/tmp/out/states/ ./one
 
 ls /tmp/out/states/
 # firmware_launch_start_0000.json
@@ -535,13 +573,13 @@ python3 -m tt_sim.trace.diff_state \
 ```
 
 **Caveat on determinism:** State at `kernel_done` is non-deterministic
-between runs today because the host polling loop in
-`wormhole_driver.py` runs `wormhole.run(100)` then checks the
-go-message mailbox — so `kernel_done` fires within a 100-cycle
-window after the kernel actually completes, and BRISC may execute
-slightly different firmware-loop bytes in that window. For
-byte-exact regression comparison either dump at a deterministic
-sub-checkpoint or tighten the polling loop. The diff tool itself is
+between runs today because the host polling loop on the simulator
+side runs `wormhole.run(N)` then checks the go-message mailbox — so
+`kernel_done` fires within an N-cycle window after the kernel
+actually completes, and BRISC may execute slightly different
+firmware-loop bytes in that window. For byte-exact regression
+comparison either dump at a deterministic sub-checkpoint or tighten
+the polling loop (`TT_SIM_CYCLES_PER_POLL`). The diff tool itself is
 exact; the noise is in *when* the snapshot is taken.
 
 ---
@@ -558,12 +596,15 @@ A useful "everything on" wrapper script for routine use:
 
 ```bash
 #!/usr/bin/env bash
-# profile-run.sh — run a tt-metal binary (or example) under tt-sim
-# with every profiling writer enabled.
+# profile-run.sh — run a tt-metal binary under tt-sim with every
+# profiling writer enabled.
 set -euo pipefail
 OUT="${1:-/tmp/tt-sim-out}"
 shift || true   # remaining args are the binary to run
 mkdir -p "$OUT"
+
+# Required: where tt-sim's run.sh lives, so UMD spawns the simulator.
+: "${TT_METAL_SIMULATOR:?TT_METAL_SIMULATOR must point at driver/wormhole}"
 
 export TT_SIM_TRACE="$OUT/events.jsonl"
 export TT_SIM_TRACE_PERFETTO="$OUT/timeline.json.gz"
@@ -581,32 +622,18 @@ echo "profiling artefacts → $OUT"
 exec "$@"
 ```
 
-Used as e.g. `./profile-run.sh /tmp/myrun python3 one/one.py` or
+Use it as e.g. `./profile-run.sh /tmp/myrun ./one` or
 `./profile-run.sh /tmp/myrun ./build/programming_examples/loopback`.
 
-## How this works under tt-metal
+## How this works under the covers
 
 `Wormhole.__init__` (in `tt_sim/device/tt_device.py`) is the only
-place that reads any of these environment variables, via the
-`enable_from_env()` helper from `tt_sim/trace/auto.py`. That helper
-runs whether the simulator is constructed from a standalone driver
-script (`python3 one/one.py`) or from the wire-bridge server
-(`driver/wormhole/server/__main__.py`) that UMD spawns for tt-metal.
-So **the env vars apply identically** in both flows:
-
-```
-# Standalone:
-TT_SIM_TRACE_PERFETTO=/tmp/timeline.json.gz python3 one/one.py
-
-# tt-metal:
-TT_SIM_TRACE_PERFETTO=/tmp/timeline.json.gz ./build/programming_examples/loopback
-```
-
-The tt-metal binary spawns UMD, UMD reads env then spawns
-`driver/wormhole/run.sh`, run.sh execs the server, the server
-constructs Wormhole, and `enable_from_env` picks up the same
-variables. No code changes are needed in tt-metal, no changes to your
-program — just env vars.
+place that reads any of the `TT_SIM_TRACE_*` environment variables,
+via the `enable_from_env()` helper in `tt_sim/trace/auto.py`. That
+constructor runs once when UMD spawns `run.sh` and `run.sh` execs
+the server, well before your tt-metal binary issues its first wire
+message. By the time the kernel starts retiring instructions, every
+writer you asked for is already subscribed to the bus.
 
 The diagnostic flags from
 [`driver/wormhole/README.md#enabling-diagnostics-in-the-tt-metal-flow`](../README.md#enabling-diagnostics-in-the-tt-metal-flow)
@@ -615,6 +642,17 @@ Tensix coprocessor diagnostics, etc.) compose freely with the
 `TT_SIM_TRACE_*` env vars — they're orthogonal: diagnostics print
 human-readable text to stderr, trace writers produce machine-readable
 artefacts on disk.
+
+A few server-level env vars also apply (defined in
+`driver/wormhole/run.sh`):
+
+| Env var | Purpose |
+| --- | --- |
+| `TT_SIM_RECORD=<path>` | Record every wire message to a file for later replay. |
+| `TT_SIM_LOG_PROTOCOL=1` | Print every wire message to stderr. |
+| `TT_SIM_CYCLES_PER_POLL=N` | Cycles to run after each wire message (default 100). Tighten for more deterministic state dumps; loosen for faster runs. |
+
+These compose with the trace env vars too.
 
 ## Picking the right output
 
@@ -643,3 +681,6 @@ A rough mapping from question to writer:
   gated counters, multi-chip identity, etc.).
 - [`tt_sim/trace/queries/`](../../../tt_sim/trace/queries/) — canned
   SQL queries for both the Perfetto and Parquet outputs.
+- [`driver/wormhole/server/README.md`](../server/README.md) — how the
+  wire-bridge server, UMD hand-off, and `TT_METAL_SIMULATOR`
+  spawning fit together.

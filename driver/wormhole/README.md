@@ -76,12 +76,13 @@ Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V co
 
 ### Structured tracing and profiling
 
-The diagnostics above are stderr text for human reading. For machine-readable output suitable for downstream tooling, the simulator ships nine `TT_SIM_TRACE_*` env vars that produce JSONL, Perfetto, Spike-compatible commitlogs, Parquet, Cachegrind, LCOV, invariant violations, and state dumps. All work identically in the tt-metal-driven flow (UMD inherits env, run.sh inherits, simulator inherits).
+The diagnostics above are stderr text for human reading. For machine-readable output suitable for downstream tooling, the simulator ships nine `TT_SIM_TRACE_*` env vars that produce JSONL, Perfetto, Spike-compatible commitlogs, Parquet, Cachegrind, LCOV, invariant violations, and state dumps. All work in the tt-metal-driven flow (UMD inherits env, `run.sh` inherits, simulator inherits) — point your tt-metal binary at this directory via `TT_METAL_SIMULATOR=` and set whichever `TT_SIM_TRACE_*` vars you want before running.
 
-**A full walkthrough for users — what each output is, how to enable it, which downstream tool reads it — lives in [docs/profiling.md](docs/profiling.md).** Quick taster:
+**A full walkthrough for users — what each output is, how to enable it, which downstream tool reads it — lives in [docs/profiling.md](docs/profiling.md).** Quick taster, from `driver/wormhole/one/src/` after `make`:
 
 ```bash
-TT_SIM_TRACE_PERFETTO=/tmp/run.json.gz python3 one/one.py
+export TT_METAL_SIMULATOR=$HOME/tt-sim/driver/wormhole
+TT_SIM_TRACE_PERFETTO=/tmp/run.json.gz ./one
 # Drag /tmp/run.json.gz onto https://ui.perfetto.dev
 ```
 
