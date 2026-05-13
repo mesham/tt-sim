@@ -123,7 +123,7 @@ class NUI(MemMapable, Clockable):
             self.nui = nui
 
         def handle_read_transfer(self):
-            noc_packet_transaction_id = extract_bits(self.packet_tag, 10, 4)
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
 
             self.nui.nui_counters.increment(
                 [
@@ -167,7 +167,7 @@ class NUI(MemMapable, Clockable):
         def handle_inline_write_transfer(
             self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
         ):
-            noc_packet_transaction_id = extract_bits(self.packet_tag, 10, 4)
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
 
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
@@ -226,7 +226,7 @@ class NUI(MemMapable, Clockable):
         def handle_none_inline_write(
             self, noc_cmd_wr_be, noc_cmd_wr_inline, noc_cmd_resp_marked
         ):
-            noc_packet_transaction_id = extract_bits(self.packet_tag, 10, 4)
+            noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
 
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
@@ -319,8 +319,11 @@ class NUI(MemMapable, Clockable):
             if self.cmd_ctrl == 1:
                 # Following the protocol at
                 # https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/NoC/Counters.md
-                # however this is different as completing immediately
-                # TODO need to hook up with NOC_PACKET_TRANSACTION_ID
+                # however this is different as completing immediately.
+                # NOC_PACKET_TRANSACTION_ID is extracted from packet_tag in
+                # handle_read_transfer / handle_*_write below; per-trid
+                # outstanding requests are tracked as FIFO queues in
+                # ``NUI.outstanding_noc_requests``.
 
                 """
                 If reading, then target has remote memory and ret has the local memory. If writing
@@ -460,7 +463,10 @@ class NUI(MemMapable, Clockable):
         return self.id_pair
 
     def add_outstanding_noc_request(self, request_id, tgt_addr):
-        self.outstanding_noc_requests[request_id] = tgt_addr
+        # Per-trid FIFO: tt-metal kernels (e.g. DRAM-sharded reads) issue
+        # multiple requests with the same transaction ID before any barrier,
+        # so we cannot keep a single slot per trid.
+        self.outstanding_noc_requests.setdefault(request_id, []).append(tgt_addr)
 
     def clock_tick(self, cycle_num):
         for noc_request in self.noc_requests_to_handle:
@@ -562,7 +568,7 @@ class NUI(MemMapable, Clockable):
             elif (
                 noc_request.action == NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ
             ):
-                tgt_addr = self.outstanding_noc_requests[noc_request.request_id]
+                tgt_addr = self.outstanding_noc_requests[noc_request.request_id].pop(0)
                 self.attached_memory.write(tgt_addr, noc_request.data)
 
                 if self.snoop:
@@ -615,9 +621,9 @@ class NUI(MemMapable, Clockable):
                     NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
                     + noc_request.request_id
                 )
-                noc_cmd_resp_marked = self.outstanding_noc_requests[
+                _noc_cmd_wr_inline, noc_cmd_resp_marked = self.outstanding_noc_requests[
                     noc_request.request_id
-                ][1]
+                ].pop(0)
                 if noc_cmd_resp_marked:
                     self.nui_counters.increment(
                         NUI.NUICounters.CounterNames.NIU_MST_WR_ACK_RECEIVED
@@ -626,7 +632,6 @@ class NUI(MemMapable, Clockable):
                         NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
                         + noc_request.request_id
                     )
-                del self.outstanding_noc_requests[noc_request.request_id]
 
         # Now copy over the new requests to the requests to handle
         self.noc_requests_to_handle = self.noc_new_requests_to_handle
