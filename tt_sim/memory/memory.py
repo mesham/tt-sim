@@ -50,6 +50,12 @@ class MemorySpace(MemMapable, ABC):
         bus = get_bus()
         if not bus.is_enabled(EventCategory.MEM):
             return
+        # Extract PC from caller_context if available — tuple shape is
+        # (unit_id, core_label, pc) when set by an RV core.
+        pc = 0
+        ctx = self.caller_context
+        if ctx is not None and len(ctx) >= 3:
+            pc = int(ctx[2]) if ctx[2] is not None else 0
         bus.publish(
             MemEvent(
                 cycle=0,
@@ -58,6 +64,7 @@ class MemorySpace(MemMapable, ABC):
                 address=int(addr),
                 size=int(size),
                 region=self._classify_region(addr),
+                pc=pc,
             )
         )
 

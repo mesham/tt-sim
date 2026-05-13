@@ -102,6 +102,10 @@ class MemEvent(Event):
     address: int
     size: int
     region: str = ""  # "L1", "DRAM", "MMIO", etc. — coarse classifier
+    # PC of the instruction that triggered the access, if known via the
+    # MemorySpace caller_context. 0 when unattributed (NoC-driven or
+    # internal accesses without a backing RV instruction).
+    pc: int = 0
 
 
 @dataclass(frozen=True, slots=True)

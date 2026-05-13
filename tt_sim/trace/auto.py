@@ -19,6 +19,11 @@ Supported env vars (all optional, all default-off):
   ingestable directly by DuckDB / pandas. Flush cadence is
   configurable via ``TT_SIM_TRACE_COUNTERS_INTERVAL`` (default: 100
   cycles).
+- ``TT_SIM_TRACE_NOC`` — Parquet writer for NoC transactions, one
+  row per emission. Partitioned by ``chip``.
+- ``TT_SIM_TRACE_MEMORY`` — Callgrind/Cachegrind text writer for
+  memory accesses (L1 / MMIO). Output is a single file consumable by
+  ``kcachegrind`` / ``qcachegrind`` / ``callgrind_annotate``.
 
 All writers can be enabled simultaneously; they subscribe to disjoint
 event handling and write independent outputs.
@@ -30,8 +35,10 @@ import os
 from tt_sim.trace.bus import get_bus
 from tt_sim.trace.counters import DEFAULT_FLUSH_INTERVAL_CYCLES, CounterAggregator
 from tt_sim.trace.ids import get_registry
+from tt_sim.trace.writers.cachegrind import MemoryTraceWriter
 from tt_sim.trace.writers.commitlog import SpikeCommitlogWriter
 from tt_sim.trace.writers.jsonl import JSONLLogger
+from tt_sim.trace.writers.noc_parquet import NoCParquetWriter
 from tt_sim.trace.writers.parquet import ParquetCounterWriter
 from tt_sim.trace.writers.perfetto import PerfettoWriter
 
@@ -40,6 +47,8 @@ _PERFETTO: PerfettoWriter | None = None
 _COMMITLOG: SpikeCommitlogWriter | None = None
 _COUNTERS_AGG: CounterAggregator | None = None
 _COUNTERS_WRITER: ParquetCounterWriter | None = None
+_NOC_WRITER: NoCParquetWriter | None = None
+_MEMORY_WRITER: MemoryTraceWriter | None = None
 
 
 def enable_from_env() -> None:
@@ -49,12 +58,24 @@ def enable_from_env() -> None:
     per process actually opens files.
     """
     global _JSONL, _PERFETTO, _COMMITLOG, _COUNTERS_AGG, _COUNTERS_WRITER
+    global _NOC_WRITER, _MEMORY_WRITER
     jsonl_path = os.environ.get("TT_SIM_TRACE")
     perfetto_path = os.environ.get("TT_SIM_TRACE_PERFETTO")
     commitlog_path = os.environ.get("TT_SIM_TRACE_COMMITLOG")
     counters_path = os.environ.get("TT_SIM_TRACE_COUNTERS")
+    noc_path = os.environ.get("TT_SIM_TRACE_NOC")
+    memory_path = os.environ.get("TT_SIM_TRACE_MEMORY")
 
-    if not any((jsonl_path, perfetto_path, commitlog_path, counters_path)):
+    if not any(
+        (
+            jsonl_path,
+            perfetto_path,
+            commitlog_path,
+            counters_path,
+            noc_path,
+            memory_path,
+        )
+    ):
         return
 
     bus = get_bus()
@@ -81,6 +102,12 @@ def enable_from_env() -> None:
         _COUNTERS_WRITER = ParquetCounterWriter(counters_path)
         _COUNTERS_AGG = CounterAggregator(flush_interval_cycles=interval)
 
+    if noc_path and _NOC_WRITER is None:
+        _NOC_WRITER = NoCParquetWriter(noc_path)
+
+    if memory_path and _MEMORY_WRITER is None:
+        _MEMORY_WRITER = MemoryTraceWriter(memory_path)
+
     if not getattr(enable_from_env, "_atexit_registered", False):
 
         def _on_exit():
@@ -96,6 +123,10 @@ def enable_from_env() -> None:
                 _COMMITLOG.close()
             if _COUNTERS_WRITER is not None:
                 _COUNTERS_WRITER.close()
+            if _NOC_WRITER is not None:
+                _NOC_WRITER.close()
+            if _MEMORY_WRITER is not None:
+                _MEMORY_WRITER.close()
 
         atexit.register(_on_exit)
         enable_from_env._atexit_registered = True  # type: ignore[attr-defined]

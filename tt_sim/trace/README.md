@@ -8,24 +8,28 @@ Event Format for visual timelines on `ui.perfetto.dev`. Later phases
 add Spike commitlog, Parquet counters, Cachegrind, and LCOV writers
 as additional consumers of the same bus. tt-sim does not build viewers.
 
-Phases 1–4 of [ROADMAP §H](../../ROADMAP.md) are complete (event bus,
-Perfetto, Spike-compatible commitlog, Parquet/DuckDB counters); read
-that for the full plan.
+Phases 1–5 of [ROADMAP §H](../../ROADMAP.md) are complete (event bus,
+Perfetto, Spike-compatible commitlog, Parquet/DuckDB counters, NoC
+Parquet + Cachegrind memory trace); read that for the full plan.
 
 ## Quick start
 
 ```bash
 export PYTHONPATH=~/tt-sim:$PYTHONPATH
 cd driver/wormhole
-TT_SIM_TRACE=/tmp/one.jsonl python3 one/one.py             # JSONL for ad-hoc
-TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz python3 one/one.py  # visual timeline
-TT_SIM_TRACE_COMMITLOG=/tmp/one/ python3 one/one.py        # Spike-compat per-core
-TT_SIM_TRACE_COUNTERS=/tmp/one-counters/ python3 one/one.py # Parquet counters / DuckDB
-# All four can be enabled at once — writers subscribe independently:
+TT_SIM_TRACE=/tmp/one.jsonl python3 one/one.py                 # JSONL for ad-hoc
+TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz python3 one/one.py      # visual timeline
+TT_SIM_TRACE_COMMITLOG=/tmp/one/ python3 one/one.py            # Spike-compat per-core
+TT_SIM_TRACE_COUNTERS=/tmp/one-counters/ python3 one/one.py    # Parquet counters / DuckDB
+TT_SIM_TRACE_NOC=/tmp/one-noc/ python3 one/one.py              # Parquet NoC transactions
+TT_SIM_TRACE_MEMORY=/tmp/one-mem.callgrind python3 one/one.py  # KCachegrind memory hotspots
+# All six can be enabled at once — writers subscribe independently:
 TT_SIM_TRACE=/tmp/one.jsonl \
 TT_SIM_TRACE_PERFETTO=/tmp/one.json.gz \
 TT_SIM_TRACE_COMMITLOG=/tmp/one/ \
 TT_SIM_TRACE_COUNTERS=/tmp/one-counters/ \
+TT_SIM_TRACE_NOC=/tmp/one-noc/ \
+TT_SIM_TRACE_MEMORY=/tmp/one-mem.callgrind \
     python3 one/one.py
 ```
 
@@ -149,6 +153,54 @@ kernel-to-kernel diff, NoC hotspot detection) live in
 As §I cycle accuracy lands, more counters (FPU stall reasons, packer
 back-pressure, L1 bank conflicts) drop into the same long-format
 schema with no consumer changes needed.
+
+### NoC transactions (Parquet)
+
+`TT_SIM_TRACE_NOC=<dir>` writes a Hive-partitioned Parquet dataset
+(`chip=N/*.parquet`) — one row per `NoCEvent` emission with columns
+`cycle, chip, core_y, core_x, unit, phase, txn_type, src_x, src_y,
+dst_x, dst_y, size_bytes, txn_id`. Suitable for SQL queries about data
+movement:
+
+```bash
+duckdb -c "
+  SELECT src_y, src_x, dst_y, dst_x, SUM(size_bytes) AS bytes
+  FROM read_parquet('/tmp/noc/**/*.parquet', hive_partitioning=true)
+  WHERE phase = 'response'
+  GROUP BY src_y, src_x, dst_y, dst_x
+  ORDER BY bytes DESC
+"
+```
+
+VC occupancy, issue/arrival cycle, and other cycle-accurate fields
+are gated on §I and will land as additional columns once the
+simulator carries that state.
+
+### Memory accesses (Callgrind / KCachegrind)
+
+`TT_SIM_TRACE_MEMORY=<file>` writes a single Callgrind text file that
+`kcachegrind` / `qcachegrind` / `callgrind_annotate` consume directly.
+Each unique `(region, pc, address)` is bucketed into a `Dr` / `Dw`
+count; functions group by `(region, pc)` so the call-cost tree
+collapses cleanly per instruction:
+
+```
+events: Dr Dw
+positions: instr
+ob=tt-sim
+fl=memory
+fn=L1_pc_0x00003780
+0x20 1 0
+0x24 1 0
+```
+
+Open with `kcachegrind /tmp/run.callgrind` and the source-attribution
+tree shows hottest PCs, with addresses underneath. Accesses without a
+PC (NoC-driven or internal-engine traffic; ~10% of the typical trace)
+group under a synthetic `<region>_no_pc` function. When §H Phase 6
+(DWARF / LCOV source-level attribution) lands, the `<region>_pc_…`
+function names are replaced with real source/function coordinates
+with no change to the writer's contract.
 
 ## Programmatic use
 
