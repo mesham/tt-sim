@@ -26,8 +26,9 @@ from tt_sim.util.conversion import (
 
 
 class TT_Device(Device):
-    def __init__(self, device_memory, dram_tiles, tensix_tiles):
+    def __init__(self, device_memory, dram_tiles, tensix_tiles, eth_tiles=()):
         self.dram_tiles = list(dram_tiles)
+        self.eth_tiles = list(eth_tiles)
         self.tensix_tiles = []
 
         self.tile_directory = {}
@@ -41,6 +42,8 @@ class TT_Device(Device):
         self.resets = [Reset([])]
 
         for tile in self.dram_tiles:
+            self._register_tile_internals(tile)
+        for tile in self.eth_tiles:
             self._register_tile_internals(tile)
         for tile in tensix_tiles:
             self.tensix_tiles.append(tile)
@@ -213,6 +216,39 @@ class Wormhole(TT_Device):
     # Overridable via the ``tensix_coords`` kwarg on ``Wormhole.__init__``.
     TENSIX_UNIFIED_COORDS = ((18, 18),)
 
+    # Ethernet tile layout. SoC physical eth coords (per soc_descriptor.yaml
+    # ``eth:`` list) sit at y ∈ {0, 6} with x ∈ {1,2,3,4,6,7,8,9}. The unified
+    # band reserves y ∈ {14, 15} below the worker/DRAM band so the historical
+    # (18, 18) default for Tensix is untouched. Physical eth y=0 maps to
+    # unified y=14, eth y=6 to unified y=15. Within each row physical x maps
+    # in ascending order to unified x ∈ {16..23} (8 columns, gap-free).
+    _ETH_PHYSICAL_X_VALUES = (1, 2, 3, 4, 6, 7, 8, 9)
+    _ETH_PHYSICAL_Y_VALUES = (0, 6)
+    ETH_UNIFIED_Y_FOR_PHYSICAL = {0: 14, 6: 15}
+
+    @classmethod
+    def eth_unified_coord_from_physical(cls, physical):
+        """Map an SoC-physical eth NoC 0 coord (per ``soc_descriptor.yaml``)
+        to its unified coord."""
+        px, py = physical
+        if px not in cls._ETH_PHYSICAL_X_VALUES:
+            raise ValueError(f"eth physical x={px} not in soc descriptor")
+        if py not in cls._ETH_PHYSICAL_Y_VALUES:
+            raise ValueError(f"eth physical y={py} not in soc descriptor")
+        ux = 16 + cls._ETH_PHYSICAL_X_VALUES.index(px)
+        uy = cls.ETH_UNIFIED_Y_FOR_PHYSICAL[py]
+        return (ux, uy)
+
+    @classmethod
+    def all_eth_physical_coords(cls):
+        """Enumerate every SoC-physical eth coord (matches descriptor order
+        is unimportant — only that the set is complete)."""
+        return tuple(
+            (px, py)
+            for py in cls._ETH_PHYSICAL_Y_VALUES
+            for px in cls._ETH_PHYSICAL_X_VALUES
+        )
+
     # SoC descriptor `functional_workers` grid: x ∈ {1,2,3,4,6,7,8,9},
     # y ∈ {1,2,3,4,5,7,8,9,10,11}. Used to map unified worker coord
     # (18..25, 16..25) ↔ SoC-physical NoC 0 coord. The y offset of +2 (mod 10)
@@ -271,11 +307,15 @@ class Wormhole(TT_Device):
             dram_tiles.append(
                 DRAMTile(unified[0], unified[1], primary[0], primary[1], aliases)
             )
+        eth_tiles = []
+        for physical in Wormhole.all_eth_physical_coords():
+            unified = Wormhole.eth_unified_coord_from_physical(physical)
+            eth_tiles.append(EthTile(unified[0], unified[1], physical[0], physical[1]))
         tensix_tiles = [self._build_tensix_tile(coord) for coord in tensix_coords]
 
         # For now don't provide any memory, in future this will be the memory
         # map of the PCIe endpoing
-        super().__init__(None, dram_tiles, tensix_tiles)
+        super().__init__(None, dram_tiles, tensix_tiles, eth_tiles=eth_tiles)
 
         enabled, threshold = deadlock_config_from_env()
         self.deadlock_detector = DeadlockDetector(
@@ -368,11 +408,31 @@ class DeviceTileDiagnostics:
 
 
 class TTDeviceTile(DeviceTile, ABC):
+    # Unified-coord band layout:
+    #   x ∈ {16..25}                       — DRAM (16-17, 16-18), Tensix workers (18-25, 16-25)
+    #   y ∈ {14..15}                       — Ethernet tiles (16-23, 14-15)
+    #   y ∈ {16..25}                       — DRAM + Tensix as above
+    # Eth lives below the worker/DRAM band so the historical (18, 18) default
+    # for Tensix is preserved verbatim.
+    UNIFIED_COORD_X_MIN = 16
+    UNIFIED_COORD_X_MAX = 25
+    UNIFIED_COORD_Y_MIN = 14
+    UNIFIED_COORD_Y_MAX = 25
+
     def __init__(self, coord_x, coord_y, noc0_router, noc1_router):
-        if coord_x <= 15 or coord_y <= 15 or coord_x >= 26 or coord_y >= 26:
+        if not (
+            TTDeviceTile.UNIFIED_COORD_X_MIN
+            <= coord_x
+            <= TTDeviceTile.UNIFIED_COORD_X_MAX
+            and TTDeviceTile.UNIFIED_COORD_Y_MIN
+            <= coord_y
+            <= TTDeviceTile.UNIFIED_COORD_Y_MAX
+        ):
             raise Exception(
-                f"Tensix tile coordinates should be the unified coordinate system "
-                f"(16 to 25), whereas ({coord_x}, {coord_y}) provided"
+                f"Tile coordinates should be the unified coordinate system "
+                f"(x in {TTDeviceTile.UNIFIED_COORD_X_MIN}..{TTDeviceTile.UNIFIED_COORD_X_MAX}, "
+                f"y in {TTDeviceTile.UNIFIED_COORD_Y_MIN}..{TTDeviceTile.UNIFIED_COORD_Y_MAX}), "
+                f"whereas ({coord_x}, {coord_y}) provided"
             )
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
         # Extra SoC-physical NoC 0 coords that ``TT_Device`` registers as
@@ -430,6 +490,65 @@ class DRAMTile(TTDeviceTile):
 
     def getSize(self):
         # Dummy value for now
+        return 0xFFFF
+
+
+class EthTile(TTDeviceTile):
+    """Minimal Ethernet tile — L1 SRAM backing only, no ERisc CPU.
+
+    The Wormhole B0 ISA docs describe an Ethernet tile as L1 SRAM plus two
+    ERisc baby cores driving the chip-to-chip ethernet MAC. tt-sim does not
+    model chip-to-chip routing yet (no second chip exists), and no in-tree
+    kernel runs ERisc code, so we deliberately stop at the L1 SRAM. The
+    point is to replace the previous ``NullEndpoint`` zero-fill with a real
+    memory-backed destination: single-chip tt-metal kernels that hardcode
+    an eth coord (e.g. ``hello_world_datatypes_kernel`` reading ``(1, 0)``)
+    now see deterministic state — writes persist, subsequent reads return
+    the written bytes rather than blanket zeros.
+    """
+
+    # Per ``driver/wormhole/soc_descriptor.yaml`` (``eth_l1_size: 262144``).
+    L1_SIZE = 0x40000
+
+    def __init__(
+        self,
+        coord_x,
+        coord_y,
+        physical_x,
+        physical_y,
+        safe=True,
+        snoop_addresses=None,
+    ):
+        eth_tile_mem_map = MemoryMap()
+
+        self.L1_mem = DRAM(EthTile.L1_SIZE)
+        l1_range = AddressRange(0x0, self.L1_mem.getSize())
+        eth_tile_mem_map[l1_range] = self.L1_mem
+
+        self.eth_memory = TileMemory(eth_tile_mem_map, safe, snoop_addresses)
+
+        r0 = NUI(0, physical_x, physical_y, self.eth_memory)
+        r1 = NUI(1, physical_x, physical_y, self.eth_memory)
+
+        registry = get_registry()
+        r0.unit_id = registry.register(0, coord_y, coord_x, Unit.NOC0).as_tuple()
+        r1.unit_id = registry.register(0, coord_y, coord_x, Unit.NOC1).as_tuple()
+
+        super().__init__(coord_x, coord_y, r0, r1)
+
+    def get_clocks(self):
+        return [self.noc0_router, self.noc1_router]
+
+    def get_resets(self):
+        return []
+
+    def read(self, address, size):
+        return self.eth_memory.read(address, size)
+
+    def write(self, address, value, size=None):
+        return self.eth_memory.write(address, value, size)
+
+    def getSize(self):
         return 0xFFFF
 
 

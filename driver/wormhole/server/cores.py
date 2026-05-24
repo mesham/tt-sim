@@ -81,6 +81,34 @@ class TensixCore:
         self.device.deassert_reset_brisc(self.unified)
 
 
+class EthCore:
+    """Routes wire messages for an eth coord into the tt-sim Wormhole.
+
+    Eth tiles in tt-sim today are L1 SRAM only — no ERisc CPU — so reset
+    assert/deassert are no-ops (there is no core to gate). Reads and writes
+    land in the eth tile's 256 KB L1; this replaces the previous NullCore
+    zero-fill behaviour so kernels that hardcode an eth coord
+    (e.g. ``hello_world_datatypes_kernel`` reading ``(1, 0)``) get
+    deterministic memory-backed state.
+    """
+
+    def __init__(self, device, unified_coord):
+        self.device = device
+        self.unified = unified_coord
+
+    def write(self, addr, data):
+        self.device.write(self.unified, addr, data)
+
+    def read(self, addr, size):
+        return self.device.read(self.unified, addr, size)
+
+    def assert_reset(self):
+        pass
+
+    def deassert_reset(self):
+        pass
+
+
 class DramCore:
     """Routes wire messages for a DRAM coord into the tt-sim Wormhole.
 

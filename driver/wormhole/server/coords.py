@@ -25,7 +25,14 @@ How the pairing works:
   resolve any worker coord; tt-sim ``TensixTile`` instances are only built
   on demand (see ``server/device.py:Device.ensure_tensix_tile``).
 
-Anything else (eth, pcie, arc, router-only) is intentionally left out — the
+- **Ethernet.** Each ``eth[i]`` entry maps to a unified coord in the eth
+  band ``y ∈ {14, 15}`` (below the worker/DRAM band so the historical
+  (18, 18) Tensix default is preserved). Backed by an ``EthTile`` with
+  L1 SRAM only — no ERisc baby cores yet. Single-chip kernels that
+  hardcode an eth coord (``hello_world_datatypes_kernel`` reads ``(1, 0)``)
+  now see deterministic memory-backed state instead of NullCore zeros.
+
+Anything else (pcie, arc, router-only) is intentionally left out — the
 fabric falls back to ``NullCore`` (zero-fills reads, swallows writes), which
 has proven sufficient for tt-metal device-init traffic.
 """
@@ -96,6 +103,15 @@ def _build_tensix_map(soc):
     return coord_map
 
 
+def _build_eth_map(soc):
+    """Pair every ``eth`` entry with its ``EthTile`` unified coord."""
+    eth = [_parse_coord(c) for c in soc["eth"]]
+    return {
+        physical: Wormhole.eth_unified_coord_from_physical(physical) for physical in eth
+    }
+
+
 _SOC = _load_soc_descriptor()
 TENSIX_COORD_MAP = _build_tensix_map(_SOC)
 DRAM_COORD_MAP = _build_dram_map(_SOC)
+ETH_COORD_MAP = _build_eth_map(_SOC)

@@ -90,8 +90,8 @@ def main(argv=None):
     fabric = Fabric()
     if not args.mock_tensix:
         # Late import so --mock-tensix avoids the (slow) Wormhole construction.
-        from .coords import DRAM_COORD_MAP, TENSIX_COORD_MAP
-        from .cores import DramCore, TensixCore
+        from .coords import DRAM_COORD_MAP, ETH_COORD_MAP, TENSIX_COORD_MAP
+        from .cores import DramCore, EthCore, TensixCore
         from .device import Device, diagnostics_from_env, enabled_diagnostic_names
 
         tensix_pool = _parse_tensix_pool(os.environ)
@@ -99,6 +99,8 @@ def main(argv=None):
         device = Device(cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics)
         for translated, unified in DRAM_COORD_MAP.items():
             fabric.register(translated, DramCore(device, unified))
+        for translated, unified in ETH_COORD_MAP.items():
+            fabric.register(translated, EthCore(device, unified))
         # Eagerly materialise the worker tiles the user asked for. Every
         # other worker coord falls through to NullCore (matching the
         # zero-stub behaviour tt-metal's grid-wide init traffic tolerates),
