@@ -1,7 +1,9 @@
 """nng pair1 transport + dispatch loop.
 
-The simulator is the LISTENER; UMD is the DIALER. On bind, we immediately send
-an EXIT message as the "I'm alive" handshake UMD expects in ``start_device()``.
+UMD is the LISTENER (binds the port in ``simulation_host.cpp::init`` and
+exports it via ``NNG_SOCKET_ADDR``); the simulator is the DIALER. On
+connect, we immediately send an EXIT message as the "I'm alive"
+handshake UMD expects in ``start_device()``.
 """
 
 import sys
@@ -19,7 +21,7 @@ class Transport:
         self.msg_count = 0
 
     def serve(self, fabric):
-        with pynng.Pair1(listen=self.addr) as sock:
+        with pynng.Pair1(dial=self.addr) as sock:
             # Handshake: tell UMD we're alive.
             sock.send(proto.build_msg(proto.CMD_EXIT))
             self._log("sent EXIT ack")
