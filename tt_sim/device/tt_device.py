@@ -163,6 +163,10 @@ class TT_Device(Device):
                 bit = 13
             elif core_type == BabyRISCVCoreType.TRISC2:
                 bit = 14
+            elif core_type == BabyRISCVCoreType.ERISC:
+                # Per WormholeB0/EthernetTile/SoftReset.md — ERisc reuses
+                # bit 11 in this tile's own RISCV_DEBUG_REG_SOFT_RESET_0.
+                bit = 11
             else:
                 raise NotImplementedError()
             existing_config = conv_to_uint32(self.read(coordinate_pair, 0xFFB121B0, 4))
@@ -494,21 +498,25 @@ class DRAMTile(TTDeviceTile):
 
 
 class EthTile(TTDeviceTile):
-    """Minimal Ethernet tile — L1 SRAM backing only, no ERisc CPU.
+    """Wormhole Ethernet tile — L1 SRAM + one ERisc baby core.
 
-    The Wormhole B0 ISA docs describe an Ethernet tile as L1 SRAM plus two
-    ERisc baby cores driving the chip-to-chip ethernet MAC. tt-sim does not
-    model chip-to-chip routing yet (no second chip exists), and no in-tree
-    kernel runs ERisc code, so we deliberately stop at the L1 SRAM. The
-    point is to replace the previous ``NullEndpoint`` zero-fill with a real
-    memory-backed destination: single-chip tt-metal kernels that hardcode
-    an eth coord (e.g. ``hello_world_datatypes_kernel`` reading ``(1, 0)``)
-    now see deterministic state — writes persist, subsequent reads return
-    the written bytes rather than blanket zeros.
+    Per the WormholeB0 EthernetTile ISA docs: 256 KiB L1, one RV32IM baby
+    core (ERisc), two NoC connections. The ethernet MAC/PHY and chip-to-
+    chip routing are *not* modelled (no second chip exists in tt-sim yet),
+    but the L1 + ERisc are enough for single-chip kernels that hardcode an
+    eth coord (e.g. ``hello_world_datatypes_kernel`` reading ``(1, 0)``) to
+    see deterministic memory-backed state instead of the former
+    ``NullEndpoint`` zero-fill, and for a driver script to run RV32IM code
+    on the ERisc core.
     """
 
     # Per ``driver/wormhole/soc_descriptor.yaml`` (``eth_l1_size: 262144``).
     L1_SIZE = 0x40000
+    # Per WormholeB0/EthernetTile/BabyRISCV/README.md.
+    ERISC_LOCAL_MEM_BASE = 0xFFB00000
+    ERISC_LOCAL_MEM_SIZE = 4 * 1024
+    ERISC_IRAM_BASE = 0xFFC00000
+    ERISC_IRAM_SIZE = 64 * 1024
 
     def __init__(
         self,
@@ -516,6 +524,7 @@ class EthTile(TTDeviceTile):
         coord_y,
         physical_x,
         physical_y,
+        erisc_snoop=False,
         safe=True,
         snoop_addresses=None,
     ):
@@ -525,22 +534,68 @@ class EthTile(TTDeviceTile):
         l1_range = AddressRange(0x0, self.L1_mem.getSize())
         eth_tile_mem_map[l1_range] = self.L1_mem
 
+        # NUIs handle inbound NoC requests by reading/writing L1 directly —
+        # matches TensixTile's pattern of passing L1_mem (not the full tile
+        # memory) as attached_memory. Outbound MMIO writes from the local
+        # ERisc to the NUI's register file are dispatched via the tile
+        # memory map below, which routes 0xFFB20000/0xFFB30000 to the NUI's
+        # own ``write``/``read`` MMIO handlers.
+        noc0_router = NUI(0, physical_x, physical_y, self.L1_mem)
+        noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
+        eth_tile_mem_map[noc0_range] = noc0_router
+
+        noc1_router = NUI(1, physical_x, physical_y, self.L1_mem)
+        noc1_range = AddressRange(0xFFB30000, noc1_router.getSize())
+        eth_tile_mem_map[noc1_range] = noc1_router
+
+        # Tile control owns RISCV_DEBUG_REG_SOFT_RESET_0 (offset 0x1B0 inside
+        # the 0xFFB12000 region). ERisc reset bit is 11 per the ISA docs;
+        # held in reset at power-on so a wormhole.reset() doesn't run the
+        # core before firmware is loaded.
+        self.tile_ctrl = TensixTileControl()
+        self.tile_ctrl.RISCV_DEBUG_REG_SOFT_RESET_0 = conv_to_bytes(1 << 11)
+        tile_ctrl_range = AddressRange(0xFFB12000, self.tile_ctrl.getSize())
+        eth_tile_mem_map[tile_ctrl_range] = self.tile_ctrl
+
         self.eth_memory = TileMemory(eth_tile_mem_map, safe, snoop_addresses)
 
-        r0 = NUI(0, physical_x, physical_y, self.eth_memory)
-        r1 = NUI(1, physical_x, physical_y, self.eth_memory)
-
         registry = get_registry()
-        r0.unit_id = registry.register(0, coord_y, coord_x, Unit.NOC0).as_tuple()
-        r1.unit_id = registry.register(0, coord_y, coord_x, Unit.NOC1).as_tuple()
+        noc0_router.unit_id = registry.register(
+            0, coord_y, coord_x, Unit.NOC0
+        ).as_tuple()
+        noc1_router.unit_id = registry.register(
+            0, coord_y, coord_x, Unit.NOC1
+        ).as_tuple()
 
-        super().__init__(coord_x, coord_y, r0, r1)
+        # ERisc per-core address space: local data RAM (4 KiB) + IRAM (64
+        # KiB). Local mem lives at the same architectural base (0xFFB00000)
+        # as BRISC's, distinguished by being in this tile's address space.
+        self.local_mem_erisc = DRAM(EthTile.ERISC_LOCAL_MEM_SIZE)
+        local_mem_range = AddressRange(
+            EthTile.ERISC_LOCAL_MEM_BASE, self.local_mem_erisc.getSize()
+        )
+        self.local_imem_erisc = DRAM(EthTile.ERISC_IRAM_SIZE)
+        local_imem_range = AddressRange(
+            EthTile.ERISC_IRAM_BASE, self.local_imem_erisc.getSize()
+        )
+        erisc_mem_map = MemoryMap()
+        erisc_mem_map[local_mem_range] = self.local_mem_erisc
+        erisc_mem_map[local_imem_range] = self.local_imem_erisc
+        self.erisc_mem = PEMemory(erisc_mem_map)
+
+        self.erisc = BabyRISCV(
+            BabyRISCVCoreType.ERISC,
+            [self.eth_memory, self.erisc_mem],
+            snoop=erisc_snoop,
+        )
+
+        super().__init__(coord_x, coord_y, noc0_router, noc1_router)
 
     def get_clocks(self):
-        return [self.noc0_router, self.noc1_router]
+        return [self.noc0_router, self.noc1_router, self.erisc, self.tile_ctrl]
 
     def get_resets(self):
-        return []
+        return [self.erisc]
 
     def read(self, address, size):
         return self.eth_memory.read(address, size)

@@ -12,15 +12,22 @@ class BabyRISCVCoreType(IntEnum):
     TRISC0 = 2
     TRISC1 = 3
     TRISC2 = 4
+    ERISC = 5
 
 
 class BabyRISCV(RV32IM_TT):
+    # Reset bit position within ``RISCV_DEBUG_REG_SOFT_RESET_0`` (at offset
+    # 0xFFB121B0 in each tile's tile-control region). Each tile has its own
+    # register, so ERISC (in eth tiles) reuses bit 11 — the same constant
+    # name ``RISCV_SOFT_RESET_0_BRISC`` per the WormholeB0 EthernetTile/
+    # SoftReset.md docs — without colliding with BRISC in Tensix tiles.
     CORE_TYPE_TO_SOFT_RESET_BIT = {
         BabyRISCVCoreType.BRISC: 11,
         BabyRISCVCoreType.NCRISC: 18,
         BabyRISCVCoreType.TRISC0: 12,
         BabyRISCVCoreType.TRISC1: 13,
         BabyRISCVCoreType.TRISC2: 14,
+        BabyRISCVCoreType.ERISC: 11,
     }
 
     def __init__(self, core_type, memory_spaces, snoop=False):
@@ -41,6 +48,12 @@ class BabyRISCV(RV32IM_TT):
         elif core_type == BabyRISCVCoreType.TRISC2:
             core_id = 3
             start_addr = 0x0E000
+        elif core_type == BabyRISCVCoreType.ERISC:
+            # Eth tile boot vector lives at L1 offset 0 (the "Tenstorrent
+            # code/data, read-only" 1 KiB region per the EthernetTile/L1.md
+            # ISA docs). Mirrors BRISC's convention in Tensix tiles.
+            core_id = 5
+            start_addr = 0x0
         super().__init__(start_addr, memory_spaces, [], snoop=snoop, core_id=core_id)
         self.core_label = core_type.name
 
@@ -52,6 +65,12 @@ class BabyRISCV(RV32IM_TT):
         https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/SoftReset.md
         """
         if self.core_type == BabyRISCVCoreType.BRISC:
+            return self.start_address
+        if self.core_type == BabyRISCVCoreType.ERISC:
+            # Eth tiles have no Tensix backend config (no FPU/SFPU/packer),
+            # so the reset-PC-override mechanism that lives at
+            # 0xFFEF0000 in a Tensix tile simply doesn't exist here. ERisc
+            # always boots from its compile-time start_address.
             return self.start_address
 
         TENSIX_BACKEND_CONFIG_BASE = 0xFFEF_0000
