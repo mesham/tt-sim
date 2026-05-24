@@ -46,25 +46,33 @@ def _threading_disabled_from_env():
 
 
 class MultiTileClock(Clock):
-    """Drives one ``Clock`` per tile, one OS thread per tile, barrier-synced.
+    """Drives one ``Clock`` per tile, one OS thread per *heavy* tile, barrier-synced.
 
     Looks like a ``Clock`` from the outside so ``Device.run()`` keeps working
-    unchanged. Internally holds a list of per-tile Clocks; ``run(N)``
-    dispatches N cycles across persistent daemon worker threads with a
-    ``threading.Barrier`` between cycles. Falls back to a plain sequential
-    tick loop when only one tile clock is registered or when
-    ``TT_SIM_THREADED=0`` is set in the environment.
+    unchanged. Internally holds a list of per-tile Clocks split into
+    ``_heavy_tile_clocks`` (Tensix tiles — substantial per-cycle work) and
+    ``_cheap_tile_clocks`` (DRAM + eth — mostly idle NUI traffic). Worker
+    threads are spawned only for the heavy set; the coordinator (the thread
+    calling ``run``) ticks every cheap clock itself in parallel with the
+    workers and joins the per-cycle barrier as one extra participant. This
+    keeps barrier-participant count at ``len(heavy) + 1`` instead of dragging
+    every DRAM/eth tile into a 26-way barrier wait every cycle.
+
+    Falls back to a plain sequential tick loop when fewer than two clocks
+    are flagged heavy or when ``TT_SIM_THREADED=0`` is set in the
+    environment.
     """
 
     def __init__(self, on_tick=None, *, force_sequential=False):
         super().__init__([], on_tick=on_tick)
         self._tile_clocks: list[Clock] = []
-        # Tile clocks flagged as "heavy" by the caller — only their count
-        # drives the auto-engage decision. Cheap clocks (DRAM, eth) add
-        # barrier overhead without contributing enough per-cycle work to
-        # win against the GIL, so threading stays off if no caller marks
-        # at least two clocks as heavy.
-        self._heavy_clock_count = 0
+        # Tile clocks flagged as "heavy" run on dedicated worker threads;
+        # cheap clocks (DRAM, eth) are ticked by the coordinator each cycle
+        # in parallel with the workers. Threading only engages when ≥2
+        # clocks are marked heavy — otherwise the barrier overhead outweighs
+        # the work.
+        self._heavy_tile_clocks: list[Clock] = []
+        self._cheap_tile_clocks: list[Clock] = []
         self._force_sequential = force_sequential or _threading_disabled_from_env()
         self._workers_started = False
         self._workers: list[threading.Thread] = []
@@ -87,10 +95,12 @@ class MultiTileClock(Clock):
         """Register a per-tile clock with the composite.
 
         ``heavy=True`` marks the clock as doing substantial per-cycle work
-        (e.g. a Tensix tile with five RV cores and the coprocessor) so it
-        counts toward the auto-engage threshold. ``heavy=False`` (default)
-        is right for cheap clocks like DRAM and eth tiles that only
-        service NoC traffic.
+        (e.g. a Tensix tile with five RV cores and the coprocessor); a
+        worker thread is spawned for it on the first threaded ``run()``.
+        ``heavy=False`` (default) is right for cheap clocks like DRAM and
+        eth tiles that only service NoC traffic — these are ticked
+        inline by the coordinator thread to keep barrier-participant
+        count low.
         """
         if self._workers_started:
             raise RuntimeError(
@@ -98,7 +108,13 @@ class MultiTileClock(Clock):
             )
         self._tile_clocks.append(tile_clock)
         if heavy:
-            self._heavy_clock_count += 1
+            self._heavy_tile_clocks.append(tile_clock)
+        else:
+            self._cheap_tile_clocks.append(tile_clock)
+
+    @property
+    def _heavy_clock_count(self) -> int:
+        return len(self._heavy_tile_clocks)
 
     def add_clockable(self, clockable):
         raise NotImplementedError(
@@ -147,7 +163,7 @@ class MultiTileClock(Clock):
     def _run_threaded(self, num_iterations):
         if not self._workers_started:
             self._start_workers()
-        n = len(self._tile_clocks)
+        n_workers = len(self._heavy_tile_clocks)
         with self._cv:
             self._error = None
             self._base_cycle = self.clock_tick_num
@@ -155,7 +171,39 @@ class MultiTileClock(Clock):
             self._workers_done = 0
             self._generation += 1
             self._cv.notify_all()
-            self._cv.wait_for(lambda: self._workers_done == n)
+        # Coordinator participates in the per-cycle barrier as one extra
+        # party alongside the heavy-tile workers; it ticks the cheap (DRAM
+        # + eth) clocks inline so that work overlaps with the heavy tiles
+        # rather than dragging 22 idle clocks into the barrier wait.
+        cheap_clocks = self._cheap_tile_clocks
+        barrier = self._barrier
+        assert barrier is not None
+        barrier_broken = False
+        for i in range(num_iterations):
+            cycle = self.clock_tick_num + i
+            self._current_cycle = cycle
+            try:
+                for cheap in cheap_clocks:
+                    cheap.clock_tick(cycle)
+            except Exception as exc:
+                with self._cv:
+                    if self._error is None:
+                        self._error = exc
+                barrier.abort()
+                barrier_broken = True
+                break
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                barrier_broken = True
+                break
+        if barrier_broken:
+            # Restore for the next batch — abort() leaves the barrier in a
+            # broken state until reset.
+            barrier.reset()
+        err: BaseException | None = None
+        with self._cv:
+            self._cv.wait_for(lambda: self._workers_done == n_workers)
             err = self._error
             self._error = None
         if err is not None:
@@ -165,13 +213,14 @@ class MultiTileClock(Clock):
             tile_clock.clock_tick_num = self.clock_tick_num
 
     def _start_workers(self):
-        n = len(self._tile_clocks)
-        self._barrier = threading.Barrier(n, action=self._barrier_action)
+        # +1 party for the coordinator thread (the caller of ``run``).
+        n_parties = len(self._heavy_tile_clocks) + 1
+        self._barrier = threading.Barrier(n_parties, action=self._barrier_action)
         self._workers = []
-        for idx, tile_clock in enumerate(self._tile_clocks):
+        for idx, tile_clock in enumerate(self._heavy_tile_clocks):
             t = threading.Thread(
                 target=self._worker_loop,
-                args=(idx, tile_clock),
+                args=(tile_clock,),
                 name=f"tt-sim-tile-{idx}",
                 daemon=True,
             )
@@ -183,7 +232,7 @@ class MultiTileClock(Clock):
         if self.on_tick is not None:
             self.on_tick(self._current_cycle)
 
-    def _worker_loop(self, idx, tile_clock):
+    def _worker_loop(self, tile_clock):
         barrier = self._barrier
         assert barrier is not None
         last_seen_generation = 0
@@ -201,15 +250,9 @@ class MultiTileClock(Clock):
                 for i in range(cycles):
                     cycle = base + i
                     tile_clock.clock_tick(cycle)
-                    if idx == 0:
-                        self._current_cycle = cycle
                     try:
                         barrier.wait()
                     except threading.BrokenBarrierError:
-                        # Another worker raised; reset barrier so subsequent
-                        # batches still work, then signal completion so the
-                        # coordinator can re-raise.
-                        barrier.reset()
                         break
             except Exception as exc:
                 with self._cv:
