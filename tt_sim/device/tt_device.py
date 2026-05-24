@@ -1,6 +1,6 @@
 from abc import ABC
 
-from tt_sim.device.clock import Clock
+from tt_sim.device.clock import Clock, MultiTileClock
 from tt_sim.device.deadlock import DeadlockDetector, deadlock_config_from_env
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
@@ -38,7 +38,7 @@ class TT_Device(Device):
         self.noc_0_directory = {}
         self.noc_1_directory = {}
 
-        self.clocks = [Clock([])]
+        self.clocks = [MultiTileClock()]
         self.resets = [Reset([])]
 
         for tile in self.dram_tiles:
@@ -88,7 +88,13 @@ class TT_Device(Device):
             self.noc_1_directory[self._noc1_mirror(alias)] = nui1
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
-        self.clocks[0].add_clockables(tile.get_clocks())
+        # Tensix tiles host the bulk of per-cycle work (5 baby RV cores +
+        # the coprocessor); DRAM and eth tiles are mostly idle NUI traffic
+        # so they should not pull the composite into threaded mode on
+        # their own. Only count Tensix toward the auto-engage threshold.
+        self.clocks[0].add_tile_clock(
+            Clock(tile.get_clocks()), heavy=isinstance(tile, TensixTile)
+        )
         self.resets[0].add_resetables(tile.get_resets())
 
     @staticmethod
@@ -111,6 +117,17 @@ class TT_Device(Device):
         """
         self.tensix_tiles.append(tile)
         self._register_tile_internals(tile)
+
+    def shutdown(self):
+        """Join any worker threads spawned by the per-tile clock pump.
+
+        Safe to call on a single-tile / ``TT_SIM_THREADED=0`` device — the
+        composite clock no-ops if no workers were ever started. Idempotent.
+        """
+        for clock in self.clocks:
+            shutdown = getattr(clock, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
 
     def read(self, coordinate_pair, address, size):
         assert coordinate_pair in self.tile_directory

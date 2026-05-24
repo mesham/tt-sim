@@ -1,3 +1,4 @@
+import threading
 from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
@@ -711,6 +712,12 @@ class NUI(MemMapable, Clockable):
         # between a request and it being handled (can increase)
         self.noc_requests_to_handle = []
         self.noc_new_requests_to_handle = []
+        # Guards cross-thread appends to noc_new_requests_to_handle from
+        # source tiles' transmit() calls and the owning tile's per-cycle
+        # swap in clock_tick(). The destination then drains
+        # noc_requests_to_handle without locking — only the owning thread
+        # touches it after the swap.
+        self._inbox_lock = threading.Lock()
         self.snoop = snoop
         self.unit_id: tuple | None = None
 
@@ -972,8 +979,9 @@ class NUI(MemMapable, Clockable):
                     )
 
         # Now copy over the new requests to the requests to handle
-        self.noc_requests_to_handle = self.noc_new_requests_to_handle
-        self.noc_new_requests_to_handle = []
+        with self._inbox_lock:
+            self.noc_requests_to_handle = self.noc_new_requests_to_handle
+            self.noc_new_requests_to_handle = []
 
     def _publish_noc_event(
         self, cycle_num, phase, txn_type, src, dst, size_bytes, txn_id
@@ -997,7 +1005,8 @@ class NUI(MemMapable, Clockable):
         )
 
     def transmit(self, data_request):
-        self.noc_new_requests_to_handle.append(data_request)
+        with self._inbox_lock:
+            self.noc_new_requests_to_handle.append(data_request)
 
     def set_noc_directory(self, noc_directory):
         self.noc_directory = noc_directory

@@ -88,6 +88,7 @@ def main(argv=None):
     print(f"[server] listening on {addr}", file=sys.stderr, flush=True)
 
     fabric = Fabric()
+    device = None
     if not args.mock_tensix:
         # Late import so --mock-tensix avoids the (slow) Wormhole construction.
         from .coords import DRAM_COORD_MAP, ETH_COORD_MAP, TENSIX_COORD_MAP
@@ -154,17 +155,24 @@ def main(argv=None):
 
     transport = Transport(addr, log_protocol=args.log_protocol)
 
-    with contextlib.ExitStack() as stack:
-        if args.record:
-            tracer = stack.enter_context(TraceWriter(args.record))
-            transport.trace_writer = tracer
-            print(
-                f"[server] recording trace to {args.record}",
-                file=sys.stderr,
-                flush=True,
-            )
+    try:
+        with contextlib.ExitStack() as stack:
+            if args.record:
+                tracer = stack.enter_context(TraceWriter(args.record))
+                transport.trace_writer = tracer
+                print(
+                    f"[server] recording trace to {args.record}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
-        transport.serve(fabric)
+            transport.serve(fabric)
+    finally:
+        # Join per-tile worker threads spawned by MultiTileClock so they
+        # don't outlive the process on graceful exit or Ctrl-C. Safe even
+        # when --mock-tensix is set (no Wormhole was built).
+        if device is not None:
+            device.wormhole.shutdown()
 
     print(
         f"[server] shutdown after {transport.msg_count} messages",
