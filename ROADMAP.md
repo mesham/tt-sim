@@ -46,12 +46,32 @@ cheap given tt-metal's grid-wide init traffic.
   per-cycle barrier as one extra party. Barrier participant count for a
   4-Tensix configuration is 5 (4 Tensix + 1 coordinator), not 26.
   Measured idle 4-Tensix `run(500)`: ~6× slower than sequential, down
-  from ~28×. Remaining gap is GIL contention on microscopic per-tile
-  work and only closes with follow-up #2:
-    - Validate against a real multi-Tensix kernel (numpy-heavy Tensix
-      backends release the GIL during matmul/eltwise ops; per-cycle
-      per-tile work grows orders of magnitude vs idle). Until measured
-      there, the speedup ceiling on a real workload is unknown.
+  from ~28×. Real-workload validation completed across two kernel
+  shapes (4 Tensix tiles in parallel each, each tile writing to a
+  disjoint DRAM region):
+    - **BRISC-only dataflow** (`one/` vector-add): threaded
+      **2.4× slower** than `TT_SIM_THREADED=0` sequential (5.7s vs
+      2.4s wall on 1200 cycles).
+    - **Coprocessor-heavy matrix unit** (`four/` int8 ELWADD via the
+      Tensix matrix unit, plus BRISC + NCRISC + 3 TRISCs): threaded
+      **1.56× slower** than sequential (5.22s vs 3.34s wall, mean
+      of 3 runs).
+  Conclusion: at the current Python granularity neither dataflow- nor
+  coprocessor-heavy kernels release the GIL enough per cycle to
+  amortise the barrier. The matrix backend's numpy ops are short
+  enough that GIL re-acquire dominates. Threading is structurally
+  correct but a perf regression for every workload measured so far.
+  Threading is now strictly opt-in: `MultiTileClock` defaults to the
+  sequential tick loop and only engages workers when
+  `TT_SIM_THREADED=1` (or `true`/`yes`/`on`) is set in the
+  environment AND ≥2 clocks are flagged heavy. The structural
+  threaded code path is preserved for future re-evaluation; default
+  multi-Tensix runs no longer regress vs single-Tensix.
+  Follow-up open:
+    - Re-evaluate on free-threaded Python 3.13t (PEP 703) where the
+      GIL doesn't serialise per-cycle Python work between workers.
+      This is the most realistic path to a speedup without rewriting
+      the cycle pump in C.
   - *Test:* no example needed for the structural refactor — covered by
     every existing single-tile example continuing to pass. Remaining
     perf follow-up wants a `driver/wormhole/seven/` (multi-Tensix, real

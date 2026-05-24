@@ -67,11 +67,23 @@ class TT_Device(Device):
         the canonical ``programming_examples/``) instead writes per-NoC
         *mirror* coords directly into NoC 1's half of the table — so on
         NoC 1 the kernel actually emits the noc1-mirror of the canonical
-        coord. We register both forms as keys: canonical on both NoCs,
-        plus the noc1-mirror as an additional alias on NoC 1 so the
-        bank-table flow resolves the right tile. Extra sub-endpoint
-        aliases (e.g. DRAM channels with two worker-visible endpoints)
-        get the same canonical + noc1-mirror pair of keys.
+        coord. For DRAM (and Tensix) we register both forms as keys:
+        canonical on both NoCs, plus the noc1-mirror as an additional
+        alias on NoC 1 so the bank-table flow resolves the right tile.
+        Extra sub-endpoint aliases (e.g. DRAM channels with two
+        worker-visible endpoints) get the same canonical + noc1-mirror
+        pair of keys.
+
+        Eth tiles deliberately *skip* noc1-mirror registration. The
+        mirror formula ``(GRID-1-x, GRID-1-y)`` maps several DRAM
+        canonical coords to eth canonical coords and vice versa
+        (e.g. DRAM ch0 canonical ``(0, 11)`` ↔ eth canonical ``(9, 0)``),
+        so registering eth mirrors would overwrite DRAM primary entries
+        in ``noc_1_directory`` — every NCRISC write back to a colliding
+        DRAM channel on NoC 1 would land in the eth tile's L1 instead.
+        Eth tiles are addressed only via canonical coords by single-chip
+        kernels (e.g. ``hello_world_datatypes_kernel`` reads ``(1, 0)``),
+        not via any bank-to-noc table, so they don't need mirror keys.
         """
         coord = tile.get_coord_pair()
         assert coord not in self.tile_directory, f"tile already registered at {coord}"
@@ -81,11 +93,14 @@ class TT_Device(Device):
         primary = nui0.get_id_pair()
         self.noc_0_directory[primary] = nui0
         self.noc_1_directory[primary] = nui1
-        self.noc_1_directory[self._noc1_mirror(primary)] = nui1
+        register_mirror = getattr(tile, "register_noc1_mirror", True)
+        if register_mirror:
+            self.noc_1_directory[self._noc1_mirror(primary)] = nui1
         for alias in getattr(tile, "noc_aliases", ()):
             self.noc_0_directory[alias] = nui0
             self.noc_1_directory[alias] = nui1
-            self.noc_1_directory[self._noc1_mirror(alias)] = nui1
+            if register_mirror:
+                self.noc_1_directory[self._noc1_mirror(alias)] = nui1
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
         # Tensix tiles host the bulk of per-cycle work (5 baby RV cores +
@@ -526,6 +541,13 @@ class EthTile(TTDeviceTile):
     ``NullEndpoint`` zero-fill, and for a driver script to run RV32IM code
     on the ERisc core.
     """
+
+    # Eth tiles must NOT register noc1-mirror keys in the device's NoC 1
+    # directory: the mirror formula maps eth canonicals to DRAM canonicals
+    # (e.g. eth ``(9, 0)`` ↔ DRAM ch0 ``(0, 11)``), so mirror-registration
+    # would overwrite DRAM primary entries and route DRAM-targeted NoC 1
+    # traffic into eth L1. See ``TT_Device._register_tile_internals``.
+    register_noc1_mirror = False
 
     # Per ``driver/wormhole/soc_descriptor.yaml`` (``eth_l1_size: 262144``).
     L1_SIZE = 0x40000

@@ -38,11 +38,11 @@ class Clock(Resetable):
         self.clock_tick_num += num_iterations
 
 
-def _threading_disabled_from_env():
+def _threading_enabled_from_env():
     raw = os.environ.get("TT_SIM_THREADED")
     if raw is None:
         return False
-    return raw.strip().lower() in ("0", "false", "no", "off")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 class MultiTileClock(Clock):
@@ -58,9 +58,14 @@ class MultiTileClock(Clock):
     keeps barrier-participant count at ``len(heavy) + 1`` instead of dragging
     every DRAM/eth tile into a 26-way barrier wait every cycle.
 
-    Falls back to a plain sequential tick loop when fewer than two clocks
-    are flagged heavy or when ``TT_SIM_THREADED=0`` is set in the
-    environment.
+    **Threading is opt-in.** The default is the sequential tick loop;
+    threading only engages when ``TT_SIM_THREADED=1`` (or ``true``/``yes``/
+    ``on``) is set in the environment AND at least two clocks are flagged
+    heavy. Real-workload benchmarks under stock CPython show threading
+    regresses wall time 1.5–2.4× because per-cycle Python work doesn't
+    release the GIL long enough to amortise the barrier (see ROADMAP §A);
+    the opt-in flag preserves the structural code path for free-threaded
+    Python 3.13t experiments without affecting the default flow.
     """
 
     def __init__(self, on_tick=None, *, force_sequential=False):
@@ -68,12 +73,13 @@ class MultiTileClock(Clock):
         self._tile_clocks: list[Clock] = []
         # Tile clocks flagged as "heavy" run on dedicated worker threads;
         # cheap clocks (DRAM, eth) are ticked by the coordinator each cycle
-        # in parallel with the workers. Threading only engages when ≥2
-        # clocks are marked heavy — otherwise the barrier overhead outweighs
-        # the work.
+        # in parallel with the workers. Threading only engages when the
+        # caller explicitly opts in (TT_SIM_THREADED=1 in env, or
+        # force_sequential=False with the env var unset still defaults to
+        # sequential) AND ≥2 clocks are marked heavy.
         self._heavy_tile_clocks: list[Clock] = []
         self._cheap_tile_clocks: list[Clock] = []
-        self._force_sequential = force_sequential or _threading_disabled_from_env()
+        self._threading_enabled = not force_sequential and _threading_enabled_from_env()
         self._workers_started = False
         self._workers: list[threading.Thread] = []
         self._barrier: threading.Barrier | None = None
@@ -141,7 +147,7 @@ class MultiTileClock(Clock):
         if num_iterations <= 0:
             return
         if (
-            self._force_sequential
+            not self._threading_enabled
             or len(self._tile_clocks) <= 1
             or self._heavy_clock_count <= 1
         ):
