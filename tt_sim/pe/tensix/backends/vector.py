@@ -27,6 +27,10 @@ class VectorUnit(TensixBackendUnit):
         "SFPMULI": "handle_muli",
         "SFPABS": "handle_sfpabs",
         "SFPMOV": "handle_sfpmov",
+        "SFPSWAP": "handle_sfpswap",
+        "SFPCAST": "handle_sfpcast",
+        "SFP_STOCH_RND": "handle_sfp_stoch_rnd",
+        "SFPDIVP2": "handle_sfpdivp2",
         "SFPEXEXP": "handle_sfpexexp",
         "SFPEXMAN": "handle_sfpexman",
         "SFPSETEXP": "handle_sfpsetexp",
@@ -100,6 +104,48 @@ class VectorUnit(TensixBackendUnit):
     SFPMOV_MOD1_NEGATE = 1
     SFPMOV_MOD1_ALL_LANES_ENABLED = 2
     SFPMOV_MOD1_FROM_SPECIAL = 8
+
+    # SFPSWAP instruction modifier. Mode 0 is an unconditional swap of VD/VC;
+    # modes 1-8 are min/max sorts where VD receives the smaller value on the
+    # rows listed here (and the larger value on the other rows), VC receiving
+    # the opposite. Row = lane // 8, matching the SFPLOAD/SFPSTORE lane->row
+    # mapping. Modes >= 9 are reserved and documented as "VD gets max on every
+    # row", i.e. the empty min-row set. Per
+    # WormholeB0/TensixTile/TensixCoprocessor/SFPSWAP.md.
+    SFPSWAP_MOD1_UNCONDITIONAL = 0
+    SFPSWAP_MOD1_MIN_ROWS = {
+        1: frozenset({0, 1, 2, 3}),
+        2: frozenset({0, 1}),
+        3: frozenset({0, 2}),
+        4: frozenset({0, 3}),
+        5: frozenset({0}),
+        6: frozenset({1}),
+        7: frozenset({2}),
+        8: frozenset({3}),
+    }
+
+    # SFP_STOCH_RND conversion modes (instr_mod1 bits [2:0]); bit 3 selects the
+    # immediate descale over src_b. The round-to-nearest constant the ISA uses
+    # for the deterministic path is 0x400000; tt-sim has no SFPU PRNG so the
+    # stochastic (rnd_mode == 1) path reuses it. Per
+    # WormholeB0/TensixTile/TensixCoprocessor/SFPSTOCHRND_*.md.
+    SFP_STOCH_RND_PRNG_RNE = 0x400000
+    SFP_STOCH_RND_FP32_TO_FP16A = 0
+    SFP_STOCH_RND_FP32_TO_FP16B = 1
+    # fp32 -> integer modes: (keep_sign, max_magnitude).
+    SFP_STOCH_RND_FLOAT_TO_INT = {
+        2: (False, 255),  # fp32 -> unsigned int8
+        3: (True, 127),  # fp32 -> signed int8
+        6: (False, 65535),  # fp32 -> unsigned int16
+        7: (True, 32767),  # fp32 -> signed int16
+    }
+    SFP_STOCH_RND_INT32_TO_UINT8 = 4
+    SFP_STOCH_RND_INT32_TO_INT8 = 5
+
+    # SFPDIVP2: bit 0 set -> wrapping-add the 8-bit immediate to the exponent
+    # field (multiply/divide by 2**imm); clear -> replace the exponent field.
+    # Per WormholeB0/TensixTile/TensixCoprocessor/SFPDIVP2.md.
+    SFPDIVP2_MOD1_ADD = 1
     SFPSETSGN_MOD1_ARG_IMM = 1
     SFPEXEXP_MOD1_NODEBIAS = 1
     SFPEXEXP_MOD1_SET_CC_SGN_EXP = 2
@@ -303,6 +349,230 @@ class VectorUnit(TensixBackendUnit):
                         value = conv_to_float(x) if isinstance(value, float) else x
                     self.lregs[vd][lane] = value
 
+    @staticmethod
+    def _sign_mag_key(value):
+        """Monotonic key implementing the SFPSWAP total order.
+
+        Reinterprets the 32-bit lane as sign-magnitude and returns an
+        unsigned key such that numeric ``key(a) < key(b)`` iff ``a`` is
+        smaller under the order ``-NaN < -Inf < ... < -0 < +0 < ... <
+        +Inf < +NaN`` (the ``SignMagIsSmaller`` semantics from the ISA
+        docs). Negatives get all bits inverted; non-negatives get only
+        the sign bit set.
+        """
+        u = conv_to_uint32(value) & 0xFFFFFFFF
+        if u & 0x80000000:
+            return ~u & 0xFFFFFFFF
+        return u | 0x80000000
+
+    def handle_sfpswap(self, instruction_info, issue_thread, instr_args):
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_src_c"]
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: swap(lreg[{vd}], lreg[{vc}]) mode {mod1}")
+
+        vd_writable = vd < 8 or vd == 16
+        vc_writable = vc < 8 or vc == 16
+        if not (vd_writable or vc_writable):
+            return
+
+        # Modes >= 9 are reserved ("VD gets max on every row"); treat as the
+        # empty min-row set so the else-branch (VD=max) applies everywhere.
+        min_rows = VectorUnit.SFPSWAP_MOD1_MIN_ROWS.get(mod1, frozenset())
+
+        for lane in range(32):
+            if not self.isLaneEnabled(lane):
+                continue
+            d_val = self.lregs[vd][lane]
+            c_val = self.lregs[vc][lane]
+
+            if mod1 == VectorUnit.SFPSWAP_MOD1_UNCONDITIONAL:
+                new_d, new_c = c_val, d_val
+            else:
+                # Preserve original bit patterns: pick the stored lane values,
+                # ordering them by the sign-magnitude total order.
+                if self._sign_mag_key(c_val) < self._sign_mag_key(d_val):
+                    smaller, larger = c_val, d_val
+                else:
+                    smaller, larger = d_val, c_val
+                if (lane // 8) in min_rows:
+                    new_d, new_c = smaller, larger
+                else:
+                    new_d, new_c = larger, smaller
+
+            if vd_writable:
+                self.lregs[vd][lane] = new_d
+            if vc_writable:
+                self.lregs[vc][lane] = new_c
+
+    def handle_sfpcast(self, instruction_info, issue_thread, instr_args):
+        # Cast a sign-magnitude int32 in VC to FP32 in VD. Verbatim port of the
+        # pseudocode in WormholeB0/TensixTile/TensixCoprocessor/SFPCAST.md.
+        # mod1 & 1 selects stochastic rounding (seven PRNG bits) on hardware;
+        # tt-sim does not model the SFPU PRNG, so both modes round to nearest
+        # even here (the round-to-nearest branch below).
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_src_c"]
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            mode = "stochastic~rne" if (mod1 & 1) else "rne"
+            print(f"SFPU: lreg[{vd}] = fp32(int32 lreg[{vc}]) [{mode}]")
+
+        if not (vd < 8 or vd == 16):
+            return
+
+        for lane in range(32):
+            if not self.isLaneEnabled(lane):
+                continue
+            c = conv_to_uint32(self.lregs[vc][lane]) & 0xFFFFFFFF
+            sign = c & 0x80000000
+            mag = c & 0x7FFFFFFF
+            # __builtin_clz of the 32-bit magnitude; the docs use 157 as the
+            # sentinel for mag == 0 so the exponent field lands on zero.
+            lz = (32 - mag.bit_length()) if mag else 157
+            norm = (mag << (lz & 31)) & 0xFFFFFFFF
+            # The implicit leading 1 in (norm >> 8) carries into the exponent
+            # field, which is why (157 - lz) rather than (158 - lz) is used.
+            d = (sign + ((157 - lz) << 23) + (norm >> 8)) & 0xFFFFFFFF
+            # Round to nearest, ties to even: round up when the guard bit is
+            # set and either the LSB or any sticky bit is set.
+            if (norm & 0x80) and (norm & 0x17F):
+                d = (d + 1) & 0xFFFFFFFF
+            self.lregs[vd][lane] = conv_to_float(d)
+
+    def handle_sfp_stoch_rnd(self, instruction_info, issue_thread, instr_args):
+        # Round / narrow VC into VD. Verbatim port of the pseudocode in
+        # WormholeB0/TensixTile/TensixCoprocessor/SFPSTOCHRND_{FloatFloat,
+        # FloatInt,IntInt}.md. mod bits [2:0] pick the conversion; bit 3
+        # selects the immediate descale over src_b (int32->int8 only). rnd_mode
+        # selects stochastic rounding on hardware, which needs the SFPU PRNG
+        # tt-sim does not model, so both paths use the round-to-nearest
+        # constant 0x400000.
+        mod = instr_args["instr_mod1"]
+        mode = mod & 0x7
+        use_imm = bool(mod & 0x8)
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_src_c"]
+        vb = instr_args["lreg_src_b"]
+        imm8 = instr_args["imm8_math"]
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = stochrnd(lreg[{vc}]) mode {mode}")
+
+        prng = VectorUnit.SFP_STOCH_RND_PRNG_RNE
+
+        for lane in range(32):
+            gate = vd < 12 or self.laneConfigValue(
+                lane, VectorUnit.DISABLE_BACKDOOR_LOAD
+            )
+            if not (gate and self.isLaneEnabled(lane)):
+                continue
+
+            if mode in (
+                VectorUnit.SFP_STOCH_RND_FP32_TO_FP16A,
+                VectorUnit.SFP_STOCH_RND_FP32_TO_FP16B,
+            ):
+                x = conv_to_uint32(self.lregs[vc][lane]) & 0xFFFFFFFF
+                exp = (x >> 23) & 0xFF
+                if exp == 0:
+                    x = 0  # denormals / zero -> +0
+                elif exp == 255:
+                    x &= 0xFF800000  # NaN / Inf -> normalized Inf
+                elif mode == VectorUnit.SFP_STOCH_RND_FP32_TO_FP16A:
+                    discarded = x & 0x1FFF  # keep 10 mantissa bits
+                    x -= discarded
+                    if discarded >= (prng >> 10):
+                        x += 0x2000
+                else:
+                    discarded = x & 0xFFFF  # keep 7 mantissa bits (bf16)
+                    x -= discarded
+                    if discarded >= (prng >> 7):
+                        x += 0x10000
+                result = conv_to_float(x & 0xFFFFFFFF)
+            elif mode in VectorUnit.SFP_STOCH_RND_FLOAT_TO_INT:
+                keep_sign, max_mag = VectorUnit.SFP_STOCH_RND_FLOAT_TO_INT[mode]
+                c = conv_to_uint32(self.lregs[vc][lane]) & 0xFFFFFFFF
+                sign = (c & 0x80000000) if keep_sign else 0
+                exp = ((c >> 23) & 0xFF) - 127
+                if exp < -1:
+                    mag = 0  # |x| < 0.5 -> 0
+                    sign = 0
+                elif exp >= 16:
+                    mag = max_mag  # |x| >= 2**16 (and NaN) -> saturate
+                else:
+                    mag = 0x800000 | (c & 0x7FFFFF)
+                    mag = (mag << exp) if exp >= 0 else (mag >> -exp)
+                    mag = (mag >> 23) + (1 if (mag & 0x7FFFFF) >= prng else 0)
+                    if mag > max_mag:
+                        mag = max_mag
+                    if mag == 0:
+                        sign = 0
+                result = (sign + mag) & 0xFFFFFFFF  # sign-magnitude integer
+            elif mode in (
+                VectorUnit.SFP_STOCH_RND_INT32_TO_UINT8,
+                VectorUnit.SFP_STOCH_RND_INT32_TO_INT8,
+            ):
+                c = conv_to_uint32(self.lregs[vc][lane]) & 0xFFFFFFFF
+                sign = c & 0x80000000
+                mag = c & 0x7FFFFFFF  # sign-magnitude source
+                mag <<= 23
+                descale = (
+                    (imm8 & 0x1F)
+                    if use_imm
+                    else (conv_to_uint32(self.lregs[vb][lane]) & 0x1F)
+                )
+                mag >>= descale
+                mag = (mag >> 23) + (1 if (mag & 0x7FFFFF) >= prng else 0)
+                if mode == VectorUnit.SFP_STOCH_RND_INT32_TO_UINT8:
+                    mag = min(mag, 255)
+                    sign = 0
+                else:
+                    mag = min(mag, 127)
+                    if mag == 0:
+                        sign = 0
+                result = (sign + mag) & 0xFFFFFFFF  # sign-magnitude integer
+            else:
+                raise NotImplementedError(f"SFP_STOCH_RND mode {mode} is reserved")
+
+            if vd < 8 or vd == 16:
+                self.lregs[vd][lane] = result
+
+    def handle_sfpdivp2(self, instruction_info, issue_thread, instr_args):
+        # Scale by a power of two by adjusting the FP32 exponent field.
+        # Verbatim port of WormholeB0/TensixTile/TensixCoprocessor/SFPDIVP2.md.
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        imm8 = instr_args["imm12_math"] & 0xFF
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            op = (
+                f"exp += {imm8}"
+                if (mod1 & VectorUnit.SFPDIVP2_MOD1_ADD)
+                else f"exp = {imm8}"
+            )
+            print(f"SFPU: lreg[{vd}] = scale2(lreg[{vc}]) [{op}]")
+
+        if not (vd < 8 or vd == 16):
+            return
+
+        for lane in range(32):
+            if not self.isLaneEnabled(lane):
+                continue
+            c = conv_to_uint32(self.lregs[vc][lane]) & 0xFFFFFFFF
+            sign = c & 0x80000000
+            exp = (c >> 23) & 0xFF
+            man = c & 0x7FFFFF
+            if mod1 & VectorUnit.SFPDIVP2_MOD1_ADD:
+                if exp != 0xFF:  # leave Inf / NaN unchanged
+                    exp = (exp + imm8) & 0xFF
+            else:
+                exp = imm8
+            self.lregs[vd][lane] = conv_to_float(sign | (exp << 23) | man)
+
     def handle_sfpexexp(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
         vd = instr_args["lreg_dest"]
@@ -436,7 +706,7 @@ class VectorUnit(TensixBackendUnit):
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
-                    c = self.lregs[vc][lane]
+                    c = self._as_fp32(self.lregs[vc][lane])
                     d = conv_to_float(self.BF16toFP32(imm16)) + c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
@@ -457,7 +727,7 @@ class VectorUnit(TensixBackendUnit):
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
-                    c = self.lregs[vc][lane]
+                    c = self._as_fp32(self.lregs[vc][lane])
                     d = conv_to_float(self.BF16toFP32(imm16)) * c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
@@ -465,6 +735,23 @@ class VectorUnit(TensixBackendUnit):
                         vd = vd
                     if vd < 8 or vd == 16:
                         self.lregs[vd][lane] = d
+
+    @staticmethod
+    def _as_fp32(value):
+        """Interpret an LReg lane as the FP32 value the float ALU sees.
+
+        LReg lanes hold either a Python float (already an FP32 value) or a
+        raw 32-bit integer bit-pattern — e.g. a full-precision constant
+        assembled by ``SFPLOADI`` UPPER/LOWER halves and copied in via
+        ``SFPCONFIG``. The float MAD/ADD/MUL ops treat every operand as
+        FP32, so an int-stored operand must be reinterpreted from its bits
+        rather than used as an integer value (otherwise ``1.4427`` read back
+        as ``1069738555`` blows the result up to infinity). Float operands
+        pass through untouched, so all-float paths are unaffected.
+        """
+        if isinstance(value, float):
+            return value
+        return conv_to_float(value & 0xFFFFFFFF)
 
     def perform_mad(self, va, vb, vc, vd, mod1):
         if self.getDiagnosticSettings().reportSFPUCalculations():
@@ -477,9 +764,9 @@ class VectorUnit(TensixBackendUnit):
                         if mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VA
                         else va
                     )
-                    a = self.lregs[va][lane]
-                    b = self.lregs[vb][lane]
-                    c = self.lregs[vc][lane]
+                    a = self._as_fp32(self.lregs[va][lane])
+                    b = self._as_fp32(self.lregs[vb][lane])
+                    c = self._as_fp32(self.lregs[vc][lane])
                     d = a * b + c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
