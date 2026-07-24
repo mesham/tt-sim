@@ -90,13 +90,38 @@ class EthCore:
     zero-fill behaviour so kernels that hardcode an eth coord
     (e.g. ``hello_world_datatypes_kernel`` reading ``(1, 0)``) get
     deterministic memory-backed state.
+
+    Go-message completion. tt-metal's ``LaunchProgram``/device init writes a
+    ``go_msg_t`` to every core (workers *and* eth) with the ``signal`` byte
+    set to a launch run-state (INIT/GO/...), then spins in
+    ``wait_until_cores_done`` until it reads back ``RUN_MSG_DONE`` (signal
+    byte 0). Real eth cores run base firmware that flips the byte; tt-sim has
+    no ERisc, so with plain memory-backed L1 the signal would stay at its
+    launched value and the host would hang forever. (Unmodelled *worker*
+    coords dodge this only because ``NullCore`` zero-fills, and 0 happens to
+    equal ``RUN_MSG_DONE``.) We model the missing firmware minimally: a
+    go-message write is stored with its signal byte forced to
+    ``RUN_MSG_DONE`` — i.e. the eth "kernel" is treated as having completed
+    instantly. Everything else lands in L1 untouched.
     """
+
+    # go_msg_t is a 4-byte union; ``signal`` is the top byte (offset 3).
+    # Launch run-states from tt_metal/hw/inc/hostdev/dev_msgs.h — anything in
+    # this set is a signal the host will then poll to RUN_MSG_DONE (0x0).
+    _GO_MSG_SIZE = 4
+    _RUN_MSG_DONE = 0x00
+    _LAUNCH_SIGNALS = frozenset({0x40, 0x80, 0xC0, 0xE0, 0xF0})
 
     def __init__(self, device, unified_coord):
         self.device = device
         self.unified = unified_coord
 
     def write(self, addr, data):
+        if (
+            len(data) == self._GO_MSG_SIZE
+            and data[self._GO_MSG_SIZE - 1] in self._LAUNCH_SIGNALS
+        ):
+            data = data[: self._GO_MSG_SIZE - 1] + bytes([self._RUN_MSG_DONE])
         self.device.write(self.unified, addr, data)
 
     def read(self, addr, size):

@@ -84,6 +84,17 @@ class TT_Device(Device):
         Eth tiles are addressed only via canonical coords by single-chip
         kernels (e.g. ``hello_world_datatypes_kernel`` reads ``(1, 0)``),
         not via any bank-to-noc table, so they don't need mirror keys.
+
+        For the same reason, an eth tile's *primary* key must not overwrite
+        an existing ``noc_1_directory`` entry. On NoC 1, cell ``(9, 0)`` is
+        physically the DRAM core at NoC 0 ``(0, 11)`` (that's the mirror), so
+        DRAM legitimately owns it. Eth ``(9, 0)`` (and ``(9, 6)``, ``(4, 0)``,
+        ``(4, 6)``) share those cells and are registered *after* DRAM, so a
+        plain assignment would clobber the DRAM mirror and a canonical
+        ``programming_example`` reading DRAM over NoC 1 would index into eth
+        L1 (a 256 KiB memory) and overflow. Eth therefore uses non-clobbering
+        (``setdefault``) registration for its NoC 1 primary; DRAM, registered
+        first, keeps the cell.
         """
         coord = tile.get_coord_pair()
         assert coord not in self.tile_directory, f"tile already registered at {coord}"
@@ -92,10 +103,13 @@ class TT_Device(Device):
         nui1 = tile.get_noc_nui(1)
         primary = nui0.get_id_pair()
         self.noc_0_directory[primary] = nui0
-        self.noc_1_directory[primary] = nui1
         register_mirror = getattr(tile, "register_noc1_mirror", True)
         if register_mirror:
+            self.noc_1_directory[primary] = nui1
             self.noc_1_directory[self._noc1_mirror(primary)] = nui1
+        else:
+            # Eth: yield to a DRAM mirror already occupying this NoC 1 cell.
+            self.noc_1_directory.setdefault(primary, nui1)
         for alias in getattr(tile, "noc_aliases", ()):
             self.noc_0_directory[alias] = nui0
             self.noc_1_directory[alias] = nui1
