@@ -18,6 +18,64 @@ References:
 
 ---
 
+## Positioning (post-ttsim)
+
+Tenstorrent released [ttsim](https://github.com/tenstorrent/ttsim) as
+the open-source, bit-exact functional simulator for Wormhole /
+Blackhole / Quasar — *"the official golden reference implementation of
+the Tenstorrent ISA contract"*. It occupies the same
+`TT_METAL_SIMULATOR` slot tt-sim's wire bridge does, in C++, faster,
+vendor-maintained, aimed at safety-critical pre-silicon validation.
+
+That changes the goal. tt-sim no longer competes for bit-exact
+correctness, broad Tensix-instruction coverage, multi-arch coverage,
+or the "run tt-metal binaries without silicon" role — ttsim wins each
+on every axis. Defensible lanes:
+
+1. **Cycle-approximate performance estimator** (§I) — ttsim is
+   explicitly *not* cycle-accurate. tt-sim's per-unit cost model +
+   observability stack is a tool for *understanding why kernels are
+   slow*, complementary to ttsim's correctness role.
+2. **Hackability** — pure Python, ISA-docs-shaped modules. Editing the
+   simulator is editing `.py`, not forking C++.
+3. **Observability tooling** (§H) — Perfetto with NoC arrows, LCOV via
+   DWARF, Cachegrind memory hotspots, Spike commitlog diffing, Parquet
+   counter datasets. Not present in ttsim's public surface; load-
+   bearing for (1).
+4. **Differential testing against ttsim** for correctness — use ttsim
+   as oracle so tt-sim engineering focuses on the cycle side.
+5. **Education** — `driver/simple/ex1-5` ladder + readable backends.
+
+Frame this honestly in user-facing docs: tt-sim is a *first-order
+performance estimator* with hackable internals and rich tracing, not a
+cycle-accurate validation tool. Cycle-accurate (matching silicon
+within ~%) needs RTL or captured silicon traces; neither is publicly
+available (see §I "Calibration against silicon traces"). Until that
+data exists, call it "performance estimator", not "cycle-accurate".
+
+### Re-prioritised headline goals
+
+1. **§I cycle-approximate perf model** — promoted from opportunistic
+   perf work to the main thing.
+2. **§H follow-ups gated on §I** — Perfetto durations, NoC
+   `vc`/`issue_cycle`/`arrival_cycle`, FPU/SFPU stall reasons, packer
+   back-pressure, L1 bank conflicts. Schema exists; data becomes real
+   when §I lands.
+3. **§L profiling + optimisation** (new) — measure before optimising;
+   make the cycle pump fast enough to be usable at kernel scale.
+4. **Differential testing harness against ttsim** — first-class
+   workstream; ttsim is the new correctness oracle.
+
+De-prioritised:
+
+- Closing every §D `NotImplementedError` — cover what the headline
+  cycle-approx examples exercise; let ttsim cover the rest.
+- Multi-arch (Blackhole/Quasar). Out of scope.
+- Native fast-dispatch. Slow-dispatch suffices for everything tt-sim
+  is now aiming at.
+
+---
+
 ## A. tt-metal wire bridge (`driver/wormhole/server/`)
 
 The integration runs end-to-end for the canonical `programming_examples/`
@@ -447,13 +505,24 @@ Multi-chip identity is the remaining gap.
 
 ---
 
-## I. Cycle accuracy
+## I. Performance modelling (cycle-approximate)
 
-The simulator is functional, not cycle-accurate — every instruction
-retires in one tick, NoC requests are accepted immediately, and there is
-no back-pressure (per CLAUDE.md "The point is hackability"). The
-sub-items below appear elsewhere flagged as "perf-level"; collected here
-so the strategy can be picked at one go rather than piecemeal.
+**Headline goal** post-ttsim (see Positioning). The simulator is
+functional, not cycle-accurate — every instruction retires in one tick,
+NoC requests are accepted immediately, and there is no back-pressure
+(per CLAUDE.md "The point is hackability"). Closing that gap is the
+defining work for tt-sim's new lane: a first-order performance
+estimator complementary to ttsim's bit-exact functional role.
+
+Be explicit in user-facing docs that this is *cycle-approximate*, not
+cycle-accurate. Cycle-accurate (matching silicon within ~%) needs RTL
+or captured silicon traces to calibrate against — see the "Calibration
+against silicon traces" bullet below. Until that data exists, the model
+targets order-of-magnitude correctness on stalls, back-pressure, and
+contention, not silicon-matching cycle counts.
+
+The sub-items below appear elsewhere flagged as "perf-level"; collected
+here so the strategy can be picked at one go rather than piecemeal.
 
 - **Per-unit cycle-cost tables.** Today every RV instruction, Tensix
   op, NoC request, and Mover transfer completes in the same tick it
@@ -572,3 +641,89 @@ Loose ends that don't need design work:
   if it doesn't, the wire bridge should synthesise it.
 - *Test:* no example needed — housekeeping. Existing examples remain
   the acceptance bar (they must still pass after each fix).
+
+---
+
+## L. Profiling & optimisation
+
+Now that §I cycle-approximate is the headline goal, the simulator must
+be fast enough to run kernel-scale workloads. `matmul_single_core` 640³
+bf16 already times out under the wire bridge — a leading indicator that
+there's perf headroom to find *before* adding more per-cycle work
+(cycle modelling, stall tracking, perf counters).
+
+### Discipline
+
+- **Profile first, optimise second.** No "use Numba" or "rewrite in
+  Cython" decision without trace data showing where the cycles go.
+  Use `TT_SIM_TRACE_COUNTERS` on a known-slow run (`four/` matmul, or
+  slow-dispatch `matmul_single_core` once it stops timing out) and
+  partition wall-clock spend.
+  - *Test:* output is a Parquet dataset + writeup refreshed in
+    `driver/wormhole/docs/profiling.md` per major optimisation round.
+- **Land §I event-driven cycle pump *before* JIT'ing.** The current
+  tick-every-component pump is being replaced anyway; the new loop
+  (typed event queue, integer cycle counts, state machines) is a much
+  better JIT target than the current OOP-heavy one.
+  - *Test:* covered by §I.
+
+### Numba
+
+Natural first JIT to try because it preserves the hackability pitch —
+decorators, no build step. Realistic targets:
+
+- **Tensix backend numeric inner loops** (matrix, FPU/SFPU element-
+  wise). Already numpy; Numba win on top usually 2–3×.
+  - *Test:* benchmark `four/` and `five/` wall-clock pre/post; assert
+    no behavioural diff.
+- **RV32IM execute** — only if rewritten table-driven over typed
+  arrays. Significant refactor of `tt_sim/pe/rv/isa/i_isa.py`.
+  - *Test:* `driver/simple/ex2`/`ex3` cycle-count regression +
+    wall-clock measurement.
+- **§I event-driven cycle pump** — best Numba target by construction.
+  - *Test:* covered by §I.
+
+Where Numba does **not** help — structurally incompatible with
+`@njit`:
+
+- `MemoryMap` interval lookup → polymorphic `mem_mapable` dispatch
+  (most-called function in the sim).
+- `EventBus.publish` subscriber walk.
+- Current clock tick (`tick()` on every registered component).
+- Tensix `frontend.py` YAML-driven decode → backend dispatch.
+
+Sprinkling `@njit` on OOP-heavy methods rarely pays — per-call boundary
+cost eats the JIT win.
+
+### `nogil=True` — revive §A threading
+
+§A threading is structurally correct but a perf regression because GIL
+contention dominates per-cycle Python work. Numba can release the GIL
+via `@njit(nogil=True)`. Wrapping Tensix backend hot inner ops this way
+gives threading a real path to a speedup that doesn't depend on Python
+3.13t — orthogonal to single-thread perf and arguably the most
+interesting near-term Numba angle.
+
+- *Test:* re-run §A's 4-Tensix `four/`-derived benchmark with Tensix
+  inner ops Numba-`nogil` and `TT_SIM_THREADED=1`; target wall-clock
+  under sequential, not over.
+
+### Alternatives considered
+
+- **Cython** — better for OOP than Numba, but adds a build step.
+  Breaks hackability. Avoid unless profiling proves OOP dispatch
+  dominates *and* no Numba-compatible rewrite is feasible.
+- **PyPy** — drop-in for pure Python, but numpy interop has been
+  historically weak; the Tensix backend is numpy-heavy. Not viable.
+- **C extension** — fastest, worst for hackability. Last resort.
+- **Free-threaded Python 3.13t (PEP 703)** — already flagged in §A.
+  Orthogonal to Numba `nogil`; complementary.
+
+### Watch: Tenstorrent shipping their own perf model
+
+ttsim is explicit about *not* being cycle-accurate today, but
+Tenstorrent has internal perf models (their compiler needs one). They
+may not have released one because it exposes microarch detail — but
+they could ship cycle accuracy or public cost tables at any time. If
+they do, §I's headline status needs re-evaluation. Watch the ttsim and
+tt-metal release notes.
