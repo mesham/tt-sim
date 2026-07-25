@@ -10,6 +10,9 @@
 #   TT_SIM_TENSIX_COORDS=1-1,2-1  comma-separated physical worker coords to
 #                                 pre-construct as TensixCores (default 1-1).
 #                                 Unlisted worker coords stay as NullCore.
+#   TT_SIM_TENSIX_CORES=N         materialise N workers at default coords
+#                                 (column-major from 1-1) instead of naming
+#                                 them. Mutually exclusive with _COORDS.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

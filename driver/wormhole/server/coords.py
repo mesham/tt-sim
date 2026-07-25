@@ -115,3 +115,40 @@ _SOC = _load_soc_descriptor()
 TENSIX_COORD_MAP = _build_tensix_map(_SOC)
 DRAM_COORD_MAP = _build_dram_map(_SOC)
 ETH_COORD_MAP = _build_eth_map(_SOC)
+
+# Primary override-selectable worker block: physical x in 1..4, y in 1..5 (the
+# 20-tile 4x5 grid that TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4 selects).
+# Filled before the extended-grid workers when materialising by count.
+_PRIMARY_MAX_X = 4
+_PRIMARY_MAX_Y = 5
+
+
+def default_tensix_coords(n):
+    """Return the first ``n`` physical worker coords for ``TT_SIM_TENSIX_CORES=N``.
+
+    Orders workers **column-major** — y fastest within a column: ``(1,1),
+    (1,2), … ,(1,5),(2,1),…`` — because that's the order tt-metal actually
+    drives program cores under the default grid override. Empirically both
+    ``matmul_multi_core`` and ``noc_tile_transfer`` launch ``(1,1)`` then
+    ``(1,2)`` and matmul fills the whole ``x=1`` column before ``x=2``. So a
+    bare *core count* materialises the coords real programs use, without the
+    user naming them. The primary 4x5 block is filled first, then any
+    extended-grid workers. A program that launches on a coord outside this set
+    still hits the clear go=GO error naming the exact coord to add.
+    """
+    if n < 1:
+        raise ValueError(f"core count must be >= 1, got {n}")
+
+    def order_key(coord):
+        x, y = coord
+        in_primary = x <= _PRIMARY_MAX_X and y <= _PRIMARY_MAX_Y
+        # Primary block first; column-major (x outer, y inner) within each band.
+        return (0 if in_primary else 1, x, y)
+
+    ordered = sorted(TENSIX_COORD_MAP, key=order_key)
+    if n > len(ordered):
+        raise ValueError(
+            f"core count {n} exceeds the {len(ordered)} functional workers "
+            f"in soc_descriptor.yaml"
+        )
+    return ordered[:n]

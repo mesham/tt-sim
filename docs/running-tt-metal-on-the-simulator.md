@@ -66,6 +66,22 @@ keeps the per-cycle pump cheap. Single-core programs work out of the box;
 export TT_SIM_TENSIX_COORDS=1-1,1-2      # comma-separated PHYSICAL x-y coords
 ```
 
+**Or specify a bare count** and let the simulator pick sensible default coords:
+
+```bash
+export TT_SIM_TENSIX_CORES=2             # materialise 2 workers at 1-1, 1-2
+```
+
+`TT_SIM_TENSIX_CORES=N` materialises N workers **column-major from `1-1`**
+(`1-1,1-2,1-3,1-4,1-5,2-1,…`). This matches the order tt-metal actually drives
+program cores under the default grid override — both `matmul_multi_core` and
+`noc_tile_transfer` launch `1-1` then `1-2`, and matmul fills the whole `x=1`
+column first — so a plain count covers the coords typical programs use without
+your having to know them. If a program launches on a coord outside the chosen
+set you still get the exact go=GO error (§1.3, below) naming what to add; switch
+to explicit `TT_SIM_TENSIX_COORDS` for off-origin placements. The two vars are
+**mutually exclusive** — set one, not both.
+
 > **Interaction with §1.2.** A `*_multi_core` program distributes its work
 > across tt-metal's *compute grid*. With no override that grid is the full 8×10,
 > so correct results would need **all 80** worker tiles materialized

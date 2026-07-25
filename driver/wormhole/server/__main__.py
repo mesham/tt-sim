@@ -17,16 +17,42 @@ from .transport import Transport
 def _parse_tensix_pool(env):
     """Return the physical worker coords the bridge should pre-construct.
 
-    Reads ``TT_SIM_TENSIX_COORDS``: comma-separated ``x-y`` physical NoC
-    coords, e.g. ``"1-1,2-1"``. Whitespace tolerated. Defaults to
-    ``[(1, 1)]`` — the single-tile coord every wormhole example targets.
-    Validates each entry against the SoC-descriptor-derived
-    ``TENSIX_COORD_MAP`` so typos surface immediately rather than as
-    silent NullCore zero-fills at runtime.
-    """
-    from .coords import TENSIX_COORD_MAP
+    Two ways to specify the pool, in precedence order:
 
-    raw = env.get("TT_SIM_TENSIX_COORDS", "1-1")
+    - ``TT_SIM_TENSIX_COORDS``: comma-separated ``x-y`` physical NoC coords,
+      e.g. ``"1-1,2-1"`` — exact control over which workers exist.
+    - ``TT_SIM_TENSIX_CORES``: a bare count ``N`` — materialise N workers at a
+      sensible default coord set (``coords.default_tensix_coords``, column-major
+      from ``1-1``), so you can drive by core *count* without naming coords.
+
+    Setting both is an error (ambiguous). Neither defaults to ``[(1, 1)]`` — the
+    single-tile coord every wormhole example targets. Coords are validated
+    against the SoC-descriptor-derived ``TENSIX_COORD_MAP`` so typos surface
+    immediately rather than as silent NullCore zero-fills at runtime.
+    """
+    from .coords import TENSIX_COORD_MAP, default_tensix_coords
+
+    coords_raw = env.get("TT_SIM_TENSIX_COORDS")
+    cores_raw = env.get("TT_SIM_TENSIX_CORES")
+    if coords_raw is not None and cores_raw is not None:
+        raise SystemExit(
+            "set only one of TT_SIM_TENSIX_COORDS (explicit coords) or "
+            "TT_SIM_TENSIX_CORES (a core count), not both"
+        )
+
+    if cores_raw is not None:
+        try:
+            n = int(cores_raw.strip())
+        except ValueError:
+            raise SystemExit(
+                f"TT_SIM_TENSIX_CORES must be an integer, got {cores_raw!r}"
+            ) from None
+        try:
+            return default_tensix_coords(n)
+        except ValueError as e:
+            raise SystemExit(f"TT_SIM_TENSIX_CORES: {e}") from None
+
+    raw = coords_raw if coords_raw is not None else "1-1"
     pool = []
     for chunk in raw.split(","):
         chunk = chunk.strip()
