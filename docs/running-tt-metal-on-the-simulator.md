@@ -35,19 +35,25 @@ sets:
 
 If you are not using the venv, export those four yourself.
 
-### 1.2 Required for tt-metal ≥ 0.70
+### 1.2 Compute-grid override (optional)
+
+**Nothing extra is required on 0.74** — it works out of the box.
+`driver/wormhole/soc_descriptor.yaml` declares the full 8×10 Wormhole worker
+grid, matching tt-metal's default compute-grid range, so the host allocates
+cleanly with no override.
 
 ```bash
+# OPTIONAL — restricts tt-metal to the gap-free 4x5 sub-block:
 export TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4
 ```
 
-**This is mandatory on 0.70+ (including 0.74).** It truncates tt-metal's
-compute grid to the gap-free 4×5 worker block declared in
-`driver/wormhole/soc_descriptor.yaml`. Without it the host asks for logical
-workers that don't exist in the truncated SoC and aborts in
-`L1BankingAllocator::generate_config`. (Background: works around a latent UMD
-bug in `SimulationChip::noc_multicast_write`; can be dropped once that's fixed
-upstream.)
+Set this only for **old-version backwards compatibility** (releases whose UMD
+still hit the `SimulationChip::noc_multicast_write` gap-cell bug) or to make a
+run cheaper by shrinking the worker grid. The 4×5 block is a subset of the
+declared grid, so the override still resolves. If you ever revert the
+descriptor to a truncated grid, this override becomes mandatory again (without
+it the host aborts in `L1BankingAllocator::generate_config` asking for logical
+workers like `(0, 5)`).
 
 ### 1.3 Multiple Tensix tiles
 
@@ -60,14 +66,25 @@ keeps the per-cycle pump cheap. Single-core programs work out of the box;
 export TT_SIM_TENSIX_COORDS=1-1,1-2      # comma-separated PHYSICAL x-y coords
 ```
 
-- Coords are **physical NoC** coords, not logical. Logical→physical for the
-  truncated grid: logical `(col, row)` → physical `(col+1, row+1)`. So logical
+> **Interaction with §1.2.** A `*_multi_core` program distributes its work
+> across tt-metal's *compute grid*. With no override that grid is the full 8×10,
+> so correct results would need **all 80** worker tiles materialized
+> (impractically slow). Exporting `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4`
+> shrinks the compute grid to the 4×5 block, so you only need those **20** tiles.
+> Either way, cores you don't materialize return zeros. **Beware:** some
+> examples (e.g. `vecadd_multi_core`, `vecadd_sharding`) print per-element
+> mismatches but still `exit 0`, so exit code alone is not a correctness signal
+> for them — grep the log for `Mismatch`.
+
+- Coords are **physical NoC** coords, not logical. Logical→physical within the
+  4×5 block: logical `(col, row)` → physical `(col+1, row+1)`. So logical
   `(0,0)`→`1-1`, logical `(0,1)`→`1-2`.
-- The full truncated worker grid is 20 tiles (physical `x∈{1,2,3,4}`,
-  `y∈{1,2,3,4,5}`):
+- The 4×5 sub-block (what `…OVERRIDE_TODEPRECATE=3,4` selects) is 20 tiles
+  (physical `x∈{1,2,3,4}`, `y∈{1,2,3,4,5}`):
   ```
   1-1,2-1,3-1,4-1,1-2,2-2,3-2,4-2,1-3,2-3,3-3,4-3,1-4,2-4,3-4,4-4,1-5,2-5,3-5,4-5
   ```
+  The full declared grid additionally has `x∈{6,7,8,9}` and `y∈{7,8,9,10,11}`.
 - Invalid coords fail fast at server start. If a program addresses a worker you
   did **not** list, the server prints
   `WARNING: wire traffic to functional worker X-Y … not in TT_SIM_TENSIX_COORDS`
@@ -87,7 +104,6 @@ The upstream examples are pre-built binaries under
 
 ```bash
 source /home/nick/projects/riscv/venv/bin/activate
-export TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4
 cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
 
 ./metal_example_add_2_integers_in_compute        # single-tile: just works
@@ -240,7 +256,7 @@ On by default; warns (does not stop) after N cycles of no observable progress.
 #!/usr/bin/env bash
 set -u
 source /home/nick/projects/riscv/venv/bin/activate
-export TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4
+# TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE is NOT needed on 0.74 (see §1.2).
 cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
 
 # name                              coords          timeout
