@@ -90,6 +90,17 @@ export TT_SIM_TENSIX_COORDS=1-1,1-2      # comma-separated PHYSICAL x-y coords
   `WARNING: wire traffic to functional worker X-Y … not in TT_SIM_TENSIX_COORDS`
   and that traffic is silently NullCore-swallowed — a common cause of "result is
   zeros / low PCC".
+- **A kernel *launch* on an unlisted worker is a hard error, not a warning.**
+  The grid-wide init handshake (`go=INIT`) touches every worker and is harmless,
+  but a `go=GO` only ever targets cores a program actually runs on. When one
+  reaches an un-materialized worker the server prints
+  `ERROR: kernel launch (go=GO) sent to functional worker X-Y … which tt-sim did
+  not materialise …` (naming the exact coord to add) and exits. This is the
+  unambiguous "start tt-sim with more cores" signal: add the named `X-Y` to
+  `TT_SIM_TENSIX_COORDS`. Note the host (tt-metal) has no "simulator died" path,
+  so it will still hang on its next poll — but the ERROR line prints the instant
+  the launch is attempted, so the reason is on screen; interrupt and re-run with
+  the coord added.
 - Cost: each materialized Tensix tile is heavy (5 RISC-V cores + coprocessor,
   pumped every cycle via the threaded clock). More tiles = slower wall-clock.
   Reach for the minimal set a program actually uses.

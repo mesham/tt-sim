@@ -133,6 +133,35 @@ def main(argv=None):
 
         fabric.unmapped_callback = _warn_unmapped_worker
 
+        def _error_kernel_launch_on_unmaterialised(coord):
+            # go=GO reached a coord tt-sim didn't materialise. If it's a
+            # functional worker, the program launches a kernel on a core the
+            # user didn't start — a silent NullCore swallow here would surface
+            # only as a downstream hang (the peer cores wait on NoC traffic
+            # this core never sends). Fail loudly and immediately instead.
+            if coord not in TENSIX_COORD_MAP or coord in _tensix_pool_set:
+                return
+            configured = ",".join(f"{x}-{y}" for x, y in sorted(_tensix_pool_set))
+            print(
+                f"[server] ERROR: kernel launch (go=GO) sent to functional "
+                f"worker {coord[0]}-{coord[1]} (unified {TENSIX_COORD_MAP[coord]}), "
+                f"which tt-sim did not materialise — the program runs on more "
+                f"cores than tt-sim was started with. Add `{coord[0]}-{coord[1]}` "
+                f"to TT_SIM_TENSIX_COORDS (currently: {configured}), or set "
+                f"TT_SIM_AUTO_TENSIX=1.",
+                file=sys.stderr,
+                flush=True,
+            )
+            # Stop the server immediately. tt-metal's UMD has no "simulator
+            # died" path — it blocks forever on its next go-message poll no
+            # matter how we close the socket — so the host still needs a Ctrl-C.
+            # But the message above prints the instant the launch is attempted
+            # (i.e. right when the hang begins), so the reason is on screen, and
+            # exiting here means we don't leave an orphaned server behind.
+            os._exit(1)
+
+        fabric.kernel_launch_callback = _error_kernel_launch_on_unmaterialised
+
         enabled = enabled_diagnostic_names(diagnostics)
         print(
             f"[server] tt-sim Wormhole ready "

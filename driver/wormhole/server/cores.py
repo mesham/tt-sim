@@ -16,23 +16,43 @@ class NullCore:
 
     Used both for genuinely unmodelled tiles (eth / pcie / arc /
     router-only) and as the fallback for worker coords the user didn't
-    list in ``TT_SIM_TENSIX_COORDS``. The optional
-    ``on_user_data_write`` hook fires the first time a write targets
-    L1 above 0x10000 — that's past the kernel firmware / init scratch
-    region, so traffic landing there means tt-metal is treating this
-    core as a real worker. ``__main__.py`` uses this to warn about the
-    most common silent-config bug.
+    list in ``TT_SIM_TENSIX_COORDS``. Two optional hooks let
+    ``__main__.py`` surface config bugs:
+
+    - ``on_user_data_write`` fires the first time a write targets L1
+      above 0x10000 — past the kernel firmware / init scratch region, so
+      traffic landing there means tt-metal is treating this core as a
+      real worker (a warning-level hint).
+    - ``on_kernel_launch`` fires when the host writes go=GO (a kernel
+      launch) to this coord. Unlike the grid-wide go=INIT handshake that
+      touches every worker during device init, a go=GO only ever targets
+      cores a program actually runs on — so a go=GO to an un-materialised
+      worker is a hard error: the program needs more cores than tt-sim
+      was started with.
     """
 
     USER_DATA_ADDR_THRESHOLD = 0x10000
+    # go_msg_t is a 4-byte union; ``signal`` is the top byte (offset 3).
+    # RUN_MSG_GO means "run the kernel here" (tt_metal/hw/inc/hostdev/dev_msgs.h);
+    # RUN_MSG_INIT (0x40) is the grid-wide init handshake and is NOT a launch.
+    _GO_MSG_SIZE = 4
+    _RUN_MSG_GO = 0x80
 
-    def __init__(self, coord, on_user_data_write=None):
+    def __init__(self, coord, on_user_data_write=None, on_kernel_launch=None):
         self.coord = coord
         self.in_reset = True
         self._on_user_data_write = on_user_data_write
+        self._on_kernel_launch = on_kernel_launch
         self._user_write_seen = False
 
     def write(self, addr, data):
+        if (
+            self._on_kernel_launch is not None
+            and len(data) == NullCore._GO_MSG_SIZE
+            and data[NullCore._GO_MSG_SIZE - 1] == NullCore._RUN_MSG_GO
+        ):
+            # Raises (see __main__) — a launch on an un-materialised worker.
+            self._on_kernel_launch(self.coord)
         if (
             not self._user_write_seen
             and self._on_user_data_write is not None

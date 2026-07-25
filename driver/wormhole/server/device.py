@@ -151,9 +151,11 @@ class Device:
 
     def deassert_reset_brisc(self, unified):
         self.wormhole.deassert_soft_reset(unified, BabyRISCVCoreType.BRISC)
-        # Match wormhole_driver.py:44 — propagate reset to clear stale CPU state
-        # before the deasserted core starts executing.
-        self.wormhole.reset()
+        # Clear stale CPU state before the deasserted core runs. Scope this to
+        # the one tile: the global ``wormhole.reset()`` clobbers the PCs of
+        # every other tile already running firmware, which corrupts the whole
+        # grid once more than one worker is materialised.
+        self.wormhole.reset_tile(unified)
         self._brisc_running[unified] = True
         self._maybe_pump()
 

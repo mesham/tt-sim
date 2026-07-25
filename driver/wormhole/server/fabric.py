@@ -23,6 +23,10 @@ class Fabric:
         # silent NullCore zero-fill becomes a "shards 1-N return zeros"
         # debugging adventure.
         self.unmapped_callback: Callable[[tuple[int, int]], None] | None = None
+        # Invoked when a NullCore-backed coord receives a go=GO (kernel launch).
+        # Wired by ``__main__.py`` to error out: a launch on an un-materialised
+        # worker means the program needs more cores than tt-sim was started with.
+        self.kernel_launch_callback: Callable[[tuple[int, int]], None] | None = None
 
     def register(self, coord, core):
         self.cores[coord] = core
@@ -30,7 +34,11 @@ class Fabric:
     def _core(self, coord):
         core = self.cores.get(coord)
         if core is None:
-            core = NullCore(coord, on_user_data_write=self.unmapped_callback)
+            core = NullCore(
+                coord,
+                on_user_data_write=self.unmapped_callback,
+                on_kernel_launch=self.kernel_launch_callback,
+            )
             self.cores[coord] = core
         return core
 
