@@ -74,27 +74,28 @@ class TT_Device(Device):
         worker-visible endpoints) get the same canonical + noc1-mirror
         pair of keys.
 
-        Eth tiles deliberately *skip* noc1-mirror registration. The
-        mirror formula ``(GRID-1-x, GRID-1-y)`` maps several DRAM
-        canonical coords to eth canonical coords and vice versa
-        (e.g. DRAM ch0 canonical ``(0, 11)`` ↔ eth canonical ``(9, 0)``),
-        so registering eth mirrors would overwrite DRAM primary entries
-        in ``noc_1_directory`` — every NCRISC write back to a colliding
-        DRAM channel on NoC 1 would land in the eth tile's L1 instead.
-        Eth tiles are addressed only via canonical coords by single-chip
-        kernels (e.g. ``hello_world_datatypes_kernel`` reads ``(1, 0)``),
-        not via any bank-to-noc table, so they don't need mirror keys.
+        **NoC 1 precedence.** On NoC 1 a tile is *physically* reachable at its
+        mirror coord ``(GRID-1-x, GRID-1-y)``; the canonical (primary) coord is
+        only a convention-1 accommodation for the ``driver/wormhole/<n>/`` tree.
+        The mirror formula maps coords across the DRAM / worker / eth bands, so
+        the two conventions collide on some cells — e.g. with the truncated 4×5
+        worker grid, Tensix ``(4, y)`` mirrors onto the DRAM column ``x = 5``
+        (Tensix ``(4, 1)`` ↔ DRAM ``(5, 10)``), and DRAM ch0 ``(0, 11)`` mirrors
+        onto eth ``(9, 0)``. When both a mirror and a primary want the same NoC 1
+        cell the **mirror must win**, because the bank-to-noc table used by the
+        canonical ``programming_examples/`` addresses DRAM over NoC 1 by its
+        mirror; letting a Tensix/eth *primary* clobber a DRAM *mirror* routes a
+        DRAM read into that tile's (smaller) L1 and overflows it. So:
 
-        For the same reason, an eth tile's *primary* key must not overwrite
-        an existing ``noc_1_directory`` entry. On NoC 1, cell ``(9, 0)`` is
-        physically the DRAM core at NoC 0 ``(0, 11)`` (that's the mirror), so
-        DRAM legitimately owns it. Eth ``(9, 0)`` (and ``(9, 6)``, ``(4, 0)``,
-        ``(4, 6)``) share those cells and are registered *after* DRAM, so a
-        plain assignment would clobber the DRAM mirror and a canonical
-        ``programming_example`` reading DRAM over NoC 1 would index into eth
-        L1 (a 256 KiB memory) and overflow. Eth therefore uses non-clobbering
-        (``setdefault``) registration for its NoC 1 primary; DRAM, registered
-        first, keeps the cell.
+        - mirror registrations are authoritative (plain assignment);
+        - primary and alias registrations use ``setdefault`` — they fill only
+          cells no mirror has claimed.
+
+        Eth tiles additionally *skip* mirror registration entirely: an eth
+        mirror would land on a DRAM canonical coord and steal that DRAM's own
+        primary cell, and no bank-to-noc flow addresses eth by mirror anyway
+        (single-chip kernels like ``hello_world_datatypes_kernel`` read eth by
+        its canonical ``(1, 0)``).
         """
         coord = tile.get_coord_pair()
         assert coord not in self.tile_directory, f"tile already registered at {coord}"
@@ -104,15 +105,13 @@ class TT_Device(Device):
         primary = nui0.get_id_pair()
         self.noc_0_directory[primary] = nui0
         register_mirror = getattr(tile, "register_noc1_mirror", True)
+        # Primary is non-authoritative on NoC 1: never clobber a mirror.
+        self.noc_1_directory.setdefault(primary, nui1)
         if register_mirror:
-            self.noc_1_directory[primary] = nui1
             self.noc_1_directory[self._noc1_mirror(primary)] = nui1
-        else:
-            # Eth: yield to a DRAM mirror already occupying this NoC 1 cell.
-            self.noc_1_directory.setdefault(primary, nui1)
         for alias in getattr(tile, "noc_aliases", ()):
             self.noc_0_directory[alias] = nui0
-            self.noc_1_directory[alias] = nui1
+            self.noc_1_directory.setdefault(alias, nui1)
             if register_mirror:
                 self.noc_1_directory[self._noc1_mirror(alias)] = nui1
         nui0.set_noc_directory(self.noc_0_directory)
