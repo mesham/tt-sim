@@ -173,8 +173,8 @@ def main(argv=None):
                 f"worker {coord[0]}-{coord[1]} (unified {TENSIX_COORD_MAP[coord]}), "
                 f"which tt-sim did not materialise — the program runs on more "
                 f"cores than tt-sim was started with. Add `{coord[0]}-{coord[1]}` "
-                f"to TT_SIM_TENSIX_COORDS (currently: {configured}), or set "
-                f"TT_SIM_AUTO_TENSIX=1.",
+                f"to TT_SIM_TENSIX_COORDS (currently: {configured}), or raise "
+                f"TT_SIM_TENSIX_CORES.",
                 file=sys.stderr,
                 flush=True,
             )
