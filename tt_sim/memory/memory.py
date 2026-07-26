@@ -69,9 +69,9 @@ class MemorySpace(MemMapable, ABC):
         )
 
     def _locate_memory_space(self, addr):
-        for addr_range, memory_space in self.memory_map.items():
-            if addr_range.check_match(addr):
-                return addr_range, memory_space
+        addr_range, memory_space = self.memory_map.locate(addr)
+        if addr_range is not None:
+            return addr_range, memory_space
 
         if self.safe:
             msg = f"Provided address '{hex(addr)}' does not match any registered memory spaces"

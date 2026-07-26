@@ -1,9 +1,8 @@
 import importlib.resources as resources
 from copy import copy
 
-import yaml
-
 from tt_sim.util.bits import extract_bits, get_bits
+from tt_sim.util.yaml_cache import load_yaml_cached
 
 
 class TensixCoprocessorDiagnostics:
@@ -51,16 +50,14 @@ class TensixConfigurationConstants:
     @classmethod
     def init(cls):
         if not hasattr(cls, "config_constants"):
-            with (
-                resources.files("tt_sim.pe.tensix")
-                .joinpath("tensix_backend_cfg.yaml")
-                .open("r") as f
-            ):
-                cls.config_constants = yaml.safe_load(f)
-                cls.ids = {}
-                for k in cls.config_constants.keys():
-                    addr32 = cls.get_addr32(k)
-                    cls.ids[addr32] = k
+            cls.config_constants = load_yaml_cached(
+                resources.files("tt_sim.pe.tensix").joinpath("tensix_backend_cfg.yaml"),
+                "tensix_backend_cfg",
+            )
+            cls.ids = {}
+            for k in cls.config_constants.keys():
+                addr32 = cls.get_addr32(k)
+                cls.ids[addr32] = k
 
     @classmethod
     def get_name(cls, id):
@@ -107,12 +104,12 @@ class TensixInstructionDecoder:
     @classmethod
     def init(cls):
         if not hasattr(cls, "tensix_instructions") or not hasattr(cls, "opcodes"):
-            with (
-                resources.files("tt_sim.pe.tensix")
-                .joinpath("tensix_instructions.yaml")
-                .open("r") as f
-            ):
-                cls.tensix_instructions = yaml.safe_load(f)
+            cls.tensix_instructions = load_yaml_cached(
+                resources.files("tt_sim.pe.tensix").joinpath(
+                    "tensix_instructions.yaml"
+                ),
+                "tensix_instructions",
+            )
 
             cls.opcodes = cls._generate_tensix_instructions_by_opcode()
 

@@ -1,3 +1,6 @@
+from bisect import bisect_right
+
+
 class AddressRange:
     def __init__(self, low, size):
         self.low = low
@@ -24,16 +27,47 @@ class MemoryMap:
             self.memory_map = {}
         else:
             self.memory_map = memory_map
+        # Lazily-built lookup index for locate(): a tuple of (sorted lows,
+        # sorted (range, value) entries). Invalidated (set to None) whenever
+        # the map is mutated and rebuilt on the next locate().
+        self._index = None
+
+    def _invalidate_index(self):
+        self._index = None
+
+    def _build_index(self):
+        entries = sorted(self.memory_map.items(), key=lambda kv: kv[0].low)
+        lows = [addr_range.low for addr_range, _ in entries]
+        self._index = (lows, entries)
+        return self._index
+
+    def locate(self, addr):
+        """Return the (AddressRange, value) covering ``addr`` via binary
+        search over the non-overlapping ranges, or (None, None) if no range
+        matches. Ranges are guaranteed non-overlapping by ``verify()``."""
+        index = self._index
+        if index is None:
+            index = self._build_index()
+        lows, entries = index
+        # Rightmost range whose low is <= addr is the only possible match.
+        idx = bisect_right(lows, addr) - 1
+        if idx >= 0:
+            addr_range, value = entries[idx]
+            if addr <= addr_range.high:
+                return addr_range, value
+        return None, None
 
     def __setitem__(self, key, value):
         assert isinstance(key, AddressRange)
         self.memory_map[key] = value
+        self._invalidate_index()
 
     def __getitem__(self, key):
         return self.memory_map[key]
 
     def __delitem__(self, key):
         del self.memory_map[key]
+        self._invalidate_index()
 
     def items(self):
         return self.memory_map.items()

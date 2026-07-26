@@ -1,3 +1,4 @@
+import builtins
 from abc import ABC, abstractmethod
 
 
@@ -39,19 +40,18 @@ class RV_ISA(ABC):
 
     @classmethod
     def get_bits(cls, bytes, start, end):
-        all_bits = []
-        for b in bytes:
-            for i in range(8):
-                all_bits.append((b >> i) & 1)
-
-        # End is inclusive, so if start=0 and end=6, get 7 values back
-        return all_bits[start : end + 1]
+        # Little-endian bit order: bit i is bit i of the integer formed from
+        # the byte sequence read low-address-first. End is inclusive, so
+        # start=0, end=6 returns 7 values (LSB-first, matching indices).
+        word = int.from_bytes(builtins.bytes(bytes), "little")
+        return [(word >> i) & 1 for i in range(start, end + 1)]
 
     @classmethod
     def get_int(cls, bytes, start, end):
-        val_bin = RV_ISA.get_bits(bytes, start, end)
-        val_bin.reverse()
-        return RV_ISA.bits_to_int(val_bin)
+        # Value of the inclusive bit field [start, end] where start is the
+        # LSB position — equivalent to get_bits + reverse + bits_to_int.
+        word = int.from_bytes(builtins.bytes(bytes), "little")
+        return (word >> start) & ((1 << (end - start + 1)) - 1)
 
     @classmethod
     def get_reg_name(cls, reg_idx):
