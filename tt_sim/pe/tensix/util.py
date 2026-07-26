@@ -281,6 +281,27 @@ class DataFormatConversions:
         return DataFormatConversions.TF32ToSrcTF32(((x & 0x8000) << 3) | (x & 0x7FFF))
 
     @classmethod
+    def ShuffleBF16(cls, x):
+        # Dst holds BF16 as Sign,Man(7b),Exp(8b)
+        # Src holds BF16 as Sign,Man(10b),Exp(8b)
+        return ((x & 0xFF00) << 3) | (x & 0xFF)
+
+    @classmethod
+    def ShuffleFP16(cls, x):
+        # Dst holds FP16 as Sign,Man(10b),Exp(5b)
+        # Src holds FP16 as Sign,Man(10b),Zero(3b),Exp(5b)
+        return ((x & 0xFFE0) << 3) | (x & 0x1F)
+
+    @classmethod
+    def ShuffleTF32(cls, x):
+        # Dst holds TF32 as Sign,HiMan(7b),Exp(8b),LoMan(3b)
+        # Src holds TF32 as Sign,Man(10b),Exp(8b)
+        signHiMan = x & 0x7F800
+        exp = x & 0x007F8
+        loMan = x & 0x00007
+        return signHiMan | (loMan << 8) | (exp >> 3)
+
+    @classmethod
     def Int8InSrcToInt8(cls, x):
         # src holds INT8 as Sign,Mag(10b),Zero(3b),Exp(5b)
         sign = x >> 18

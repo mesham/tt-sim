@@ -28,7 +28,11 @@ class MatrixUnit(TensixBackendUnit):
         "ZEROSRC": "handle_zerosrc",
         "INCRWC": "handle_incrwc",
         "CLEARDVALID": "handle_cleardvalid",
+        "GATESRCRST": "handle_gatesrcrst",
+        "TRNSPSRCB": "handle_trnspsrcb",
+        "MOVB2A": "handle_movb2a",
         "MOVA2D": "handle_mova2d",
+        "MOVD2B": "handle_movd2b",
         "MVMUL": "handle_mvmul",
         "DOTPV": "handle_dotpv",
         "GAPOOL": "handle_gapool",
@@ -73,6 +77,77 @@ class MatrixUnit(TensixBackendUnit):
                 ).allowedClient = SrcRegister.SrcClient.Unpackers
                 if not keepReadingSameSrc:
                     self.srcBBank ^= 1
+
+    def handle_gatesrcrst(self, instruction_info, issue_thread, instr_args):
+        # GATESRCRST forcibly invalidates the one-slot operand cache sitting
+        # between SrcB and the Matrix Unit and resets the SrcA/SrcB pipeline
+        # gating to "don't gate". This functional model reads SrcA/SrcB
+        # directly on every op and models neither the operand cache nor the
+        # gating mechanism, so there is no state to reset here; it is a no-op.
+        pass
+
+    def handle_trnspsrcb(self, instruction_info, issue_thread, instr_args):
+        # Transpose the 16x16 matrix held in SrcB rows [16, 32) in place. The
+        # ISA wait-gate (FPU must own the SrcB bank before dispatch) is modelled
+        # by the one-instruction-per-cycle issue behaviour, so only the swap is
+        # performed here.
+        srcB = self.getSrcB()
+        rowBase = 16
+        for i in range(16):
+            for j in range(i):
+                ij = srcB[rowBase + i, j]
+                ji = srcB[rowBase + j, i]
+                srcB[rowBase + i, j] = ji
+                srcB[rowBase + j, i] = ij
+
+    def handle_movb2a(self, instruction_info, issue_thread, instr_args):
+        srcBRow = instr_args["srcb"]
+        move4Rows = (instr_args["instr_mod"] >> 1) & 0x1
+        addrMod = instr_args["addr_mode"]
+        srcARow = instr_args["srca"]
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+        flushDenormals = not self.getConfigValue(
+            stateID, "ALU_ACC_CTRL_Zero_Flag_disabled_src"
+        )
+
+        rwc = self.backend.getRWC(issue_thread)
+
+        # Determine the row range
+        srcARow += rwc.SrcA
+        srcBRow += rwc.SrcB
+        if move4Rows:
+            numRows = 4
+            srcARow &= 0x3C
+            srcBRow &= 0x3C
+        else:
+            numRows = 1
+            srcARow &= 0x3F
+            srcBRow &= 0x3F
+
+        # Now copy the row(s) from SrcB into SrcA
+        srcA = self.getSrcA()
+        srcB = self.getSrcB()
+        for i in range(numRows):
+            for j in range(16):
+                if get_nth_bit(
+                    self.backend.vector_unit.laneConfigValue(
+                        int(j / 2), VectorUnit.BLOCK_DEST_MOV
+                    ),
+                    j & 1,
+                ):
+                    continue
+                srcVal = srcB[srcBRow, j]
+                if flushDenormals and not (srcVal & 0xFF):
+                    srcVal = 0
+                srcA[srcARow, j] = srcVal
+            srcARow += 1
+            srcBRow += 1
+
+        # Advance the RWCs
+        rwc.applyAddrMod(issue_thread, addrMod)
 
     def handle_mova2d(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
@@ -159,6 +234,124 @@ class MatrixUnit(TensixBackendUnit):
                     )
                 else:
                     self.getDst().setDst16b(dstRow, j, val16b)
+            dstRow += 1
+            srcRow += 1
+
+        # Advance the RWCs
+        rwc.applyAddrMod(issue_thread, addrMod)
+
+    def handle_movd2b(self, instruction_info, issue_thread, instr_args):
+        dstRow = instr_args["dst"]
+        move4Rows = (instr_args["instr_mod"] >> 1) & 0x1
+        addrMod = instr_args["addr_mode"]
+        srcRow = instr_args["src"]
+        useDst32bLo = instr_args["dest_32b_lo"]
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        # Determine the data formats. Note that (as with MOVA2D) SrcAFmt is
+        # deliberately used to select the SrcB style; this is not a typo.
+        if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
+            useDst32b = False
+            srcBStyle = DataFormat.FP16
+        else:
+            if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_override"):
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
+            else:
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+
+            useDst32b = self.getConfigValue(
+                stateID, "ALU_ACC_CTRL_Fp32_enabled"
+            ) or self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled")
+
+            if srcAFmt in [
+                DataFormat.FP32,
+                DataFormat.BF16,
+                DataFormat.BFP8,
+                DataFormat.BFP4,
+                DataFormat.BFP2,
+                DataFormat.INT32,
+                DataFormat.UINT16,
+            ]:
+                srcBStyle = DataFormat.BF16
+            elif srcAFmt in [
+                DataFormat.FP16,
+                DataFormat.BFP8_b,
+                DataFormat.BFP4_b,
+                DataFormat.BFP2_b,
+                DataFormat.INT8,
+            ]:
+                srcBStyle = DataFormat.FP16
+            else:
+                # SrcAFmt == TF32
+                srcBStyle = DataFormat.TF32
+
+        rwc = self.backend.getRWC(issue_thread)
+
+        # Determine the row range
+        dstRow += self.getThreadConfigValue(
+            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+        )
+        dstRow += rwc.Dst + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
+        srcRow += rwc.SrcB
+
+        if move4Rows:
+            numRows = 4
+            dstRow &= 0x3FC
+            srcRow &= 0x3C
+        else:
+            numRows = 1
+            dstRow &= 0x3FF
+            srcRow &= 0x3F
+
+        # Now copy the row(s) from Dst into SrcB
+        srcB = self.getSrcB()
+        for i in range(numRows):
+            for j in range(16):
+                if get_nth_bit(
+                    self.backend.vector_unit.laneConfigValue(
+                        int(j / 2), VectorUnit.BLOCK_DEST_MOV
+                    ),
+                    j & 1,
+                ):
+                    continue
+
+                if useDst32b:
+                    # Read from Dst in 32-bit mode
+                    dstVal = self.getDst().getDst32b(dstRow, j)
+                    if useDst32bLo:
+                        # Only useful if software has deliberately packed two
+                        # bf16/fp16 values into 32 bits and written them to Dst32b
+                        dstVal = (dstVal << 16) | (dstVal & 0xFFFF)
+
+                    if srcBStyle == DataFormat.BF16:
+                        # Treat dstVal as fp32 or tf32, truncate to bf16
+                        srcBVal = DataFormatConversions.ShuffleBF16(dstVal >> 16)
+                    elif srcBStyle == DataFormat.FP16:
+                        srcBVal = DataFormatConversions.ShuffleFP16(dstVal >> 16)
+                    elif not useDst32bLo:
+                        # Treat dstVal as fp32 or tf32, truncate to tf32
+                        srcBVal = DataFormatConversions.ShuffleTF32(dstVal >> 13)
+                    else:
+                        # The 13 bits discarded by the fp32 -> tf32 conversion
+                        srcBVal = dstVal & 0x1FFF
+                else:
+                    # Read from Dst in 16-bit mode
+                    dstVal = self.getDst().getDst16b(dstRow, j)
+                    if srcBStyle == DataFormat.BF16:
+                        # Treat dstVal as bf16
+                        srcBVal = DataFormatConversions.ShuffleBF16(dstVal)
+                    elif srcBStyle == DataFormat.FP16:
+                        # Treat dstVal as fp16 (int8 is overlaid onto fp16 here)
+                        srcBVal = DataFormatConversions.ShuffleFP16(dstVal)
+                    else:
+                        # dstVal isn't wide enough to hold fp32/tf32 data; the ISA
+                        # documents this combination as undefined behaviour
+                        srcBVal = 0
+
+                srcB[srcRow, j] = srcBVal
             dstRow += 1
             srcRow += 1
 
