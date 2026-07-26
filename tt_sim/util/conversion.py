@@ -21,6 +21,12 @@ def conv_to_int32(val, signed=True):
     if isinstance(val, bytes):
         return int.from_bytes(val, byteorder="little", signed=signed)
     elif isinstance(val, int):
+        # Normalise to 32 bits so out-of-range ints (e.g. negative values held
+        # in an lreg, or results wider than 32 bits) are interpreted the same
+        # way the hardware would rather than passed through unchanged.
+        val &= 0xFFFFFFFF
+        if signed and val >= 0x80000000:
+            val -= 0x100000000
         return val
     else:
         raise NotImplementedError()
