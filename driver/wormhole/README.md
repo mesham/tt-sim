@@ -1,295 +1,259 @@
-# Wormhole simulator driver
+# Wormhole simulator examples
 
-This is the Wormhole driver, and probably what people will use the most. There is the Wormhole setup itself provided, along with a range of code examples that can be run and modified. You can also build your own kernels and run them too. 
+This directory holds a set of example tt-metal programs that run against the Wormhole
+simulator. Each example is a real tt-metal host program: it is **built against a local
+tt-metal checkout and run exactly the way you would run it on hardware — only the
+device is the simulator instead of silicon.** tt-metal's UMD has a "simulation" chip
+backend; when `TT_METAL_SIMULATOR` points at this directory the host binary talks to
+tt-sim over a socket in place of a real chip. Each program validates its own results on
+the host and exits non-zero on mismatch, so the examples double as a test suite.
 
-## Provided examples
+> **Why not run the examples "directly" any more?** Earlier revisions shipped a
+> standalone Python driver per example (`one/one.py`, a hand-written `parameters.json`,
+> pre-extracted kernel `.bin` files) that drove the simulator without tt-metal. That
+> flow was pinned to one tt-metal release (its L1 memory map was baked into a JSON) and
+> was not tenable across tt-metal versions. It has been removed. The examples now build
+> against whatever tt-metal you point them at, and the release-specific layout comes
+> from the host binary over the wire.
 
-All the examples are run in the same way as illustrated here for the first one (see [Getting Started](#getting-started)), executed from this base _wormhole_ directory due to the paths being relative to here.
+## Layout
 
-* [one](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/one) is what we explore in the README furtheron here, this is using BRISC only to read data from DRAM, perform addition, and write results back to DRAM.
-* [two](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/two) is similar to the first example, but uses NCRISC to write results back to DRAM. This therefore involves a circular buffer between BRISC and NCRISC.
-* [three](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/three) is similar to the second example, but is chunking up data and operating upon individual chunks passing these then to NCRISC.
-* [loopback](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/loopback) brings in TRISC cores and the Tensix unit to copy data from the CBs into a segment of _dst_ and then copy this out to another CB. This tests the unpackers and packers, and all the associated functionality.
-* [four](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/four) uses the matrix unit in the Tensix coprocessor to do the addition of examples one to three, via the _ELWADD_ instruction. In the Tensix co-processor data is unpacked to _srcA_ and _srcB_, then element wise addition is undertaken and results are in _dst_ which are then packed to L1.
-* [four-fp](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/four-fp) is the same as the fourth one, but uses FP32 as the input and output type instead, with the FPU computing with FP16.
-* [five](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/five) similar to the fourth example, but uses the vector unit (SFPU) to do the element wise addition. In the Tensix coprocessor data is unpacked to different rows of _dst_, the SFPU executes the _SFPIADD_ instruction storing results to rows of _dst_, with the packer then copying these into L1.
-* [five-fp](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/five-fp) similar to the fifth example, but uses floating point numbers. The _base_ example uses FP32 throughout (the SFPU computes with this), there is also a version where the SFPU computes with TF32 and FP16.
+```
+driver/wormhole/
+├── tests/                  the example suite (each example is a self-contained test)
+│   ├── examples_test.py     build + run every example, assert pass (pytest / standalone)
+│   ├── one/  two/  …  nine/  loopback/
+│   │   └── src/             <name>.cpp + CMakeLists.txt + kernels/
+├── server/                 the wire-bridge server UMD talks to (run.sh spawns it)
+├── run.sh                  UMD entry point → `python -m driver.wormhole.server`
+├── soc_descriptor.yaml     the Wormhole worker/DRAM grid UMD sees
+├── replay.py               wire-trace replayer (used by server regression tests)
+└── docs/                   profiling walkthrough
+```
+
+## Requirements
+
+- A built tt-metal checkout that exports the `TT-Metalium` CMake package (i.e. a
+  `.../<build>/lib/cmake/tt-metalium/tt-metalium-config.cmake` exists — true for a
+  normal `build/` or `build_Release/`).
+- `cmake` and `clang++-17` on `PATH`.
+
+## Environment — driving execution to the simulator
+
+Running an example is ordinary tt-metal: the *only* thing that redirects it from silicon
+to tt-sim is `TT_METAL_SIMULATOR`. When it points at this directory, UMD's simulation
+backend spawns `run.sh` (which starts the tt-sim server) and the host binary talks to it
+over a socket. The variables that matter:
+
+| Variable | Purpose |
+| --- | --- |
+| `TT_METAL_SIMULATOR` | **The switch.** Path to this `driver/wormhole/` directory; UMD spawns its `run.sh` as the device instead of opening real hardware. |
+| `TT_METAL_HOME` | tt-metal checkout. Used by CMake to build the example (falls back to `TT_METAL_RUNTIME_ROOT`) and by the host binary at runtime to locate its kernels/firmware. |
+| `TT_METAL_SLOW_DISPATCH_MODE=1` | Forces `EnqueueProgram` to fall back to `detail::LaunchProgram` — the only launch path the simulator models. |
+| `LD_LIBRARY_PATH` | Must include `<tt-metal>/<build>/lib` so the host binary finds `libtt_metal.so` etc. |
+| `TT_SIM_TENSIX_COORDS` | Physical worker tiles to materialise, e.g. `1-1` or `1-1,2-1`. Needed for multi-tile programs (see below). |
+
+The project venv sets `TT_METAL_RUNTIME_ROOT`, `TT_METAL_SIMULATOR`,
+`TT_METAL_SLOW_DISPATCH_MODE=1` and `LD_LIBRARY_PATH` for you. Without it, export them
+yourself:
+
+```bash
+export TT_METAL_HOME=/path/to/tt-metal
+export TT_METAL_SIMULATOR="$(git rev-parse --show-toplevel)/driver/wormhole"
+export TT_METAL_SLOW_DISPATCH_MODE=1
+export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:$LD_LIBRARY_PATH"
+```
+
+See [docs/running-tt-metal-on-the-simulator.md](../../docs/running-tt-metal-on-the-simulator.md)
+for the full runbook, including running the upstream `programming_examples/` and the
+diagnostics knobs below.
 
 ## Getting started
 
-You first need to add the root of the repository to your _PYTHONPATH_
+Activate the venv and build one example with CMake, then run the binary. The build
+locates tt-metal from `TT_METAL_HOME` (falling back to `TT_METAL_RUNTIME_ROOT`, which
+the venv sets), so no extra flags are needed:
 
 ```bash
-export PYTHONPATH=~/tt-sim:$PYTHONPATH
+source /home/nick/projects/riscv/venv/bin/activate
+export TT_METAL_HOME=$TT_METAL_RUNTIME_ROOT        # CMake also accepts TT_METAL_RUNTIME_ROOT
+
+cd driver/wormhole/tests/one/src
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+./build/one
+# ...tt-metal / UMD log lines...
+# Completed successfully on the device, with 100 elements
 ```
 
-Then from within this _wormhole_ directory you can run an example (note it takes a few seconds to run, this is startup overhead parsing YAML configuration files):
+Run the binary **from its `src/` directory** — the host program refers to its kernels
+by the relative path `kernels/...`, which tt-metal resolves against the current
+directory. Multi-tile programs need the exact worker tiles they launch on materialised in
+the simulator; export `TT_SIM_TENSIX_COORDS=<physical coords>` before running — see the
+runbook above. Of the bundled examples only `nine` needs this: it launches on logical
+`(0,0)`+`(1,0)`, i.e. physical `1-1` and `2-1`, so run it with
+`TT_SIM_TENSIX_COORDS=1-1,2-1` (a bare `TT_SIM_TENSIX_CORES=2` materialises `1-1,1-2`
+instead, so `nine`'s launch on `2-1` would hit an unmaterialised tile and hang).
+
+## Running the examples as a test suite
+
+[`tests/examples_test.py`](tests/examples_test.py) builds every example and runs it
+against the simulator, asserting each exits 0 and prints its success line. It follows the
+repo's `*_test.py` convention, so it runs either standalone or under pytest, and skips
+cleanly when the tt-metal build environment is absent:
 
 ```bash
-~/tt-sim/driver/wormhole $ python3 one/one.py
---> Launching and running firmware
-    --> Done, device is ready
---> Launching and running kernel
-    --> Done
-Example one completed successfully
+python3 -m driver.wormhole.tests.examples_test   # prints PASS/FAIL per example
+pytest driver/wormhole/tests/examples_test.py -v  # same, under pytest
 ```
 
-If you look into the [one/one.py](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/one/one.py) file you will see that this simple example sets things up, launches the firmware to initialise the cores, writes some numbers to the DRAM, runs the kernel, and then checks that the resulting value is the element wise sum of the input values. This is using the RISC-V BRISC core to do the addition in this first example.
+## The examples
 
-The source code of this example is [here](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/one/kernels/dataflow/read_kernel.cpp) and this has been built into the _brisc_kernel.bin_ file in the [one example directory](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/one). The [parameters.json](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/one/parameters.json) file provides the values for device mailboxes, runtime arguments, circular buffers etc. Normally this is provided by tt-metal via the host executable at runtime, but we don't yet have integration with tt-metal so is provided manually.
+Each lives in `tests/<name>/src/` as a host program (`<name>.cpp`), a `CMakeLists.txt`,
+and a `kernels/` tree.
 
->**NOTE:**  
-> For these examples you should run from the _wormhole_ directory due to paths to binaries and parameter files being relative from here in configuration scripts.
+* **one** — BRISC only: reads two vectors from DRAM, adds them on the RISC-V core, writes
+  the result back.
+* **two** — like one, but NCRISC writes the result back, so a circular buffer bridges
+  BRISC and NCRISC.
+* **three** — like two, but chunks the data and operates on individual chunks.
+* **loopback** — brings in the TRISC cores and the Tensix unit to copy data through *dst*
+  and back out via a CB, exercising the unpackers and packers.
+* **four** — uses the matrix unit (FPU) to do the elementwise add via the *ELWADD* path:
+  data is unpacked to *srcA*/*srcB*, added, and the *dst* result is packed to L1.
+* **four-fp** — like four, but FP32 in/out with the FPU computing in FP16.
+* **five** — like four, but the vector unit (SFPU) performs the elementwise add.
+* **five-fp** — floating-point variant of five.
+* **six** — single-core matmul on the matrix unit, validated against a CPU golden by
+  Pearson correlation (bfloat16 + HiFi4 is not bit-exact).
+* **eight** — elementwise add like one, but the BRISC reader issues its two DRAM reads
+  with distinct NoC transaction IDs and barriers on them independently.
+* **nine** — two-tile example: a producer tile runs reader+compute+sender and a consumer
+  tile runs the writer, with a CB bridged across the tiles over the NoC. Run with
+  `TT_SIM_TENSIX_COORDS=1-1,2-1`.
 
-### Exploring more
+All eleven examples currently pass. The Tensix coprocessor in the simulator is still
+incomplete, though, so a future example may exercise a gap the simulator hasn't modelled;
+when a compute gap crashes the simulator server the host then hangs, so a hang is usually
+an unmodelled-op symptom rather than slowness. The `examples_test.py` output tells you
+which examples pass on your build.
 
-The simulator runs until it detects completiong (this is done [here](https://github.com/mesham/tt-sim/blob/9280e5e935f83de0565876e9e57c5367fa77d80b/driver/wormhole/wormhole_driver.py#L79)). The nice thing about Python is that it is trivial to script up exploring and manipulating state, during testing I have found it very useful to run for _n_ cycles only and then through the objects grab out values of registers and memory addresse. 
+> A former `seven` (a Python-only two-tile smoke test) has moved to
+> [`server/multi_tensix_test.py`](server/multi_tensix_test.py); the real two-tile
+> firmware+kernel path it stood in for is now exercised end-to-end by `nine`.
 
-In each example you can set diagnostic settings, these are off by default (turning all of them on results in lots of output!) For example, change _brisc_diagnostics=False_ to _brisc_diagnostics=True_ and _issued_instructions=False_ to _issued_instructions=True_ a few lines higher up in _one.py_. If you rerun you will see the BRISC babycore providing diagnostic information about every instruction it executes and the Tensix co-processor reporting instructions that it has issued to the backend (whilst this first example does not use the Tensix co-processor the firmware still issues some instructions at about 1700 cycles in to set it up). For example, looking about half way you will see something like:
+## Writing your own example
 
-```bash
-[0-> 1690][0x478c] jalr zero, 0x0(ra)    # jump to 0x39b8
-[0-> 1691][0x39b8] addi a5, zero, 0x1f    # a5 = zero + 0x1f
-[0-> 1692][0x39bc] sw a5, 0x274(s0)    # mem[0xffef0274] = a5
-[0-> 1693][0x39c0] lui a5, 0x10180000    # a5 = 0x10180000
-[0-> 1694][0x39c4] sw a5, 0x0(s7)    # mem[0xffe40000] = a5
-Issued ZEROACC to MATH from thread 0
-[0-> 1695][0x39c8] lui a5, 0x8a003000    # a5 = 0x8a003000
-[0-> 1696][0x39cc] addi a5, a5, 0xa    # a5 = a5 + 0xa
-[0-> 1697][0x39d0] sw a5, 0x0(s7)    # mem[0xffe40000] = a5
-Issued SFPENCC to SFPU from thread 0
-[0-> 1698][0x39d4] lui a5, 0x2000000    # a5 = 0x2000000
-[0-> 1699][0x39d8] sw a5, 0x0(s7)    # mem[0xffe40000] = a5
-Issued NOP to NONE from thread 0
-[0-> 1700][0x39dc] lui a5, 0x7100c000    # a5 = 0x7100c000
-[0-> 1701][0x39e0] addi a5, a5, -0x80    # a5 = a5 + -0x80
-[0-> 1702][0x39e4] sw a5, 0x0(s7)    # mem[0xffe40000] = a5
-Issued SFPLOADI to SFPU from thread 0
-[0-> 1703][0x39e8] lui a5, 0x91000000    # a5 = 0x91000000
-[0-> 1704][0x39ec] addi a5, a5, 0xb0    # a5 = a5 + 0xb0
-[0-> 1705][0x39f0] sw a5, 0x0(s7)    # mem[0xffe40000] = a5
-Issued SFPCONFIG to SFPU from thread 0
-[0-> 1706][0x39f4] lw a5, 0xc(s0)    # a5 = mem[0xffef000c]
-```
+Create `tests/<name>/src/` with three things:
 
-Taking the first line as an example, _[0-> 1690]_ denotes this is Baby RISC-V core 0 (BRISC) at cycle number 1690. _[0x478c]_ is the value of the PC (i.e. the address of the instruction being executed), with the instruction itself and some meta data. The _Issued_ messages are from diagnostics reported by the Tensix coprocessor, here for example the firmware is issuing some instructions to the MATH and vector unit to set them up. You can enable other diagnostics via the boolean values, for example _configurations_set_ reports all values set in the Tensix configuration unit. As an aside, it is fine to omit these diagnostic settings (it just assumes they are all off), but they are included in each example explicitly for convenience.
+1. `<name>.cpp` — a tt-metal host program. Include the API as
+   `#include <tt-metalium/host_api.hpp>` / `<tt-metalium/device.hpp>` /
+   `<tt-metalium/tt_metal.hpp>`. Launch with `tt::tt_metal::detail::LaunchProgram`
+   (slow-dispatch is the only path the simulator models; the venv sets
+   `TT_METAL_SLOW_DISPATCH_MODE=1` so `EnqueueProgram` falls back to it). Validate your
+   results on the host and `return` non-zero on mismatch so the harness can see failures.
+2. `CMakeLists.txt` — copy one from an existing example; only the target/`project` name
+   changes. It uses `find_package(TT-Metalium)` and links `TT::Metalium`, which supplies
+   all include paths, defines and flags — do not hand-roll compiler flags.
+3. `kernels/` — the data-movement and compute kernels. Note the tt-metal kernel
+   conventions this tt-metal release uses: **data-movement kernels do not include
+   `dataflow_api.h`** (the framework force-includes it); **compute kernels use
+   `#include "api/compute/<name>.h"`** and a plain `void kernel_main() { ... }` entry
+   point (no `namespace NAMESPACE { void MAIN {...} }`).
 
-### Structured tracing and profiling
+Then add `(name, coords)` to `EXAMPLES` in `tests/examples_test.py` to include it in the
+suite (`coords` is the physical tiles it launches on, e.g. `"1-1"`).
 
-The diagnostics above are stderr text for human reading. For machine-readable output suitable for downstream tooling, the simulator ships nine `TT_SIM_TRACE_*` env vars that produce JSONL, Perfetto, Spike-compatible commitlogs, Parquet, Cachegrind, LCOV, invariant violations, and state dumps. All work in the tt-metal-driven flow (UMD inherits env, `run.sh` inherits, simulator inherits) — point your tt-metal binary at this directory via `TT_METAL_SIMULATOR=` and set whichever `TT_SIM_TRACE_*` vars you want before running.
+> **Firmware.** tt-metal runs firmware on each Tensix tile before launching a kernel; in
+> this flow the host binary streams those firmware binaries to the device over the wire,
+> so nothing needs to be staged here. Only the direct launch path
+> (`tt::tt_metal::detail::LaunchProgram`) is modelled — the command-queue/fast-dispatch
+> flow is not.
 
-**A full walkthrough for users — what each output is, how to enable it, which downstream tool reads it — lives in [docs/profiling.md](docs/profiling.md).** Quick taster, from `driver/wormhole/one/src/` after `make`:
+## Structured tracing and profiling
+
+Beyond the human-readable diagnostics below, the simulator ships nine `TT_SIM_TRACE_*`
+env vars that produce machine-readable output (JSONL, Perfetto, Spike-compatible
+commitlogs, Parquet, Cachegrind, LCOV, invariant violations, state dumps). All work in
+this tt-metal-driven flow — UMD inherits the env, `run.sh` inherits it, the simulator
+inherits it. Quick taster, from `driver/wormhole/tests/one/src/` after building:
 
 ```bash
 export TT_METAL_SIMULATOR=$HOME/tt-sim/driver/wormhole
-TT_SIM_TRACE_PERFETTO=/tmp/run.json.gz ./one
+TT_SIM_TRACE_PERFETTO=/tmp/run.json.gz ./build/one
 # Drag /tmp/run.json.gz onto https://ui.perfetto.dev
 ```
 
-Developer-side documentation (event schema, how to add a publish call or a new writer) lives in [tt_sim/trace/README.md](../../tt_sim/trace/README.md); the design history and what isn't yet modelled is in [ROADMAP §H](../../ROADMAP.md).
+A full walkthrough — what each output is and which downstream tool reads it — lives in
+[docs/profiling.md](docs/profiling.md). Developer-side docs (event schema, adding a
+writer) are in [tt_sim/trace/README.md](../../tt_sim/trace/README.md); design history and
+what isn't yet modelled is in [ROADMAP §H](../../ROADMAP.md).
 
-### Firmware and kernel launching
+## Enabling diagnostics
 
-Before launching kernels tt-metal runs firmware on each of the Tensix tiles which reset them, set up the different components etc. The [firmware](https://github.com/mesham/tt-sim/tree/main/driver/wormhole/firmware) directory contains these binaries which are taken unmodified from that generated by tt-metal when a kernel is launched. These are all built from tt-metal source code in [tt_metal/hw/firmware](https://github.com/tenstorrent/tt-metal/tree/main/tt_metal/hw/firmware). 
-
-It should be highlighted that tt-metal has two flows when launching kernels, a direct approach and a command queue approach. We currently only support the simpler, direct, approach. By contrast the command queue approach uses two Tensix tiles to marshal and control the execution of kernels across other Tensix tiles, and for simplicity we have avoided supporting this so far. Therefore kernels need to be launched via tt-metal using the _tt:tt_metal::detail::LaunchProgram_ API call.
-
-### Enabling diagnostics in the tt-metal flow
-
-The diagnostic flags shown above (_brisc_diagnostics=True_, _issued_instructions=True_, etc.) are constructed in Python at the top of each standalone example. When tt-metal launches the simulator the user does not own the entry point — UMD spawns _run.sh_ — so the same controls are exposed via _TT_SIM_DIAG_*_ environment variables. All default to off; set any of them to a truthy value (_1_, _true_, _yes_, _on_, case-insensitive) to turn the matching diagnostic on. Output goes to stderr, alongside the other server log messages.
+Because UMD owns the entry point (it spawns `run.sh`), per-component diagnostics are
+exposed through `TT_SIM_DIAG_*` environment variables. All default to off; set any to a
+truthy value (`1`, `true`, `yes`, `on`, case-insensitive) before running the tt-metal
+program. Output goes to stderr alongside the server log.
 
 Per baby-RISC-V core (instruction trace):
 
 | Env var | Field |
 | --- | --- |
-| _TT_SIM_DIAG_BRISC_  | _brisc_diagnostics_ |
-| _TT_SIM_DIAG_NCRISC_ | _ncrisc_diagnostics_ |
-| _TT_SIM_DIAG_TRISC0_ | _trisc0_diagnostics_ |
-| _TT_SIM_DIAG_TRISC1_ | _trisc1_diagnostics_ |
-| _TT_SIM_DIAG_TRISC2_ | _trisc2_diagnostics_ |
+| `TT_SIM_DIAG_BRISC`  | `brisc_diagnostics` |
+| `TT_SIM_DIAG_NCRISC` | `ncrisc_diagnostics` |
+| `TT_SIM_DIAG_TRISC0` | `trisc0_diagnostics` |
+| `TT_SIM_DIAG_TRISC1` | `trisc1_diagnostics` |
+| `TT_SIM_DIAG_TRISC2` | `trisc2_diagnostics` |
 
 Per NoC (transaction trace):
 
 | Env var | Field |
 | --- | --- |
-| _TT_SIM_DIAG_NOC0_ | _noc0_diagnostics_ |
-| _TT_SIM_DIAG_NOC1_ | _noc1_diagnostics_ |
+| `TT_SIM_DIAG_NOC0` | `noc0_diagnostics` |
+| `TT_SIM_DIAG_NOC1` | `noc1_diagnostics` |
 
 Tensix coprocessor:
 
 | Env var | Field |
 | --- | --- |
-| _TT_SIM_DIAG_CO_ISSUED_ | _issued_instructions_ |
-| _TT_SIM_DIAG_CO_CONFIG_ | _configurations_set_ |
-| _TT_SIM_DIAG_CO_UNPACK_ | _unpacking_ |
-| _TT_SIM_DIAG_CO_PACK_   | _packing_ |
-| _TT_SIM_DIAG_CO_FPU_    | _fpu_calculations_ |
-| _TT_SIM_DIAG_CO_SFPU_   | _sfpu_calculations_ |
-| _TT_SIM_DIAG_CO_THCON_  | _thcon_ |
+| `TT_SIM_DIAG_CO_ISSUED` | `issued_instructions` |
+| `TT_SIM_DIAG_CO_CONFIG` | `configurations_set` |
+| `TT_SIM_DIAG_CO_UNPACK` | `unpacking` |
+| `TT_SIM_DIAG_CO_PACK`   | `packing` |
+| `TT_SIM_DIAG_CO_FPU`    | `fpu_calculations` |
+| `TT_SIM_DIAG_CO_SFPU`   | `sfpu_calculations` |
+| `TT_SIM_DIAG_CO_THCON`  | `thcon` |
 
-Aggregates (shortcuts that fan out to several of the individual flags above):
-
-| Env var | Expands to |
-| --- | --- |
-| _TT_SIM_DIAG_TRISC_ | TRISC0 + TRISC1 + TRISC2 |
-| _TT_SIM_DIAG_NOC_   | NOC0 + NOC1 |
-| _TT_SIM_DIAG_CO_    | every CO\_\* flag |
-| _TT_SIM_DIAG_ALL_   | every individual flag |
-
-Individual vars win over aggregates when both are present, so you can use an aggregate to turn things on broadly and then mask specific flags back off. Examples:
+Aggregates (fan out to several individual flags): `TT_SIM_DIAG_TRISC` (all three TRISCs),
+`TT_SIM_DIAG_NOC` (both NoCs), `TT_SIM_DIAG_CO` (every `CO_*` flag), `TT_SIM_DIAG_ALL`
+(every flag). Individual vars win over aggregates, so `TT_SIM_DIAG_ALL=1
+TT_SIM_DIAG_NCRISC=0` means "everything except NCRISC". `TT_SIM_DIAG_CO_SFPU=1` is
+particularly handy when a compute result is wrong. The server prints a one-line summary
+of the enabled flags at startup.
 
 ```bash
-# Trace BRISC instructions only.
-TT_SIM_DIAG_BRISC=1 \
-TT_METAL_SIMULATOR=$(pwd)/driver/wormhole \
-    <your tt-metal program>
-
-# Everything on except NCRISC.
-TT_SIM_DIAG_ALL=1 TT_SIM_DIAG_NCRISC=0 \
-TT_METAL_SIMULATOR=$(pwd)/driver/wormhole \
-    <your tt-metal program>
+# Trace BRISC instructions only:
+TT_SIM_DIAG_BRISC=1 ./build/one
 ```
 
-The server prints a one-line summary at startup (e.g. _[server] diagnostics: BRISC, CO_FPU_, or _none_ when nothing is enabled) so you can confirm the variables were picked up.
+## Deadlock detection
 
-### Deadlock detection
+Some kernels or firmware can wedge — a NoC read with no matching response, a circular
+buffer counter that never advances, a Tensix backend instruction that never completes, a
+mailbox read with nothing on the other end. Because the host polls the go-signal mailbox
+in a tight loop, such a wedge shows up as a silent hang.
 
-Some kernels and bits of firmware can wedge — a NoC read with no matching response, a circular buffer counter that never gets bumped, a Tensix backend instruction that never completes, a mailbox read with nothing on the other end. Because each driver script polls a go-signal mailbox via `wormhole.run(100)` in a tight loop until it sees _RUN_MSG_DONE_, a wedge of this kind shows up as a silent hang of the Python process with no indication of what went wrong.
-
-The simulator runs a per-cycle progress watchdog by default. If nothing observable has changed for a configured number of cycles (default 50000), a multi-line _[DEADLOCK]_ block is printed to stderr describing what it can see. The watchdog does not stop the simulation — it simply warns and keeps running, and re-prints once per window for as long as the stall continues, so a long stall is visible without flooding output. It is dormant while every BabyRISC-V core is in soft reset (the normal state before firmware launch).
-
-The signals that the watchdog tracks each cycle are:
-
-* The program counter of every BabyRISC-V core that is out of reset (frozen, oscillating, or moving through a wider range).
-* The NoC counters on every NUI of the Tensix tile and the DRAM tiles (read requests sent and outstanding, write requests outgoing).
-* The Tensix coprocessor's three frontends and the busy-state of its backend on each thread.
-* The unknown-instruction count on each core (in case it has jumped into data).
-
-When it fires, the report names the responsible component. A frozen-PC stall (most often a `MemoryStall` on a mailbox or `ttsync` wait gate) looks like:
-
-```
-[DEADLOCK cycle=50000] no observable progress for 50000 cycles
-  BRISC: frozen at 0x4b80 (memory stall or `j .`)
-  (TT_SIM_DEADLOCK=0 to disable, TT_SIM_DEADLOCK_THRESHOLD=N to tune window)
-```
-
-A NoC stall where a read request was issued but the response never arrived looks like:
-
-```
-[DEADLOCK cycle=50000] no observable progress for 50000 cycles
-  NCRISC: oscillating in [0x12010, 0x12018] (3 unique PCs) — likely polling
-  NoC tile=(18, 18) nui=0: 1 read(s), 0 write(s) outstanding (1 unresolved)
-  (TT_SIM_DEADLOCK=0 to disable, TT_SIM_DEADLOCK_THRESHOLD=N to tune window)
-```
-
-The two env vars below control the watchdog. Both apply equally to the standalone _python3 one/one.py_-style flow and to the tt-metal server flow, so the same controls work in both places.
+The simulator runs a per-cycle progress watchdog by default. If nothing observable has
+changed for a configured number of cycles (default 50000), a multi-line `[DEADLOCK]`
+block is printed to stderr describing what it can see (each out-of-reset core's PC, NoC
+counters, the coprocessor frontends/backends, and unknown-instruction counts) and names
+the responsible component. It warns and keeps running, re-printing once per window, so a
+long stall is visible without flooding output. It is dormant while every baby core is in
+soft reset (the normal state before firmware launch).
 
 | Env var | Effect |
 | --- | --- |
-| _TT_SIM_DEADLOCK_ | Set to a falsy value (_0_, _false_, _no_, _off_) to disable the watchdog entirely. On by default. |
-| _TT_SIM_DEADLOCK_THRESHOLD_ | Integer number of cycles of no observable progress before a warning fires. Defaults to _50000_; raise it if a long-running compute loop trips a false positive, lower it to surface stalls sooner. |
-
-## Building your own kernels to run
-
-The simulator is not currently integrated with tt-metal, although that could be fairly easy to do in the future, so this is a fairly manual (albeit rather simple) process. Before we explain how to do this, it's useful to understand tt-metal support provided here.
-
-### tt-metal abstraction
-
-In [tt_metal.py](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/tt_metal.py) we abstract specifics around host and device integration at the low level. The most important part of this is the memory map in L1, which is understood by the host and device, and how these communicate with each other and between RISC-V cores within a Tensix unit. Whilst we currently support release 0.62.2 of tt-metal, we have abstracted specifics around the memory map into [tt_metal_0.62.2.json](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/tt_metal_0.62.2.json) which should make it easier to update to future releases. It should be stressed that this is entirely agnostic to the hardware itself and is very much a software thing, hence providing it here rather than in the core simulator.
-
-When a driver script loads it will read in the JSON configuration file and use this to determine the memory layout on the device, as well as some constants that are understood by the firmware. If you look at one of the example parameter files (e.g. [one/parameters.json](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/one/parameters.json)) you will see that the keys in the parameters file of _kernel_config_ and _go_message_ match those of _kernel_config_msg_t_ and _go_msg_t_ in _tt_metal_0.62.2.json_. That's really a major point of the _tt_metal.py_ script here, it calculates the mapping between the input parameter values and the location where these need to be stored within L1 memory of the Tensix tile. 
-
-There are also a few other things, such as setting up mappings in L1 between DRAM banks and tiles for both NoCs etc, but these are fairly simple. The [wormhole_driver.py](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/wormhole_driver.py) script is then a high level support script that will launch and run the firmware in one method, and the kernel in another method. This really just saves lots of duplicate code between the examples.
-
-### Building via tt-metal
-
-Therefore to program the simulator with your own kernels you need to provide your own driver script (e.g. [one/one.py](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/one/one.py)) which is problem specific and should be fairly simple based on what is already provided. You also need to provide a _parameters.json_ and the kernel binary files and for that we need to invoke tt-metal.
-
-We have forked tt-metal [here](https://github.com/mesham/tt-metal) providing release version 0.62.2 but also with some additional diagnostic information reported when kernels are run, and we will use that information to prepare the _parameters.json_ file and grab the binaries.
-
-Therefore, as normal run your host code to invoke the JIT builder, there is a lot of output but if you work up from the bottom you care about the kernel specific output:
-
-```bash
-~/tt-example/$ ./my_host
-.....
-==== 4 runtime arguments ==== 
-Arg 0: 0x20
-Arg 1: 0x420
-Arg 2: 0x100
-Arg 3: 0x40
-Write RTA to 0x7190
-==== 3 runtime arguments ==== 
-Arg 0: 0x820
-Arg 1: 0x100
-Arg 2: 0x40
-Write RTA to 0x71a0
-==== 2 runtime arguments ==== 
-Arg 0: 0x100
-Arg 1: 0x40
-Write RTA to 0x71ac
-Allocate CB 256, 0x185a0
-Allocate CB 256, 0x185a0
-Allocate CB 256, 0x185a0
-Write binary /home/user/.cache/tt-metal-cache/d279aa36be/4098/kernels/read_kernel/10818148161270680775//brisc/brisc.elf of length 0x3fc to addr 0x71f0
-Launch
-Write binary /home/user/.cache/tt-metal-cache/d279aa36be/4098/kernels/write_kernel/6534090200371868679//ncrisc/ncrisc.elf of length 0x358 to addr 0x75f0
-Launch
-Write binary /home/user/.cache/tt-metal-cache/d279aa36be/4098/kernels/compute_kernel/3362008294476569189//trisc0/trisc0.elf of length 0x71c to addr 0x7950
-Write binary /home/user/.cache/tt-metal-cache/d279aa36be/4098/kernels/compute_kernel/3362008294476569189//trisc1/trisc1.elf of length 0x448 to addr 0x8070
-Write binary /home/user/.cache/tt-metal-cache/d279aa36be/4098/kernels/compute_kernel/3362008294476569189//trisc2/trisc2.elf of length 0x538 to addr 0x84c0
-=== CB on core ===
-CB 0 0x0: 0x185a0
-CB 0 0x1: 0x100
-CB 0 0x2: 0x1
-CB 0 0x3: 0x100
-=== CB on core ===
-CB 1 0x4: 0x186a0
-CB 1 0x5: 0x100
-CB 1 0x6: 0x1
-CB 1 0x7: 0x100
-=== CB on core ===
-CB 2 0x8: 0x187a0
-CB 2 0x9: 0x100
-CB 2 0xa: 0x1
-CB 2 0xb: 0x100
-Write CB config to addr 0x71c0 size=48
-watcher_kernel_ids: 0x4 0x5 0x6
----- Launching '(x=18,y=18)' 0x20 ------ 
-[0x0] watcher_kernel_ids: 0x4 0x5 0x6
-[0x6] ncrisc_kernel_size16: 0x36
-[0x8] kernel_config_base: 0x7190 0x3f520 0x73d0
-[0x14] sem_offset: 0x30 0x0 0x0
-[0x1a] local_cb_offset: 0x30
-[0x1c] remote_cb_offset: 0x60
-[0x1e] rta_offset 0: 0x0 0x30
-[0x22] rta_offset 1: 0x10 0x30
-[0x26] rta_offset 2: 0x1c 0x30
-[0x2a] mode: 0x1
-[0x2c] kernel_text_offset: 0x60 0x460 0x7c0 0xee0 0x1330
-[0x40] local_cb_mask: 0x7
-[0x44] brisc_noc_id: 0x0
-[0x45] brisc_noc_mode: 0x0
-[0x46] min_remote_cb_start_index: 0x20
-[0x47] exit_erisc_kernel: 0x0
-[0x48] host_assigned_id: 0x0
-[0x4c] sub_device_origin_x: 0x0
-[0x4d] sub_device_origin_y: 0x0
-[0x4e] enables: 0x7
-[0x4f] preload: 0x0
--> [0x2a0] GO: dispatch_message_offset: 0x1 master_x: 0x0 master_y: 0x0 signal: 0x80
-Sent go message
-~/tt-example/$
-```
-
-There is quite a bit here, but if we start from the top you can see it provides the location of each kernel elf file, its size and location that it is written to in memory, then the runtime arguments (for BRISC, NCRISC, and then the TRISCs), the CB configuration settings, and then the mailbox and go message. The values shown above are the same as in [five/parameters.json](https://github.com/mesham/tt-sim/blob/main/driver/wormhole/five/parameters.json) so taking this as an example, create your own  _parameters.json_ file based upon the specific values that have been reported.
-
-You will note that the kernel files reported above are _elf_, whereas we need _bin_ files. In-fact when launching kernels tt-metal will extract the binary from the elf, so we need to do the same but a little more manually. When tt-metal builds it downloads the GCC RV32 toolchain, so you already have this, and we can use _objcopy_ to extract the binary from the elf. First change into the directory holding the elf and then execute _objcopy_
-
-```bash
-~/tt-example/$ cd /home/user/.cache/tt-metal-cache/d279aa36be/4098/kernels/read_kernel/10818148161270680775//brisc
-.../$ ~/tt-metal/runtime/sfpi/compiler/bin/riscv32-tt-elf-objcopy -I elf32-little brisc.elf -O binary brisc.bin
-```
-
-You need to do this for each of the elf files, brisc, ncrisc, trisc0, trisc1 and trisc2. Note that I am assuming your tt-metal install is at the top level of your home directory here, this might need to be tweaked depending on where you have located it.
-
-Once you have done these steps you should be able to run your kernel on the simulator.
+| `TT_SIM_DEADLOCK` | Set falsy (`0`/`false`/`no`/`off`) to disable the watchdog. On by default. |
+| `TT_SIM_DEADLOCK_THRESHOLD` | Cycles of no observable progress before a warning fires (default `50000`). Raise it if a long compute loop trips a false positive; lower it to surface stalls sooner. |

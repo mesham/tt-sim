@@ -2,8 +2,9 @@
 
 Cycle pumping rule (locked-in plan decision): after every read/write through
 this Device, ``wormhole.run(cycles_per_poll)`` is invoked iff at least one
-BRISC is out of reset. Mirrors the existing
-``while not done: wormhole.run(100)`` pattern in wormhole_driver.py:51-57.
+BRISC is out of reset. This mirrors how a tt-metal host drives the device: it
+writes the go signal, then polls the go-message mailbox, pumping cycles between
+polls until the firmware flips it to ``RUN_MSG_DONE``.
 """
 
 import os

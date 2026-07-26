@@ -844,8 +844,15 @@ class UnPackerUnit(TensixBackendUnit):
                 else:
                     return raw_datum & 0xFF
             case DataFormat.INT32 | DataFormat.FP32:
-                assert unpackToDst
-                return DataFormatConversions.FP32ToDstFormatFP32(raw_datum)
+                if unpackToDst:
+                    return DataFormatConversions.FP32ToDstFormatFP32(raw_datum)
+                # Unpacking a 32-bit datum to the 19-bit SrcA/SrcB registers
+                # narrows it to the Src TF32 storage format (the widest Src
+                # representation), the same way an explicit FP32->TF32 unpack to
+                # Src is handled at the top of this function. tt-metal's LLK
+                # emits such an unpack (e.g. clearing SrcA to zero) ahead of
+                # SFPU int32/fp32 kernels, which then compute out of Dst.
+                return DataFormatConversions.TF32ToSrcFormatTF32(raw_datum >> 13)
             case DataFormat.BF16:
                 if unpackToDst:
                     return DataFormatConversions.BF16ToDstFormatBF16(raw_datum)

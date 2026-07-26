@@ -1,0 +1,7 @@
+# CMake build trees for the examples (each tests/<example>/src builds into src/build/).
+tests/*/src/build/
+
+# Stray build artifacts from the older Makefile flow, in case any linger.
+tests/*/src/*.o
+tests/*/src/out
+tests/*/src/generated/

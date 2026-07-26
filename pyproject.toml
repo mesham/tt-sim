@@ -22,7 +22,7 @@ dependencies = [
 version = "1.0"
 
 [project.optional-dependencies]
-dev=["ruff"]
+dev=["ruff", "pytest"]
 
 [tool.setuptools]
 packages = ["tt_sim"]

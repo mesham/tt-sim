@@ -476,9 +476,10 @@ Multi-chip identity is the remaining gap.
 - **`hypothesis` property tests.** Needs a kernel generator —
   separate research project.
 - **Determinism: tighten the host polling loop.** State dumps at
-  `kernel_done` vary by up to 100 cycles per run because
-  `wormhole_driver.py` polls every 100 cycles. Byte-exact regression
-  comparison wants a tighter boundary.
+  `kernel_done` vary by up to 100 cycles per run because the server pumps
+  `cycles_per_poll` (default 100) cycles per wire message
+  (`server/device.py`). Byte-exact regression comparison wants a tighter
+  boundary.
 - **L1 / DRAM content snapshotting** in state dumps. Today only
   registers + NoC counters. Add when a consumer needs it.
 - **CI examples.** A fixed workload runs in CI and produces all
