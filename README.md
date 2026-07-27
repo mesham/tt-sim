@@ -6,7 +6,57 @@ Optional diagnostic information can be provided by each RISC-V baby core, the No
 
 This is written in Python, mainly to make it easy for people to hackaround and experiment with things. If you want to add some functionality, or fix a bug, then please feel free to go ahead and raise a PR. This is still work in progress, so also please raise issues etc as you find them!
 
-## Getting started
+## Contents
+
+- [Installation](#installation)
+- [Using tt-sim as a simulator for tt-metal](#using-tt-sim-as-a-simulator-for-tt-metal)
+- [Repository overview](#repository-overview)
+- [Key parts of the simulator](#key-parts-of-the-simulator)
+
+## Installation
+
+tt-sim is pure Python and requires Python ≥ 3.10. Clone the repository and install it in
+editable mode, which pulls in its dependencies (numpy, pyyaml, pynng, flatbuffers,
+pyarrow, pyelftools):
+
+```bash
+git clone https://github.com/mesham/tt-sim.git
+cd tt-sim
+pip install -e .           # add [dev] for the ruff + pytest tooling: pip install -e .[dev]
+```
+
+This installs the `tt_sim` simulator library. The example drivers live under `driver/`
+and are run from the repository root, so keep the repo root on your `PYTHONPATH` when
+invoking them directly (the tt-metal flow below wires this up for you automatically):
+
+```bash
+export PYTHONPATH=$PWD:$PYTHONPATH
+```
+
+## Using tt-sim as a simulator for tt-metal
+
+tt-metal's UMD has a "simulation" chip backend: point `TT_METAL_SIMULATOR` at the
+[`driver/wormhole`](driver/wormhole) directory and UMD launches tt-sim in place of real
+silicon, so an ordinary tt-metal program runs against the simulator over a socket — no
+code changes, exactly as it would run on hardware. The minimal setup:
+
+```bash
+export TT_METAL_RUNTIME_ROOT=/path/to/tt-metal          # your built tt-metal checkout
+export TT_METAL_SIMULATOR="$PWD/driver/wormhole"        # the switch: route execution to tt-sim
+export TT_METAL_SLOW_DISPATCH_MODE=1                    # the only launch path the sim models
+export LD_LIBRARY_PATH="$TT_METAL_RUNTIME_ROOT/build/lib:$LD_LIBRARY_PATH"
+
+# then run any tt-metal program, e.g. an upstream example:
+cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
+./metal_example_add_2_integers_in_compute
+```
+
+A set of ready-to-run example programs, plus a build-and-run test suite, lives under
+[`driver/wormhole/tests`](driver/wormhole/tests). For the full walkthrough — building the
+examples, the multi-tile `TT_SIM_TENSIX_COORDS` knob, diagnostics, structured tracing and
+the deadlock watchdog — see **[`driver/wormhole/README.md`](driver/wormhole/README.md)**.
+
+## Repository overview
 
 The simulator implementation is in the [tt_sim](https://github.com/mesham/tt-sim/tree/main/tt_sim) directory, with the [driver](https://github.com/mesham/tt-sim/tree/main/driver) directory providing a range of examples that illustrate running the simulator. These are individually documented, but to summarise:
 
@@ -17,7 +67,7 @@ The simulator implementation is in the [tt_sim](https://github.com/mesham/tt-sim
 
 There are a few of key components which are worth highlighting:
 
-* [tt_device.Wormhole](https://github.com/mesham/tt-sim/blob/93da242e8a1a26160afaca43b0772bebc88b9171/tt_sim/device/tt_device.py#L111) creates the Wormhole, currently with a single DRAM tile and a tensix tile. Here you can see the NoC coordinates specified of each, and also the booleans provided to _TensixTile_ are whether to report diagnostic information (the first five for each RISC-V baby core, then next two for each NoC and then the separate Tensix co-processor choices). These diagnostics are driven from the [wormhole](https://github.com/mesham/tt-sim/tree/main/driver/wormhole) examples, and effectively are being set by the driver scripts there.
+* [tt_device.Wormhole](https://github.com/mesham/tt-sim/blob/93da242e8a1a26160afaca43b0772bebc88b9171/tt_sim/device/tt_device.py#L111) creates the Wormhole, currently with a single DRAM tile and a tensix tile. Here you can see the NoC coordinates specified of each, and also the booleans provided to _TensixTile_ are whether to report diagnostic information (the first five for each RISC-V baby core, then next two for each NoC and then the separate Tensix co-processor choices). In the [wormhole](https://github.com/mesham/tt-sim/tree/main/driver/wormhole) tt-metal flow these are set from the `TT_SIM_DIAG_*` environment variables (see that directory's README).
 * [tt_device.TensixTile](https://github.com/mesham/tt-sim/blob/93da242e8a1a26160afaca43b0772bebc88b9171/tt_sim/device/tt_device.py#L186) plumbs everything together within a Tensix tile, setting all the memory addresses and ranges for each individual component. These are all based on the ISA documentation [memory map](https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/BabyRISCV/README.md). 
 * [tt_noc](https://github.com/mesham/tt-sim/blob/main/tt_sim/network/tt_noc.py) is the implementation of the NoC, it is not yet complete with all the functionality but is sufficient to communicate between tiles and, for example, read and write between DRAM and the Tensix tile.
 * [rv](https://github.com/mesham/tt-sim/tree/main/tt_sim/pe/rv) provides the RV32IM implementation with [.ttinsn extension](https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/BabyRISCV/PushTensixInstruction.md#ttinsn-instruction-set-extension). This is fairly self explanatory, providing a pluggable approach to combining ISAs. The [BabyRISCV](https://github.com/mesham/tt-sim/blob/main/tt_sim/pe/rv/babyriscv.py) ties this together for the baby RISC-V cores in the Tensix tile, for instance determining the initial PC value after a soft reset as per [here](https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/SoftReset.md).
