@@ -16,7 +16,7 @@ Run under pytest (if installed)::
     pytest driver/wormhole/tests/examples_test.py -v
 
 It skips cleanly when the tt-metal build environment is absent (no
-``TT_METAL_HOME``/``TT_METAL_RUNTIME_ROOT``, no exported TT-Metalium package, no
+``TT_METAL_RUNTIME_ROOT``/``TT_METAL_HOME``, no exported TT-Metalium package, no
 ``TT_METAL_SIMULATOR``, or missing ``cmake``/``clang``), so it is safe to collect
 anywhere.
 """
@@ -58,8 +58,10 @@ EXAMPLES = [
 ]
 
 
-def _tt_metal_home():
-    return os.environ.get("TT_METAL_HOME") or os.environ.get("TT_METAL_RUNTIME_ROOT")
+def _tt_metal_root():
+    # TT_METAL_RUNTIME_ROOT is the current tt-metal variable; TT_METAL_HOME is
+    # the older name, kept as a fallback.
+    return os.environ.get("TT_METAL_RUNTIME_ROOT") or os.environ.get("TT_METAL_HOME")
 
 
 def _build_dir(home):
@@ -80,9 +82,9 @@ def _build_dir(home):
 
 def skip_reason():
     """Why the suite can't run here, or None if it can."""
-    home = _tt_metal_home()
+    home = _tt_metal_root()
     if not home:
-        return "TT_METAL_HOME / TT_METAL_RUNTIME_ROOT not set"
+        return "TT_METAL_RUNTIME_ROOT / TT_METAL_HOME not set"
     if _build_dir(home) is None:
         return f"no tt-metal build exporting the TT-Metalium package under {home}"
     if not os.environ.get("TT_METAL_SIMULATOR"):
@@ -105,6 +107,9 @@ def _reap_servers():
 
 def _run_env(home, coords):
     env = dict(os.environ)
+    # Current tt-metal reads TT_METAL_RUNTIME_ROOT; also set TT_METAL_HOME for
+    # older builds.
+    env["TT_METAL_RUNTIME_ROOT"] = str(home)
     env["TT_METAL_HOME"] = str(home)
     env["LD_LIBRARY_PATH"] = f"{_build_dir(home)}/lib:" + env.get("LD_LIBRARY_PATH", "")
     # Materialise exactly the physical tiles this example launches on. The two
@@ -139,7 +144,7 @@ def build_example(name):
 
 def run_example(name, coords):
     """Build and run one example against the simulator; return the CompletedProcess."""
-    home = _tt_metal_home()
+    home = _tt_metal_root()
     src = WORMHOLE / name / "src"
     exe = build_example(name)
     _reap_servers()

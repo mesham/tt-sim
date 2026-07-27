@@ -48,7 +48,7 @@ over a socket. The variables that matter:
 | Variable | Purpose |
 | --- | --- |
 | `TT_METAL_SIMULATOR` | **The switch.** Path to this `driver/wormhole/` directory; UMD spawns its `run.sh` as the device instead of opening real hardware. |
-| `TT_METAL_HOME` | tt-metal checkout. Used by CMake to build the example (falls back to `TT_METAL_RUNTIME_ROOT`) and by the host binary at runtime to locate its kernels/firmware. |
+| `TT_METAL_RUNTIME_ROOT` | tt-metal checkout. Used by CMake to build the example and by the host binary at runtime to locate its kernels/firmware. (`TT_METAL_HOME`, the older name, is accepted as a fallback.) |
 | `TT_METAL_SLOW_DISPATCH_MODE=1` | Forces `EnqueueProgram` to fall back to `detail::LaunchProgram` — the only launch path the simulator models. |
 | `LD_LIBRARY_PATH` | Must include `<tt-metal>/<build>/lib` so the host binary finds `libtt_metal.so` etc. |
 | `TT_SIM_TENSIX_COORDS` | Physical worker tiles to materialise, e.g. `1-1` or `1-1,2-1`. Needed for multi-tile programs (see below). |
@@ -58,10 +58,10 @@ The project venv sets `TT_METAL_RUNTIME_ROOT`, `TT_METAL_SIMULATOR`,
 yourself:
 
 ```bash
-export TT_METAL_HOME=/path/to/tt-metal
+export TT_METAL_RUNTIME_ROOT=/path/to/tt-metal
 export TT_METAL_SIMULATOR="$(git rev-parse --show-toplevel)/driver/wormhole"
 export TT_METAL_SLOW_DISPATCH_MODE=1
-export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="$TT_METAL_RUNTIME_ROOT/build/lib:$LD_LIBRARY_PATH"
 ```
 
 See [docs/running-tt-metal-on-the-simulator.md](../../docs/running-tt-metal-on-the-simulator.md)
@@ -70,13 +70,11 @@ diagnostics knobs below.
 
 ## Getting started
 
-Activate the venv and build one example with CMake, then run the binary. The build
-locates tt-metal from `TT_METAL_HOME` (falling back to `TT_METAL_RUNTIME_ROOT`, which
-the venv sets), so no extra flags are needed:
+Activate the venv (which sets `TT_METAL_RUNTIME_ROOT`) and build one example with CMake,
+then run the binary — no extra flags needed:
 
 ```bash
 source /home/nick/projects/riscv/venv/bin/activate
-export TT_METAL_HOME=$TT_METAL_RUNTIME_ROOT        # CMake also accepts TT_METAL_RUNTIME_ROOT
 
 cd driver/wormhole/tests/one/src
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release

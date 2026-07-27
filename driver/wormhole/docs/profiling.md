@@ -43,7 +43,7 @@ env vars and shell.
 
 You need three things in place once before profiling any run:
 
-1. **`tt-metal` built and exported as `TT_METAL_HOME`** — the C++
+1. **`tt-metal` built and exported as `TT_METAL_RUNTIME_ROOT`** — the C++
    example links against `libtt_metal`. See the mesham fork of
    tt-metal for build instructions.
 
@@ -88,7 +88,7 @@ silicon.
 So the always-set-once-per-shell prep is:
 
 ```bash
-export TT_METAL_HOME=$HOME/tt-metal              # wherever you built tt-metal
+export TT_METAL_RUNTIME_ROOT=$HOME/tt-metal     # wherever you built tt-metal
 export TT_METAL_SIMULATOR=$HOME/tt-sim/driver/wormhole
 ```
 
