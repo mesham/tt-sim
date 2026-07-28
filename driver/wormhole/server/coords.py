@@ -41,7 +41,7 @@ import pathlib
 
 import yaml
 
-from tt_sim.device.tt_device import Wormhole
+from tt_sim.device.wormhole import Wormhole
 
 _SOC_DESCRIPTOR_PATH = (
     pathlib.Path(__file__).resolve().parents[1] / "soc_descriptor.yaml"

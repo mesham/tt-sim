@@ -9,7 +9,8 @@ polls until the firmware flips it to ``RUN_MSG_DONE``.
 
 import os
 
-from tt_sim.device.tt_device import DeviceTileDiagnostics, Wormhole
+from tt_sim.device.tt_device import DeviceTileDiagnostics
+from tt_sim.device.wormhole import Wormhole
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.pe.tensix.util import TensixCoprocessorDiagnostics
 

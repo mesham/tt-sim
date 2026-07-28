@@ -108,15 +108,18 @@ class NullEndpoint:
 NOC_MAX_BURST_SIZE = 8192
 
 
-def _split_burst(total_size: int) -> list[tuple[int, int]]:
+def _split_burst(
+    total_size: int, max_burst: int = NOC_MAX_BURST_SIZE
+) -> list[tuple[int, int]]:
     """Return ``[(offset, size), ...]`` chunks covering ``total_size`` bytes,
-    each at most :data:`NOC_MAX_BURST_SIZE` bytes."""
-    if total_size <= NOC_MAX_BURST_SIZE:
+    each at most ``max_burst`` bytes (defaulting to :data:`NOC_MAX_BURST_SIZE`,
+    the Wormhole limit; Blackhole's is larger)."""
+    if total_size <= max_burst:
         return [(0, total_size)]
     chunks = []
     offset = 0
     while offset < total_size:
-        chunk = min(NOC_MAX_BURST_SIZE, total_size - offset)
+        chunk = min(max_burst, total_size - offset)
         chunks.append((offset, chunk))
         offset += chunk
     return chunks
@@ -176,7 +179,7 @@ class NUI(MemMapable, Clockable):
             # response writes into the right slice. OUTSTANDING bumps by
             # the chunk count so ``noc_async_read_barrier`` waits for all
             # responses.
-            chunks = _split_burst(total_size)
+            chunks = _split_burst(total_size, self.nui.noc_max_burst_size)
             num_chunks = len(chunks)
 
             self.nui.nui_counters.increment(
@@ -287,7 +290,7 @@ class NUI(MemMapable, Clockable):
         ):
             noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
             total_size = self.at_len_be
-            chunks = _split_burst(total_size)
+            chunks = _split_burst(total_size, self.nui.noc_max_burst_size)
             num_chunks = len(chunks)
 
             if noc_cmd_resp_marked:
@@ -672,13 +675,26 @@ class NUI(MemMapable, Clockable):
         def __delitem__(self, idx):
             del self.counters[idx]
 
-    # Wormhole NoC grid dimensions — used to mirror the canonical NoC 0
-    # physical coord onto NoC 1's coord space. NoC 1's origin is the
+    # Default (Wormhole) NoC grid dimensions — used to mirror the canonical
+    # NoC 0 physical coord onto NoC 1's coord space. NoC 1's origin is the
     # bottom-right tile, so its coords are (NOC_GRID_X-1 - x, NOC_GRID_Y-1 - y).
+    # A device passes its architecture's dims (e.g. 17 x 12 for Blackhole) via
+    # the constructor; these class constants are the fallback for direct
+    # construction that does not supply them.
     NOC_GRID_X = 10
     NOC_GRID_Y = 12
 
-    def __init__(self, noc_number, x_coord, y_coord, attached_memory, snoop=False):
+    def __init__(
+        self,
+        noc_number,
+        x_coord,
+        y_coord,
+        attached_memory,
+        snoop=False,
+        noc_grid_x=None,
+        noc_grid_y=None,
+        noc_max_burst_size=None,
+    ):
         """``x_coord`` / ``y_coord`` are the tile's canonical SoC-physical
         NoC 0 coord. The NUI's ``id_pair`` (directory key + the ``source``
         field of NoC requests) is the canonical coord on BOTH NoCs — that's
@@ -686,15 +702,24 @@ class NUI(MemMapable, Clockable):
         in the SoC descriptor. Per-NoC physical coords for the
         kernel-visible ``NOC_NODE_ID`` register reads are derived by
         mirroring through the grid dimensions for NoC 1.
+
+        ``noc_grid_x`` / ``noc_grid_y`` / ``noc_max_burst_size`` come from the
+        architecture profile; each falls back to the Wormhole default when not
+        supplied. See ``docs/plans/blackhole-support.md``.
         """
         assert noc_number == 0 or noc_number == 1
         self.noc_number = noc_number
+        self.noc_grid_x = NUI.NOC_GRID_X if noc_grid_x is None else noc_grid_x
+        self.noc_grid_y = NUI.NOC_GRID_Y if noc_grid_y is None else noc_grid_y
+        self.noc_max_burst_size = (
+            NOC_MAX_BURST_SIZE if noc_max_burst_size is None else noc_max_burst_size
+        )
         if noc_number == 0:
             self.x_coord = x_coord
             self.y_coord = y_coord
         else:
-            self.x_coord = NUI.NOC_GRID_X - 1 - x_coord
-            self.y_coord = NUI.NOC_GRID_Y - 1 - y_coord
+            self.x_coord = self.noc_grid_x - 1 - x_coord
+            self.y_coord = self.noc_grid_y - 1 - y_coord
         self.id_pair = (x_coord, y_coord)
         self.generate_NIU_and_NoC_config()
         self.generate_NoC_node_id()
