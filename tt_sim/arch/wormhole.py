@@ -19,6 +19,12 @@ WORMHOLE_PROFILE = ArchProfile(
     # Tensix L1 SRAM: TENSIX_SRAM_SIZE = 1464 * 1024, per
     # WormholeB0/TensixTile/L1.md.
     tensix_l1_size=1464 * 1024,
+    # Baby-core local data memories (ttsim config.h, TT_ARCH_VERSION 0).
+    brisc_local_mem_size=4 * 1024,
+    ncrisc_local_mem_size=4 * 1024,
+    trisc_local_mem_size=2 * 1024,
+    # Wormhole keeps the reset-PC override in the Tensix backend config.
+    baby_core_reset_pc_debug_regs=False,
     # Unified coords assigned to each of the 6 physical DRAM channels. Picked
     # from the (16-17, 16-18) band so they stay clear of the Tensix at (18, 18).
     dram_channel_unified_coords=(
@@ -45,4 +51,5 @@ WORMHOLE_PROFILE = ArchProfile(
     tensix_unified_coords=((18, 18),),
     # Wormhole packs the destination coord into the MID address register.
     noc_coord_strategy=WormholeNocCoords(),
+    noc_blackhole_cmd_buf_layout=False,
 )

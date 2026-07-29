@@ -478,7 +478,7 @@ class TensixTile(TTDeviceTile):
         self.tensix_mem = TensixMemory(tensix_mem_map)
 
         # Create brisc CPU
-        self.local_mem_brisc = DRAM(4096)
+        self.local_mem_brisc = DRAM(profile.brisc_local_mem_size)
         local_mem_brisc_range = AddressRange(0xFFB00000, self.local_mem_brisc.getSize())
         brisc_pc_buf_0_range = AddressRange(0xFFE80000, self.pc_buf_0.getSize())
         brisc_pc_buf_1_range = AddressRange(0xFFE90000, self.pc_buf_1.getSize())
@@ -513,7 +513,7 @@ class TensixTile(TTDeviceTile):
         )
 
         # Create ncrisc CPU
-        self.local_mem_ncrisc = DRAM(4096)
+        self.local_mem_ncrisc = DRAM(profile.ncrisc_local_mem_size)
         local_mem_ncrisc_range = AddressRange(
             0xFFB00000, self.local_mem_ncrisc.getSize()
         )
@@ -534,6 +534,7 @@ class TensixTile(TTDeviceTile):
             BabyRISCVCoreType.NCRISC,
             [self.tensix_mem, self.ncrisc_mem],
             snoop=ncrisc_snoop,
+            reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
         )
 
         # Common addresses for TRISC cores
@@ -548,7 +549,7 @@ class TensixTile(TTDeviceTile):
         )
 
         # Create trisc0 CPU
-        self.local_mem_trisc0 = DRAM(2048)
+        self.local_mem_trisc0 = DRAM(profile.trisc_local_mem_size)
         local_mem_trisc0_range = AddressRange(
             0xFFB00000, self.local_mem_trisc0.getSize()
         )
@@ -573,10 +574,11 @@ class TensixTile(TTDeviceTile):
             BabyRISCVCoreType.TRISC0,
             [self.tensix_mem, self.trisc0_mem],
             snoop=trisc0_snoop,
+            reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
         )
 
         # Create trisc1 CPU
-        self.local_mem_trisc1 = DRAM(2048)
+        self.local_mem_trisc1 = DRAM(profile.trisc_local_mem_size)
         local_mem_trisc1_range = AddressRange(
             0xFFB00000, self.local_mem_trisc1.getSize()
         )
@@ -601,10 +603,11 @@ class TensixTile(TTDeviceTile):
             BabyRISCVCoreType.TRISC1,
             [self.tensix_mem, self.trisc1_mem],
             snoop=trisc1_snoop,
+            reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
         )
 
         # Create trisc2 CPU
-        self.local_mem_trisc2 = DRAM(2048)
+        self.local_mem_trisc2 = DRAM(profile.trisc_local_mem_size)
         local_mem_trisc2_range = AddressRange(
             0xFFB00000, self.local_mem_trisc2.getSize()
         )
@@ -629,6 +632,7 @@ class TensixTile(TTDeviceTile):
             BabyRISCVCoreType.TRISC2,
             [self.tensix_mem, self.trisc2_mem],
             snoop=trisc2_snoop,
+            reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
         )
 
         # Set addressable memory for Tensix co-processor

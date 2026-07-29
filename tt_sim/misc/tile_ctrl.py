@@ -9,6 +9,12 @@ class TensixTileControl(MemMapable, Clockable):
         self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE = conv_to_bytes(0)
         self.RISCV_DEBUG_REG_DBG_FEATURE_DISABLE = conv_to_bytes(0)
         self.cycle_num = 0
+        # Backing store for RISCV_DEBUG_REG_* registers without dedicated
+        # semantics — clock-gating control (DEST_CG_CTRL/CG_CTRL_EN/CG_KICK at
+        # 0x240+), scratch/postcode registers, etc. The functional sim does not
+        # model clock gating, so these behave as plain read-what-you-wrote
+        # registers, which is what the firmware's init sequence expects.
+        self.regs = {}
 
     def clock_tick(self, cycle_num):
         self.cycle_num = cycle_num
@@ -31,9 +37,7 @@ class TensixTileControl(MemMapable, Clockable):
         elif addr == 0x68:
             return self.RISCV_DEBUG_REG_DBG_FEATURE_DISABLE
         else:
-            raise NotImplementedError(
-                f"Reading from address {hex(addr)} not yet supported by tile ctrl"
-            )
+            return self.regs.get(addr, conv_to_bytes(0))
 
     def write(self, addr, value, size=None):
         if addr == 0x1B0:
@@ -49,9 +53,7 @@ class TensixTileControl(MemMapable, Clockable):
         elif addr == 0x68:
             self.RISCV_DEBUG_REG_DBG_FEATURE_DISABLE = value
         else:
-            raise NotImplementedError(
-                f"Writing to address {hex(addr)} not yet supported by tile ctrl"
-            )
+            self.regs[addr] = value
 
     def getSize(self):
         return 0xFFF

@@ -15,7 +15,7 @@ construct the device and move data DRAM<->Tensix over the NoC.
 """
 
 from tt_sim.arch import BLACKHOLE_PROFILE
-from tt_sim.device.tt_device import TT_Device
+from tt_sim.device.tt_device import DeviceTileDiagnostics, TT_Device
 from tt_sim.device.wormhole import DRAMTile, TensixTile
 
 
@@ -42,9 +42,9 @@ class BlackholeDRAMTile(_BlackholeTileCoords, DRAMTile):
 
 class Blackhole(TT_Device):
     def __init__(self, diagnostics=None, tensix_coords=None):
-        # Accepted for wire-bridge factory-signature parity with Wormhole;
-        # Blackhole diagnostics wiring is not modelled yet.
-        self.diagnostics = diagnostics
+        # Per-core RISC-V / NoC / coprocessor diagnostic flags, wired into each
+        # tile so TT_SIM_DIAG_* env vars work on Blackhole as on Wormhole.
+        self.diagnostics = diagnostics or DeviceTileDiagnostics()
         self.profile = BLACKHOLE_PROFILE
         if tensix_coords is None:
             tensix_coords = self.profile.tensix_unified_coords
@@ -75,7 +75,22 @@ class Blackhole(TT_Device):
         # Blackhole addresses tiles by physical NoC 0 coord, so the tile coord
         # and the NUI's physical coord are the same.
         x, y = coord
-        return BlackholeTensixTile(x, y, x, y, profile=self.profile)
+        d = self.diagnostics
+        return BlackholeTensixTile(
+            x,
+            y,
+            x,
+            y,
+            d.reportBRISC(),
+            d.reportNCRISC(),
+            d.reportTRISC0(),
+            d.reportTRISC1(),
+            d.reportTRISC2(),
+            d.reportNoC0(),
+            d.reportNoC1(),
+            d.getTensixCoprocessorDiagnostics(),
+            profile=self.profile,
+        )
 
     def add_tensix_tile(self, coord):
         """Construct and register a Tensix tile at ``coord`` after __init__.

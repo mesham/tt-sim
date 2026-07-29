@@ -702,6 +702,7 @@ class NUI(MemMapable, Clockable):
         noc_grid_y=None,
         noc_max_burst_size=None,
         noc_coord_strategy=None,
+        noc_blackhole_cmd_buf_layout=False,
     ):
         """``x_coord`` / ``y_coord`` are the tile's canonical SoC-physical
         NoC 0 coord. The NUI's ``id_pair`` (directory key + the ``source``
@@ -727,6 +728,7 @@ class NUI(MemMapable, Clockable):
         self.noc_coord_strategy = (
             WormholeNocCoords() if noc_coord_strategy is None else noc_coord_strategy
         )
+        self.blackhole_cmd_buf_layout = noc_blackhole_cmd_buf_layout
         if noc_number == 0:
             self.x_coord = x_coord
             self.y_coord = y_coord
@@ -1080,6 +1082,13 @@ class NUI(MemMapable, Clockable):
         self.noc_id_logical = replace_bits(0, self.x_coord, 0, 6)
         self.noc_id_logical = replace_bits(self.noc_id_logical, self.y_coord, 6, 6)
 
+        # Backing store for the NOC_CFG(cnt) register block (0x100 + cnt*4)
+        # that isn't modelled with dedicated semantics — e.g. the NoC ID
+        # translation tables / masks the firmware programs then reads back.
+        # Behaves like plain config registers (read-what-you-wrote, default 0),
+        # which is enough for the init sequences that touch them.
+        self.noc_config_regs = {}
+
     def generate_NoC_node_id(self):
         self.noc_node_id = replace_bits(0, self.x_coord, 0, 6)
         self.noc_node_id = replace_bits(self.noc_node_id, self.y_coord, 6, 6)
@@ -1097,7 +1106,48 @@ class NUI(MemMapable, Clockable):
             self.noc_endpoint_id, self.noc_number, 24, 8
         )
 
+    # Blackhole command-buffer register offset (within a 0x800-stride buffer) ->
+    # the Wormhole-canonical offset (within a 0x400-stride buffer) that read()/
+    # write() below are written against. Blackhole inserts AT_LEN_BE_1 at 0x24,
+    # which shifts AT_DATA to 0x28 and CMD_CTRL/NODE_ID/ENDPOINT_ID up to
+    # 0x40/0x44/0x48 (see blackhole/noc_parameters.h). AT_LEN_BE_1 (0x24) has no
+    # Wormhole equivalent and is not modelled, so it maps to ``None`` (ignored).
+    _BH_CMD_REG_TO_WH = {
+        0x0: 0x0,
+        0x4: 0x4,
+        0x8: 0x8,
+        0xC: 0xC,
+        0x10: 0x10,
+        0x14: 0x14,
+        0x18: 0x18,
+        0x1C: 0x1C,
+        0x20: 0x20,
+        0x24: None,
+        0x28: 0x24,
+        0x40: 0x28,
+        0x44: 0x2C,
+        0x48: 0x30,
+    }
+
+    def _to_canonical_cmd_addr(self, addr):
+        """Map a Blackhole NIU address to the Wormhole-canonical layout.
+
+        Returns the canonical address, or ``None`` for the unmodelled
+        AT_LEN_BE_1 register. A no-op for Wormhole.
+        """
+        if not self.blackhole_cmd_buf_layout:
+            return addr
+        buf, reg = divmod(addr, 0x800)
+        if 0 <= buf < 4 and reg in NUI._BH_CMD_REG_TO_WH:
+            wh_reg = NUI._BH_CMD_REG_TO_WH[reg]
+            return None if wh_reg is None else buf * 0x400 + wh_reg
+        return addr
+
     def read(self, addr, size):
+        canonical = self._to_canonical_cmd_addr(addr)
+        if canonical is None:
+            return conv_to_bytes(0)  # AT_LEN_BE_1: not modelled, reads as 0
+        addr = canonical
         if self.snoop:
             print(f"NoC read {hex(addr)}")
         if addr == 0x0138:
@@ -1193,12 +1243,19 @@ class NUI(MemMapable, Clockable):
         elif addr >= 0x200 and addr <= 0x2F4:
             counter_idx = int((addr - 0x200) / 4)
             return conv_to_bytes(self.nui_counters[counter_idx])
+        elif 0x100 <= addr <= 0x1FC and (addr & 0x3) == 0:
+            # NOC_CFG(cnt) register block, generic read-what-you-wrote.
+            return conv_to_bytes(self.noc_config_regs.get(addr, 0))
         else:
             raise NotImplementedError(
                 f"Reading from address {hex(addr)} not yet supported by NoC"
             )
 
     def write(self, addr, value, size=None):
+        canonical = self._to_canonical_cmd_addr(addr)
+        if canonical is None:
+            return  # AT_LEN_BE_1: not modelled, writes ignored
+        addr = canonical
         if self.snoop:
             print(f"NoC write {hex(addr)}")
         if addr == 0x0138:
@@ -1307,6 +1364,9 @@ class NUI(MemMapable, Clockable):
         elif addr == 0xC28:
             self.request_initiators[3].cmd_ctrl = conv_to_uint32(value)
             self.request_initiators[3].initiate()
+        elif 0x100 <= addr <= 0x1FC and (addr & 0x3) == 0:
+            # NOC_CFG(cnt) register block, generic backing store.
+            self.noc_config_regs[addr] = conv_to_uint32(value)
         else:
             raise NotImplementedError(
                 f"Writing to address {hex(addr)} not yet supported by NoC"

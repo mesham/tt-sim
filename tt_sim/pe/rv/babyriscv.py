@@ -30,7 +30,12 @@ class BabyRISCV(RV32IM_TT):
         BabyRISCVCoreType.ERISC: 11,
     }
 
-    def __init__(self, core_type, memory_spaces, snoop=False):
+    def __init__(
+        self, core_type, memory_spaces, snoop=False, reset_pc_debug_regs=False
+    ):
+        # Blackhole moves the NCRISC/TRISC reset-PC override out of the Tensix
+        # backend config (Wormhole) into the RISCV_DEBUG_REG tile-control block.
+        self.reset_pc_debug_regs = reset_pc_debug_regs
         self.core_type = core_type
         self.soft_active = False
         if core_type == BabyRISCVCoreType.BRISC:
@@ -72,6 +77,9 @@ class BabyRISCV(RV32IM_TT):
             # 0xFFEF0000 in a Tensix tile simply doesn't exist here. ERisc
             # always boots from its compile-time start_address.
             return self.start_address
+
+        if self.reset_pc_debug_regs:
+            return self._blackhole_reset_pc()
 
         TENSIX_BACKEND_CONFIG_BASE = 0xFFEF_0000
 
@@ -115,6 +123,29 @@ class BabyRISCV(RV32IM_TT):
             return TensixConfigurationConstants.parse_raw_config_value(raw_pc, pc_key)
         else:
             return self.start_address
+
+    def _blackhole_reset_pc(self):
+        """Blackhole NCRISC/TRISC reset-PC override, read from the tile-control
+        RISCV_DEBUG_REG block (base 0xFFB12000) rather than the Tensix backend
+        config. Per tt-metal blackhole/tensix.h: TRISC0/1/2_RESET_PC at
+        0x228/0x22C/0x230, TRISC_RESET_PC_OVERRIDE (one enable bit per TRISC) at
+        0x234; NCRISC_RESET_PC at 0x238, NCRISC_RESET_PC_OVERRIDE (bit 0) at
+        0x23C. When the override bit is clear the core boots from its default.
+        """
+        DEBUG_BASE = 0xFFB1_2000
+
+        def rd(offset):
+            return conv_to_uint32(self.visible_memory.read(DEBUG_BASE + offset, 4))
+
+        if self.core_type == BabyRISCVCoreType.NCRISC:
+            if not get_nth_bit(rd(0x23C), 0):
+                return self.start_address
+            return rd(0x238)
+
+        idx = self.core_type - BabyRISCVCoreType.TRISC0  # 0, 1, 2
+        if not get_nth_bit(rd(0x234), idx):
+            return self.start_address
+        return rd(0x228 + idx * 4)
 
     def clock_tick(self, cycle_num):
         # These cores have a soft reset that they need to check

@@ -27,7 +27,9 @@ REG_RET_ADDR_HI = 0x14  # Blackhole coordinate register
 REG_PACKET_TAG = 0x18
 REG_CTRL = 0x1C
 REG_AT_LEN_BE = 0x20
-REG_CMD_CTRL = 0x28
+# Blackhole inserts AT_LEN_BE_1 at 0x24, shifting AT_DATA to 0x28 and CMD_CTRL
+# (the trigger) up to 0x40 (see blackhole/noc_parameters.h).
+REG_CMD_CTRL = 0x40
 
 
 def _coord_reg(x, y):

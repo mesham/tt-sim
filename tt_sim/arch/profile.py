@@ -34,6 +34,19 @@ class ArchProfile:
     #: Tensix L1 SRAM size, in bytes.
     tensix_l1_size: int
 
+    #: Per-baby-core private local data memory sizes, in bytes (at base
+    #: ``0xFFB00000``). Blackhole doubles these vs Wormhole (ttsim ``config.h``):
+    #: BRISC/NCRISC 8 KiB vs 4 KiB, TRISC 4 KiB vs 2 KiB. The firmware stack sits
+    #: at the top of this region, so an undersized value faults on stack writes.
+    brisc_local_mem_size: int
+    ncrisc_local_mem_size: int
+    trisc_local_mem_size: int
+
+    #: Where the NCRISC/TRISC reset-PC override lives: the Tensix backend config
+    #: (Wormhole, ``False``) or the RISCV_DEBUG_REG tile-control block
+    #: (Blackhole, ``True``). See ``BabyRISCV.get_start_address``.
+    baby_core_reset_pc_debug_regs: bool
+
     #: Unified coord assigned to each physical DRAM channel, one entry per
     #: channel, in the same order as the SoC descriptor's DRAM list.
     dram_channel_unified_coords: tuple[tuple[int, int], ...]
@@ -52,6 +65,12 @@ class ArchProfile:
     #: HI register). See :mod:`tt_sim.network.noc_coords`.
     noc_coord_strategy: object
 
+    #: Whether the NIU command-buffer register layout is Blackhole's (buffers
+    #: spaced 0x800 apart, and AT_DATA/CMD_CTRL/NODE_ID shifted by the inserted
+    #: AT_LEN_BE_1 register) rather than Wormhole's (0x400 stride). The NUI
+    #: normalises Blackhole addresses to the Wormhole-canonical layout.
+    noc_blackhole_cmd_buf_layout: bool
+
     @property
     def noc_kwargs(self) -> dict:
         """The per-arch NoC parameters a tile passes to each ``NUI`` it builds."""
@@ -60,4 +79,5 @@ class ArchProfile:
             "noc_grid_y": self.noc_grid_y,
             "noc_max_burst_size": self.noc_max_burst_size,
             "noc_coord_strategy": self.noc_coord_strategy,
+            "noc_blackhole_cmd_buf_layout": self.noc_blackhole_cmd_buf_layout,
         }
