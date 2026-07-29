@@ -2463,6 +2463,45 @@ SFPMUL:
     arguments: *SFPU_MATH
     description: "sFPU math instruction multiply; this is a two cycle operation  "
 
+# Blackhole-only SFPU superset (opcodes distinct from every Wormhole op, so a
+# Wormhole kernel never emits them — adding them here is a strict superset).
+# See BlackholeA0/.../VectorUnit.md and docs/plans/blackhole-support.md.
+SFPLE:
+    op_binary: 0x96
+    ex_resource: SFPU
+    instrn_type: SFPU
+    src_mask: 0x0
+    fcov:
+    arguments: *SFPU_MATHI12
+    description: "Blackhole SFPU: set lane flags where lreg_dest <= lreg_c"
+
+SFPGT:
+    op_binary: 0x97
+    ex_resource: SFPU
+    instrn_type: SFPU
+    src_mask: 0x0
+    fcov:
+    arguments: *SFPU_MATHI12
+    description: "Blackhole SFPU: set lane flags where lreg_dest > lreg_c"
+
+SFPMUL24:
+    op_binary: 0x98
+    ex_resource: SFPU
+    instrn_type: SFPU
+    src_mask: 0x0
+    fcov:
+    arguments: *SFPU_MATH
+    description: "Blackhole SFPU: 24-bit integer multiply lreg_src_a * lreg_src_b"
+
+SFPARECIP:
+    op_binary: 0x99
+    ex_resource: SFPU
+    instrn_type: SFPU
+    src_mask: 0x0
+    fcov:
+    arguments: *SFPU_MATHI12
+    description: "Blackhole SFPU: approximate reciprocal of lreg_c"
+
 SFPPUSHC:
     op_binary: 0x87
     ex_resource: SFPU

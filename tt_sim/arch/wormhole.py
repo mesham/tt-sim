@@ -6,6 +6,7 @@ they are consumed and ``docs/plans/blackhole-support.md`` for the porting plan.
 """
 
 from tt_sim.arch.profile import ArchProfile
+from tt_sim.network.noc_coords import WormholeNocCoords
 
 WORMHOLE_PROFILE = ArchProfile(
     name="wormhole",
@@ -42,4 +43,6 @@ WORMHOLE_PROFILE = ArchProfile(
     # Default: a single Tensix at the historical (18, 18) coord every single-tile
     # example bakes in.
     tensix_unified_coords=((18, 18),),
+    # Wormhole packs the destination coord into the MID address register.
+    noc_coord_strategy=WormholeNocCoords(),
 )

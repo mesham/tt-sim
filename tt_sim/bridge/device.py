@@ -1,20 +1,20 @@
-"""Wrapper around tt-sim Wormhole — device + cycle pumping + reset tracking.
+"""Architecture-agnostic device wrapper — cycle pumping + reset tracking.
 
 Cycle pumping rule (locked-in plan decision): after every read/write through
-this Device, ``wormhole.run(cycles_per_poll)`` is invoked iff at least one
+this Device, ``tt_device.run(cycles_per_poll)`` is invoked iff at least one
 BRISC is out of reset. This mirrors how a tt-metal host drives the device: it
 writes the go signal, then polls the go-message mailbox, pumping cycles between
 polls until the firmware flips it to ``RUN_MSG_DONE``.
+
+The underlying tt-sim device (Wormhole / Blackhole) and its coord map are
+injected by the driver, so nothing here is architecture-specific.
 """
 
 import os
 
 from tt_sim.device.tt_device import DeviceTileDiagnostics
-from tt_sim.device.wormhole import Wormhole
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.pe.tensix.util import TensixCoprocessorDiagnostics
-
-from .coords import TENSIX_COORD_MAP
 
 # Map from individual env var → (group, field). Group "rv"/"noc" fields land
 # on DeviceTileDiagnostics; group "co" fields land on TensixCoprocessorDiagnostics.
@@ -113,8 +113,26 @@ def enabled_diagnostic_names(diagnostics):
 
 
 class Device:
-    def __init__(self, *, cycles_per_poll: int = 100, diagnostics=None):
-        self.wormhole = Wormhole(diagnostics or DeviceTileDiagnostics())
+    """Wire-bridge wrapper around a tt-sim device (cycle pump + reset tracking).
+
+    Architecture-agnostic: ``device_factory`` builds the underlying tt-sim
+    device (``driver/wormhole`` passes a Wormhole factory, ``driver/blackhole``
+    a Blackhole one), and ``tensix_coord_map`` maps a translated worker coord to
+    the tile-directory coord the device is keyed by. The device only needs the
+    common ``TT_Device`` surface (read/write, soft reset, ``add_tensix_tile``,
+    ``run``, ``shutdown``), so the same wrapper drives either architecture.
+    """
+
+    def __init__(
+        self,
+        device_factory,
+        tensix_coord_map,
+        *,
+        cycles_per_poll: int = 100,
+        diagnostics=None,
+    ):
+        self.tt_device = device_factory(diagnostics or DeviceTileDiagnostics())
+        self.tensix_coord_map = tensix_coord_map
         self.cycles_per_poll = cycles_per_poll
         # unified_coord -> True if BRISC has been deasserted.
         self._brisc_running: dict[tuple[int, int], bool] = {}
@@ -124,14 +142,14 @@ class Device:
 
         Called on first access to a Tensix worker coord that isn't yet
         backed by a tt-sim tile. Builds the tile through
-        ``Wormhole.add_tensix_tile`` (which registers it in both NoC
-        directories under its canonical SoC-physical NoC 0 coord) and
-        registers it for BRISC-reset tracking. Idempotent — returns the
-        unified coord on repeat calls.
+        ``add_tensix_tile`` (which registers it in both NoC directories under
+        its canonical SoC-physical NoC 0 coord) and registers it for
+        BRISC-reset tracking. Idempotent — returns the unified coord on repeat
+        calls.
         """
-        unified = TENSIX_COORD_MAP[translated]
-        if unified not in self.wormhole.tile_directory:
-            self.wormhole.add_tensix_tile(unified)
+        unified = self.tensix_coord_map[translated]
+        if unified not in self.tt_device.tile_directory:
+            self.tt_device.add_tensix_tile(unified)
         self.register_tensix(unified)
         return unified
 
@@ -139,28 +157,28 @@ class Device:
         self._brisc_running.setdefault(unified, False)
 
     def write(self, unified, addr, data):
-        self.wormhole.write(unified, addr, data)
+        self.tt_device.write(unified, addr, data)
         self._maybe_pump()
 
     def read(self, unified, addr, size):
-        result = bytes(self.wormhole.read(unified, addr, size))
+        result = bytes(self.tt_device.read(unified, addr, size))
         self._maybe_pump()
         return result
 
     def assert_reset(self, unified):
         self._brisc_running[unified] = False
-        self.wormhole.assert_soft_reset(unified)
+        self.tt_device.assert_soft_reset(unified)
 
     def deassert_reset_brisc(self, unified):
-        self.wormhole.deassert_soft_reset(unified, BabyRISCVCoreType.BRISC)
+        self.tt_device.deassert_soft_reset(unified, BabyRISCVCoreType.BRISC)
         # Clear stale CPU state before the deasserted core runs. Scope this to
-        # the one tile: the global ``wormhole.reset()`` clobbers the PCs of
-        # every other tile already running firmware, which corrupts the whole
-        # grid once more than one worker is materialised.
-        self.wormhole.reset_tile(unified)
+        # the one tile: the global ``reset()`` clobbers the PCs of every other
+        # tile already running firmware, which corrupts the whole grid once
+        # more than one worker is materialised.
+        self.tt_device.reset_tile(unified)
         self._brisc_running[unified] = True
         self._maybe_pump()
 
     def _maybe_pump(self):
         if any(self._brisc_running.values()):
-            self.wormhole.run(self.cycles_per_poll)
+            self.tt_device.run(self.cycles_per_poll)

@@ -28,14 +28,6 @@ from tt_sim.pe.tensix.tensix import TensixCoProcessor
 from tt_sim.trace import Unit, enable_from_env, get_registry
 from tt_sim.util.conversion import conv_to_bytes
 
-# NoC parameters every Wormhole tile hands to its NUIs, sourced from the profile
-# so it stays the single source of truth (Blackhole tiles will pass their own).
-_WH_NOC_KWARGS = {
-    "noc_grid_x": WORMHOLE_PROFILE.noc_grid_x,
-    "noc_grid_y": WORMHOLE_PROFILE.noc_grid_y,
-    "noc_max_burst_size": WORMHOLE_PROFILE.noc_max_burst_size,
-}
-
 
 class Wormhole(TT_Device):
     # The Wormhole hardware constants now live in ``WORMHOLE_PROFILE``. These
@@ -147,12 +139,27 @@ class Wormhole(TT_Device):
             primary = physicals[0]
             aliases = physicals[1:]
             dram_tiles.append(
-                DRAMTile(unified[0], unified[1], primary[0], primary[1], aliases)
+                DRAMTile(
+                    unified[0],
+                    unified[1],
+                    primary[0],
+                    primary[1],
+                    aliases,
+                    profile=self.profile,
+                )
             )
         eth_tiles = []
         for physical in Wormhole.all_eth_physical_coords():
             unified = Wormhole.eth_unified_coord_from_physical(physical)
-            eth_tiles.append(EthTile(unified[0], unified[1], physical[0], physical[1]))
+            eth_tiles.append(
+                EthTile(
+                    unified[0],
+                    unified[1],
+                    physical[0],
+                    physical[1],
+                    profile=self.profile,
+                )
+            )
         tensix_tiles = [self._build_tensix_tile(coord) for coord in tensix_coords]
 
         # For now don't provide any memory, in future this will be the memory
@@ -188,7 +195,7 @@ class Wormhole(TT_Device):
             self.diagnostics.reportNoC0(),
             self.diagnostics.reportNoC1(),
             self.diagnostics.getTensixCoprocessorDiagnostics(),
-            l1_size=self.profile.tensix_l1_size,
+            profile=self.profile,
         )
 
     def add_tensix_tile(self, coord):
@@ -216,6 +223,7 @@ class DRAMTile(TTDeviceTile):
         physical_aliases=(),
         safe=True,
         snoop_addresses=None,
+        profile=WORMHOLE_PROFILE,
     ):
         dram_tile_mem_map = MemoryMap()
 
@@ -229,8 +237,8 @@ class DRAMTile(TTDeviceTile):
 
         self.dram_memory = TileMemory(dram_tile_mem_map, safe, snoop_addresses)
 
-        r0 = NUI(0, physical_x, physical_y, self.dram_memory, **_WH_NOC_KWARGS)
-        r1 = NUI(1, physical_x, physical_y, self.dram_memory, **_WH_NOC_KWARGS)
+        r0 = NUI(0, physical_x, physical_y, self.dram_memory, **profile.noc_kwargs)
+        r1 = NUI(1, physical_x, physical_y, self.dram_memory, **profile.noc_kwargs)
 
         # Register DRAM-tile NoC routers so their NoCEvents (request-phase
         # arrivals at the destination tile) appear in the trace.
@@ -295,6 +303,7 @@ class EthTile(TTDeviceTile):
         erisc_snoop=False,
         safe=True,
         snoop_addresses=None,
+        profile=WORMHOLE_PROFILE,
     ):
         eth_tile_mem_map = MemoryMap()
 
@@ -308,11 +317,11 @@ class EthTile(TTDeviceTile):
         # ERisc to the NUI's register file are dispatched via the tile
         # memory map below, which routes 0xFFB20000/0xFFB30000 to the NUI's
         # own ``write``/``read`` MMIO handlers.
-        noc0_router = NUI(0, physical_x, physical_y, self.L1_mem, **_WH_NOC_KWARGS)
+        noc0_router = NUI(0, physical_x, physical_y, self.L1_mem, **profile.noc_kwargs)
         noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
         eth_tile_mem_map[noc0_range] = noc0_router
 
-        noc1_router = NUI(1, physical_x, physical_y, self.L1_mem, **_WH_NOC_KWARGS)
+        noc1_router = NUI(1, physical_x, physical_y, self.L1_mem, **profile.noc_kwargs)
         noc1_range = AddressRange(0xFFB30000, noc1_router.getSize())
         eth_tile_mem_map[noc1_range] = noc1_router
 
@@ -392,7 +401,7 @@ class TensixTile(TTDeviceTile):
         noc0_snoop=False,
         noc1_snoop=False,
         coprocessor_diagnostics=None,
-        l1_size=1464 * 1024,
+        profile=WORMHOLE_PROFILE,
     ):
         self.tensix_coprocessor = TensixCoProcessor(coprocessor_diagnostics)
 
@@ -415,7 +424,7 @@ class TensixTile(TTDeviceTile):
         # Tensix L1 SRAM. Size comes from the architecture profile; per
         # WormholeB0/TensixTile/L1.md, Wormhole's is TENSIX_SRAM_SIZE =
         # 1464 * 1024 = 1,499,136 bytes.
-        self.L1_mem = DRAM(l1_size)
+        self.L1_mem = DRAM(profile.tensix_l1_size)
         l1_range = AddressRange(0x0, self.L1_mem.getSize())
         tensix_mem_map[l1_range] = self.L1_mem
 
@@ -428,13 +437,13 @@ class TensixTile(TTDeviceTile):
         tensix_mem_map[tensix_config_range] = self.tensix_coprocessor_be_config
 
         noc0_router = NUI(
-            0, physical_x, physical_y, self.L1_mem, noc0_snoop, **_WH_NOC_KWARGS
+            0, physical_x, physical_y, self.L1_mem, noc0_snoop, **profile.noc_kwargs
         )
         noc0_range = AddressRange(0xFFB20000, noc0_router.getSize())
         tensix_mem_map[noc0_range] = noc0_router
 
         noc1_router = NUI(
-            1, physical_x, physical_y, self.L1_mem, noc1_snoop, **_WH_NOC_KWARGS
+            1, physical_x, physical_y, self.L1_mem, noc1_snoop, **profile.noc_kwargs
         )
         noc1_range = AddressRange(0xFFB30000, noc1_router.getSize())
         tensix_mem_map[noc1_range] = noc1_router

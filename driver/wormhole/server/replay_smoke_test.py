@@ -18,10 +18,8 @@ from pathlib import Path
 
 import pynng
 
-from . import protocol as proto
-from .fabric import Fabric
-from .trace import TraceWriter
-from .transport import Transport
+from tt_sim.bridge import Fabric, TraceWriter, Transport
+from tt_sim.bridge import protocol as proto
 
 
 def _run_server(addr, fabric, tracer, ready):

@@ -22,12 +22,11 @@ import time
 
 import pynng
 
-from . import protocol as proto
+from tt_sim.bridge import DramCore, Fabric, TensixCore, Transport
+from tt_sim.bridge import protocol as proto
+
 from .coords import DRAM_COORD_MAP, TENSIX_COORD_MAP
-from .cores import DramCore, TensixCore
-from .device import Device
-from .fabric import Fabric
-from .transport import Transport
+from .wh_device import make_device
 
 # tt-sim Wormhole's tensix is at unified (18,18); DRAM at (16,16). The
 # translated wire coords come from coords.py.
@@ -66,9 +65,9 @@ class _CountingWormhole:
 
 
 def _build_server(addr, cycles_per_poll):
-    device = Device(cycles_per_poll=cycles_per_poll)
+    device = make_device(cycles_per_poll=cycles_per_poll)
     # Wrap wormhole so we can count pumps.
-    device.wormhole = _CountingWormhole(device.wormhole)
+    device.tt_device = _CountingWormhole(device.tt_device)
     fabric = Fabric()
     # Mirror __main__.py: DRAM eager (small, always touched); Tensix only
     # the default worker (1, 1) — matching the single-tile bridge default
@@ -124,8 +123,8 @@ def main():
             )
 
             # No pumps yet — nothing has been deasserted.
-            assert device.wormhole.run_calls == 0, (
-                f"expected 0 pumps before deassert, got {device.wormhole.run_calls}"
+            assert device.tt_device.run_calls == 0, (
+                f"expected 0 pumps before deassert, got {device.tt_device.run_calls}"
             )
 
             # 2) WRITE to DRAM, READ back, verify.
@@ -166,7 +165,7 @@ def main():
                     size=4,
                 )
             )
-            pumps_before = device.wormhole.run_calls
+            pumps_before = device.tt_device.run_calls
             sock.send(proto.build_msg(proto.CMD_RESET_ASSERT, core=WIRE_TENSIX))
             sock.send(proto.build_msg(proto.CMD_RESET_DEASSERT, core=WIRE_TENSIX))
             sock.send(
@@ -175,7 +174,7 @@ def main():
                 )
             )
             proto.parse(sock.recv())
-            pumps_after = device.wormhole.run_calls
+            pumps_after = device.tt_device.run_calls
             # 1 pump on deassert + 1 pump on the subsequent READ = 2.
             assert pumps_after - pumps_before >= 2, (
                 f"expected >=2 pumps after deassert+read, got {pumps_after - pumps_before}"
@@ -199,8 +198,8 @@ def main():
 
     print(
         f"tensix smoke test OK "
-        f"(messages={transport.msg_count}, pumps={device.wormhole.run_calls}, "
-        f"resets={device.wormhole.reset_calls})"
+        f"(messages={transport.msg_count}, pumps={device.tt_device.run_calls}, "
+        f"resets={device.tt_device.reset_calls})"
     )
 
 

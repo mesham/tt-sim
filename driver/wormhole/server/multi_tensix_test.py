@@ -27,12 +27,11 @@ import time
 
 import pynng
 
-from . import protocol as proto
+from tt_sim.bridge import DramCore, Fabric, TensixCore, Transport
+from tt_sim.bridge import protocol as proto
+
 from .coords import DRAM_COORD_MAP, TENSIX_COORD_MAP
-from .cores import DramCore, TensixCore
-from .device import Device
-from .fabric import Fabric
-from .transport import Transport
+from .wh_device import make_device
 
 # Two adjacent worker tiles. Physical (1,1)->unified (18,18), (2,1)->(19,18).
 WIRE_TILE_A = (1, 1)
@@ -51,7 +50,7 @@ def _dial(addr, timeout_s=5.0):
 
 
 def _build_server(cycles_per_poll):
-    device = Device(cycles_per_poll=cycles_per_poll)
+    device = make_device(cycles_per_poll=cycles_per_poll)
     fabric = Fabric()
     for translated, unified in DRAM_COORD_MAP.items():
         fabric.register(translated, DramCore(device, unified))

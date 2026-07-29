@@ -23,6 +23,11 @@ class VectorUnit(TensixBackendUnit):
         "SFPMAD": "handle_mad",
         "SFPADD": "handle_add",
         "SFPMUL": "handle_mul",
+        # Blackhole-only SFPU superset.
+        "SFPGT": "handle_sfpgt",
+        "SFPLE": "handle_sfple",
+        "SFPMUL24": "handle_sfpmul24",
+        "SFPARECIP": "handle_sfparecip",
         "SFPADDI": "handle_addi",
         "SFPMULI": "handle_muli",
         "SFPABS": "handle_sfpabs",
@@ -940,6 +945,62 @@ class VectorUnit(TensixBackendUnit):
                                 self.laneFlags[lane] = c >= 0
                             case VectorUnit.SFPSETCC_MOD1_LREG_EQ0:
                                 self.laneFlags[lane] = c == 0
+
+    def _set_lane_flags_cmp(self, vd, vc, compare):
+        """Shared body of the Blackhole SFPGT / SFPLE comparisons.
+
+        Per BlackholeA0/.../VectorUnit.md these set ``LaneFlags[Lane]`` from a
+        comparison of ``LReg[lreg_dest]`` (VD) against ``LReg[lreg_c]`` (VC),
+        under FP32 ordering. Only the FP32-mode flag update is modelled (the
+        sign-magnitude-integer mode's extra ``VD = ... ? -(2^31-1) : +0`` write
+        is not yet emitted by any path we run).
+        """
+        for lane in range(32):
+            if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
+                if self.isLaneEnabled(lane):
+                    self.laneFlags[lane] = compare(
+                        self._as_fp32(self.lregs[vd][lane]),
+                        self._as_fp32(self.lregs[vc][lane]),
+                    )
+
+    def handle_sfpgt(self, instruction_info, issue_thread, instr_args):
+        # Blackhole SFPGT: LaneFlags[Lane] = (VD > VC).
+        self._set_lane_flags_cmp(
+            instr_args["lreg_dest"], instr_args["lreg_c"], lambda d, c: d > c
+        )
+
+    def handle_sfple(self, instruction_info, issue_thread, instr_args):
+        # Blackhole SFPLE: LaneFlags[Lane] = (VD <= VC).
+        self._set_lane_flags_cmp(
+            instr_args["lreg_dest"], instr_args["lreg_c"], lambda d, c: d <= c
+        )
+
+    def handle_sfpmul24(self, instruction_info, issue_thread, instr_args):
+        """Blackhole SFPMUL24: 24-bit integer multiply.
+
+        Two's-complement mode, per BlackholeA0/.../VectorUnit.md:
+        ``VD = (VA * VB) & 0x7fffff`` — the low 23 bits of the product of the low
+        23 bits of each source. (The ``>> 23`` high-bits variant is a separate
+        mode not modelled here.)
+        """
+        vd = instr_args["lreg_dest"]
+        va = instr_args["lreg_src_a"]
+        vb = instr_args["lreg_src_b"]
+        if vd < 8 or vd == 16:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    a = conv_to_uint32(self.lregs[va][lane]) & 0x7FFFFF
+                    b = conv_to_uint32(self.lregs[vb][lane]) & 0x7FFFFF
+                    self.lregs[vd][lane] = (a * b) & 0x7FFFFF
+
+    def handle_sfparecip(self, instruction_info, issue_thread, instr_args):
+        # Blackhole SFPARECIP is an approximate reciprocal implemented by a
+        # hardware lookup/refinement whose exact bit pattern is not reproducible
+        # from the public docs. Fail loudly rather than return a plausibly-wrong
+        # value; implement against ttsim's data/bh reference when a kernel needs it.
+        raise NotImplementedError(
+            "Blackhole SFPARECIP (approximate reciprocal) is not yet modelled"
+        )
 
     def handle_sfpencc(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]

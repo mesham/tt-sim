@@ -30,7 +30,7 @@ packages = ["tt_sim"]
 [tool.ruff]
 target-version = "py310"
 extend-include = ["*.ipynb", "*.pyi"]
-exclude = [".venv", "docs/marimo", "driver/wormhole/server/_flatbuf"]
+exclude = [".venv", "docs/marimo", "tt_sim/bridge/_flatbuf"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "PT", "TID251", "INP", "PYI"]

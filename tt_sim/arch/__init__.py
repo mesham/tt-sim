@@ -7,7 +7,8 @@ them, so a new architecture is (largely) a new profile plus per-arch strategies
 rather than a fork. See ``docs/plans/blackhole-support.md``.
 """
 
+from tt_sim.arch.blackhole import BLACKHOLE_PROFILE
 from tt_sim.arch.profile import ArchProfile
 from tt_sim.arch.wormhole import WORMHOLE_PROFILE
 
-__all__ = ["ArchProfile", "WORMHOLE_PROFILE"]
+__all__ = ["ArchProfile", "BLACKHOLE_PROFILE", "WORMHOLE_PROFILE"]

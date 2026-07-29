@@ -6,27 +6,51 @@ import numpy as np
 class DstRegister:
     def __init__(self):
         self.dstBits = np.zeros([1024, 16], dtype=np.uint32)
+        # DEST_ACCESS_CFG row-remap gates (Blackhole). Both default off, which
+        # is the hardware reset state and every path tt-sim currently drives.
+        # With them off, Adj16 is the identity and Adj32 reduces to the shared
+        # 32-bit row fold, so the addressing is byte-identical to Wormhole.
+        # tt-sim does not yet model writes to DEST_ACCESS_CFG (a Blackhole
+        # compute path that enables the swizzle is future work), so these stay
+        # False today; see BlackholeA0/.../Dst.md for the gated transforms.
+        self.dest_remap_addrs = False
+        self.dest_swizzle_32b = False
+
+    def adj16(self, r):
+        """Blackhole ``Adj16`` Dst16b row map (identity unless the remap gate).
+
+        Per BlackholeA0 Dst.md: preserves bits [1:0] and [6:2], XORing in
+        shifted copies of bits [5:4] and bit [3] when remap is enabled.
+        """
+        if self.dest_remap_addrs:
+            r = (r & 0x3C7) ^ ((r & 0x030) >> 1) ^ ((r & 0x008) << 2)
+        return r
+
+    def adj32(self, r):
+        """Blackhole ``Adj32`` Dst32b base row: ``Adj16``, an optional 32-bit
+        swizzle, then the shared fold ``((r & 0x1F8) << 1) | (r & 0x207)`` that
+        both architectures apply."""
+        r = self.adj16(r)
+        if self.dest_swizzle_32b:
+            r = (r & 0x3F3) ^ ((r & 0x018) >> 1) ^ ((r & 0x004) << 1)
+        return ((r & 0x1F8) << 1) | (r & 0x207)
 
     def getDst16b(self, idx0, idx1):
-        return int(self.dstBits[idx0][idx1])
+        return int(self.dstBits[self.adj16(idx0)][idx1])
 
     def setDst16b(self, idx0, idx1, value):
-        self.dstBits[idx0][idx1] = value
-
-    def to_32b_row(self, r_16b):
-        br = ((r_16b & 0x1F8) << 1) | (r_16b & 0x207)
-        return br, br + 8
+        self.dstBits[self.adj16(idx0)][idx1] = value
 
     def getDst32b(self, idx0, idx1):
-        r1, r2 = self.to_32b_row(idx0)
-        v1 = self.dstBits[r1][idx1]
-        v2 = self.dstBits[r2][idx1]
+        br = self.adj32(idx0)
+        v1 = self.dstBits[br][idx1]
+        v2 = self.dstBits[br + 8][idx1]
         return int((v1 << 16) | (v2 & 0xFFFF))
 
     def setDst32b(self, idx0, idx1, value):
-        r1, r2 = self.to_32b_row(idx0)
-        self.dstBits[r1][idx1] = value >> 16
-        self.dstBits[r2][idx1] = value & 0xFFFF
+        br = self.adj32(idx0)
+        self.dstBits[br][idx1] = value >> 16
+        self.dstBits[br + 8][idx1] = value & 0xFFFF
 
     def setUndefinedRow(self, row, isDst32=False):
         # ZEROACC zeroes the accumulator. On real hardware reads after this

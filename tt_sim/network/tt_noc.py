@@ -3,6 +3,7 @@ from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.trace import EventCategory, NoCEvent, get_bus
 from tt_sim.util.bits import clear_bit, extract_bits, replace_bits
 from tt_sim.util.conversion import (
@@ -161,8 +162,12 @@ class NUI(MemMapable, Clockable):
         def __init__(self, nui):
             self.target_addr_low = 0
             self.target_addr_mid = 0
+            # Dedicated coordinate register (Blackhole NOC_TARG/RET_ADDR_HI);
+            # unused by Wormhole, whose coord lives in the MID register.
+            self.target_addr_hi = 0
             self.ret_addr_low = 0
             self.ret_addr_mid = 0
+            self.ret_addr_hi = 0
             self.packet_tag = 0
             self.ctrl = 0
             self.at_len_be = 0
@@ -195,8 +200,9 @@ class NUI(MemMapable, Clockable):
             )
             self.cmd_ctrl = 0
 
-            target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
-            target_tile_y = extract_bits(self.target_addr_mid, 6, 10)
+            target_tile_x, target_tile_y = self.nui.noc_coord_strategy.target_coord(
+                self
+            )
             destination = self.nui.resolve_destination((target_tile_x, target_tile_y))
 
             for chunk_offset, chunk_size in chunks:
@@ -258,8 +264,7 @@ class NUI(MemMapable, Clockable):
             self.cmd_ctrl = 0
 
             # Send write request
-            ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
-            ret_tile_y = extract_bits(self.ret_addr_mid, 6, 10)
+            ret_tile_x, ret_tile_y = self.nui.noc_coord_strategy.ret_coord(self)
             destination = self.nui.resolve_destination((ret_tile_x, ret_tile_y))
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
@@ -329,8 +334,7 @@ class NUI(MemMapable, Clockable):
             # of the source data + writes into a contiguous slice of the
             # destination. The per-trid FIFO gains N entries so each ACK
             # decrements OUTSTANDING by one.
-            ret_tile_x = extract_bits(self.ret_addr_mid, 6, 4)
-            ret_tile_y = extract_bits(self.ret_addr_mid, 6, 10)
+            ret_tile_x, ret_tile_y = self.nui.noc_coord_strategy.ret_coord(self)
             destination = self.nui.resolve_destination((ret_tile_x, ret_tile_y))
 
             for chunk_offset, chunk_size in chunks:
@@ -430,10 +434,12 @@ class NUI(MemMapable, Clockable):
             """
             noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
 
-            x_end = extract_bits(self.ret_addr_mid, 6, 4)
-            y_end = extract_bits(self.ret_addr_mid, 6, 10)
-            x_start = extract_bits(self.ret_addr_mid, 6, 16)
-            y_start = extract_bits(self.ret_addr_mid, 6, 22)
+            (
+                x_start,
+                y_start,
+                x_end,
+                y_end,
+            ) = self.nui.noc_coord_strategy.broadcast_coords(self)
 
             destinations = [
                 (x, y)
@@ -535,8 +541,9 @@ class NUI(MemMapable, Clockable):
 
             self.cmd_ctrl = 0
 
-            target_tile_x = extract_bits(self.target_addr_mid, 6, 4)
-            target_tile_y = extract_bits(self.target_addr_mid, 6, 10)
+            target_tile_x, target_tile_y = self.nui.noc_coord_strategy.target_coord(
+                self
+            )
             destination = self.nui.resolve_destination((target_tile_x, target_tile_y))
 
             atomic_req = NUI.NoCDataRequest(
@@ -694,6 +701,7 @@ class NUI(MemMapable, Clockable):
         noc_grid_x=None,
         noc_grid_y=None,
         noc_max_burst_size=None,
+        noc_coord_strategy=None,
     ):
         """``x_coord`` / ``y_coord`` are the tile's canonical SoC-physical
         NoC 0 coord. The NUI's ``id_pair`` (directory key + the ``source``
@@ -713,6 +721,11 @@ class NUI(MemMapable, Clockable):
         self.noc_grid_y = NUI.NOC_GRID_Y if noc_grid_y is None else noc_grid_y
         self.noc_max_burst_size = (
             NOC_MAX_BURST_SIZE if noc_max_burst_size is None else noc_max_burst_size
+        )
+        # Strategy for reading a request's destination coord out of the NIU
+        # command registers; defaults to Wormhole's coord-in-MID layout.
+        self.noc_coord_strategy = (
+            WormholeNocCoords() if noc_coord_strategy is None else noc_coord_strategy
         )
         if noc_number == 0:
             self.x_coord = x_coord
@@ -1206,10 +1219,14 @@ class NUI(MemMapable, Clockable):
             self.request_initiators[0].target_addr_low = conv_to_uint32(value)
         elif addr == 0x4:
             self.request_initiators[0].target_addr_mid = conv_to_uint32(value)
+        elif addr == 0x8:
+            self.request_initiators[0].target_addr_hi = conv_to_uint32(value)
         elif addr == 0xC:
             self.request_initiators[0].ret_addr_low = conv_to_uint32(value)
         elif addr == 0x10:
             self.request_initiators[0].ret_addr_mid = conv_to_uint32(value)
+        elif addr == 0x14:
+            self.request_initiators[0].ret_addr_hi = conv_to_uint32(value)
         elif addr == 0x18:
             self.request_initiators[0].packet_tag = conv_to_uint32(value)
         elif addr == 0x1C:
@@ -1225,10 +1242,14 @@ class NUI(MemMapable, Clockable):
             self.request_initiators[1].target_addr_low = conv_to_uint32(value)
         elif addr == 0x404:
             self.request_initiators[1].target_addr_mid = conv_to_uint32(value)
+        elif addr == 0x408:
+            self.request_initiators[1].target_addr_hi = conv_to_uint32(value)
         elif addr == 0x40C:
             self.request_initiators[1].ret_addr_low = conv_to_uint32(value)
         elif addr == 0x410:
             self.request_initiators[1].ret_addr_mid = conv_to_uint32(value)
+        elif addr == 0x414:
+            self.request_initiators[1].ret_addr_hi = conv_to_uint32(value)
         elif addr == 0x418:
             self.request_initiators[1].packet_tag = conv_to_uint32(value)
         elif addr == 0x41C:
@@ -1244,10 +1265,14 @@ class NUI(MemMapable, Clockable):
             self.request_initiators[2].target_addr_low = conv_to_uint32(value)
         elif addr == 0x804:
             self.request_initiators[2].target_addr_mid = conv_to_uint32(value)
+        elif addr == 0x808:
+            self.request_initiators[2].target_addr_hi = conv_to_uint32(value)
         elif addr == 0x80C:
             self.request_initiators[2].ret_addr_low = conv_to_uint32(value)
         elif addr == 0x810:
             self.request_initiators[2].ret_addr_mid = conv_to_uint32(value)
+        elif addr == 0x814:
+            self.request_initiators[2].ret_addr_hi = conv_to_uint32(value)
         elif addr == 0x818:
             self.request_initiators[2].packet_tag = conv_to_uint32(value)
         elif addr == 0x81C:
@@ -1263,10 +1288,14 @@ class NUI(MemMapable, Clockable):
             self.request_initiators[3].target_addr_low = conv_to_uint32(value)
         elif addr == 0xC04:
             self.request_initiators[3].target_addr_mid = conv_to_uint32(value)
+        elif addr == 0xC08:
+            self.request_initiators[3].target_addr_hi = conv_to_uint32(value)
         elif addr == 0xC0C:
             self.request_initiators[3].ret_addr_low = conv_to_uint32(value)
         elif addr == 0xC10:
             self.request_initiators[3].ret_addr_mid = conv_to_uint32(value)
+        elif addr == 0xC14:
+            self.request_initiators[3].ret_addr_hi = conv_to_uint32(value)
         elif addr == 0xC18:
             self.request_initiators[3].packet_tag = conv_to_uint32(value)
         elif addr == 0xC1C:

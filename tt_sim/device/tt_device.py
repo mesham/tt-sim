@@ -285,19 +285,18 @@ class TTDeviceTile(DeviceTile, ABC):
     is_tensix = False
 
     def __init__(self, coord_x, coord_y, noc0_router, noc1_router):
+        # Reference the bounds via ``self`` so an architecture whose tile coords
+        # occupy a different range (e.g. Blackhole's 17x12 physical grid) can
+        # override the class constants in a subclass.
         if not (
-            TTDeviceTile.UNIFIED_COORD_X_MIN
-            <= coord_x
-            <= TTDeviceTile.UNIFIED_COORD_X_MAX
-            and TTDeviceTile.UNIFIED_COORD_Y_MIN
-            <= coord_y
-            <= TTDeviceTile.UNIFIED_COORD_Y_MAX
+            self.UNIFIED_COORD_X_MIN <= coord_x <= self.UNIFIED_COORD_X_MAX
+            and self.UNIFIED_COORD_Y_MIN <= coord_y <= self.UNIFIED_COORD_Y_MAX
         ):
             raise Exception(
-                f"Tile coordinates should be the unified coordinate system "
-                f"(x in {TTDeviceTile.UNIFIED_COORD_X_MIN}..{TTDeviceTile.UNIFIED_COORD_X_MAX}, "
-                f"y in {TTDeviceTile.UNIFIED_COORD_Y_MIN}..{TTDeviceTile.UNIFIED_COORD_Y_MAX}), "
-                f"whereas ({coord_x}, {coord_y}) provided"
+                f"Tile coordinate ({coord_x}, {coord_y}) is outside this "
+                f"architecture's tile-coordinate range "
+                f"(x in {self.UNIFIED_COORD_X_MIN}..{self.UNIFIED_COORD_X_MAX}, "
+                f"y in {self.UNIFIED_COORD_Y_MIN}..{self.UNIFIED_COORD_Y_MAX})"
             )
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
         # Extra SoC-physical NoC 0 coords that ``TT_Device`` registers as

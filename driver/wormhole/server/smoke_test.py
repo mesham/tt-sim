@@ -14,9 +14,8 @@ import time
 
 import pynng
 
-from . import protocol as proto
-from .fabric import Fabric
-from .transport import Transport
+from tt_sim.bridge import Fabric, Transport
+from tt_sim.bridge import protocol as proto
 
 
 def _run_server(addr, ready):

@@ -9,9 +9,7 @@ import contextlib
 import os
 import sys
 
-from .fabric import Fabric
-from .trace import TraceWriter
-from .transport import Transport
+from tt_sim.bridge import Fabric, TraceWriter, Transport
 
 
 def _parse_tensix_pool(env):
@@ -117,13 +115,22 @@ def main(argv=None):
     device = None
     if not args.mock_tensix:
         # Late import so --mock-tensix avoids the (slow) Wormhole construction.
+        from tt_sim.bridge import (
+            DramCore,
+            EthCore,
+            TensixCore,
+            diagnostics_from_env,
+            enabled_diagnostic_names,
+        )
+
         from .coords import DRAM_COORD_MAP, ETH_COORD_MAP, TENSIX_COORD_MAP
-        from .cores import DramCore, EthCore, TensixCore
-        from .device import Device, diagnostics_from_env, enabled_diagnostic_names
+        from .wh_device import make_device
 
         tensix_pool = _parse_tensix_pool(os.environ)
         diagnostics = diagnostics_from_env()
-        device = Device(cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics)
+        device = make_device(
+            cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics
+        )
         for translated, unified in DRAM_COORD_MAP.items():
             fabric.register(translated, DramCore(device, unified))
         for translated, unified in ETH_COORD_MAP.items():
@@ -227,7 +234,7 @@ def main(argv=None):
         # don't outlive the process on graceful exit or Ctrl-C. Safe even
         # when --mock-tensix is set (no Wormhole was built).
         if device is not None:
-            device.wormhole.shutdown()
+            device.tt_device.shutdown()
 
     print(
         f"[server] shutdown after {transport.msg_count} messages",

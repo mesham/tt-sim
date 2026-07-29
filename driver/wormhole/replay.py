@@ -31,8 +31,9 @@ _REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from driver.wormhole.server import protocol as proto  # noqa: E402
 from driver.wormhole.server.trace import parse_trace_line  # noqa: E402
+
+from tt_sim.bridge import protocol as proto  # noqa: E402
 
 
 def _dial_with_retry(addr, timeout_s=10.0):

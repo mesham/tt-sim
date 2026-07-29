@@ -46,3 +46,18 @@ class ArchProfile:
 
     #: Default Tensix worker tiles to instantiate, as unified coords.
     tensix_unified_coords: tuple[tuple[int, int], ...]
+
+    #: Strategy that reads a NoC request's destination coordinate out of the NIU
+    #: command registers (Wormhole packs it into MID; Blackhole uses a dedicated
+    #: HI register). See :mod:`tt_sim.network.noc_coords`.
+    noc_coord_strategy: object
+
+    @property
+    def noc_kwargs(self) -> dict:
+        """The per-arch NoC parameters a tile passes to each ``NUI`` it builds."""
+        return {
+            "noc_grid_x": self.noc_grid_x,
+            "noc_grid_y": self.noc_grid_y,
+            "noc_max_burst_size": self.noc_max_burst_size,
+            "noc_coord_strategy": self.noc_coord_strategy,
+        }
