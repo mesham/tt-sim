@@ -47,17 +47,40 @@ class TensixCoprocessorDiagnostics:
 
 
 class TensixConfigurationConstants:
+    # The Tensix backend config-register layout (register name -> ADDR32 / SHAMT
+    # / MASK) differs between architectures: Blackhole has a larger, differently
+    # indexed register map (e.g. SRCA_SET_Base is thread-config index 3 on
+    # Wormhole but 5 on Blackhole). ``use_blackhole`` selects which layout the
+    # (process-global) accessors use; it is set when a device's config unit is
+    # built. Both layouts are cached, so switching is cheap.
+    _YAML_BY_ARCH = {
+        False: "tensix_backend_cfg.yaml",
+        True: "tensix_backend_cfg_blackhole.yaml",
+    }
+    _blackhole = False
+
+    @classmethod
+    def use_blackhole(cls, blackhole):
+        if getattr(cls, "_loaded_arch", None) != blackhole:
+            cls._blackhole = blackhole
+            cls._load(blackhole)
+
+    @classmethod
+    def _load(cls, blackhole):
+        yaml_name = cls._YAML_BY_ARCH[blackhole]
+        cls.config_constants = load_yaml_cached(
+            resources.files("tt_sim.pe.tensix").joinpath(yaml_name),
+            yaml_name.removesuffix(".yaml"),
+        )
+        cls.ids = {}
+        for k in cls.config_constants.keys():
+            cls.ids[cls.config_constants[k]["ADDR32"]] = k
+        cls._loaded_arch = blackhole
+
     @classmethod
     def init(cls):
         if not hasattr(cls, "config_constants"):
-            cls.config_constants = load_yaml_cached(
-                resources.files("tt_sim.pe.tensix").joinpath("tensix_backend_cfg.yaml"),
-                "tensix_backend_cfg",
-            )
-            cls.ids = {}
-            for k in cls.config_constants.keys():
-                addr32 = cls.get_addr32(k)
-                cls.ids[addr32] = k
+            cls._load(cls._blackhole)
 
     @classmethod
     def get_name(cls, id):
@@ -66,6 +89,11 @@ class TensixConfigurationConstants:
             return cls.ids[id]
         else:
             return "NONE"
+
+    @classmethod
+    def exists(cls, key):
+        cls.init()
+        return key in cls.config_constants
 
     @classmethod
     def get_addr32(cls, key):

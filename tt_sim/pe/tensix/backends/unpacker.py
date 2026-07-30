@@ -770,10 +770,21 @@ class UnPackerUnit(TensixBackendUnit):
             else self.backend.getThreadConfigValue(issue_thread, "SRCA_SET_Base")
         ) << 4
         if flipSrc:
+            # Release the current bank to the matrix unit and advance to the
+            # other bank — the same effect as the explicit "give src to fpu"
+            # UNPACR_NOP (``handle_give_src_to_fpu``). This is a *set*, not a
+            # toggle: Blackhole kernels mark dvalid inline on the regular UNPACR
+            # (rather than issuing the Wormhole-only SETDVALID NoOp), so this
+            # runs once per unpacked face; toggling would flip an even number of
+            # times and leave the bank owned by the unpackers, starving the FPU.
             if self.unpacker_id == 0:
-                self.backend.getSrcA(self.srcBank).flipAllowedClient()
+                self.backend.getSrcA(self.srcBank).setAllowedClient(
+                    SrcRegister.SrcClient.MatrixUnit
+                )
             else:
-                self.backend.getSrcB(self.srcBank).flipAllowedClient()
+                self.backend.getSrcB(self.srcBank).setAllowedClient(
+                    SrcRegister.SrcClient.MatrixUnit
+                )
             self.srcBank ^= 1
             self.srcRow[issue_thread] = srcRowBase
         else:

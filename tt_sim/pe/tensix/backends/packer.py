@@ -36,7 +36,10 @@ class PackerUnit(TensixBackendUnit):
             self.inputSourceStride = 0
             self.inDataFormat = None
             self.byteAddress = 0
-            self.datastreamNeedsNewAddr = 0
+            # The first datastream (before any Last/Flush has run) still needs a
+            # fresh output address computed from config; without this the very
+            # first tile packs from address 0 instead of the CB base.
+            self.datastreamNeedsNewAddr = True
             self.outBytes = 0
             self.outDataFormat = None
 
@@ -131,9 +134,22 @@ class PackerUnit(TensixBackendUnit):
             if flush:
                 self.packerI[i].inputNumDatums = 0
             else:
-                self.packerI[i].inputNumDatums = (
+                numDatums = (
                     self.backend.getADC(whichADC).Packers.Channel[1].X - adc.X + 1
                 )
+                if self.backend.blackhole:
+                    # Blackhole PACR reinterprets the Wormhole `PackSel` bits
+                    # (11:8) as `read_intf_sel`, selecting which of the four Dst
+                    # read interfaces are active. With all four enabled (field
+                    # 0) one PACR streams 4x the datums across four contiguous
+                    # Dst rows (row = base + i//16); otherwise it scales by the
+                    # number of selected interfaces. See ttsim TT_ARCH_VERSION==1
+                    # pack path and the ISA PACR read_intf_sel field.
+                    read_intf_sel = packMask
+                    numDatums *= (
+                        4 if read_intf_sel == 0 else bin(read_intf_sel).count("1")
+                    )
+                self.packerI[i].inputNumDatums = numDatums
 
             if zeroWrite or flush:
                 self.packerI[i].inputSource = None
@@ -411,6 +427,17 @@ class PackerUnit(TensixBackendUnit):
                     addr, conv_to_bytes(datum, self.packerI[i].outBytes)
                 )
                 addr += self.packerI[i].outBytes
+
+            if self.backend.blackhole:
+                # Blackhole carries the output address forward across the PACRs
+                # that together pack one tile (ttsim's `packer_valid`): each PACR
+                # appends its datums after the previous one, so the first PACR
+                # lands at the CB page base (what the consumer reads) and later
+                # PACRs spill past it. generate_output_address only recomputes
+                # byteAddress on a new tile (datastreamNeedsNewAddr, set on
+                # last/flush), so this intra-tile advance is what the next PACR
+                # reads. Wormhole keeps its existing hold-in-place behaviour.
+                self.packerI[i].byteAddress = addr
 
     def formatConversion(self, stateID, inDataFormat, outDataFormat, raw_datum):
         match inDataFormat:

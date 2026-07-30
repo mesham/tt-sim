@@ -31,6 +31,12 @@ BLACKHOLE_PROFILE = ArchProfile(
     trisc_local_mem_size=4 * 1024,
     # Blackhole moves the reset-PC override to the RISCV_DEBUG_REG block.
     baby_core_reset_pc_debug_regs=True,
+    # Blackhole's Tensix backend config state is larger than Wormhole's
+    # (ttsim sim.h TT_ARCH_VERSION 1: 56 config / 68 thread-config registers).
+    tensix_cfg_state_size=56,
+    tensix_thd_state_size=68,
+    # Use Blackhole Tensix semantics: BH config-register layout + STALLWAIT bits.
+    tensix_blackhole=True,
     # Blackhole baby cores add, over RV32IM: Zba address-gen + Zbb basic
     # bit-manip (tt-metal's Blackhole kernels use them, e.g. zext.h / sh2add for
     # loop-bound and pointer arithmetic), Zaamo local-L1 atomics, and an F/Zfh

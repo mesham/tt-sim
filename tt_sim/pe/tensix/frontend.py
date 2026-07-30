@@ -18,7 +18,7 @@ class TensixFrontend(MemMapable):
     https://github.com/tenstorrent/tt-isa-documentation/tree/main/WormholeB0/TensixTile/TensixCoprocessor
     """
 
-    def __init__(self, thread_id, backend, diags_settings):
+    def __init__(self, thread_id, backend, diags_settings, blackhole_conditions=False):
         self.thread_id = thread_id
         self.backend = backend
         self.mop_instruction_fifo = []
@@ -26,7 +26,7 @@ class TensixFrontend(MemMapable):
         self.wait_gate_instruction_fifo = []
         self.mop_expander = TensixMOPExpander(self)
         self.replay_expander = TensixReplayExpander(self)
-        self.wait_gate = WaitGate(self, backend)
+        self.wait_gate = WaitGate(self, backend, blackhole_conditions)
         self.diags_settings = diags_settings
         self.unit_id: tuple | None = None
 
@@ -205,13 +205,17 @@ class WaitGate(TensixFrontendUnit):
                     sem_check.append(i)
             return sem_check
 
-    def __init__(self, frontend, backend):
+    def __init__(self, frontend, backend, blackhole_conditions=False):
         super().__init__(frontend)
         self.mutex_stall = False
         self.backend_enforced_stall = False
         self.latchedWaitInstruction = None
         self.latch_wait = False
         self.backend = backend
+        # The STALLWAIT/SEMWAIT condition-mask bit assignments differ between
+        # Wormhole and Blackhole (compare the two arch's STALLWAIT.md). When set,
+        # ``check_for_semwait_condition_match`` uses the Blackhole layout.
+        self.blackhole_conditions = blackhole_conditions
 
     def setBackendEnforcedStall(self):
         self.backend_enforced_stall = True
@@ -251,6 +255,8 @@ class WaitGate(TensixFrontendUnit):
             return True
 
     def check_for_semwait_condition_match(self, cond_idx):
+        if self.blackhole_conditions:
+            return self._check_blackhole_condition(cond_idx)
         # Some of these conditions do not apply, as per
         # https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/STALLWAIT.md
         match cond_idx:
@@ -288,12 +294,16 @@ class WaitGate(TensixFrontendUnit):
                 )
             case 10:
                 return (
-                    self.backend.getSrcA(self.backend.matrix_unit.srcBank).allowedClient
+                    self.backend.getSrcA(
+                        self.backend.matrix_unit.srcABank
+                    ).allowedClient
                     == SrcRegister.SrcClient.MatrixUnit
                 )
             case 11:
                 return (
-                    self.backend.getSrcB(self.backend.matrix_unit.srcBank).allowedClient
+                    self.backend.getSrcB(
+                        self.backend.matrix_unit.srcBBank
+                    ).allowedClient
                     == SrcRegister.SrcClient.MatrixUnit
                 )
             case 12:
@@ -303,6 +313,67 @@ class WaitGate(TensixFrontendUnit):
             case 14:
                 return not self.backend.vector_unit.hasInflightInstructionsFromThread(
                     self.frontend.thread_id
+                )
+            case _:
+                return True
+
+    def _check_blackhole_condition(self, cond_idx):
+        """Blackhole STALLWAIT condition bits (C0-C12), per
+        BlackholeA0/TensixTile/TensixCoprocessor/STALLWAIT.md. Returns True when
+        the (selected) condition is satisfied so the stall can clear. The bit
+        assignments differ substantially from Wormhole's — e.g. bit 10 here is
+        "the RISCV T core has an unprocessed memory request" (always satisfied in
+        this functionally-timed sim), where Wormhole's bit 10 meant "SrcA owned
+        by the matrix unit"; using the Wormhole layout deadlocks the unpacker."""
+        be = self.backend
+        thread = self.frontend.thread_id
+        match cond_idx:
+            case 0:  # C0: ThCon (scalar) has outstanding memory requests
+                # Scalar-unit memory is synchronous here, so never outstanding.
+                return True
+            case 1:  # C1: instruction in Unpacker 0's pipeline for this thread
+                return not be.unpacker_units[0].hasInflightInstructionsFromThread(
+                    thread
+                )
+            case 2:  # C2: instruction in Unpacker 1's pipeline for this thread
+                return not be.unpacker_units[1].hasInflightInstructionsFromThread(
+                    thread
+                )
+            case 3:  # C3: instruction in the Packer pipeline for this thread
+                return not be.packer_unit.hasInflightInstructionsFromThread(thread)
+            case 4:  # C4: instruction in the Matrix Unit (FPU) pipeline
+                return not be.matrix_unit.hasInflightInstructionsFromThread(thread)
+            case 5:  # C5: SrcA not yet available for unpacker writes
+                return (
+                    be.getSrcA(be.unpacker_units[0].srcBank).allowedClient
+                    == SrcRegister.SrcClient.Unpackers
+                )
+            case 6:  # C6: SrcB not yet available for unpacker writes
+                return (
+                    be.getSrcB(be.unpacker_units[1].srcBank).allowedClient
+                    == SrcRegister.SrcClient.Unpackers
+                )
+            case 7:  # C7: SrcA not yet available for FPU reads
+                return (
+                    be.getSrcA(be.matrix_unit.srcABank).allowedClient
+                    == SrcRegister.SrcClient.MatrixUnit
+                )
+            case 8:  # C8: SrcB not yet available for FPU reads
+                return (
+                    be.getSrcB(be.matrix_unit.srcBBank).allowedClient
+                    == SrcRegister.SrcClient.MatrixUnit
+                )
+            case 9:  # C9: the mover has outstanding memory requests
+                return not be.mover_unit.checkForOutstandingInstructions()
+            case 10:  # C10: RISCV T core has an unprocessed memory request
+                # RISCV<->L1 accesses are synchronous here, so never pending.
+                return True
+            case 11:  # C11: instruction in the Vector Unit (SFPU) pipeline
+                return not be.vector_unit.hasInflightInstructionsFromThread(thread)
+            case 12:  # C12: instruction in the Config Unit pipeline (any thread)
+                return not any(
+                    be.config_unit.hasInflightInstructionsFromThread(t)
+                    for t in range(3)
                 )
             case _:
                 return True

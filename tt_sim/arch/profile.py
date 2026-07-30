@@ -93,6 +93,19 @@ class ArchProfile:
     trisc1_firmware_base: int | None = None
     trisc2_firmware_base: int | None = None
 
+    #: Sizes of the Tensix coprocessor's backend config state (number of 128-bit
+    #: config registers) and per-thread config state. Wormhole 47 / 57;
+    #: Blackhole is larger at 56 / 68 (ttsim ``sim.h`` TT_ARCH_VERSION 1). An
+    #: undersized value asserts when a kernel writes a high config register.
+    tensix_cfg_state_size: int = 47
+    tensix_thd_state_size: int = 57
+
+    #: Whether the Tensix coprocessor uses Blackhole semantics: the backend
+    #: config-register layout (``tensix_backend_cfg_blackhole.yaml``) and the
+    #: STALLWAIT/SEMWAIT condition-mask bit assignments, both of which differ
+    #: from Wormhole's. See ``TensixConfigurationConstants`` and ``WaitGate``.
+    tensix_blackhole: bool = False
+
     #: Per-channel SoC-physical coordinate of the DRAM tile's **NoC 1** worker
     #: endpoint, parallel to :attr:`dram_channel_unified_coords`. A DRAM channel
     #: exposes several sub-endpoints and NoC 0 / NoC 1 use *different* ones (the

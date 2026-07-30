@@ -19,18 +19,33 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         "WRCFG": "handle_wrcfg",
         "RDCFG": "handle_rdcfg",
     }
+    # Per-arch sizes of the backend config state (number of 128-bit config
+    # registers) and the per-thread config state. Wormhole defaults; Blackhole
+    # is larger (56 / 68 — ttsim ``sim.h`` TT_ARCH_VERSION 1), threaded in via
+    # the arch profile.
     CFG_STATE_SIZE = 47
     THD_STATE_SIZE = 57
 
-    def __init__(self, backend, gprs):
+    def __init__(
+        self, backend, gprs, cfg_state_size=None, thd_state_size=None, blackhole=False
+    ):
+        # Select the arch-specific config-register layout (name -> ADDR32 / SHAMT
+        # / MASK) that every backend unit reads through TensixConfigurationConstants.
+        TensixConfigurationConstants.use_blackhole(blackhole)
+        self.CFG_STATE_SIZE = (
+            cfg_state_size if cfg_state_size is not None else self.CFG_STATE_SIZE
+        )
+        self.THD_STATE_SIZE = (
+            thd_state_size if thd_state_size is not None else self.THD_STATE_SIZE
+        )
         self.config = [
-            [0] * (TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4),
-            [0] * TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4,
+            [0] * (self.CFG_STATE_SIZE * 4),
+            [0] * (self.CFG_STATE_SIZE * 4),
         ]
         self.threadConfig = [
-            [0] * TensixBackendConfigurationUnit.THD_STATE_SIZE,
-            [0] * TensixBackendConfigurationUnit.THD_STATE_SIZE,
-            [0] * TensixBackendConfigurationUnit.THD_STATE_SIZE,
+            [0] * self.THD_STATE_SIZE,
+            [0] * self.THD_STATE_SIZE,
+            [0] * self.THD_STATE_SIZE,
         ]
         self.gprs = gprs
         self.prev_cycle_setc16_or_wrcfg = False
@@ -105,7 +120,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
 
     def handle_rdcfg(self, instruction_info, issue_thread, instr_args):
         cfgIndex = instr_args["CfgReg"]
-        assert cfgIndex < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+        assert cfgIndex < self.CFG_STATE_SIZE * 4
 
         resultReg = instr_args["GprAddress"]
 
@@ -117,7 +132,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
 
     def handle_wrcfg(self, instruction_info, issue_thread, instr_args):
         cfgIndex = instr_args["CfgReg"]
-        assert cfgIndex < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+        assert cfgIndex < self.CFG_STATE_SIZE * 4
 
         inputReg = instr_args["GprAddress"]
 
@@ -145,7 +160,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         cfg_index = instr_args["setc16_reg"]
         new_value = instr_args["setc16_value"]
 
-        assert cfg_index < TensixBackendConfigurationUnit.THD_STATE_SIZE
+        assert cfg_index < self.THD_STATE_SIZE
 
         self.setThreadConfig(issue_thread, cfg_index, new_value)
 
@@ -166,7 +181,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         new_value = instr_args["Data"] << (8 * index1)
         mask = instr_args["Mask"] << (8 * index1)
 
-        assert index4 < TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+        assert index4 < self.CFG_STATE_SIZE * 4
 
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
@@ -184,29 +199,27 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         return self.config[state][entry_idx]
 
     def read(self, addr, size):
-        threadConfigStart = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4 * 2
+        threadConfigStart = self.CFG_STATE_SIZE * 4 * 2
         idx = addr / 4
         if idx < threadConfigStart:
-            each_config_size = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
-            second_idx = (
-                1 if idx > TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4 else 0
-            )
+            each_config_size = self.CFG_STATE_SIZE * 4
+            second_idx = 1 if idx > self.CFG_STATE_SIZE * 4 else 0
             first_idx = int(idx - (each_config_size * second_idx))
             return conv_to_bytes(self.config[second_idx][first_idx])
         else:
             idx = idx - threadConfigStart
-            second_idx = idx / TensixBackendConfigurationUnit.THD_STATE_SIZE
+            second_idx = idx / self.THD_STATE_SIZE
             return conv_to_bytes(
                 self.threadConfig[second_idx][
-                    idx - ((TensixBackendConfigurationUnit.THD_STATE_SIZE) * second_idx)
+                    idx - ((self.THD_STATE_SIZE) * second_idx)
                 ]
             )
 
     def write(self, addr, value, size=None):
-        threadConfigStart = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4 * 2
+        threadConfigStart = self.CFG_STATE_SIZE * 4 * 2
         idx = addr / 4
         if idx < threadConfigStart:
-            each_config_size = TensixBackendConfigurationUnit.CFG_STATE_SIZE * 4
+            each_config_size = self.CFG_STATE_SIZE * 4
             second_idx = 1 if idx > each_config_size else 0
             first_idx = int(idx - (each_config_size * second_idx))
             self.setConfig(second_idx, first_idx, conv_to_uint32(value))

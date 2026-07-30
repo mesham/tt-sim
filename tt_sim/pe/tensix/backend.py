@@ -23,7 +23,14 @@ class TensixBackend:
     https://github.com/tenstorrent/tt-isa-documentation/tree/main/WormholeB0/TensixTile/TensixCoprocessor
     """
 
-    def __init__(self, diags_settings):
+    def __init__(
+        self,
+        diags_settings,
+        cfg_state_size=None,
+        thd_state_size=None,
+        blackhole=False,
+    ):
+        self.blackhole = blackhole
         self.gpr = TensixGPR()
         self.mover_unit = MoverUnit(self)
         self.sync_unit = TensixSyncUnit(self)
@@ -33,7 +40,9 @@ class TensixBackend:
         self.unpacker_units = [UnPackerUnit(self, i) for i in range(2)]
         self.packer_unit = PackerUnit(self)
         self.misc_unit = MiscellaneousUnit(self)
-        self.config_unit = TensixBackendConfigurationUnit(self, self.gpr)
+        self.config_unit = TensixBackendConfigurationUnit(
+            self, self.gpr, cfg_state_size, thd_state_size, blackhole
+        )
         self.dst = DstRegister()
         self.srcA = [SrcRegister(), SrcRegister()]
         self.srcB = [SrcRegister(), SrcRegister()]
@@ -117,6 +126,11 @@ class TensixBackend:
         return unit_clocks
 
     def getThreadConfigValue(self, issue_thread, key):
+        # A thread-config register that doesn't exist on this architecture (e.g.
+        # Wormhole's ADDR_MOD_SET_Base, which Blackhole replaces with the
+        # ADDR_MOD_AB2_* register set) reads as unset — 0.
+        if not TensixConfigurationConstants.exists(key):
+            return 0
         addr_idx = TensixConfigurationConstants.get_addr32(key)
         val = self.getConfigUnit().get_threadConfig_entry(issue_thread, addr_idx)
         return TensixConfigurationConstants.parse_raw_config_value(val, key)

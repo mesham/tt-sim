@@ -11,12 +11,20 @@ class TensixCoProcessor(ProcessingElement):
     the frontend and backend parts
     """
 
-    def __init__(self, diags_settings=None):
+    def __init__(
+        self,
+        diags_settings=None,
+        cfg_state_size=None,
+        thd_state_size=None,
+        blackhole=False,
+    ):
         if diags_settings is None:
             diags_settings = TensixCoprocessorDiagnostics()
-        self.backend = TensixBackend(diags_settings)
+        self.backend = TensixBackend(
+            diags_settings, cfg_state_size, thd_state_size, blackhole
+        )
         self.threads = [
-            TensixFrontend(i, self.backend, diags_settings) for i in range(3)
+            TensixFrontend(i, self.backend, diags_settings, blackhole) for i in range(3)
         ]
         self.backend.setFrontendThreads(self.threads)
 
