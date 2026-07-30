@@ -15,8 +15,8 @@ construct the device and move data DRAM<->Tensix over the NoC.
 """
 
 from tt_sim.arch import BLACKHOLE_PROFILE
+from tt_sim.device.tiles import DRAMTile, TensixTile
 from tt_sim.device.tt_device import DeviceTileDiagnostics, TT_Device
-from tt_sim.device.wormhole import DRAMTile, TensixTile
 
 
 class _BlackholeTileCoords:
