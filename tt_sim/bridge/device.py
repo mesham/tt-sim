@@ -15,6 +15,7 @@ import os
 from tt_sim.device.tt_device import DeviceTileDiagnostics
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.pe.tensix.util import TensixCoprocessorDiagnostics
+from tt_sim.util.conversion import conv_to_uint32
 
 # Map from individual env var → (group, field). Group "rv"/"noc" fields land
 # on DeviceTileDiagnostics; group "co" fields land on TensixCoprocessorDiagnostics.
@@ -123,6 +124,18 @@ class Device:
     ``run``, ``shutdown``), so the same wrapper drives either architecture.
     """
 
+    # A wire DEASSERT deasserts the master BRISC plus whichever subordinate
+    # RISCs the program enabled. tt-metal's launch message carries a bitmask
+    # (``kernel_config_msg_t.enables``) where bit i selects processor i in this
+    # order (tt-metal ``program.cpp``: ``enables |= 1 << processor_index``).
+    _ENABLE_BIT_TO_CORE = (
+        BabyRISCVCoreType.BRISC,
+        BabyRISCVCoreType.NCRISC,
+        BabyRISCVCoreType.TRISC0,
+        BabyRISCVCoreType.TRISC1,
+        BabyRISCVCoreType.TRISC2,
+    )
+
     def __init__(
         self,
         device_factory,
@@ -130,10 +143,15 @@ class Device:
         *,
         cycles_per_poll: int = 100,
         diagnostics=None,
+        launch_enables_offset=None,
     ):
         self.tt_device = device_factory(diagnostics or DeviceTileDiagnostics())
         self.tensix_coord_map = tensix_coord_map
         self.cycles_per_poll = cycles_per_poll
+        # L1 offset of the launch message's ``enables`` bitmask, or None to keep
+        # the legacy BRISC-only deassert (Wormhole, whose captured flows are all
+        # single-RISC). Blackhole injects it so NCRISC/TRISC kernels run.
+        self.launch_enables_offset = launch_enables_offset
         # unified_coord -> True if BRISC has been deasserted.
         self._brisc_running: dict[tuple[int, int], bool] = {}
 
@@ -169,9 +187,25 @@ class Device:
         self._brisc_running[unified] = False
         self.tt_device.assert_soft_reset(unified)
 
-    def deassert_reset_brisc(self, unified):
-        self.tt_device.deassert_soft_reset(unified, BabyRISCVCoreType.BRISC)
-        # Clear stale CPU state before the deasserted core runs. Scope this to
+    def deassert_reset(self, unified):
+        # A wire DEASSERT brings the master BRISC plus every subordinate the
+        # launch message enabled out of soft reset. BRISC is always released:
+        # it is the dispatch master and also runs during the grid-wide init
+        # handshake (before any launch message is written). NCRISC/TRISC are
+        # released only when their ``enables`` bit is set, so a BRISC-only
+        # program doesn't run their (idle) base firmware, which would otherwise
+        # perturb BRISC's go-message completion.
+        cores = {BabyRISCVCoreType.BRISC}
+        if self.launch_enables_offset is not None:
+            enables = conv_to_uint32(
+                self.tt_device.read(unified, self.launch_enables_offset, 4)
+            )
+            for bit, core in enumerate(self._ENABLE_BIT_TO_CORE):
+                if enables & (1 << bit):
+                    cores.add(core)
+        for core in cores:
+            self.tt_device.deassert_soft_reset(unified, core)
+        # Clear stale CPU state before the deasserted cores run. Scope this to
         # the one tile: the global ``reset()`` clobbers the PCs of every other
         # tile already running firmware, which corrupts the whole grid once
         # more than one worker is materialised.

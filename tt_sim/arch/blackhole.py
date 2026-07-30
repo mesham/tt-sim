@@ -31,14 +31,35 @@ BLACKHOLE_PROFILE = ArchProfile(
     trisc_local_mem_size=4 * 1024,
     # Blackhole moves the reset-PC override to the RISCV_DEBUG_REG block.
     baby_core_reset_pc_debug_regs=True,
+    # Blackhole baby cores add, over RV32IM: Zba address-gen + Zbb basic
+    # bit-manip (tt-metal's Blackhole kernels use them, e.g. zext.h / sh2add for
+    # loop-bound and pointer arithmetic), Zaamo local-L1 atomics, and an F/Zfh
+    # guard (floating-point is partially supported by hardware but not yet
+    # modelled — the guard makes any use fail loudly). The V vector extension is
+    # TRISC2-only, so its guard is attached there.
+    baby_core_isa_extensions=("zba", "zbb", "zaamo", "zfh", "f_guard"),
+    trisc2_isa_extensions=("v_guard",),
     # DRAM channel 0's worker-visible NoC 0 endpoint is physical (0, 11) (from
     # the descriptor's dram_views: channel 0 worker_endpoint noc0 index -> 0-11).
     # Blackhole uses physical coords as the tile coord, so unified == physical.
     dram_channel_unified_coords=((0, 11),),
     dram_channel_physical_noc0_coords=(((0, 11),),),
+    # DRAM channel 0's NoC 1 worker endpoint is a different subchannel than its
+    # NoC 0 one: (0, 1) vs (0, 11) (blackhole_140_arch.yaml dram_views channel 0
+    # worker_endpoint [2, 1] indexes dram[0]=[0-0, 0-1, 0-11]). A NoC 1 write to
+    # this channel targets the mirror of (0, 1).
+    dram_channel_physical_noc1_coords=((0, 1),),
     # First functional worker: physical (1, 2).
     tensix_unified_coords=((1, 2),),
     # Blackhole holds the destination coord in the dedicated HI register.
     noc_coord_strategy=BlackholeNocCoords(),
     noc_blackhole_cmd_buf_layout=True,
+    # Baby-core firmware bases (blackhole/dev_mem_map.h): with no IRAM
+    # constraints every core boots from L1. Computed from the mailbox/zeros/LLK
+    # chain: BRISC 0x39E0, then NCRISC 0x5BE0, TRISC0/1/2 0x65E0/0x6FE0/0x79E0.
+    # (BRISC always boots from the 0x0 boot vector, so it needs no override.)
+    ncrisc_firmware_base=0x5BE0,
+    trisc0_firmware_base=0x65E0,
+    trisc1_firmware_base=0x6FE0,
+    trisc2_firmware_base=0x79E0,
 )

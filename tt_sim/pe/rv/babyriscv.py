@@ -1,9 +1,30 @@
 from enum import IntEnum
 
+from tt_sim.pe.rv.isa.a_isa import RV_ZAAMO_ISA
+from tt_sim.pe.rv.isa.b_isa import RV_ZBA_ISA, RV_ZBB_ISA
+from tt_sim.pe.rv.isa.guard_isa import RV_F_GUARD_ISA, RV_V_GUARD_ISA
+from tt_sim.pe.rv.isa.zfh_isa import RV_ZFH_ISA
 from tt_sim.pe.rv.rv32 import RV32IM_TT
 from tt_sim.pe.tensix.util import TensixConfigurationConstants
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
+
+# Maps arch-profile ISA-extension names to the ISA classes that implement them.
+# Kept here (not in the arch profile) so the profile stays free of pe.rv imports.
+# ``f_guard`` / ``v_guard`` are placeholders that raise NotImplementedError for
+# the not-yet-modelled F single-precision and V extensions (see guard_isa.py);
+# ``zfh`` is the real half-precision unit (see zfh_isa.py).
+ISA_EXTENSION_REGISTRY = {
+    "zba": RV_ZBA_ISA,
+    "zbb": RV_ZBB_ISA,
+    "zaamo": RV_ZAAMO_ISA,
+    "zfh": RV_ZFH_ISA,
+    "f_guard": RV_F_GUARD_ISA,
+    "v_guard": RV_V_GUARD_ISA,
+}
+
+# Extensions that require the floating-point register file to be allocated.
+_FP_EXTENSIONS = frozenset({"zfh", "f_guard"})
 
 
 class BabyRISCVCoreType(IntEnum):
@@ -31,7 +52,13 @@ class BabyRISCV(RV32IM_TT):
     }
 
     def __init__(
-        self, core_type, memory_spaces, snoop=False, reset_pc_debug_regs=False
+        self,
+        core_type,
+        memory_spaces,
+        snoop=False,
+        reset_pc_debug_regs=False,
+        start_address=None,
+        isa_extensions=(),
     ):
         # Blackhole moves the NCRISC/TRISC reset-PC override out of the Tensix
         # backend config (Wormhole) into the RISCV_DEBUG_REG tile-control block.
@@ -59,7 +86,22 @@ class BabyRISCV(RV32IM_TT):
             # ISA docs). Mirrors BRISC's convention in Tensix tiles.
             core_id = 5
             start_addr = 0x0
-        super().__init__(start_addr, memory_spaces, [], snoop=snoop, core_id=core_id)
+        # Blackhole lays the baby-RISC firmware out at different L1 bases than
+        # Wormhole (and, having no IRAM constraints, boots NCRISC from L1 rather
+        # than 0x12000). When the arch profile supplies a firmware base, it is
+        # the core's default boot PC (used unless a reset-PC override is set).
+        if start_address is not None:
+            start_addr = start_address
+        extensions = [ISA_EXTENSION_REGISTRY[name] for name in isa_extensions]
+        fp_registers = any(name in _FP_EXTENSIONS for name in isa_extensions)
+        super().__init__(
+            start_addr,
+            memory_spaces,
+            extensions,
+            snoop=snoop,
+            core_id=core_id,
+            fp_registers=fp_registers,
+        )
         self.core_label = core_type.name
 
     def get_start_address(self):

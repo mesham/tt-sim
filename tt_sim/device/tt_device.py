@@ -95,10 +95,15 @@ class TT_Device(Device):
         primary = nui0.get_id_pair()
         self.noc_0_directory[primary] = nui0
         register_mirror = getattr(tile, "register_noc1_mirror", True)
+        # A tile whose NoC 1 endpoint is a different SoC-physical coord than its
+        # NoC 0 endpoint (Blackhole DRAM: NoC 0 (0,11), NoC 1 (0,1)) mirrors that
+        # NoC 1 coord instead of the primary — otherwise kernels addressing the
+        # channel over NoC 1 route to an empty grid cell.
+        noc1_source = getattr(tile, "noc1_endpoint_coord", None) or primary
         # Primary is non-authoritative on NoC 1: never clobber a mirror.
         self.noc_1_directory.setdefault(primary, nui1)
         if register_mirror:
-            self.noc_1_directory[self._noc1_mirror(primary)] = nui1
+            self.noc_1_directory[self._noc1_mirror(noc1_source)] = nui1
         for alias in getattr(tile, "noc_aliases", ()):
             self.noc_0_directory[alias] = nui0
             self.noc_1_directory.setdefault(alias, nui1)

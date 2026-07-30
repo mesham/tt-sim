@@ -50,9 +50,13 @@ class Blackhole(TT_Device):
             tensix_coords = self.profile.tensix_unified_coords
 
         dram_tiles = []
-        for unified, physicals in zip(
+        noc1_coords = self.profile.dram_channel_physical_noc1_coords or (
+            (None,) * len(self.profile.dram_channel_unified_coords)
+        )
+        for unified, physicals, noc1_coord in zip(
             self.profile.dram_channel_unified_coords,
             self.profile.dram_channel_physical_noc0_coords,
+            noc1_coords,
         ):
             primary = physicals[0]
             aliases = physicals[1:]
@@ -64,6 +68,7 @@ class Blackhole(TT_Device):
                     primary[1],
                     aliases,
                     profile=self.profile,
+                    noc1_endpoint_coord=noc1_coord,
                 )
             )
 

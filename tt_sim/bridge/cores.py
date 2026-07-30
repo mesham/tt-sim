@@ -91,14 +91,12 @@ class TensixCore:
         self.device.assert_reset(self.unified)
 
     def deassert_reset(self):
-        # TODO(future): honour the launch_msg ``enables`` field to fan out to
-        # NCRISC/TRISC0/1/2. tt-metal "one" uses enables=0x1 (BRISC only), so
-        # BRISC-only is correct for the immediate target. The launch message
-        # arrives via a WRITE to the launch_msg L1 offset (0x20 for "one"); a
-        # future hook in ``write()`` can snapshot the enables field and apply
-        # it here when the host then sends DEASSERT.
+        # A wire DEASSERT releases the master BRISC plus whichever subordinate
+        # RISCs (NCRISC / TRISC0-2) the launch message enabled — see
+        # ``Device.deassert_reset``. This is what lets a program with a writer on
+        # NCRISC (RISCV_1) or compute on the TRISCs actually run those cores.
         self.in_reset = False
-        self.device.deassert_reset_brisc(self.unified)
+        self.device.deassert_reset(self.unified)
 
 
 class EthCore:

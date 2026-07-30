@@ -224,6 +224,7 @@ class DRAMTile(TTDeviceTile):
         safe=True,
         snoop_addresses=None,
         profile=WORMHOLE_PROFILE,
+        noc1_endpoint_coord=None,
     ):
         dram_tile_mem_map = MemoryMap()
 
@@ -248,6 +249,10 @@ class DRAMTile(TTDeviceTile):
 
         super().__init__(coord_x, coord_y, r0, r1)
         self.noc_aliases = tuple(physical_aliases)
+        # SoC-physical NoC 1 endpoint of this DRAM channel, when it differs from
+        # the NoC 0 endpoint (Blackhole). The device mirrors this — not the NoC 0
+        # coord — into the NoC 1 routing table. See ``TT_Device._register``.
+        self.noc1_endpoint_coord = noc1_endpoint_coord
 
     def get_clocks(self):
         return [self.noc0_router, self.noc1_router]
@@ -364,6 +369,7 @@ class EthTile(TTDeviceTile):
             BabyRISCVCoreType.ERISC,
             [self.eth_memory, self.erisc_mem],
             snoop=erisc_snoop,
+            isa_extensions=profile.baby_core_isa_extensions,
         )
 
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
@@ -510,6 +516,7 @@ class TensixTile(TTDeviceTile):
             BabyRISCVCoreType.BRISC,
             [self.tensix_mem, self.brisc0_mem],
             snoop=brisc_snoop,
+            isa_extensions=profile.baby_core_isa_extensions,
         )
 
         # Create ncrisc CPU
@@ -535,6 +542,8 @@ class TensixTile(TTDeviceTile):
             [self.tensix_mem, self.ncrisc_mem],
             snoop=ncrisc_snoop,
             reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
+            start_address=profile.ncrisc_firmware_base,
+            isa_extensions=profile.baby_core_isa_extensions,
         )
 
         # Common addresses for TRISC cores
@@ -575,6 +584,8 @@ class TensixTile(TTDeviceTile):
             [self.tensix_mem, self.trisc0_mem],
             snoop=trisc0_snoop,
             reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
+            start_address=profile.trisc0_firmware_base,
+            isa_extensions=profile.baby_core_isa_extensions,
         )
 
         # Create trisc1 CPU
@@ -604,6 +615,8 @@ class TensixTile(TTDeviceTile):
             [self.tensix_mem, self.trisc1_mem],
             snoop=trisc1_snoop,
             reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
+            start_address=profile.trisc1_firmware_base,
+            isa_extensions=profile.baby_core_isa_extensions,
         )
 
         # Create trisc2 CPU
@@ -633,6 +646,11 @@ class TensixTile(TTDeviceTile):
             [self.tensix_mem, self.trisc2_mem],
             snoop=trisc2_snoop,
             reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
+            start_address=profile.trisc2_firmware_base,
+            # TRISC2 additionally carries the V vector extension (guarded).
+            isa_extensions=(
+                profile.baby_core_isa_extensions + profile.trisc2_isa_extensions
+            ),
         )
 
         # Set addressable memory for Tensix co-processor

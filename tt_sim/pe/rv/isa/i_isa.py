@@ -422,7 +422,17 @@ class RV_I_ISA(RV_ISA):
                     info_msg,
                 )
         elif type_val == 0x1 or type_val == 0x5:
-            bit_pos = RV_ISA.get_int(instr, 20, 25)
+            # Base shift-immediate uses shamt in bits [20:24] with a fixed high
+            # field: 0x00 for slli/srli, 0x20 for srai. Any other high field is
+            # a Zbb single-bit-manip op (clz/ctz/cpop/sext.*/rori/rev8/orc.b),
+            # which must fall through to that extension rather than being run as
+            # a shift.
+            high = RV_ISA.get_int(instr, 25, 31)
+            if type_val == 0x1 and high != 0x00:
+                return False
+            if type_val == 0x5 and high not in (0x00, 0x20):
+                return False
+            bit_pos = RV_ISA.get_int(instr, 20, 24)
             if type_val == 0x1:
                 # slli
                 result = (rs1_val << bit_pos) % (1 << 32)  # Overflow is ignored
@@ -470,9 +480,17 @@ class RV_I_ISA(RV_ISA):
         rs2_val = conv_to_uint32(register_file[rs2].read())
         rd = RV_ISA.get_int(instr, 7, 11)
 
-        # The i variant of r has a zero at location 25
-        i_variant = RV_ISA.get_int(instr, 25, 25) == 0
-        if not i_variant:
+        # Base RV32I R-type uses funct7 == 0x00 for every funct3, plus 0x20 for
+        # the two "alternate" ops sub (funct3 0) and sra (funct3 5). Any other
+        # funct7 belongs to an extension (M's 0x01, Zba's 0x10, Zbb's
+        # 0x04/0x05/0x30, ...) and must be left for the next ISA to decode —
+        # otherwise, e.g., zext.h (funct7 0x04, funct3 4) is silently executed
+        # as xor and andn (funct7 0x20, funct3 7) as and.
+        funct7 = RV_ISA.get_int(instr, 25, 31)
+        if funct7 == 0x20:
+            if type_val not in (0x0, 0x5):
+                return False
+        elif funct7 != 0x00:
             return False
 
         signed_op = False

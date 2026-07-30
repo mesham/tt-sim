@@ -8,6 +8,12 @@ from tt_sim.pe.rv.isa.tt_isa import RV_TT_ISA
 from tt_sim.trace import EventCategory, InstrEvent, get_bus
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
+# The 32 integer registers occupy indices 0-31, with pc/nextpc at 32/33. When a
+# core is built with a floating-point unit, the 32 f-registers occupy 34-65 and
+# fcsr is 66 — kept as module constants so the F/Zfh ISAs can address them.
+FP_REGISTER_BASE = 34
+FCSR_INDEX = FP_REGISTER_BASE + 32  # 66
+
 REGISTER_NAME_MAPPING = {
     "x0": 0,
     "x1": 1,
@@ -76,6 +82,11 @@ REGISTER_NAME_MAPPING = {
     "fp": 8,
     "pc": 32,
     "nextpc": 33,
+    # Floating-point register file (F/Zfh, FLEN=32). Present only on cores built
+    # with fp_registers=True (Blackhole baby cores); indices are stable so the
+    # FP ISAs address them as FP_REGISTER_BASE + n. fcsr follows the 32 f-regs.
+    **{f"f{i}": FP_REGISTER_BASE + i for i in range(32)},
+    "fcsr": FCSR_INDEX,
 }
 
 
@@ -88,6 +99,7 @@ class RV32I(ProcessingElement):
         unknown_instr_is_error=False,
         snoop=False,
         core_id=0,
+        fp_registers=False,
     ):
         if extensions is None:
             extensions = []
@@ -107,6 +119,15 @@ class RV32I(ProcessingElement):
         registers.append(Register(4, conv_to_bytes(0), RegisterAccessMode.R, False))
         for i in range(33):
             registers.append(Register(4))
+
+        # Floating-point register file (F/Zfh): 32 f-registers + fcsr, appended
+        # at FP_REGISTER_BASE so the FP ISAs find them. Only cores with an FP
+        # unit (Blackhole baby cores) allocate these; RV32IM cores never do.
+        if fp_registers:
+            assert len(registers) == FP_REGISTER_BASE
+            for i in range(32):
+                registers.append(Register(4))
+            registers.append(Register(4))  # fcsr
 
         self.register_file = RegisterFile(registers, REGISTER_NAME_MAPPING)
         self.unknown_instr_is_error = unknown_instr_is_error
@@ -232,6 +253,7 @@ class RV32IM(RV32I):
         unknown_instr_is_error=False,
         snoop=False,
         core_id=0,
+        fp_registers=False,
     ):
         if extensions is None:
             extensions = []
@@ -244,6 +266,7 @@ class RV32IM(RV32I):
             unknown_instr_is_error,
             snoop,
             core_id,
+            fp_registers,
         )
 
 
@@ -256,6 +279,7 @@ class RV32IM_TT(RV32IM):
         unknown_instr_is_error=False,
         snoop=False,
         core_id=0,
+        fp_registers=False,
     ):
         if extensions is None:
             extensions = []
@@ -268,4 +292,5 @@ class RV32IM_TT(RV32IM):
             unknown_instr_is_error,
             snoop,
             core_id,
+            fp_registers,
         )

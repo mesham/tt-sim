@@ -71,6 +71,38 @@ class ArchProfile:
     #: normalises Blackhole addresses to the Wormhole-canonical layout.
     noc_blackhole_cmd_buf_layout: bool
 
+    #: RISC-V ISA extensions every baby core implements beyond RV32IM + the
+    #: ``.ttinsn`` custom op, as lower-case names (mapped to ISA classes in
+    #: ``BabyRISCV``). Wormhole baby cores are RV32IM-only, so this is empty;
+    #: Blackhole adds Zba/Zbb bit-manip, Zaamo atomics, and an F/Zfh guard.
+    #: See the per-arch ``BabyRISCV/InstructionSet.md`` ISA docs.
+    baby_core_isa_extensions: tuple[str, ...] = ()
+
+    #: Extra ISA extensions only the TRISC2 baby core has. The Blackhole ISA doc
+    #: notes the V vector extension is "RISC-V T2 only", so its guard lands here
+    #: rather than on every core.
+    trisc2_isa_extensions: tuple[str, ...] = ()
+
+    #: Default boot PC (firmware base) for NCRISC / TRISC0 / TRISC1 / TRISC2,
+    #: used when tt-metal has not set a reset-PC override. ``None`` keeps the
+    #: baked-in Wormhole defaults (NCRISC 0x12000, TRISC 0x6000/0xA000/0xE000).
+    #: Blackhole has no IRAM constraints and boots every baby core from L1, so it
+    #: sets these to its ``MEM_{NC,TRISC*}_FIRMWARE_BASE`` values.
+    ncrisc_firmware_base: int | None = None
+    trisc0_firmware_base: int | None = None
+    trisc1_firmware_base: int | None = None
+    trisc2_firmware_base: int | None = None
+
+    #: Per-channel SoC-physical coordinate of the DRAM tile's **NoC 1** worker
+    #: endpoint, parallel to :attr:`dram_channel_unified_coords`. A DRAM channel
+    #: exposes several sub-endpoints and NoC 0 / NoC 1 use *different* ones (the
+    #: SoC descriptor's ``worker_endpoint`` subchannel indices): Blackhole ch0 is
+    #: NoC 0 (0, 11) but NoC 1 (0, 1). The device registers the tile's NoC 1
+    #: routing entry at the mirror of this coord. ``None`` keeps the legacy
+    #: behaviour of mirroring the NoC 0 coord (correct where both NoCs share the
+    #: same physical endpoint, e.g. Wormhole's captured single-NoC flows).
+    dram_channel_physical_noc1_coords: tuple[tuple[int, int], ...] | None = None
+
     @property
     def noc_kwargs(self) -> dict:
         """The per-arch NoC parameters a tile passes to each ``NUI`` it builds."""
