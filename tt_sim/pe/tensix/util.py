@@ -181,6 +181,10 @@ class TensixInstructionDecoder:
                 )
 
         instruction_info["instr_args"] = instr_args
+        # Keep the raw 32-bit word so handlers can read fields the shared
+        # (Wormhole-layout) argument table doesn't expose — e.g. Blackhole's
+        # ZEROACC `clear_zero_flags` bit.
+        instruction_info["raw_instruction"] = instruction
 
         return instruction_info
 

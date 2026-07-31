@@ -998,6 +998,24 @@ class MatrixUnit(TensixBackendUnit):
         useDst32b = extract_bits(instr_args["clear_mode"], 1, 2)
         imm10 = instr_args["dst"]
 
+        # Blackhole ZEROACC carries a `clear_zero_flags` bit (raw bit 17, absent
+        # from the shared Wormhole-layout argument table). When set, the
+        # instruction only re-asserts DEST zero-flags and must NOT clear the
+        # data: it is the workaround `copy_tile` issues immediately after
+        # unpack-to-dest (a Blackhole HW bug drops the zero-flag clear when
+        # unpack-to-dest and a packer ZEROACC land in the same cycle), so the
+        # rows it names hold the freshly-unpacked operands. tt-sim emulates
+        # zero-flags by zeroing the data, so here it must skip the clear or it
+        # wipes those operands (the SFPU then reads 0). The RWC still advances.
+        # See ttsim TT_ARCH_VERSION==1 ZEROACC (clear_zero_flags -> valid=true).
+        if self.backend.blackhole and get_nth_bit(
+            instruction_info["raw_instruction"], 17
+        ):
+            if mode == ZEROACC_MODE_ONE_ROW or mode == ZEROACC_MODE_16_ROWS:
+                addr_mod = extract_bits(instr_args["AddrMode"], 2, 0)
+                self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)
+            return
+
         if mode == ZEROACC_MODE_ONE_ROW:
             state_id = self.getThreadConfigValue(issue_thread, "CFG_STATE_ID_StateID")
             row = imm10
