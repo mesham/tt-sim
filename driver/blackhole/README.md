@@ -28,26 +28,36 @@ Standalone bring-up demo:
 python3 -m driver.blackhole.bringup
 ```
 
-Against tt-metal (like the Wormhole flow, but point the simulator env var here):
+Against tt-metal — build and run the shared examples, pointing the simulator env
+var here instead of at Wormhole:
 
 ```bash
 export TT_METAL_SIMULATOR="$PWD/driver/blackhole"
 export TT_METAL_SLOW_DISPATCH_MODE=1
-# ... then run a tt-metal program as in ../wormhole/README.md
 ```
 
-`TT_SIM_TENSIX_COORDS` / `TT_SIM_TENSIX_CORES` and the `TT_SIM_DIAG_*` diagnostics
-work exactly as for Wormhole (they are handled by the shared bridge).
+The full build + run flow (CMake, the run environment, the whole-suite runner
+`tests/run_examples.sh`, and the offline replay guards) is documented in
+**[examples/README.md](../../examples/README.md)** — the same doc both arches share.
+The only Blackhole difference is the worker coordinate convention: logical `(0,0)`
+maps to physical `(1,2)` (vs `(1,1)` on Wormhole), so single-tile examples use
+`TT_SIM_TENSIX_COORDS=1-2` and `nine` uses `1-2,2-2`. `TT_SIM_TENSIX_CORES` and the
+`TT_SIM_DIAG_*` diagnostics work exactly as for Wormhole (handled by the shared bridge).
 
 ## Scope / status
 
-This is a **single Tensix + single DRAM** bring-up. Modelled and verified
-in-process: device construction, the 17×12 NoC grid and NoC-1 mirror, Blackhole's
-NoC HI-register address encoding, ISA-faithful DST addressing, the SFPU superset
-comparison/mul ops, and WRITE/READ routed end-to-end through the bridge into the
-Blackhole device.
+**Working end-to-end.** All bundled examples (`one`–`nine`, `loopback`) build and
+run live against `driver/blackhole` and validate their own results — including the
+`six` bf16 matmul (matrix engine + K-accumulation) and the two-tile `nine` (cross-tile
+NoC + semaphore). Each has a socket-free replay guard in `server/*_replay_test.py`, and
+Wormhole stays byte-identical throughout. See `docs/plans/blackhole-support.md` for the
+full port history.
 
-Not yet modelled (see the plan): the full DRAM/eth grid (only channel-0 DRAM is
-backed; other DRAM + eth fall to `NullCore`), Blackhole eth tiles (2 RV cores /
-512 KB L1), baby-core kernel execution, and a live tt-metal run — the last needs
-a Blackhole-built tt-metal.
+Modelled: device construction, the 17×12 NoC grid + NoC-1 mirror, Blackhole's NoC
+HI-register address encoding, ISA-faithful DST addressing, all **8 DRAM channels**,
+baby-core kernel execution across BRISC/NCRISC/TRISC, and the Tensix coprocessor
+(unpackers, matrix FPU, SFPU superset, packer).
+
+Not yet modelled (see the plan): the full worker grid (tiles are materialised on
+demand; the default is a single Tensix), Blackhole eth tiles (2 RV cores / 512 KB L1),
+and ttsim-Blackhole differential testing.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the tt-metal example programs (built under driver/examples/<name>/src)
+# Run the tt-metal example programs (built under examples/<name>/src)
 # against the Blackhole simulator and report pass/fail.
 #
 # The example *host* programs are architecture-agnostic — the same binary runs on
@@ -25,7 +25,7 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-TESTS="$REPO/driver/examples"
+TESTS="$REPO/examples"
 TRACES="$REPO/driver/blackhole/server/traces"
 
 RECORD=0

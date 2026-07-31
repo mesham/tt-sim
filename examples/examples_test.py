@@ -1,6 +1,6 @@
 """Build every shared example against tt-metal and run it live on the simulator.
 
-Each example under ``driver/examples/<name>/src`` is a real, arch-agnostic
+Each example under ``examples/<name>/src`` is a real, arch-agnostic
 tt-metal host program (the same binary runs on either arch depending on
 ``TT_METAL_SIMULATOR``) that validates its own results and exits non-zero on
 mismatch. This harness is the "run it like hardware, but the simulator route"
@@ -16,11 +16,11 @@ offline-replay guards in ``driver/blackhole/server/``.
 
 Run standalone (no pytest needed)::
 
-    python3 -m driver.examples.examples_test
+    python3 -m examples.examples_test
 
 Run under pytest (if installed)::
 
-    pytest driver/examples/examples_test.py -v
+    pytest examples/examples_test.py -v
 
 It skips cleanly when the tt-metal build environment is absent (no
 ``TT_METAL_RUNTIME_ROOT``/``TT_METAL_HOME``, no exported TT-Metalium package, no

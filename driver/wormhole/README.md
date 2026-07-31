@@ -31,9 +31,16 @@ driver/wormhole/
 ├── replay.py               wire-trace replayer (used by server regression tests)
 └── docs/                   profiling walkthrough
 
-The arch-agnostic example *sources* live in driver/examples/ (shared with
-Blackhole); the Wormhole live runner is driver/examples/examples_test.py.
+The arch-agnostic example *sources* live in examples/ (shared with
+Blackhole); the Wormhole live runner is examples/examples_test.py.
 ```
+
+> **Building and running the examples** is the same across both simulators and is
+> documented once in **[examples/README.md](../../examples/README.md)** (CMake
+> build, the run environment, per-arch coordinates, the suite runners, and the
+> offline replay guards). This file covers the **Wormhole-driver specifics** on
+> top of that: the environment switch, structured tracing, per-component
+> diagnostics, and deadlock detection.
 
 ## Requirements
 
@@ -80,7 +87,7 @@ then run the binary — no extra flags needed:
 ```bash
 source /home/nick/projects/riscv/venv/bin/activate
 
-cd driver/examples/one/src
+cd examples/one/src
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
@@ -100,14 +107,14 @@ instead, so `nine`'s launch on `2-1` would hit an unmaterialised tile and hang).
 
 ## Running the examples as a test suite
 
-[`tests/examples_test.py`](tests/examples_test.py) builds every example and runs it
+[`examples/examples_test.py`](../../examples/examples_test.py) builds every example and runs it
 against the simulator, asserting each exits 0 and prints its success line. It follows the
 repo's `*_test.py` convention, so it runs either standalone or under pytest, and skips
 cleanly when the tt-metal build environment is absent:
 
 ```bash
-python3 -m driver.examples.examples_test   # prints PASS/FAIL per example
-pytest driver/examples/examples_test.py -v  # same, under pytest
+python3 -m examples.examples_test   # prints PASS/FAIL per example
+pytest examples/examples_test.py -v  # same, under pytest
 ```
 
 That harness needs the built tt-metal toolchain (it compiles and launches each
@@ -120,28 +127,11 @@ bump with [`tests/capture_traces.sh`](tests/capture_traces.sh).
 
 ## The examples
 
-Each lives in `tests/<name>/src/` as a host program (`<name>.cpp`), a `CMakeLists.txt`,
-and a `kernels/` tree.
-
-* **one** — BRISC only: reads two vectors from DRAM, adds them on the RISC-V core, writes
-  the result back.
-* **two** — like one, but NCRISC writes the result back, so a circular buffer bridges
-  BRISC and NCRISC.
-* **three** — like two, but chunks the data and operates on individual chunks.
-* **loopback** — brings in the TRISC cores and the Tensix unit to copy data through *dst*
-  and back out via a CB, exercising the unpackers and packers.
-* **four** — uses the matrix unit (FPU) to do the elementwise add via the *ELWADD* path:
-  data is unpacked to *srcA*/*srcB*, added, and the *dst* result is packed to L1.
-* **four-fp** — like four, but FP32 in/out with the FPU computing in FP16.
-* **five** — like four, but the vector unit (SFPU) performs the elementwise add.
-* **five-fp** — floating-point variant of five.
-* **six** — single-core matmul on the matrix unit, validated against a CPU golden by
-  Pearson correlation (bfloat16 + HiFi4 is not bit-exact).
-* **eight** — elementwise add like one, but the BRISC reader issues its two DRAM reads
-  with distinct NoC transaction IDs and barriers on them independently.
-* **nine** — two-tile example: a producer tile runs reader+compute+sender and a consumer
-  tile runs the writer, with a CB bridged across the tiles over the NoC. Run with
-  `TT_SIM_TENSIX_COORDS=1-1,2-1`.
+The sources and a one-line description of each live in
+[examples/README.md](../../examples/README.md#the-examples). Of the bundled set only
+`nine` launches on two tiles — on Wormhole run it with `TT_SIM_TENSIX_COORDS=1-1,2-1`
+(a bare `TT_SIM_TENSIX_CORES=2` materialises `1-1,1-2` instead, so `nine`'s launch on
+`2-1` would hit an unmaterialised tile and hang).
 
 All eleven examples currently pass. The Tensix coprocessor in the simulator is still
 incomplete, though, so a future example may exercise a gap the simulator hasn't modelled;
@@ -155,25 +145,12 @@ which examples pass on your build.
 
 ## Writing your own example
 
-Create `tests/<name>/src/` with three things:
-
-1. `<name>.cpp` — a tt-metal host program. Include the API as
-   `#include <tt-metalium/host_api.hpp>` / `<tt-metalium/device.hpp>` /
-   `<tt-metalium/tt_metal.hpp>`. Launch with `tt::tt_metal::detail::LaunchProgram`
-   (slow-dispatch is the only path the simulator models; the venv sets
-   `TT_METAL_SLOW_DISPATCH_MODE=1` so `EnqueueProgram` falls back to it). Validate your
-   results on the host and `return` non-zero on mismatch so the harness can see failures.
-2. `CMakeLists.txt` — copy one from an existing example; only the target/`project` name
-   changes. It uses `find_package(TT-Metalium)` and links `TT::Metalium`, which supplies
-   all include paths, defines and flags — do not hand-roll compiler flags.
-3. `kernels/` — the data-movement and compute kernels. Note the tt-metal kernel
-   conventions this tt-metal release uses: **data-movement kernels do not include
-   `dataflow_api.h`** (the framework force-includes it); **compute kernels use
-   `#include "api/compute/<name>.h"`** and a plain `void kernel_main() { ... }` entry
-   point (no `namespace NAMESPACE { void MAIN {...} }`).
-
-Then add `(name, coords)` to `EXAMPLES` in `tests/examples_test.py` to include it in the
-suite (`coords` is the physical tiles it launches on, e.g. `"1-1"`).
+The `<name>.cpp` / `CMakeLists.txt` / `kernels/` recipe (and the tt-metal kernel
+conventions this release uses) is in
+[examples/README.md](../../examples/README.md#writing-a-new-example). To fold a new
+example into the **Wormhole** suites, add `(name, coords)` to `EXAMPLES` in
+`examples/examples_test.py` (`coords` = the physical tiles it launches on, e.g. `"1-1"`)
+and to `tests/capture_traces.sh`.
 
 > **Firmware.** tt-metal runs firmware on each Tensix tile before launching a kernel; in
 > this flow the host binary streams those firmware binaries to the device over the wire,
@@ -187,7 +164,7 @@ Beyond the human-readable diagnostics below, the simulator ships nine `TT_SIM_TR
 env vars that produce machine-readable output (JSONL, Perfetto, Spike-compatible
 commitlogs, Parquet, Cachegrind, LCOV, invariant violations, state dumps). All work in
 this tt-metal-driven flow — UMD inherits the env, `run.sh` inherits it, the simulator
-inherits it. Quick taster, from `driver/examples/one/src/` after building:
+inherits it. Quick taster, from `examples/one/src/` after building:
 
 ```bash
 export TT_METAL_SIMULATOR=$HOME/tt-sim/driver/wormhole

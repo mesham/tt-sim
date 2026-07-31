@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build + run every shared example (driver/examples/<name>/src) against the
+# Build + run every shared example (examples/<name>/src) against the
 # WORMHOLE simulator and record each wire trace under
 # driver/wormhole/server/traces/<name>.trace. Those traces back the per-example
 # offline-replay guards (driver/wormhole/server/<name>_replay_test.py), the
@@ -18,7 +18,7 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-EXAMPLES="$REPO/driver/examples"
+EXAMPLES="$REPO/examples"
 TRACES="$REPO/driver/wormhole/server/traces"
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
@@ -46,7 +46,7 @@ pass=0; fail=0; failed=()
 for name in "${ORDER[@]}"; do
   src="$EXAMPLES/$name/src"
   if [ ! -d "$src" ]; then echo "SKIP  $name (no source at $src)"; continue; fi
-  # Build if needed (stale build/ dirs were dropped in the driver/examples move).
+  # Build if needed (stale build/ dirs were dropped in the examples move).
   if [ ! -x "$src/build/$name" ]; then
     echo "BUILD $name"
     ( cd "$src" \
