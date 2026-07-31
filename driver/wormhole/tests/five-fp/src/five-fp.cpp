@@ -1,6 +1,7 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
 #include <tt-metalium/tt_metal.hpp>
+#include <tt-metalium/circular_buffer_constants.h>  // NUM_CIRCULAR_BUFFERS (32 on WH, 64 on BH)
 #define DATA_SIZE 256
 #define CHUNK_SIZE 64
 
@@ -53,7 +54,10 @@ int main(int argc, char** argv) {
 
     // Will instruct compute cores to run the unpackers in unpack to dst mode, rather than
     // unpacking to srcA. This means we feed the SFPU with FP32, rather than TF32.
-    std::vector<UnpackToDestMode> unpack_to_dest_mode(32, UnpackToDestMode::UnpackToDestFp32);
+    // Must be sized to the host JIT's circular-buffer count, which is arch-specific
+    // (NUM_CIRCULAR_BUFFERS = 32 on Wormhole, 64 on Blackhole). Hardcoding 32 aborts
+    // the Blackhole build with "unpack_to_dest_mode vector must have 64 elements".
+    std::vector<UnpackToDestMode> unpack_to_dest_mode(NUM_CIRCULAR_BUFFERS, UnpackToDestMode::UnpackToDestFp32);
 
     // Write the src0 and src1 data to DRAM on the device
     tt::tt_metal::detail::WriteToBuffer(src0_dram_buffer, src0_data);
