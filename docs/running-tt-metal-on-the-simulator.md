@@ -127,10 +127,10 @@ to explicit `TT_SIM_TENSIX_COORDS` for off-origin placements. The two vars are
 
 The upstream examples are pre-built binaries under
 `$TT_METAL_RUNTIME_ROOT/build/programming_examples/` named
-`metal_example_<name>`. The tt-sim examples in `driver/wormhole/tests/<name>/src/` are the
+`metal_example_<name>`. The tt-sim examples in `driver/examples/<name>/src/` are the
 same kind of program — build one with `cmake -B build -S . && cmake --build build` and run
 `./build/<name>` from its `src/` dir (see `driver/wormhole/README.md`), or run the whole
-set via `python3 -m driver.wormhole.tests.examples_test`.
+set via `python3 -m driver.examples.examples_test`.
 
 ```bash
 source /home/nick/projects/riscv/venv/bin/activate

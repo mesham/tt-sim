@@ -76,7 +76,7 @@ then run the binary — no extra flags needed:
 ```bash
 source /home/nick/projects/riscv/venv/bin/activate
 
-cd driver/wormhole/tests/one/src
+cd driver/examples/one/src
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
@@ -102,8 +102,8 @@ repo's `*_test.py` convention, so it runs either standalone or under pytest, and
 cleanly when the tt-metal build environment is absent:
 
 ```bash
-python3 -m driver.wormhole.tests.examples_test   # prints PASS/FAIL per example
-pytest driver/wormhole/tests/examples_test.py -v  # same, under pytest
+python3 -m driver.examples.examples_test   # prints PASS/FAIL per example
+pytest driver/examples/examples_test.py -v  # same, under pytest
 ```
 
 ## The examples
@@ -175,7 +175,7 @@ Beyond the human-readable diagnostics below, the simulator ships nine `TT_SIM_TR
 env vars that produce machine-readable output (JSONL, Perfetto, Spike-compatible
 commitlogs, Parquet, Cachegrind, LCOV, invariant violations, state dumps). All work in
 this tt-metal-driven flow — UMD inherits the env, `run.sh` inherits it, the simulator
-inherits it. Quick taster, from `driver/wormhole/tests/one/src/` after building:
+inherits it. Quick taster, from `driver/examples/one/src/` after building:
 
 ```bash
 export TT_METAL_SIMULATOR=$HOME/tt-sim/driver/wormhole
