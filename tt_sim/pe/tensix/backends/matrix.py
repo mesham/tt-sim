@@ -49,6 +49,19 @@ class MatrixUnit(TensixBackendUnit):
     def getSrcB(self):
         return self.backend.getSrcB(self.srcBBank)
 
+    def _read_addr_mode(self, instruction_info, instr_args):
+        # The math ``addr_mode`` field is 3 bits on Blackhole (raw bits 16:14)
+        # but only 2 bits on Wormhole (16:15) — Blackhole has 8 ADDR_MOD
+        # sections, Wormhole 4. The shared instruction table encodes the
+        # Wormhole start_bit (15), so on Blackhole its low bit (14) is dropped
+        # and the value is shifted: ADDR_MOD_1/2/4/5 silently decode as
+        # 0/1/2/2, losing the matmul MOP's dest-reset mods (ADDR_MOD_5) so the
+        # second K-face never accumulates. Read the true field from the raw
+        # word on Blackhole. See docs/plans/blackhole-support.md (`six`).
+        if self.backend.blackhole:
+            return extract_bits(instruction_info["raw_instruction"], 3, 14)
+        return instr_args["addr_mode"]
+
     def handle_cleardvalid(self, instruction_info, issue_thread, instr_args):
         reset = instr_args["reset"] & 0x1
         keepReadingSameSrc = (instr_args["reset"] >> 1) & 0x1
@@ -103,7 +116,7 @@ class MatrixUnit(TensixBackendUnit):
     def handle_movb2a(self, instruction_info, issue_thread, instr_args):
         srcBRow = instr_args["srcb"]
         move4Rows = (instr_args["instr_mod"] >> 1) & 0x1
-        addrMod = instr_args["addr_mode"]
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
         srcARow = instr_args["srca"]
 
         stateID = self.backend.getThreadConfigValue(
@@ -152,7 +165,7 @@ class MatrixUnit(TensixBackendUnit):
     def handle_mova2d(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
         move8Rows = (instr_args["instr_mod"] >> 1) & 0x1
-        addrMod = instr_args["addr_mode"]
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
         srcRow = instr_args["src"]
         useDst32bLo = instr_args["dest_32b_lo"]
 
@@ -243,7 +256,7 @@ class MatrixUnit(TensixBackendUnit):
     def handle_movd2b(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
         move4Rows = (instr_args["instr_mod"] >> 1) & 0x1
-        addrMod = instr_args["addr_mode"]
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
         srcRow = instr_args["src"]
         useDst32bLo = instr_args["dest_32b_lo"]
 
@@ -436,7 +449,7 @@ class MatrixUnit(TensixBackendUnit):
 
     def handle_gapool(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
-        addrMod = instr_args["addr_mode"]
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
@@ -444,7 +457,7 @@ class MatrixUnit(TensixBackendUnit):
 
     def handle_dotpv(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
-        addrMod = instr_args["addr_mode"]
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
@@ -452,7 +465,7 @@ class MatrixUnit(TensixBackendUnit):
 
     def handle_mvmul(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
-        addrMod = instr_args["addr_mode"]
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
         broadcastSrcBRow = instr_args["instr_mod19"]
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
@@ -817,7 +830,7 @@ class MatrixUnit(TensixBackendUnit):
         broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
         dstRow = instr_args["dst"]
         addDst = True  # Always add for ELWMUL
-        addrMode = instr_args["addr_mode"]
+        addrMode = self._read_addr_mode(instruction_info, instr_args)
 
         flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
         flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
@@ -853,7 +866,7 @@ class MatrixUnit(TensixBackendUnit):
         broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
         dstRow = instr_args["dst"]
         addDst = instr_args["dest_accum_en"]
-        addrMode = instr_args["addr_mode"]
+        addrMode = self._read_addr_mode(instruction_info, instr_args)
 
         flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
         flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
@@ -897,7 +910,7 @@ class MatrixUnit(TensixBackendUnit):
         broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
         dstRow = instr_args["dst"]
         addDst = instr_args["dest_accum_en"]
-        addrMode = instr_args["addr_mode"]
+        addrMode = self._read_addr_mode(instruction_info, instr_args)
 
         flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
         flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)

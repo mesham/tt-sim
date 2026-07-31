@@ -45,16 +45,56 @@ BLACKHOLE_PROFILE = ArchProfile(
     # TRISC2-only, so its guard is attached there.
     baby_core_isa_extensions=("zba", "zbb", "zaamo", "zfh", "f_guard"),
     trisc2_isa_extensions=("v_guard",),
-    # DRAM channel 0's worker-visible NoC 0 endpoint is physical (0, 11) (from
-    # the descriptor's dram_views: channel 0 worker_endpoint noc0 index -> 0-11).
-    # Blackhole uses physical coords as the tile coord, so unified == physical.
-    dram_channel_unified_coords=((0, 11),),
-    dram_channel_physical_noc0_coords=(((0, 11),),),
-    # DRAM channel 0's NoC 1 worker endpoint is a different subchannel than its
-    # NoC 0 one: (0, 1) vs (0, 11) (blackhole_140_arch.yaml dram_views channel 0
-    # worker_endpoint [2, 1] indexes dram[0]=[0-0, 0-1, 0-11]). A NoC 1 write to
-    # this channel targets the mirror of (0, 1).
-    dram_channel_physical_noc1_coords=((0, 1),),
+    # All 8 DRAM channels' worker-visible endpoints, in SoC-descriptor channel
+    # order. tt-metal interleaves a buffer's tiles round-robin across every
+    # channel (default InterleavedBufferConfig), so an example that reads more
+    # than one tile — e.g. `six`'s 128^3 matmul, whose A/B tiles land on all 8
+    # banks — reads zeros for any channel not modelled. Each channel's NoC 0 and
+    # NoC 1 worker endpoints are *different* subchannels of its 3-endpoint DRAM
+    # row: the coords below come from the descriptor's `dram` array indexed by
+    # `dram_views[ch].worker_endpoint = [noc0_idx, noc1_idx]`:
+    #   ch: dram row              worker_endpoint  -> NoC0     NoC1
+    #   0:  [0-0, 0-1, 0-11]      [2, 1]           -> (0,11)   (0,1)
+    #   1:  [0-2, 0-10, 0-3]      [0, 1]           -> (0,2)    (0,10)
+    #   2:  [0-9, 0-4, 0-8]       [0, 1]           -> (0,9)    (0,4)
+    #   3:  [0-5, 0-7, 0-6]       [0, 1]           -> (0,5)    (0,7)
+    #   4:  [9-0, 9-1, 9-11]      [2, 1]           -> (9,11)   (9,1)
+    #   5:  [9-2, 9-10, 9-3]      [2, 1]           -> (9,3)    (9,10)
+    #   6:  [9-9, 9-4, 9-8]       [2, 1]           -> (9,8)    (9,4)
+    #   7:  [9-5, 9-7, 9-6]       [2, 1]           -> (9,6)    (9,7)
+    # Blackhole uses physical coords as the tile coord, so unified == NoC 0.
+    dram_channel_unified_coords=(
+        (0, 11),
+        (0, 2),
+        (0, 9),
+        (0, 5),
+        (9, 11),
+        (9, 3),
+        (9, 8),
+        (9, 6),
+    ),
+    dram_channel_physical_noc0_coords=(
+        ((0, 11),),
+        ((0, 2),),
+        ((0, 9),),
+        ((0, 5),),
+        ((9, 11),),
+        ((9, 3),),
+        ((9, 8),),
+        ((9, 6),),
+    ),
+    # Each channel's NoC 1 worker endpoint (a different subchannel than NoC 0);
+    # a NoC 1 read/write to the channel targets the grid-mirror of this coord.
+    dram_channel_physical_noc1_coords=(
+        (0, 1),
+        (0, 10),
+        (0, 4),
+        (0, 7),
+        (9, 1),
+        (9, 10),
+        (9, 4),
+        (9, 7),
+    ),
     # First functional worker: physical (1, 2).
     tensix_unified_coords=((1, 2),),
     # Blackhole holds the destination coord in the dedicated HI register.

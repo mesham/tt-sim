@@ -218,17 +218,38 @@ class PackerUnit(TensixBackendUnit):
                 )
                 adc.Y = adc.Y_Cr
             else:
-                adc.Y = self.backend.getThreadConfigValue(
+                incr = self.backend.getThreadConfigValue(
                     issue_thread, AM_KEY + "_YsrcIncr"
                 )
+                # ttsim advances the pack Y counter (ch_y = ch_y + incr) in this
+                # non-CR/non-clear branch; the previous code *set* it to incr, so
+                # Y never accumulated across the successive PACRs that pack a full
+                # multi-face tile — the Dst read row stayed put and only the first
+                # face landed correctly. `six`'s 32x32 output is the first
+                # full-tile pack to hit this (four/five pack a single face, where
+                # Y is always 0 here so set == accumulate). Guarded to Blackhole
+                # so Wormhole stays byte-identical.
+                if self.backend.blackhole:
+                    adc.Y = (adc.Y + incr) & 0x1FFF  # ADC_Y_MASK (13 bits)
+                else:
+                    adc.Y = incr
 
             if self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_ZsrcClear"):
                 adc.Z = 0
                 adc.Z_Cr = 0
             else:
-                adc.Z = self.backend.getThreadConfigValue(
+                z_incr = self.backend.getThreadConfigValue(
                     issue_thread, AM_KEY + "_ZsrcIncr"
                 )
+                # As with Y above, ttsim accumulates the pack Z (face) counter
+                # (ch_z = ch_z + incr); setting it dropped the face selection
+                # between the PACRs of a multi-face tile so every face but the
+                # first read the wrong Dst rows. Blackhole-guarded for WH
+                # byte-identity.
+                if self.backend.blackhole:
+                    adc.Z = (adc.Z + z_incr) & 0xFF  # ADC_Z_MASK (8 bits)
+                else:
+                    adc.Z = z_incr
 
     def generate_output_address(
         self, stateID, issue_thread, packMask, flush, last, addrMod, ovrdThreadId
@@ -357,17 +378,38 @@ class PackerUnit(TensixBackendUnit):
                 )
                 adc.Y = adc.Y_Cr
             else:
-                adc.Y = self.backend.getThreadConfigValue(
+                incr = self.backend.getThreadConfigValue(
                     issue_thread, AM_KEY + "_YsrcIncr"
                 )
+                # ttsim advances the pack Y counter (ch_y = ch_y + incr) in this
+                # non-CR/non-clear branch; the previous code *set* it to incr, so
+                # Y never accumulated across the successive PACRs that pack a full
+                # multi-face tile — the Dst read row stayed put and only the first
+                # face landed correctly. `six`'s 32x32 output is the first
+                # full-tile pack to hit this (four/five pack a single face, where
+                # Y is always 0 here so set == accumulate). Guarded to Blackhole
+                # so Wormhole stays byte-identical.
+                if self.backend.blackhole:
+                    adc.Y = (adc.Y + incr) & 0x1FFF  # ADC_Y_MASK (13 bits)
+                else:
+                    adc.Y = incr
 
             if self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_ZsrcClear"):
                 adc.Z = 0
                 adc.Z_Cr = 0
             else:
-                adc.Z = self.backend.getThreadConfigValue(
+                z_incr = self.backend.getThreadConfigValue(
                     issue_thread, AM_KEY + "_ZsrcIncr"
                 )
+                # As with Y above, ttsim accumulates the pack Z (face) counter
+                # (ch_z = ch_z + incr); setting it dropped the face selection
+                # between the PACRs of a multi-face tile so every face but the
+                # first read the wrong Dst rows. Blackhole-guarded for WH
+                # byte-identity.
+                if self.backend.blackhole:
+                    adc.Z = (adc.Z + z_incr) & 0xFF  # ADC_Z_MASK (8 bits)
+                else:
+                    adc.Z = z_incr
 
     def handle_pacr(self, instruction_info, issue_thread, instr_args):
         last = instr_args["Last"]
