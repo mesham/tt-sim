@@ -21,7 +21,15 @@ int main(int argc, char** argv) {
     // tt-sim simulator hint: pre-construct both Tensix tiles we use. UMD's
     // tt_SimulationDevice spawns run.sh, which inherits the parent env,
     // which reaches the bridge's __main__.py. No-op on real Wormhole.
-    setenv("TT_SIM_TENSIX_COORDS", "1-1,2-1", 1);
+    //
+    // The physical worker coords differ per arch (Wormhole logical (0,0)/(1,0)
+    // -> physical (1,1)/(2,1); Blackhole -> (1,2)/(2,2)), and the source is
+    // arch-agnostic, so this only supplies the Wormhole *fallback*: overwrite=0
+    // lets a caller that already exported TT_SIM_TENSIX_COORDS (e.g. the
+    // Blackhole run script, with "1-2,2-2") win. With overwrite=1 the wrong
+    // arch's coords would be forced onto the bridge, which rejects any coord
+    // that is not a functional worker in its SoC descriptor.
+    setenv("TT_SIM_TENSIX_COORDS", "1-1,2-1", 0);
 
     IDevice* device = CreateDevice(0);
     Program program = CreateProgram();
