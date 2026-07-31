@@ -20,15 +20,19 @@ the host and exits non-zero on mismatch, so the examples double as a test suite.
 
 ```
 driver/wormhole/
-├── tests/                  the example suite (each example is a self-contained test)
-│   ├── examples_test.py     build + run every example, assert pass (pytest / standalone)
-│   ├── one/  two/  …  nine/  loopback/
-│   │   └── src/             <name>.cpp + CMakeLists.txt + kernels/
+├── tests/
+│   └── capture_traces.sh   build + run every shared example, record its wire trace
 ├── server/                 the wire-bridge server UMD talks to (run.sh spawns it)
+│   ├── examples_replay_test.py  byte-identical offline replay of every example trace
+│   ├── offline_replay_test.py   byte-identical replay of one.trace (the pinned baseline)
+│   └── traces/             one recorded wire trace per example
 ├── run.sh                  UMD entry point → `python -m driver.wormhole.server`
 ├── soc_descriptor.yaml     the Wormhole worker/DRAM grid UMD sees
 ├── replay.py               wire-trace replayer (used by server regression tests)
 └── docs/                   profiling walkthrough
+
+The arch-agnostic example *sources* live in driver/examples/ (shared with
+Blackhole); the Wormhole live runner is driver/examples/examples_test.py.
 ```
 
 ## Requirements
@@ -105,6 +109,14 @@ cleanly when the tt-metal build environment is absent:
 python3 -m driver.examples.examples_test   # prints PASS/FAIL per example
 pytest driver/examples/examples_test.py -v  # same, under pytest
 ```
+
+That harness needs the built tt-metal toolchain (it compiles and launches each
+example live). For a fast, dependency-free CI guard there is also **offline
+replay**: [`server/examples_replay_test.py`](server/examples_replay_test.py)
+replays a recorded wire trace per example (`server/traces/<name>.trace`) and
+asserts every host READ reply reproduces bit-for-bit — the Wormhole analogue of
+Blackhole's `server/*_replay_test.py`. Recapture the traces after a tt-metal
+bump with [`tests/capture_traces.sh`](tests/capture_traces.sh).
 
 ## The examples
 
