@@ -233,7 +233,15 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpxor(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-        vb = vd
+        # The SFPU MATHI binary logical ops take their first source from the
+        # imm12 field: LREG[dest] = LREG[imm12] OP LREG[c]. sfpi emits a nonzero
+        # imm12 (often != dest) when it reuses another lreg for the result — e.g.
+        # bitwise_and/or_tile's last tile chunk writes into the mask's register,
+        # so assuming vb==vd there drops the loaded data and stores mask OP mask.
+        # imm12 == 0 encodes the in-place 2-operand form (vb == dest), which is
+        # what tt-metal's xor path emits; fall back to vd so that stays correct
+        # and every existing imm12==0 caller is byte-identical.
+        vb = instr_args["imm12_math"] or vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
             print(f"SFPU: lreg[{vd}] = lreg[{vb}] ^ lreg[{vc}]")
@@ -247,8 +255,7 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpand(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-        vb = vd
-
+        vb = instr_args["imm12_math"] or vd  # src1 = imm12 (0 => in-place vd); see SFPXOR
         if self.getDiagnosticSettings().reportSFPUCalculations():
             print(f"SFPU: lreg[{vd}] = lreg[{vb}] & lreg[{vc}]")
         if vd < 8 or vd == 16:
@@ -261,8 +268,7 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpor(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-        vb = vd
-
+        vb = instr_args["imm12_math"] or vd  # src1 = imm12 (0 => in-place vd); see SFPXOR
         if self.getDiagnosticSettings().reportSFPUCalculations():
             print(f"SFPU: lreg[{vd}] = lreg[{vb}] | lreg[{vc}]")
 
@@ -1152,17 +1158,22 @@ class VectorUnit(TensixBackendUnit):
                                 DataFormatConversions.FP32ToBF16(conv_to_uint32(datum))
                             )
                             self.getDst().setDst16b(row, column, write_val)
-                        case (
-                            VectorUnit.MOD0_FMT_FP32
-                            | VectorUnit.MOD0_FMT_INT32
-                            | VectorUnit.MOD0_FMT_INT32_ALL
-                        ):
+                        case VectorUnit.MOD0_FMT_FP32:
                             self.getDst().setDst32b(
                                 row,
                                 column,
                                 DataFormatConversions.FP32ToDstFormatFP32(
                                     conv_to_uint32(datum)
                                 ),
+                            )
+                        case (
+                            VectorUnit.MOD0_FMT_INT32
+                            | VectorUnit.MOD0_FMT_INT32_ALL
+                        ):
+                            # INT32 stored verbatim (mirrors the SFPLOAD case) —
+                            # no float-format rearrangement for integers.
+                            self.getDst().setDst32b(
+                                row, column, conv_to_uint32(datum)
                             )
                         case VectorUnit.MOD0_FMT_INT32_SM:
                             write_val = DataFormatConversions.FP32ToDstFormatFP32(
@@ -1254,8 +1265,12 @@ class VectorUnit(TensixBackendUnit):
                                 DataFormatConversions.FP32InDstToFP32(rd)
                             )
                         case VectorUnit.MOD0_FMT_INT32 | VectorUnit.MOD0_FMT_INT32_ALL:
-                            rd = self.getDst().getDst32b(row, column)
-                            datum = DataFormatConversions.FP32InDstToFP32(rd)
+                            # INT32 is stored verbatim in Dst, so load it raw. The
+                            # FP32InDstToFP32 rearrangement is only for actual
+                            # floats — applying it to an integer permutes its bits
+                            # and corrupts every non-bit-symmetric op (add, sub,
+                            # and, or), while XOR-with-a-halfword-mask survives.
+                            datum = self.getDst().getDst32b(row, column)
                         case VectorUnit.MOD0_FMT_INT32_SM:
                             rd = self.getDst().getDst32b(row, column)
                             datum = DataFormatConversions.signMagToTwosComp(

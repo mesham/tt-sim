@@ -403,10 +403,6 @@ class WaitGate(TensixFrontendUnit):
                     instruction_info = TensixInstructionDecoder.getInstructionInfo(
                         instruction
                     )
-                    if instruction_info["name"] == "ATGETM":
-                        # Stall due to mutex, but still process this instruction to ensure
-                        # it reaches the sync unit
-                        self.mutex_stall = True
                     if instruction_info["ex_resource"] == "MATH":
                         # For FPU instructions need to ensure that srcA and srcB
                         # being consumed has allowed client of MatrixUnit
@@ -418,6 +414,15 @@ class WaitGate(TensixFrontendUnit):
                         instruction, self.frontend.thread_id
                     )
                     if instruction_accepted:
+                        # An accepted ATGETM stalls the gate until the sync unit
+                        # grants the mutex (informMutexAcquired clears mutex_stall).
+                        # Set the stall only once the instruction has actually
+                        # reached the sync unit: if issueInstruction rejected it
+                        # this cycle (its issue queue was busy), the gate must stay
+                        # free to retry next cycle — otherwise mutex_stall latches
+                        # forever with no ATGETM in flight to ever clear it.
+                        if instruction_info["name"] == "ATGETM":
+                            self.mutex_stall = True
                         # If the instruction was accepted then remove it,
                         # otherwise retry next cycle
                         if self.getDiagnosticSettings().reportIssuedInstructions():
