@@ -52,6 +52,9 @@ class UnPackerUnit(TensixBackendUnit):
             super().clock_tick(cycle_num)
 
     def handle_unpacr_nop(self, instruction_info, issue_thread, instr_args):
+        if self.backend.blackhole:
+            self._handle_unpacr_nop_blackhole(instruction_info, issue_thread)
+            return
         args = instr_args["NoOp"]
 
         mode1 = args & 0x3
@@ -76,6 +79,31 @@ class UnPackerUnit(TensixBackendUnit):
                     self.handle_give_src_to_fpu(issue_thread, args)
                 case _:
                     raise NotImplementedError()
+
+    def _handle_unpacr_nop_blackhole(self, instruction_info, issue_thread):
+        # Blackhole re-lays out UNPACR_NOP entirely (ttsim data/bh): the WH
+        # ``NoOp`` mode-select bits mean different things here, so decode the BH
+        # fields from the raw word. Fields: unpack_pop(1:0), src_clr_val_ctrl(3:2),
+        # bank_clr_ctrl(4), stall_clr_cntrl(5), clr_to1_fmt_ctrl(7:6),
+        # set_dvalid(8), msg_clr_cnt(14:12), stream_id(21:16), unpacker_select(23).
+        # ttsim only models unpack_pop==1 (stall-and-clear implied) with an
+        # optional set_dvalid; the FP32 copy path emits exactly that to hand the
+        # freshly-unpacked src bank to the matrix unit. Assert the control fields
+        # we don't model are absent rather than mis-handle them silently.
+        raw = instruction_info["raw_instruction"]
+        unpack_pop = get_bits(raw, 0, 1)
+        set_dvalid = get_nth_bit(raw, 8)
+        assert unpack_pop == 1, f"UNPACR_NOP unpack_pop={unpack_pop} not modelled"
+        assert get_nth_bit(raw, 4) == 0, "UNPACR_NOP bank_clr_ctrl not modelled"
+        assert get_bits(raw, 6, 7) == 0, "UNPACR_NOP clr_to1_fmt_ctrl not modelled"
+        assert get_bits(raw, 12, 14) == 0, "UNPACR_NOP msg_clr_cnt not modelled"
+        assert get_bits(raw, 16, 21) == 0, "UNPACR_NOP stream_id not modelled"
+        if set_dvalid:
+            # Give the src bank to the matrix unit (the WH "give src to fpu"),
+            # which is what unblocks a waiting FPU op. tt-sim's ownership model
+            # doesn't need ttsim's separate double-buffer clear — the next UNPACR
+            # overwrites the bank — so set_dvalid is the operative effect here.
+            self.handle_give_src_to_fpu(issue_thread, raw)
 
     def handle_give_src_to_fpu(self, issue_thread, args):
         if self.unpacker_id == 0:

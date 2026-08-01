@@ -1,10 +1,10 @@
-"""Tests for the Blackhole SFPU superset ops (SFPGT / SFPLE / SFPMUL24).
+"""Tests for the Blackhole SFPU superset ops (SFPGT / SFPLE / SFPMUL24 / SFPARECIP).
 
 Runs standalone (``python3 -m tt_sim.pe.tensix.sfpu_blackhole_test``) or under
 pytest. Drives a real ``VectorUnit`` (via a coprocessor) so the handlers are
 exercised exactly as a decoded instruction would reach them; also checks the
-decoder recognises the new opcodes. SFPARECIP is intentionally not implemented
-(hardware approximation) and must fail loudly.
+decoder recognises the new opcodes. SFPARECIP's LUT-based reciprocal is a
+verbatim port of ttsim's data/bh reference, checked against exact bit patterns.
 """
 
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
@@ -60,22 +60,26 @@ def test_sfpmul24_low_23_bit_product():
     assert vu.lregs[0][1] == ((0x7FFFFF * 2) & 0x7FFFFF)
 
 
-def test_sfparecip_fails_loudly():
+def test_sfparecip_approx_reciprocal():
+    # Exact bit patterns from the ttsim data/bh reference (approx_recip): sign
+    # preserved, magnitude replaced by the LUT 1/x approximation.
     vu = _vector_unit()
-    try:
-        vu.handle_sfparecip(None, 0, _args())
-    except NotImplementedError:
-        return
-    raise AssertionError("SFPARECIP should raise NotImplementedError")
+    vu.lregs[1][0] = 1.0  # 1/1 ~= 0.996  -> 0x3F7F0000
+    vu.lregs[1][1] = 2.0  # 1/2 ~= 0.499  -> 0x3EFF0000
+    vu.lregs[1][2] = -1.0  # sign preserved -> 0xBF7F0000
+    vu.lregs[1][3] = 0.0  # 1/0 -> +inf    -> 0x7F800000
+    vu.handle_sfparecip(None, 0, _args(lreg_dest=0, lreg_c=1))
+    assert vu.lregs[0][0] == 0x3F7F0000
+    assert vu.lregs[0][1] == 0x3EFF0000
+    assert vu.lregs[0][2] == 0xBF7F0000
+    assert vu.lregs[0][3] == 0x7F800000
 
 
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
-    print(
-        "sfpu_blackhole_test OK: SFPGT/SFPLE/SFPMUL24 verified, SFPARECIP fails loudly"
-    )
+    print("sfpu_blackhole_test OK: SFPGT/SFPLE/SFPMUL24/SFPARECIP verified")
 
 
 if __name__ == "__main__":

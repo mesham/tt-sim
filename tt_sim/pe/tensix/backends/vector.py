@@ -1,7 +1,7 @@
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
 from tt_sim.pe.tensix.util import DataFormatConversions
-from tt_sim.util.bits import get_bits, get_nth_bit
+from tt_sim.util.bits import extract_bits, get_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_float, conv_to_uint32
 
 
@@ -255,7 +255,9 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpand(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-        vb = instr_args["imm12_math"] or vd  # src1 = imm12 (0 => in-place vd); see SFPXOR
+        vb = (
+            instr_args["imm12_math"] or vd
+        )  # src1 = imm12 (0 => in-place vd); see SFPXOR
         if self.getDiagnosticSettings().reportSFPUCalculations():
             print(f"SFPU: lreg[{vd}] = lreg[{vb}] & lreg[{vc}]")
         if vd < 8 or vd == 16:
@@ -268,7 +270,9 @@ class VectorUnit(TensixBackendUnit):
     def handle_sfpor(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
-        vb = instr_args["imm12_math"] or vd  # src1 = imm12 (0 => in-place vd); see SFPXOR
+        vb = (
+            instr_args["imm12_math"] or vd
+        )  # src1 = imm12 (0 => in-place vd); see SFPXOR
         if self.getDiagnosticSettings().reportSFPUCalculations():
             print(f"SFPU: lreg[{vd}] = lreg[{vb}] | lreg[{vc}]")
 
@@ -999,14 +1003,167 @@ class VectorUnit(TensixBackendUnit):
                     b = conv_to_uint32(self.lregs[vb][lane]) & 0x7FFFFF
                     self.lregs[vd][lane] = (a * b) & 0x7FFFFF
 
+    # Reciprocal-mantissa lookup table for SFPARECIP (128 entries), a verbatim
+    # port of ttsim's data/bh reference (src/tensix.cpp approx_recip).
+    ARECIP_LUT = (
+        127,
+        125,
+        123,
+        121,
+        119,
+        117,
+        116,
+        114,
+        112,
+        110,
+        109,
+        107,
+        105,
+        104,
+        102,
+        100,
+        99,
+        97,
+        96,
+        94,
+        93,
+        91,
+        90,
+        88,
+        87,
+        85,
+        84,
+        83,
+        81,
+        80,
+        79,
+        77,
+        76,
+        75,
+        74,
+        72,
+        71,
+        70,
+        69,
+        68,
+        66,
+        65,
+        64,
+        63,
+        62,
+        61,
+        60,
+        59,
+        58,
+        57,
+        56,
+        55,
+        54,
+        53,
+        52,
+        51,
+        50,
+        49,
+        48,
+        47,
+        46,
+        45,
+        44,
+        43,
+        42,
+        41,
+        40,
+        40,
+        39,
+        38,
+        37,
+        36,
+        35,
+        35,
+        34,
+        33,
+        32,
+        31,
+        31,
+        30,
+        29,
+        28,
+        28,
+        27,
+        26,
+        25,
+        25,
+        24,
+        23,
+        23,
+        22,
+        21,
+        21,
+        20,
+        19,
+        19,
+        18,
+        17,
+        17,
+        16,
+        15,
+        15,
+        14,
+        14,
+        13,
+        12,
+        12,
+        11,
+        11,
+        10,
+        9,
+        9,
+        8,
+        8,
+        7,
+        7,
+        6,
+        5,
+        5,
+        4,
+        4,
+        3,
+        3,
+        2,
+        2,
+        1,
+        1,
+        0,
+    )
+
+    @staticmethod
+    def _approx_recip(x):
+        # x is the FP32 magnitude (bits 30:0). Port of ttsim approx_recip:
+        # exponent 253 - e reflects the ~1/x scaling, mantissa from the LUT.
+        if x < 0x800000:  # zero / denormal -> +inf
+            return 0x7F800000
+        elif x < 0x7E800000:  # x < 2**126
+            return ((253 - (x >> 23)) << 23) | (
+                VectorUnit.ARECIP_LUT[(x >> 16) & 0x7F] << 16
+            )
+        else:
+            return 0
+
     def handle_sfparecip(self, instruction_info, issue_thread, instr_args):
-        # Blackhole SFPARECIP is an approximate reciprocal implemented by a
-        # hardware lookup/refinement whose exact bit pattern is not reproducible
-        # from the public docs. Fail loudly rather than return a plausibly-wrong
-        # value; implement against ttsim's data/bh reference when a kernel needs it.
-        raise NotImplementedError(
-            "Blackhole SFPARECIP (approximate reciprocal) is not yet modelled"
-        )
+        # Blackhole approximate reciprocal: sign preserved, magnitude replaced by
+        # the LUT-based 1/x approximation. Mirrors ttsim's SFPARECIP, which only
+        # models the base variant (no instruction modifier / immediate).
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_c"]
+        assert instr_args["instr_mod1"] == 0, "SFPARECIP instr_mod1 not modelled"
+        assert instr_args["imm12_math"] == 0, "SFPARECIP imm12_math not modelled"
+        if vd < 8:
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    x = conv_to_uint32(self.lregs[vc][lane])
+                    self.lregs[vd][lane] = (x & 0x80000000) | self._approx_recip(
+                        x & 0x7FFFFFFF
+                    )
 
     def handle_sfpencc(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -1067,6 +1224,17 @@ class VectorUnit(TensixBackendUnit):
                         if mod1 & VectorUnit.SFPIADD_MOD1_CC_GTE0:
                             self.laneFlags[lane] = not self.laneFlags[lane]
 
+    def _read_sfpu_addr_mode(self, instruction_info, instr_args):
+        # SFPLOAD/SFPSTORE/SFPLOADMACRO ``sfpu_addr_mode`` is 3 bits on Blackhole
+        # (raw bits 15:13) but only 2 bits on Wormhole (15:14). The shared
+        # instruction table encodes the Wormhole field, so on Blackhole its low
+        # bit (13) is dropped and the value shifts. Read the true 3-bit field
+        # from the raw word on Blackhole, mirroring the matrix unit's addr_mode
+        # handling. See docs/plans/blackhole-support.md.
+        if self.backend.blackhole:
+            return extract_bits(instruction_info["raw_instruction"], 3, 13)
+        return instr_args["sfpu_addr_mode"]
+
     def get_dst_address(self, issue_thread, mod0, imm10):
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
@@ -1118,7 +1286,7 @@ class VectorUnit(TensixBackendUnit):
 
     def handle_sfpstore(self, instruction_info, issue_thread, instr_args):
         imm10 = instr_args["dest_reg_addr"]
-        addrmod = instr_args["sfpu_addr_mode"]
+        addrmod = self._read_sfpu_addr_mode(instruction_info, instr_args)
         mod0 = instr_args["instr_mod0"]
         vd = instr_args["lreg_ind"]
 
@@ -1166,15 +1334,10 @@ class VectorUnit(TensixBackendUnit):
                                     conv_to_uint32(datum)
                                 ),
                             )
-                        case (
-                            VectorUnit.MOD0_FMT_INT32
-                            | VectorUnit.MOD0_FMT_INT32_ALL
-                        ):
+                        case VectorUnit.MOD0_FMT_INT32 | VectorUnit.MOD0_FMT_INT32_ALL:
                             # INT32 stored verbatim (mirrors the SFPLOAD case) —
                             # no float-format rearrangement for integers.
-                            self.getDst().setDst32b(
-                                row, column, conv_to_uint32(datum)
-                            )
+                            self.getDst().setDst32b(row, column, conv_to_uint32(datum))
                         case VectorUnit.MOD0_FMT_INT32_SM:
                             write_val = DataFormatConversions.FP32ToDstFormatFP32(
                                 DataFormatConversions.toSignMag(datum)
@@ -1215,7 +1378,7 @@ class VectorUnit(TensixBackendUnit):
 
     def handle_sfpload(self, instruction_info, issue_thread, instr_args):
         imm10 = instr_args["dest_reg_addr"]
-        addrmod = instr_args["sfpu_addr_mode"]
+        addrmod = self._read_sfpu_addr_mode(instruction_info, instr_args)
         mod0 = instr_args["instr_mod0"]
         vd = instr_args["lreg_ind"]
 
