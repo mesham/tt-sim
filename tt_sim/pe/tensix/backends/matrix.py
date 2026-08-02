@@ -1390,20 +1390,17 @@ class MatrixUnit(TensixBackendUnit):
         # (lane, row, column). A broadcast SrcB row means one row's worth of
         # group sums serves every Dst row, so only the distinct rows are
         # gathered and numpy broadcasts the rest.
-        srcAColumns = np.array(
-            [[toFP32(srcA[srcARow + k, j]) for j in range(16)] for k in range(16)],
-            dtype=np.int64,
-        )[:, np.newaxis, :]
-        srcBRows = np.array(
-            [
-                [
-                    toFP32(srcB[srcBRow + i, k])
-                    for i in range(1 if broadcastSrcBRow else numRows)
-                ]
-                for k in range(16)
-            ],
-            dtype=np.int64,
-        )[:, :, np.newaxis]
+        #
+        # The operands are gathered a rectangle at a time and converted out of
+        # the Src storage layout a rectangle at a time too: the ``*InSrcTo*``
+        # conversions are pure bit arithmetic, so the same functions the scalar
+        # paths call convert a whole block when handed one (see
+        # DataFormatConversions). SrcB is transposed because its rows index the
+        # 16 lanes, and the copy is deliberate -- every later op wants it
+        # contiguous.
+        srcAColumns = toFP32(srcA.readRows(srcARow, 16))[:, np.newaxis, :]
+        srcBLanes = srcB.readRows(srcBRow, 1 if broadcastSrcBRow else numRows)
+        srcBRows = toFP32(np.ascontiguousarray(srcBLanes.T))[:, :, np.newaxis]
 
         # Every Dst element is read before any is written, where the scalar loop
         # interleaved the two. That is safe because each (row, column) touches
@@ -1411,47 +1408,31 @@ class MatrixUnit(TensixBackendUnit):
         # holds zeroed data: ZEROACC zeroes on clear, and GMPOOL -- the one
         # writer that holds the flag off mid-row -- always reaches its last
         # column and re-asserts it before the instruction ends.
+        dstRows = np.arange(dstRow, dstRow + numRows)
         if useDst32b:
-            dstVals = [
-                [
-                    DataFormatConversions.FP32InDstToFP32(dst.getDst32b(dstRow + i, j))
-                    for j in range(16)
-                ]
-                for i in range(numRows)
-            ]
+            dstVals = DataFormatConversions.FP32InDstToFP32(dst.getDst32bRows(dstRows))
         else:
-            dstVals = [
-                [
-                    DataFormatConversions.BF16InDstToBF16(dst.getDst16b(dstRow + i, j))
-                    << 16
-                    for j in range(16)
-                ]
-                for i in range(numRows)
-            ]
+            dstVals = (
+                DataFormatConversions.BF16InDstToBF16(dst.getDst16bRows(dstRows)) << 16
+            )
 
         results = self._fpu_accumulate_batch(
             self._fpu_group_sums_batch(
                 srcAColumns, srcBRows, fidelityPhase, expProdAdj
             ),
-            np.array(dstVals, dtype=np.int64),
+            dstVals,
             useDst32b,
             negOneRenormBug,
-        ).tolist()
+        )
 
-        for i in range(numRows):
-            for j in range(16):
-                if useDst32b:
-                    dst.setDst32b(
-                        dstRow + i,
-                        j,
-                        DataFormatConversions.FP32ToDstFormatFP32(results[i][j]),
-                    )
-                else:
-                    dst.setDst16b(
-                        dstRow + i,
-                        j,
-                        DataFormatConversions.FP32ToDstFormatBF16(results[i][j]),
-                    )
+        if useDst32b:
+            dst.setDst32bRows(
+                dstRows, DataFormatConversions.FP32ToDstFormatFP32(results)
+            )
+        else:
+            dst.setDst16bRows(
+                dstRows, DataFormatConversions.FP32ToDstFormatBF16(results)
+            )
 
     def get_dataformat_and_useDst(self, issue_thread, stateID):
         # Determine data formats

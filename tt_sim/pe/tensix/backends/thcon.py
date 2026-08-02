@@ -64,6 +64,10 @@ class ScalarUnit(TensixBackendUnit):
 
         return super().issueInstruction(instruction, from_thread)
 
+    def is_clock_idle(self):
+        # A stalled ThCon re-evaluates its stall condition every cycle.
+        return not self.next_instruction and not self.stalled
+
     def clock_tick(self, cycle_num):
         if self.stalled:
             if self.stalled_type == ScalarUnit.THConStallType.FLUSHDMA:

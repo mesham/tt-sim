@@ -822,6 +822,11 @@ class NUI(MemMapable, Clockable):
         self._inbox_lock = threading.Lock()
         self.snoop = snoop
         self.unit_id: tuple | None = None
+        # The owning tile's TileClock, set by TTDeviceTile._bind_clock. An
+        # inbound transmit() is one of the stimuli that can wake a dormant
+        # tile, so it must be able to reach the clock. None when the NUI is
+        # constructed standalone (unit tests, driver/simple examples).
+        self.clock_owner = None
 
     def get_id_pair(self):
         # Return the ID in this NoC coordinate system
@@ -833,7 +838,21 @@ class NUI(MemMapable, Clockable):
         # so we cannot keep a single slot per trid.
         self.outstanding_noc_requests.setdefault(request_id, []).append(tgt_addr)
 
+    def is_clock_idle(self):
+        """No requests in flight, so ``clock_tick`` would only swap two empty
+        lists. See ``docs/plans/event-driven-pump.md``; the only way this
+        becomes False again is ``transmit()``, which wakes the owning tile."""
+        return not (self.noc_requests_to_handle or self.noc_new_requests_to_handle)
+
     def clock_tick(self, cycle_num):
+        if not (self.noc_requests_to_handle or self.noc_new_requests_to_handle):
+            # Nothing queued and nothing arriving: the drain loop below has no
+            # work and the swap would exchange one empty list for another.
+            # Early-out so an idle NIU costs neither the lock nor the
+            # allocation (ROADMAP §L target 4). Kept alongside the TileClock
+            # gate because a tile stays awake for its busy NIU while its other
+            # NIU, and both NIUs of a tile whose cores are running, are idle.
+            return
         for noc_request in self.noc_requests_to_handle:
             assert isinstance(noc_request, NUI.NoCDataRequest)
             if noc_request.action == NUI.NoCDataRequest.DataRequestAction.READ:
@@ -1109,6 +1128,9 @@ class NUI(MemMapable, Clockable):
     def transmit(self, data_request):
         with self._inbox_lock:
             self.noc_new_requests_to_handle.append(data_request)
+        owner = self.clock_owner
+        if owner is not None:
+            owner.awake = True
 
     def set_noc_directory(self, noc_directory):
         self.noc_directory = noc_directory

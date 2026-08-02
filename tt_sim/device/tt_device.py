@@ -1,6 +1,6 @@
 from abc import ABC
 
-from tt_sim.device.clock import Clock, MultiTileClock
+from tt_sim.device.clock import MultiTileClock, TileClock
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
@@ -115,7 +115,10 @@ class TT_Device(Device):
         # the coprocessor); DRAM and eth tiles are mostly idle NUI traffic
         # so they should not pull the composite into threaded mode on
         # their own. Only count Tensix toward the auto-engage threshold.
-        self.clocks[0].add_tile_clock(Clock(tile.get_clocks()), heavy=tile.is_tensix)
+        gated, always = tile.get_clock_partition()
+        tile_clock = TileClock(gated, always=always, quiescent=tile.clock_quiescent)
+        tile._bind_clock(tile_clock)
+        self.clocks[0].add_tile_clock(tile_clock, heavy=tile.is_tensix)
         self.resets[0].add_resetables(tile.get_resets())
 
     def _noc1_mirror(self, canonical):
@@ -141,6 +144,16 @@ class TT_Device(Device):
         self.tensix_tiles.append(tile)
         self._register_tile_internals(tile)
 
+    def reset(self, reset_number=0):
+        """Reset every registered component, waking every tile.
+
+        A reset rewrites core state behind the pump's back, so no tile may
+        stay dormant on the strength of a pre-reset quiescence decision.
+        """
+        for tile in self.tile_directory.values():
+            tile.clock.awake = True
+        super().reset(reset_number)
+
     def shutdown(self):
         """Join any worker threads spawned by the per-tile clock pump.
 
@@ -154,11 +167,19 @@ class TT_Device(Device):
 
     def read(self, coordinate_pair, address, size):
         assert coordinate_pair in self.tile_directory
-        return self.tile_directory[coordinate_pair].read(address, size)
+        tile = self.tile_directory[coordinate_pair]
+        # A host-side access is one of the three stimuli that can act on a
+        # dormant tile (see ``TileClock``). Reads are woken too: they are rare
+        # relative to cycles, and it removes any need to reason about which
+        # MMIO reads have side effects.
+        tile.clock.awake = True
+        return tile.read(address, size)
 
     def write(self, coordinate_pair, address, value, size=None):
         assert coordinate_pair in self.tile_directory
-        self.tile_directory[coordinate_pair].write(address, value, size)
+        tile = self.tile_directory[coordinate_pair]
+        tile.clock.awake = True
+        tile.write(address, value, size)
 
     def deassert_soft_reset(self, coordinate_pair=None, core_type=None):
         if coordinate_pair is None:
@@ -186,6 +207,7 @@ class TT_Device(Device):
         scoped variant.
         """
         tile = self.tile_directory[coordinate_pair]
+        tile.clock.awake = True
         for core in tile.get_resets():
             core.reset()
 
@@ -289,6 +311,50 @@ class TTDeviceTile(DeviceTile, ABC):
     #: device depending on the concrete Wormhole tile classes.
     is_tensix = False
 
+    def get_clock_partition(self):
+        """Split ``get_clocks()`` into ``(gated, always)``.
+
+        ``gated`` components are skipped while the tile is dormant; ``always``
+        components are ticked every cycle regardless (see
+        :class:`~tt_sim.device.clock.TileClock`). The concatenation must equal
+        ``get_clocks()`` in order, because ``always`` is ticked after
+        ``gated`` — so only a trailing slice may be moved across.
+        Default: everything is gated.
+        """
+        return list(self.get_clocks()), []
+
+    def clock_quiescent(self):
+        """True when ticking this tile's gated components changes nothing.
+
+        The generic implementation asks every gated component (see
+        :meth:`~tt_sim.device.clock.Clockable.is_clock_idle`), which fails
+        safe: a component that has not opted in keeps the tile awake forever.
+        Subclasses override to put the cheapest discriminator first — a
+        Tensix tile with a core out of reset is never quiescent, and finding
+        that out costs five attribute reads rather than twenty probe calls.
+        """
+        for probe in self._idle_probes:
+            if not probe():
+                return False
+        return True
+
+    def _bind_clock(self, tile_clock):
+        """Attach the tile's :class:`TileClock` and precompute its probes.
+
+        Called by ``TT_Device`` once the tile clock exists. The wake hooks go
+        onto the components that can be acted on from outside while the tile
+        is dormant: the two NIUs (a NoC message from another tile) and the
+        tile-control block (a soft-reset write from any path).
+        """
+        self.clock = tile_clock
+        gated, _ = self.get_clock_partition()
+        self._idle_probes = tuple(item.is_clock_idle for item in gated)
+        self.noc0_router.clock_owner = tile_clock
+        self.noc1_router.clock_owner = tile_clock
+        tile_ctrl = getattr(self, "tile_ctrl", None)
+        if tile_ctrl is not None:
+            tile_ctrl.clock_owner = tile_clock
+
     def __init__(self, coord_x, coord_y, noc0_router, noc1_router):
         # Reference the bounds via ``self`` so an architecture whose tile coords
         # occupy a different range (e.g. Blackhole's 17x12 physical grid) can
@@ -304,6 +370,9 @@ class TTDeviceTile(DeviceTile, ABC):
                 f"y in {self.UNIFIED_COORD_Y_MIN}..{self.UNIFIED_COORD_Y_MAX})"
             )
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
+        #: Set by ``TT_Device._register_tile_internals`` via ``_bind_clock``.
+        self.clock = None
+        self._idle_probes = ()
         # Extra SoC-physical NoC 0 coords that ``TT_Device`` registers as
         # noc-directory aliases on both NoCs (so kernels addressing either
         # sub-endpoint hit the same tile). Default empty; DRAMTile populates.

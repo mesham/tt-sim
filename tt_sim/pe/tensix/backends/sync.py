@@ -80,6 +80,10 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             else:
                 return False
 
+    def is_clock_idle(self):
+        # A queued mutex waiter is retried every cycle by the override below.
+        return not self.next_instruction and not self.blocked_mutex
+
     def clock_tick(self, cycle_num):
         super().clock_tick(cycle_num)
         to_remove = []

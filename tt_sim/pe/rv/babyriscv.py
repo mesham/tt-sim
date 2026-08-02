@@ -219,6 +219,19 @@ class BabyRISCV(RV32IM_TT):
             src = self._soft_reset_src = (target, SOFT_RESET_ADDR - addr_range.low)
         return int.from_bytes(src[0].read(src[1], 4), "little")
 
+    def is_clock_idle(self):
+        """Idle while held in soft reset with the reset already taken.
+
+        ``soft_active`` False means the last tick either saw the core in reset
+        or has not run one yet; the reset-register read then confirms it is
+        still held. Both halves are needed: a core that is out of reset with
+        ``soft_active`` False is about to boot, and a core in reset with
+        ``soft_active`` True still owes one tick to clear the flag.
+        """
+        if self.soft_active:
+            return False
+        return self._read_soft_reset() & self.soft_reset_mask != 0
+
     def clock_tick(self, cycle_num):
         # These cores have a soft reset that they need to check
         is_in_reset = self._read_soft_reset() & self.soft_reset_mask != 0

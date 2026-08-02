@@ -15,6 +15,10 @@ class TensixTileControl(MemMapable, Clockable):
         # model clock gating, so these behave as plain read-what-you-wrote
         # registers, which is what the firmware's init sequence expects.
         self.regs = {}
+        # Owning tile's TileClock, set by TTDeviceTile._bind_clock. A write to
+        # RISCV_DEBUG_REG_SOFT_RESET_0 can bring a core out of reset, so it
+        # must wake the tile whatever path the write arrived by.
+        self.clock_owner = None
 
     def clock_tick(self, cycle_num):
         self.cycle_num = cycle_num
@@ -42,6 +46,8 @@ class TensixTileControl(MemMapable, Clockable):
     def write(self, addr, value, size=None):
         if addr == 0x1B0:
             self.RISCV_DEBUG_REG_SOFT_RESET_0 = value
+            if self.clock_owner is not None:
+                self.clock_owner.awake = True
         elif addr == 0x1F0:
             # RISCV_DEBUG_REG_WALL_CLOCK_L
             self.counter_high_at = self.cycle_num >> 32

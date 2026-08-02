@@ -87,6 +87,20 @@ class DRAMTile(TTDeviceTile):
     def get_clocks(self):
         return [self.noc0_router, self.noc1_router]
 
+    def clock_quiescent(self):
+        # A DRAM tile's only clockables are its two NIUs, and nothing runs on
+        # it — so it is idle exactly when neither NIU has a request queued or
+        # arriving. Written out rather than looping the generic probes because
+        # it is on the per-cycle path of every DRAM tile in the device.
+        n0 = self.noc0_router
+        n1 = self.noc1_router
+        return not (
+            n0.noc_requests_to_handle
+            or n0.noc_new_requests_to_handle
+            or n1.noc_requests_to_handle
+            or n1.noc_new_requests_to_handle
+        )
+
     def get_resets(self):
         return []
 
@@ -207,6 +221,19 @@ class EthTile(TTDeviceTile):
 
     def get_clocks(self):
         return [self.noc0_router, self.noc1_router, self.erisc, self.tile_ctrl]
+
+    def get_clock_partition(self):
+        # tile_ctrl latches the cycle counter behind RISCV_DEBUG_REG_WALL_CLOCK_*
+        # and must keep ticking while the tile is dormant; it is last in
+        # get_clocks(), so moving it to the always-list preserves tick order.
+        clocks = self.get_clocks()
+        assert clocks[-1] is self.tile_ctrl
+        return clocks[:-1], [self.tile_ctrl]
+
+    def clock_quiescent(self):
+        if self.erisc.soft_active:
+            return False
+        return TTDeviceTile.clock_quiescent(self)
 
     def get_resets(self):
         return [self.erisc]
@@ -558,6 +585,28 @@ class TensixTile(TTDeviceTile):
             self.noc1_router,
             self.tile_ctrl,
         ]
+
+    def get_clock_partition(self):
+        # See EthTile.get_clock_partition — tile_ctrl is the wall clock and is
+        # last in get_clocks(), so the split preserves tick order exactly.
+        clocks = self.get_clocks()
+        assert clocks[-1] is self.tile_ctrl
+        return clocks[:-1], [self.tile_ctrl]
+
+    def clock_quiescent(self):
+        # Fast reject first: a tile with any baby core out of soft reset is
+        # never quiescent, and five attribute reads settle that. Only when the
+        # whole tile is in reset do we pay for the full sweep over ~20
+        # coprocessor / NoC / TDMA probes.
+        if (
+            self.brisc.soft_active
+            or self.ncrisc.soft_active
+            or self.trisc0.soft_active
+            or self.trisc1.soft_active
+            or self.trisc2.soft_active
+        ):
+            return False
+        return TTDeviceTile.clock_quiescent(self)
 
     def get_tensix_memory(self):
         return self.tensix_mem

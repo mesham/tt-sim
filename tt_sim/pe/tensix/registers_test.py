@@ -10,7 +10,9 @@ from BlackholeA0/.../Dst.md that a future compute path will enable via
 as all-ones (minus infinity) by GMPOOL alone.
 """
 
-from tt_sim.pe.tensix.registers import DstRegister
+import numpy as np
+
+from tt_sim.pe.tensix.registers import DstRegister, SrcRegister
 
 
 def _shared_fold(r):
@@ -123,6 +125,106 @@ def test_valid_on_last_column_holds_the_flag_until_column_15():
         assert dst.getDst16b(5, col + 1, isGmpool=True) == 0xFFFF
     dst.setDst16b(5, 15, 0x1234, validOnLastColumn=True)
     assert dst.dstRowValid[5]
+
+
+# -- Whole-row accessors ---------------------------------------------------
+#
+# The matrix unit reads and writes a whole Dst rectangle per MVMUL, and a whole
+# Src block, through the block accessors rather than 16 scalar calls per row.
+# These pin them as being exactly the scalar accessors applied row by row --
+# including the row adjustment, the zero flags, and the 32-bit hi/lo split.
+
+
+def _seeded(shape, seed):
+    return np.random.default_rng(seed).integers(0, 1 << 16, shape, dtype=np.int64)
+
+
+def _clear_flag(dst, row, isDst32=False):
+    """Clear a row's zero flag *without* zeroing its data, so a read that
+    ignored the flag would return something visibly different from zero."""
+    dst.dstRowValid[dst.adj32(row) if isDst32 else dst.adj16(row)] = False
+
+
+def test_dst16b_row_block_reads_match_the_scalar_accessor():
+    for remap in (False, True):
+        dst = DstRegister()
+        dst.dest_remap_addrs = remap
+        dst.dstBits[:] = _seeded(dst.dstBits.shape, 1)
+        for row in (0, 5, 0x30):
+            _clear_flag(dst, row)
+        rows = list(range(0x38))
+        block = dst.getDst16bRows(np.array(rows))
+        assert block.tolist() == [
+            [dst.getDst16b(r, c) for c in range(16)] for r in rows
+        ]
+
+
+def test_dst16b_row_block_writes_match_the_scalar_accessor():
+    for remap in (False, True):
+        block_written, scalar_written = DstRegister(), DstRegister()
+        for dst in (block_written, scalar_written):
+            dst.dest_remap_addrs = remap
+            for row in (2, 9):
+                _clear_flag(dst, row)
+        rows = list(range(2, 10))
+        values = _seeded((len(rows), 16), 2)
+
+        block_written.setDst16bRows(np.array(rows), values)
+        for i, r in enumerate(rows):
+            for c in range(16):
+                scalar_written.setDst16b(r, c, int(values[i][c]))
+
+        assert np.array_equal(block_written.dstBits, scalar_written.dstBits)
+        assert np.array_equal(block_written.dstRowValid, scalar_written.dstRowValid)
+
+
+def test_dst32b_row_block_reads_match_the_scalar_accessor():
+    for swizzle in (False, True):
+        dst = DstRegister()
+        dst.dest_swizzle_32b = swizzle
+        dst.dstBits[:] = _seeded(dst.dstBits.shape, 3)
+        for row in (1, 4):
+            _clear_flag(dst, row, isDst32=True)
+        rows = list(range(0x20))
+        block = dst.getDst32bRows(np.array(rows))
+        assert block.tolist() == [
+            [dst.getDst32b(r, c) for c in range(16)] for r in rows
+        ]
+
+
+def test_dst32b_row_block_writes_match_the_scalar_accessor():
+    for swizzle in (False, True):
+        block_written, scalar_written = DstRegister(), DstRegister()
+        for dst in (block_written, scalar_written):
+            dst.dest_swizzle_32b = swizzle
+            _clear_flag(dst, 3, isDst32=True)
+        rows = list(range(3, 11))
+        values = _seeded((len(rows), 16), 4) << 16 | _seeded((len(rows), 16), 5)
+
+        block_written.setDst32bRows(np.array(rows), values)
+        for i, r in enumerate(rows):
+            for c in range(16):
+                scalar_written.setDst32b(r, c, int(values[i][c]))
+
+        assert np.array_equal(block_written.dstBits, scalar_written.dstBits)
+        assert np.array_equal(block_written.dstRowValid, scalar_written.dstRowValid)
+
+
+def test_src_read_rows_matches_the_scalar_accessor():
+    src = SrcRegister()
+    src.data[:] = np.random.default_rng(6).integers(0, 1 << 19, src.data.shape)
+    block = src.readRows(8, 16)
+    assert block.dtype == np.int64
+    assert block.tolist() == [[src[r, c] for c in range(16)] for r in range(8, 24)]
+
+
+def test_src_read_rows_past_the_end_of_the_bank_raises():
+    src = SrcRegister()
+    try:
+        src.readRows(56, 16)
+    except IndexError:
+        return
+    raise AssertionError("reading past row 63 should raise, as scalar indexing does")
 
 
 def main():

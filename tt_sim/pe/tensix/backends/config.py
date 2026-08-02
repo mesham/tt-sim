@@ -62,6 +62,11 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
 
+    def is_clock_idle(self):
+        # The override also clears prev_cycle_setc16_or_wrcfg, which is
+        # observable, so it must already be clear for the tick to be a no-op.
+        return not self.next_instruction and not self.prev_cycle_setc16_or_wrcfg
+
     def clock_tick(self, cycle_num):
         self.prev_cycle_setc16_or_wrcfg = self.checkIfNextInstructionsContainOpcodes(
             "SETC16", "WRCFG"

@@ -378,6 +378,18 @@ class WaitGate(TensixFrontendUnit):
             case _:
                 return True
 
+    def is_clock_idle(self):
+        """Idle with nothing latched and nothing waiting at the gate.
+
+        ``latch_wait`` matters independently of the FIFO: a latched wait
+        re-tests its condition every cycle and clears itself when it is met,
+        which is observable. The two stall flags are deliberately *not*
+        treated as idle — they are cleared by the sync / ThCon units, which
+        report themselves busy while that is pending, so the tile stays awake
+        either way and this keeps the predicate one expression.
+        """
+        return not self.latch_wait and not self.frontend.wait_gate_instruction_fifo
+
     def clock_tick(self, cycle_num):
         if not self.mutex_stall and not self.backend_enforced_stall:
             instruction = self.frontend.inspect_wait_gate_instruction()
@@ -499,6 +511,9 @@ class TensixReplayExpander(TensixFrontendUnit):
             )
         )
 
+    def is_clock_idle(self):
+        return not self.frontend.replay_instruction_fifo
+
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_replay_instruction()
         if instruction is not None:
@@ -559,6 +574,9 @@ class TensixMOPExpander(TensixFrontendUnit, MemMapable):
         assert idx < 9
 
         self.mop_cfg[idx] = conv_to_uint32(value)
+
+    def is_clock_idle(self):
+        return not self.frontend.mop_instruction_fifo
 
     def clock_tick(self, cycle_num):
         instruction = self.frontend.pop_mop_instruction()

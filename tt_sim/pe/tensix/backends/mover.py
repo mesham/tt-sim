@@ -33,6 +33,9 @@ class MoverUnit(TensixBackendUnit):
     def append_command_from_tdma(self, command):
         self.tdma_commands.append(command)
 
+    def is_clock_idle(self):
+        return not self.next_instruction and not self.tdma_commands
+
     def clock_tick(self, cycle_num):
         if len(self.tdma_commands) > 0:
             self.move(*self.tdma_commands.pop(0))

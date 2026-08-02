@@ -10,6 +10,26 @@ class Clockable(ABC):
     def clock_tick(self, cycle_num):
         raise NotImplementedError()
 
+    def is_clock_idle(self):
+        """True when ``clock_tick`` would be a no-op for observable state.
+
+        This is the opt-in half of the event-driven pump (see
+        ``docs/plans/event-driven-pump.md``): a :class:`TileClock` stops
+        ticking a whole tile once *every* component on it reports idle, and
+        resumes on the next external stimulus (a NoC message arriving, a host
+        read/write, a reset). The contract a component signs by overriding
+        this is narrow and local:
+
+            returning True means "ticking me right now changes nothing an
+            observer could see, and nothing internal to me can change that —
+            only somebody else acting on me can".
+
+        The default is the conservative answer. A component that has not
+        opted in keeps its tile permanently awake, so adding a new clockable
+        can never silently break dormancy; it can only fail to speed it up.
+        """
+        return False
+
 
 class Clock(Resetable):
     def __init__(self, clockables, on_tick=None):
@@ -36,6 +56,64 @@ class Clock(Resetable):
         for i in range(num_iterations):
             self.clock_tick(i + self.clock_tick_num)
         self.clock_tick_num += num_iterations
+
+
+class TileClock(Clock):
+    """A per-tile :class:`Clock` that stops ticking while the tile is idle.
+
+    Phase 1 of the event-driven pump (``docs/plans/event-driven-pump.md``).
+    The dispatch protocol is unchanged — every component still gets
+    ``clock_tick(cycle_num)``, in exactly the order ``get_clocks()`` returns —
+    but a tile whose every component reports :meth:`Clockable.is_clock_idle`
+    is skipped entirely until something wakes it.
+
+    Two lists, because they answer different questions:
+
+    - ``clock_items`` are *gated*: skipped while dormant.
+    - ``always_items`` are ticked every cycle regardless. Today that is only
+      the tile-control block, whose ``clock_tick`` just latches the cycle
+      counter feeding ``RISCV_DEBUG_REG_WALL_CLOCK_*`` — a pure function of
+      the cycle number that an observer can read at any time, including while
+      the tile is dormant. Ticking it costs one attribute store per tile.
+
+    Waking is *pushed* by the only three things that can act on a dormant
+    tile from outside: a NoC message landing in one of its NIUs
+    (``NUI.transmit``), a host read/write through ``TT_Device``, and a reset.
+    Each sets :attr:`awake` directly. Falling asleep is decided by the tile's
+    ``clock_quiescent()`` probe, evaluated *after* the tick so the decision is
+    made against post-tick state.
+    """
+
+    def __init__(self, clockables, *, always=(), quiescent=None, on_tick=None):
+        super().__init__(clockables, on_tick=on_tick)
+        self.always_items = list(always)
+        #: Callable returning True when the gated components are all idle, or
+        #: None to disable dormancy for this tile entirely.
+        self.quiescent_probe = quiescent
+        self.awake = True
+        #: Cycles skipped while dormant — diagnostics only.
+        self.dormant_cycles = 0
+
+    def wake(self):
+        self.awake = True
+
+    def reset(self):
+        super().reset()
+        self.awake = True
+
+    def clock_tick(self, cycle):
+        if self.awake:
+            for item in self.clock_items:
+                item.clock_tick(cycle)
+            probe = self.quiescent_probe
+            if probe is not None and probe():
+                self.awake = False
+        else:
+            self.dormant_cycles += 1
+        for item in self.always_items:
+            item.clock_tick(cycle)
+        if self.on_tick is not None:
+            self.on_tick(cycle)
 
 
 def _threading_enabled_from_env():

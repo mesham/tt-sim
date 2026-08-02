@@ -43,6 +43,9 @@ class TDMA(MemMapable, Clockable):
 
         return result
 
+    def is_clock_idle(self):
+        return not self.command_queue
+
     def clock_tick(self, cycle_num):
         if len(self.command_queue) > 0:
             command = self.command_queue.pop(0)

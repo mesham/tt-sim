@@ -101,6 +101,17 @@ class TensixBackendUnit(Clockable, ABC):
                     return True
         return False
 
+    def is_clock_idle(self):
+        """Idle with an empty issue queue.
+
+        Complete for every unit that does not override ``clock_tick``: the
+        base implementation only drains ``next_instruction``, and a handler
+        has no way to defer work to a later cycle except through its own
+        ``clock_tick``. Units that *do* override it (config, sync, thcon,
+        mover, unpacker) extend this with the state their override reads.
+        """
+        return not self.next_instruction
+
     def clock_tick(self, cycle_num):
         # next_instruction is all instructions to process in this cycle,
         # is often one but for some units might be more

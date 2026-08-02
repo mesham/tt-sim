@@ -89,6 +89,41 @@ class DstRegister:
         if not validOnLastColumn or column == 15:
             self.dstRowValid[row] = True
 
+    # -- Whole-row accessors -------------------------------------------------
+    #
+    # The four methods below are the per-datum accessors above applied to a
+    # whole row (or a block of rows) at once, so a consumer that touches every
+    # column of a row -- the matrix unit reads and writes an entire Dst
+    # rectangle per MVMUL -- pays numpy's overhead once instead of 16 times per
+    # row. ``rows`` is an array of *unadjusted* row indices, exactly what the
+    # scalar ``idx0`` is; the values are int64 blocks of shape
+    # ``(len(rows), 16)``. None of them take ``isGmpool`` (GMPOOL walks a column
+    # at a time) or ``validOnLastColumn`` (a whole row lands at once, so the
+    # flag would be re-asserted either way).
+
+    def getDst16bRows(self, rows):
+        rows = self.adj16(np.asarray(rows))
+        valid = self.dstRowValid[rows][:, np.newaxis]
+        return np.where(valid, self.dstBits[rows], 0).astype(np.int64)
+
+    def setDst16bRows(self, rows, values):
+        rows = self.adj16(np.asarray(rows))
+        self.dstBits[rows] = values
+        self.dstRowValid[rows] = True
+
+    def getDst32bRows(self, rows):
+        br = self.adj32(np.asarray(rows))
+        hi = self.dstBits[br].astype(np.int64)
+        lo = self.dstBits[br + 8].astype(np.int64)
+        valid = self.dstRowValid[br][:, np.newaxis]
+        return np.where(valid, (hi << 16) | (lo & 0xFFFF), 0)
+
+    def setDst32bRows(self, rows, values):
+        br = self.adj32(np.asarray(rows))
+        self.dstBits[br] = values >> 16
+        self.dstBits[br + 8] = values & 0xFFFF
+        self.dstRowValid[br] = True
+
     def setUndefinedRow(self, row, isDst32=False):
         # ZEROACC clears a row's zero flag, it does not touch the data. Every
         # consumer but GMPOOL then reads the row as zero, so tt-sim also zeroes
@@ -153,6 +188,24 @@ class SrcRegister:
     def __setitem__(self, key, value):
         x, y = key
         self.data[x][y] = value
+
+    def readRows(self, row, numRows):
+        """The ``numRows`` x 16 block starting at ``row``, as int64.
+
+        The conversions out of the Src storage layout
+        (``DataFormatConversions``' ``*InSrcTo*`` family) are pure bit
+        arithmetic, so the matrix unit converts a whole block in one numpy call
+        rather than one datum at a time; int64 is what keeps the shifts they do
+        from wrapping (Src holds 19 bits, FP32 takes 32). Out-of-range rows
+        raise, as indexing a row past the end of a bank does -- the wrap
+        hardware applies to a 6-bit row index is not modelled here either way.
+        """
+        block = self.data[row : row + numRows]
+        if block.shape[0] != numRows:
+            raise IndexError(
+                f"Src rows [{row}, {row + numRows}) exceed the 64-row bank"
+            )
+        return block.astype(np.int64)
 
 
 class LReg:

@@ -41,6 +41,11 @@ class UnPackerUnit(TensixBackendUnit):
         else:
             return super().issueInstruction(instruction, from_thread)
 
+    def is_clock_idle(self):
+        # A blocked unpacker re-runs its latched instruction every cycle until
+        # the Src bank it is waiting on frees up.
+        return not self.next_instruction and not self.blocked
+
     def clock_tick(self, cycle_num):
         if self.blocked:
             assert self.repeat_instruction is not None

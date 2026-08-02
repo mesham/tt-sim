@@ -197,6 +197,17 @@ class DataFormatConversions:
 
     This is heavily based on the functional implementations at
     https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor
+
+    Most of these are pure bit arithmetic -- masks, shifts and ors -- which
+    numpy applies elementwise, so passing an int64 array converts a whole block
+    of Src/Dst in one call with no second implementation to keep in step. The
+    matrix unit's batched MVMUL path does exactly that. ``conversion_batch_test``
+    proves it: it walks the entire 19-bit Src input space and every reachable
+    class of the FP32 ones, asserting the array form equals the scalar loop.
+    Keep new conversions branch-free where the branch can be written as
+    arithmetic (see :meth:`FP32ToBF16`); the ones that cannot (
+    :meth:`Int8InSrcToInt8`, :meth:`FP32ToFP16`) are scalar-only and are not
+    used by a batched path.
     """
 
     # Conversion to Dst register format routines
@@ -415,14 +426,15 @@ class DataFormatConversions:
 
     @classmethod
     def FP32ToBF16(cls, x):
-        # Flush denormals to signed zero, then truncate toward zero
+        # Flush denormals to signed zero, then truncate toward zero.
+        # ``man * (exp != 0)`` is the flush written without a branch, so that
+        # this converts a whole numpy block as readily as a single datum (see
+        # the note at the top of the class); for a scalar it is the same int.
         sign = x & 0x80000000
         exp = x & 0x7F800000
         man = x & 0x007FFFFF
-        if exp == 0:
-            man = 0
 
-        return (sign | exp | man) >> 16
+        return (sign | exp | man * (exp != 0)) >> 16
 
     # Integer manipulation routines
 
