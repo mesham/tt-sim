@@ -18,7 +18,16 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         "RMWCIB3": "handle_rmwcib3",
         "WRCFG": "handle_wrcfg",
         "RDCFG": "handle_rdcfg",
+        # Blackhole only
+        "CFGSHIFTMASK": "handle_cfgshiftmask",
     }
+    # The only CFGSHIFTMASK mode the vendor reference simulator (ttsim
+    # ``src/tensix.cpp``) models: no circular shift, a full-width mask, the
+    # "old + scratch" operation and no masking of the old value. Every other
+    # combination raises there too, so tt-sim has nothing to port and no oracle
+    # to check an implementation against — fail loudly instead of guessing.
+    # (right_cshift_amt, mask_width, operation, disable_mask_on_old_val)
+    CFGSHIFTMASK_MODELLED_MODE = (0, 31, 3, 1)
     # Per-arch sizes of the backend config state (number of 128-bit config
     # registers) and the per-thread config state. Wormhole defaults; Blackhole
     # is larger (56 / 68 — ttsim ``sim.h`` TT_ARCH_VERSION 1), threaded in via
@@ -191,6 +200,51 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         new_value = (new_value & mask) | (existing_val & ~mask)
 
         self.setConfig(stateID, index4, new_value, issue_thread)
+
+    def handle_cfgshiftmask(self, instruction_info, issue_thread, instr_args):
+        """Blackhole CFGSHIFTMASK: combine a CFG scratch register with a CFG
+        register, storing the result back in that CFG register.
+
+        A verbatim port of ttsim's ``TENSIX_EXECUTE_CFGSHIFTMASK`` (which itself
+        only models ``CFG[CfgReg] += SCRATCH[scratch_sel]``); the full shift/mask
+        pseudocode is in this instruction's description in
+        ``tensix_instructions.yaml`` for whenever a kernel needs another mode.
+        """
+        if not self.backend.blackhole:
+            raise NotImplementedError(
+                "CFGSHIFTMASK is a Blackhole-only instruction (it has no Wormhole "
+                "encoding, and the Wormhole config layout has no CFG scratch registers)"
+            )
+
+        mode = (
+            instr_args["right_cshift_amt"],
+            instr_args["mask_width"],
+            instr_args["operation"],
+            instr_args["disable_mask_on_old_val"],
+        )
+        if mode != self.CFGSHIFTMASK_MODELLED_MODE:
+            raise NotImplementedError(
+                f"CFGSHIFTMASK (right_cshift_amt, mask_width, operation, "
+                f"disable_mask_on_old_val)={mode} is not modelled in tt-sim; only "
+                f"{self.CFGSHIFTMASK_MODELLED_MODE} (add the scratch register into the "
+                f"CFG register) is, matching the vendor reference simulator"
+            )
+
+        # scratch_sel 0b11 means "select the scratch register of my thread".
+        scratch_sel = instr_args["scratch_sel"]
+        scratch_index = issue_thread if scratch_sel == 3 else scratch_sel
+        assert scratch_index < 3
+
+        cfg_index = instr_args["CfgReg"]
+        assert cfg_index < self.CFG_STATE_SIZE * 4
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+        scratch_value = self.getConfigValue(stateID, f"SCRATCH_SEC{scratch_index}_val")
+        new_value = (self.config[stateID][cfg_index] + scratch_value) & 0xFFFFFFFF
+
+        self.setConfig(stateID, cfg_index, new_value, issue_thread)
 
     def get_threadConfig_entry(self, thread, entry_idx):
         return self.threadConfig[thread][entry_idx]

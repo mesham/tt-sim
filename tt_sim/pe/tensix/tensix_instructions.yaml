@@ -3043,3 +3043,150 @@ REPLAY:
         start_bit: 14
         field_type: DEC
         description: "replay_buffer[start_idx +: len] are targeted by this replay command. The hardware will only use the log2(replay_buffer_depth) LSBs of this field."
+
+# Blackhole-only non-SFPU superset. As with the SFPU additions above, these
+# opcodes are distinct from every Wormhole op, so a Wormhole kernel never emits
+# them and the shared table stays a strict superset. Field layouts are verbatim
+# from the vendor tt-llk Blackhole `instructions/assembly.yaml`; only
+# CFGSHIFTMASK has modelled semantics (see backends/config.py) — the other four
+# are decoded and then rejected loudly by TensixBackend (the vendor reference
+# simulator does not implement them either, so there is nothing to port).
+# `reserved` fields exist only to bound the preceding field: tt-sim derives each
+# argument's end bit from the next argument's start bit.
+
+CFGSHIFTMASK:
+    instrn_type: LOCAL_CREGS
+    ex_resource: CFG
+    op_binary: 0xb8
+    src_mask: 0x0
+    fcov:
+    arguments:
+        - name: CfgReg
+          start_bit: 0
+          field_type: DEC
+          description: "configuration register address holding the second operand and receiving the result (32-bit aligned)"
+        - name: scratch_sel
+          start_bit: 8
+          field_type: BIN
+          description: "Selects which of the three CFG scratch registers supplies the other operand, or 0b11 for 'select by thread ID'"
+        - name: right_cshift_amt
+          start_bit: 10
+          field_type: DEC
+          description: "Number of places for the circular right shift (0-31) applied to both the mask and the scratch value"
+        - name: mask_width
+          start_bit: 15
+          field_type: DEC
+          description: "Width of mask minus one, i.e. for a mask of width N put N-1 in this field"
+        - name: operation
+          start_bit: 20
+          field_type: DEC
+          description: "Select operation: 000 OR, 001 AND, 010 XOR, 011 add, 111 subtract (100-110 are OR with the inverted scratch value)"
+        - name: disable_mask_on_old_val
+          start_bit: 23
+          field_type: BIN
+          description: "If 1, the old value of CfgReg is not masked with ~mask before the operation is applied"
+    description: "Blackhole: circular-shift and mask a CFG scratch register, combine it with a CFG register and store the result back there"
+
+MOVDBGB2D:
+    instrn_type: COMPUTE
+    ex_resource: MATH
+    op_binary: 0x0c
+    src_mask: 0x0
+    fcov:
+    arguments:
+        - name: dst
+          start_bit: 0
+          field_type: DEC
+          description: "Dest address spec"
+        - name: movb2d_instr_mod
+          start_bit: 11
+          field_type: DEC
+          description: "instruction modifier, bit[0] - single row/single row with broadcasted datum0; bit[1] - broadcast single word; bit[2] - multiple rows"
+        - name: addr_mode
+          start_bit: 14
+          field_type: BIN
+          description: "3-bit index of cfg register ADDR_MOD_REG to use for describing addressing mode"
+        - name: src
+          start_bit: 17
+          field_type: DEC
+          description: "Source address spec"
+        - name: dest_32b_lo
+          start_bit: 23
+          field_type: BIN
+          description: "address dest in 32-bit mode, but use the ext bits (Lower bits) (1-bit)"
+    description: "Blackhole: move srcB register to Dst in debug mode - do not wait for ready signals"
+
+RESOURCEDECL:
+    instrn_type: COMPUTE
+    ex_resource: NONE
+    op_binary: 0x05
+    src_mask: 0x0
+    fcov:
+    arguments:
+        - name: op_class
+          start_bit: 0
+          field_type: DEC
+          description: "Set the resources used by instruction class N (0-15, e.g. 4 is STREAMWRCFG/CFGSHIFTMASK, 13 is MOP, 14 is REPLAY)"
+        - name: resources
+          start_bit: 4
+          field_type: BIN
+          description: "Resources declared for that class: bit0 reads shared cfg, bit1 writes shared cfg, bits2-4 which CFG space, bit5 reads GPR, bit6 writes GPR, bit7 reads TDMA, bit8 writes TDMA"
+        - name: linger_time
+          start_bit: 13
+          field_type: BIN
+          description: "Extra stall time OR-ed into a shift register whenever an instruction of this class is stalled (bits 16:13, default 4'b0001)"
+        - name: reserved
+          start_bit: 17
+          field_type: BIN
+          description: "Unused"
+    description: "Blackhole: declare ahead-of-time which resources a class of Tensix instructions uses, for the Tensix-TRISC sync mechanism"
+
+STREAMWAIT:
+    instrn_type: LOCAL_CREGS
+    ex_resource: SYNC
+    op_binary: 0xa7
+    src_mask: 0x0
+    fcov:
+    arguments:
+        - name: wait_stream_sel
+          start_bit: 0
+          field_type: DEC
+          description: "Selects one of the STREAM_ID_SYNC global CFG regs (0-3); its value is the ID of the stream to wait on"
+        - name: target_sel
+          start_bit: 3
+          field_type: BIN
+          description: "0 - target_value is a phase number, 1 - target_value is a number of messages received"
+        - name: target_value
+          start_bit: 4
+          field_type: DEC
+          description: "(10-bit field, bits 13:4) low bits of the phase / num_msgs_received value to wait for, the high bits coming from STREAMWAIT_PARAMS"
+        - name: reserved
+          start_bit: 14
+          field_type: BIN
+          description: "Unused"
+        - name: stall_res
+          start_bit: 15
+          field_type: HEX
+          description: "resource to be stalled -- bit mask for resources (compute/tdma(bit0), sync(bit1), pack(bit2), unpack(bit3), xmov(bit4), thcon(bit5), math(bit6), cfg(bit7), sfpu(bit8)  )"
+    description: "Blackhole: like STALLWAIT, but the wait condition is a stream reaching a given phase or message count"
+
+STREAMWRCFG:
+    instrn_type: LOCAL_CREGS
+    ex_resource: CFG
+    op_binary: 0xb7
+    src_mask: 0x0
+    fcov:
+    arguments:
+        - name: CfgReg
+          start_bit: 0
+          field_type: DEC
+          description: "configuration register address to write data to (32-bit aligned)"
+        - name: StreamRegAddr
+          start_bit: 11
+          field_type: DEC
+          description: "Address of desired stream register"
+        - name: stream_id_sel
+          start_bit: 21
+          field_type: DEC
+          description: "Selects one of the STREAM_ID_SYNC thread-private CFG regs (0-3); its value is the ID of the stream to read from"
+    description: "Blackhole: read a stream register and save the result in a CFG register"

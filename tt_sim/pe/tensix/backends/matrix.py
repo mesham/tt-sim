@@ -62,6 +62,18 @@ class MatrixUnit(TensixBackendUnit):
             return extract_bits(instruction_info["raw_instruction"], 3, 14)
         return instr_args["addr_mode"]
 
+    def _read_pool_addr_mode(self, instruction_info, instr_args):
+        # GAPOOL and GMPOOL keep their addressing-mode field at bit 15 on
+        # Blackhole (where it is renamed ``pool_addr_mode``), but widen it to 3
+        # bits: raw 17:15 versus Wormhole's 16:15. That is a different position
+        # to every other math instruction (which move to 16:14, see
+        # ``_read_addr_mode``), so these two need their own reader — using the
+        # generic one would pick up bit 14, which here is ``max_pool_index_en``.
+        # See docs/plans/blackhole-support.md (Phase 8).
+        if self.backend.blackhole:
+            return extract_bits(instruction_info["raw_instruction"], 3, 15)
+        return instr_args["addr_mode"]
+
     def handle_cleardvalid(self, instruction_info, issue_thread, instr_args):
         reset = instr_args["reset"] & 0x1
         keepReadingSameSrc = (instr_args["reset"] >> 1) & 0x1
@@ -449,7 +461,7 @@ class MatrixUnit(TensixBackendUnit):
 
     def handle_gapool(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
-        addrMod = self._read_addr_mode(instruction_info, instr_args)
+        addrMod = self._read_pool_addr_mode(instruction_info, instr_args)
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
@@ -569,6 +581,7 @@ class MatrixUnit(TensixBackendUnit):
                 srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
             else:
                 srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+            srcAFmt = self.implied_srcA_format(issue_thread, srcAFmt)
             if srcAFmt in [
                 DataFormat.FP32,
                 DataFormat.BF16,
@@ -593,6 +606,27 @@ class MatrixUnit(TensixBackendUnit):
 
             useDst32b = self.getConfigValue(stateID, "ALU_ACC_CTRL_Fp32_enabled")
             return srcAStyle, useDst32b
+
+    def implied_srcA_format(self, issue_thread, configuredFmt):
+        """The operand format Blackhole's matrix unit actually uses for SrcA.
+
+        Wormhole always takes it from ALU_FORMAT_SPEC_REG0_SrcA. Blackhole
+        instead *implies* it from the format the unpacker last wrote the bank
+        in, latched when the bank was handed over; the configured register is
+        only consulted when DISABLE_IMPLIED_SRCA_FMT_Base is set.
+
+        This matters for the FP32 path. tt-metal leaves ALU_FORMAT_SPEC_REG0_SrcA
+        at FP32 while the unpacker converts to TF32 on the way into Src, and
+        SrcA holds TF32 in a 19-bit form. Reading the configured FP32 selects
+        the BF16 operand style, which narrows the datum to 7 mantissa bits and
+        loses ~2 bits of every copied value; the implied TF32 keeps all 10.
+        """
+        if not self.backend.blackhole:
+            return configuredFmt
+        if self.getThreadConfigValue(issue_thread, "DISABLE_IMPLIED_SRCA_FMT_Base"):
+            return configuredFmt
+        latched = self.backend.getSrcA(self.srcABank).getDataFormat()
+        return configuredFmt if latched is None else latched
 
     def get_base_row_ranges(self, issue_thread, stateID, rwc, broadcastSrcBRow):
         # Determine the row range

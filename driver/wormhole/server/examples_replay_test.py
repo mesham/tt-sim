@@ -30,8 +30,17 @@ from .wh_device import make_device
 
 TRACES = Path(__file__).resolve().parent / "traces"
 EXAMPLES = [
-    "one", "two", "three", "four", "four-fp", "five", "five-fp",
-    "six", "eight", "nine", "loopback",
+    "one",
+    "two",
+    "three",
+    "four",
+    "four-fp",
+    "five",
+    "five-fp",
+    "six",
+    "eight",
+    "nine",
+    "loopback",
 ]
 
 # The go-message mailbox the host spin-polls waiting for RUN_MSG_DONE; its

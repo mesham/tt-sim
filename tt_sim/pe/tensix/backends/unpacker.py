@@ -135,22 +135,31 @@ class UnPackerUnit(TensixBackendUnit):
             self.handle_give_src_to_fpu(issue_thread, raw)
 
     def handle_give_src_to_fpu(self, issue_thread, args):
+        # Unlike the regular UNPACR, this path moves no datums, so there is no
+        # latched unpack state to take the format from -- read it from config,
+        # as the hardware does.
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+        outDataFormat = DataFormat(
+            self.getConfigValue(
+                stateID, "THCON_SEC" + str(self.unpacker_id) + "_REG2_Out_data_format"
+            )
+        )
+
         if self.unpacker_id == 0:
-            self.backend.getSrcA(self.srcBank).setAllowedClient(
-                SrcRegister.SrcClient.MatrixUnit
-            )
-            self.srcBank ^= 1
-            self.srcRow[issue_thread] = (
-                self.backend.getThreadConfigValue(issue_thread, "SRCA_SET_Base") << 4
-            )
+            src = self.backend.getSrcA(self.srcBank)
+            setBase = "SRCA_SET_Base"
         else:
-            self.backend.getSrcB(self.srcBank).setAllowedClient(
-                SrcRegister.SrcClient.MatrixUnit
-            )
-            self.srcBank ^= 1
-            self.srcRow[issue_thread] = (
-                self.backend.getThreadConfigValue(issue_thread, "SRCB_SET_Base") << 4
-            )
+            src = self.backend.getSrcB(self.srcBank)
+            setBase = "SRCB_SET_Base"
+
+        src.setAllowedClient(SrcRegister.SrcClient.MatrixUnit)
+        src.setDataFormat(outDataFormat)
+        self.srcBank ^= 1
+        self.srcRow[issue_thread] = (
+            self.backend.getThreadConfigValue(issue_thread, setBase) << 4
+        )
 
     def handle_mmio_register_write(self, args):
         accumulate = get_nth_bit(args, 3)
@@ -820,7 +829,7 @@ class UnPackerUnit(TensixBackendUnit):
                     1
                 ].Z += ch1ZInc
 
-    def flip_src_banks(self, flipSrc, issue_thread):
+    def flip_src_banks(self, flipSrc, issue_thread, outDataFormat=None):
         srcRowBase = (
             self.backend.getThreadConfigValue(issue_thread, "SRCB_SET_Base")
             if self.unpacker_id
@@ -835,13 +844,14 @@ class UnPackerUnit(TensixBackendUnit):
             # runs once per unpacked face; toggling would flip an even number of
             # times and leave the bank owned by the unpackers, starving the FPU.
             if self.unpacker_id == 0:
-                self.backend.getSrcA(self.srcBank).setAllowedClient(
-                    SrcRegister.SrcClient.MatrixUnit
-                )
+                src = self.backend.getSrcA(self.srcBank)
             else:
-                self.backend.getSrcB(self.srcBank).setAllowedClient(
-                    SrcRegister.SrcClient.MatrixUnit
-                )
+                src = self.backend.getSrcB(self.srcBank)
+            src.setAllowedClient(SrcRegister.SrcClient.MatrixUnit)
+            # Latch the format the bank was written in, for the matrix unit's
+            # implied-format read (see ``latch_src_data_format``).
+            if outDataFormat is not None:
+                src.setDataFormat(outDataFormat)
             self.srcBank ^= 1
             self.srcRow[issue_thread] = srcRowBase
         else:
@@ -1111,4 +1121,4 @@ class UnPackerUnit(TensixBackendUnit):
         )
 
         # Flip src banks
-        self.flip_src_banks(state["flipSrc"], issue_thread)
+        self.flip_src_banks(state["flipSrc"], issue_thread, state["outDataFormat"])

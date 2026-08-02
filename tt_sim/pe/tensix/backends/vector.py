@@ -2,7 +2,7 @@ from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
 from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import extract_bits, get_bits, get_nth_bit
-from tt_sim.util.conversion import conv_to_float, conv_to_uint32
+from tt_sim.util.conversion import conv_to_float, conv_to_int32, conv_to_uint32
 
 _M64 = 0xFFFFFFFFFFFFFFFF
 _M32 = 0xFFFFFFFF
@@ -134,6 +134,7 @@ class VectorUnit(TensixBackendUnit):
         "SFPSETEXP": "handle_sfpsetexp",
         "SFPSETMAN": "handle_sfpsetman",
         "SFPSHFT": "handle_sfpshft",
+        "SFPSHFT2": "handle_sfpshft2",
         "SFPSETSGN": "handle_sfpsetsgn",
         "SFPAND": "handle_sfpand",
         "SFPOR": "handle_sfpor",
@@ -228,6 +229,17 @@ class VectorUnit(TensixBackendUnit):
     # stochastic (rnd_mode == 1) path reuses it. Per
     # WormholeB0/TensixTile/TensixCoprocessor/SFPSTOCHRND_*.md.
     SFP_STOCH_RND_PRNG_RNE = 0x400000
+    # rnd_mode values. Wormhole has a one-bit field (nearest-even / stochastic);
+    # Blackhole widens it to two bits and adds round-toward-zero (sfpi's
+    # RoundMode::Zero, guarded by __riscv_xtttensixbh).
+    SFP_STOCH_RND_RND_NEAREST_EVEN = 0
+    SFP_STOCH_RND_RND_STOCHASTIC = 1
+    SFP_STOCH_RND_RND_ZERO = 2
+    # Every rounding decision in the op is ``discarded >= constant`` where the
+    # discarded part is always below 0x800000, so this constant never rounds up
+    # — i.e. it truncates, which on these sign-magnitude data is exactly
+    # round-toward-zero.
+    SFP_STOCH_RND_PRNG_TRUNCATE = 0x800000
     SFP_STOCH_RND_FP32_TO_FP16A = 0
     SFP_STOCH_RND_FP32_TO_FP16B = 1
     # fp32 -> integer modes: (keep_sign, max_magnitude).
@@ -253,6 +265,24 @@ class VectorUnit(TensixBackendUnit):
     SFPSETEXP_MOD1_ARG_EXPONENT = 2
     SFPSETMAN_MOD1_ARG_IMM = 1
     SFPSHFT_MOD1_ARG_IMM = 1
+    # Blackhole-only SFPSHFT modifier bits (Wormhole reserves everything above
+    # bit 0): bit 1 makes right shifts arithmetic, bit 2 takes the value being
+    # shifted from VC instead of VD (sfpi's SFPSHFT_MOD1_{ARITHMETIC,SRC_LREGC}).
+    SFPSHFT_MOD1_ARITHMETIC = 2
+    SFPSHFT_MOD1_SRC_LREG_C = 4
+
+    # SFPSHFT2 instruction modifiers (the subset the reference simulator models).
+    SFPSHFT2_MOD1_SUBVEC_SHFLROR1 = 3
+    SFPSHFT2_MOD1_SUBVEC_SHFLSHR1 = 4  # Blackhole only: broken in Wormhole silicon
+    SFPSHFT2_MOD1_SHFT_LREG = 5
+
+    # SFPCAST instruction modifiers. Modes 0 and 1 (int32 -> fp32, rounding to
+    # nearest-even / stochastically) exist on both architectures; Blackhole adds
+    # the sign-magnitude <-> two's-complement conversions.
+    SFPCAST_MOD1_INT32_TO_FP32_RNE = 0
+    SFPCAST_MOD1_INT32_TO_FP32_RNS = 1
+    SFPCAST_MOD1_SM32_TO_INT32 = 2
+    SFPCAST_MOD1_INT32_TO_SM32 = 3
 
     ENABLE_FP16A_INF = (0, 1)
     DISABLE_BACKDOOR_LOAD = (1, 1)
@@ -515,19 +545,48 @@ class VectorUnit(TensixBackendUnit):
             if vc_writable:
                 self.lregs[vc][lane] = new_c
 
+    @staticmethod
+    def _cast_negate(c, sign):
+        """Blackhole SFPCAST modes 2 and 3 (sign-magnitude <-> two's complement).
+
+        Verbatim from ttsim's ``TENSIX_EXECUTE_SFPCAST`` Blackhole branch
+        (``dst = sign | (sign ? -src : src)``): the whole word is negated when
+        the sign bit is set and the sign bit is then forced back on. That single
+        involution converts in both directions, which is why the two modes share
+        it. It also reproduces the hardware quirk sfpi documents next to
+        ``SFPCAST_MOD1_SM32_TO_INT32`` — sign-magnitude ``-0`` (0x80000000)
+        negates to itself, so it comes out as the most negative int32 rather
+        than as zero.
+        """
+        return (sign | ((-c) if sign else c)) & 0xFFFFFFFF
+
     def handle_sfpcast(self, instruction_info, issue_thread, instr_args):
         # Cast a sign-magnitude int32 in VC to FP32 in VD. Verbatim port of the
         # pseudocode in WormholeB0/TensixTile/TensixCoprocessor/SFPCAST.md.
         # mod1 & 1 selects stochastic rounding (seven PRNG bits) on hardware;
         # tt-sim does not model the SFPU PRNG, so both modes round to nearest
         # even here (the round-to-nearest branch below).
+        #
+        # Blackhole adds two more modes (2 and 3), which convert between
+        # sign-magnitude and two's-complement integers rather than producing a
+        # float; see ``_cast_negate`` for the shared body.
         mod1 = instr_args["instr_mod1"]
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_src_c"]
+        int_convert = self.backend.blackhole and mod1 in (
+            VectorUnit.SFPCAST_MOD1_SM32_TO_INT32,
+            VectorUnit.SFPCAST_MOD1_INT32_TO_SM32,
+        )
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            mode = "stochastic~rne" if (mod1 & 1) else "rne"
-            print(f"SFPU: lreg[{vd}] = fp32(int32 lreg[{vc}]) [{mode}]")
+            if int_convert:
+                kind = (
+                    "sm32" if mod1 == VectorUnit.SFPCAST_MOD1_SM32_TO_INT32 else "i32"
+                )
+                print(f"SFPU: lreg[{vd}] = negate_if_signed({kind} lreg[{vc}])")
+            else:
+                mode = "stochastic~rne" if (mod1 & 1) else "rne"
+                print(f"SFPU: lreg[{vd}] = fp32(int32 lreg[{vc}]) [{mode}]")
 
         if not (vd < 8 or vd == 16):
             return
@@ -537,6 +596,9 @@ class VectorUnit(TensixBackendUnit):
                 continue
             c = conv_to_uint32(self.lregs[vc][lane]) & 0xFFFFFFFF
             sign = c & 0x80000000
+            if int_convert:
+                self.lregs[vd][lane] = self._cast_negate(c, sign)
+                continue
             mag = c & 0x7FFFFFFF
             # __builtin_clz of the 32-bit magnitude; the docs use 157 as the
             # sentinel for mag == 0 so the exponent field lands on zero.
@@ -551,14 +613,27 @@ class VectorUnit(TensixBackendUnit):
                 d = (d + 1) & 0xFFFFFFFF
             self.lregs[vd][lane] = conv_to_float(d)
 
+    def _read_rnd_mode(self, instruction_info):
+        # SFP_STOCH_RND's ``rnd_mode`` is one bit on Wormhole (raw bit 21) and
+        # two bits on Blackhole (raw bits 22:21, the extra encoding being
+        # round-toward-zero). The shared instruction table gives the field the
+        # whole top of the argument word (23:21), so read the architecture's
+        # real width straight out of the raw instruction — the same idiom as
+        # ``_read_sfpu_addr_mode``.
+        if instruction_info is None:
+            return VectorUnit.SFP_STOCH_RND_RND_NEAREST_EVEN
+        width = 2 if self.backend.blackhole else 1
+        return extract_bits(instruction_info["raw_instruction"], width, 21)
+
     def handle_sfp_stoch_rnd(self, instruction_info, issue_thread, instr_args):
         # Round / narrow VC into VD. Verbatim port of the pseudocode in
         # WormholeB0/TensixTile/TensixCoprocessor/SFPSTOCHRND_{FloatFloat,
         # FloatInt,IntInt}.md. mod bits [2:0] pick the conversion; bit 3
         # selects the immediate descale over src_b (int32->int8 only). rnd_mode
         # selects stochastic rounding on hardware, which needs the SFPU PRNG
-        # tt-sim does not model, so both paths use the round-to-nearest
-        # constant 0x400000.
+        # tt-sim does not model, so that path uses the round-to-nearest
+        # constant 0x400000. Blackhole additionally has rnd_mode 2 (round toward
+        # zero), which is deterministic and therefore modelled exactly.
         mod = instr_args["instr_mod1"]
         mode = mod & 0x7
         use_imm = bool(mod & 0x8)
@@ -566,11 +641,15 @@ class VectorUnit(TensixBackendUnit):
         vc = instr_args["lreg_src_c"]
         vb = instr_args["lreg_src_b"]
         imm8 = instr_args["imm8_math"]
+        rnd_mode = self._read_rnd_mode(instruction_info)
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(f"SFPU: lreg[{vd}] = stochrnd(lreg[{vc}]) mode {mode}")
+            print(f"SFPU: lreg[{vd}] = stochrnd(lreg[{vc}]) mode {mode} rnd {rnd_mode}")
 
-        prng = VectorUnit.SFP_STOCH_RND_PRNG_RNE
+        if rnd_mode == VectorUnit.SFP_STOCH_RND_RND_ZERO:
+            prng = VectorUnit.SFP_STOCH_RND_PRNG_TRUNCATE
+        else:
+            prng = VectorUnit.SFP_STOCH_RND_PRNG_RNE
 
         for lane in range(32):
             gate = vd < 12 or self.laneConfigValue(
@@ -775,18 +854,24 @@ class VectorUnit(TensixBackendUnit):
                     )
 
     def handle_sfpshft(self, instruction_info, issue_thread, instr_args):
-        mod1 = instr_args["instr_mod1"] & 1  # spec: high bits reserved, mask to 1
+        # Wormhole reserves every instr_mod1 bit above bit 0 (shift amount from
+        # the immediate rather than from VC), so it is masked away there.
+        # Blackhole adds bit 1 (right shifts become arithmetic) and bit 2 (the
+        # value being shifted comes from VC rather than VD) — per ttsim's
+        # ``TT_ARCH_VERSION >= 1`` branch of ``TENSIX_EXECUTE_SFPSHFT``.
+        mod1 = instr_args["instr_mod1"] & (7 if self.backend.blackhole else 1)
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
         imm12 = instr_args["imm12_math"] & 0xFFF
         if imm12 >= 0x800:
             imm12 -= 0x1000  # sign-extend 12-bit immediate
-        vb = vd
+        vb = vc if (mod1 & VectorUnit.SFPSHFT_MOD1_SRC_LREG_C) else vd
 
         if self.getDiagnosticSettings().reportSFPUCalculations():
-            print(
-                f"SFPU: lreg[{vd}] = lreg[{vb}] shift {imm12 if mod1 else f'lreg[{vc}]'}"
+            amount = (
+                imm12 if (mod1 & VectorUnit.SFPSHFT_MOD1_ARG_IMM) else f"lreg[{vc}]"
             )
+            print(f"SFPU: lreg[{vd}] = lreg[{vb}] shift {amount}")
 
         if vd < 8 or vd == 16:
             for lane in range(32):
@@ -799,9 +884,79 @@ class VectorUnit(TensixBackendUnit):
                     b = conv_to_uint32(self.lregs[vb][lane])
                     if shift_amount >= 0:
                         result = (b << (shift_amount & 31)) & 0xFFFFFFFF
+                    elif mod1 & VectorUnit.SFPSHFT_MOD1_ARITHMETIC:
+                        result = (
+                            conv_to_int32(b) >> ((-shift_amount) & 31)
+                        ) & 0xFFFFFFFF
                     else:
                         result = b >> ((-shift_amount) & 31)
                     self.lregs[vd][lane] = result
+
+    def handle_sfpshft2(self, instruction_info, issue_thread, instr_args):
+        """Cross-lane and register-indirect shifts (SFPSHFT2).
+
+        Port of ttsim's ``TENSIX_EXECUTE_SFPSHFT2``, which models three of the
+        seven modes: 3 rotates each 8-lane subvector up by one lane, 4 does the
+        same but shifts a zero into lane 0 instead of wrapping, and 5 shifts
+        ``LReg[imm12]`` by the signed amount held in VC. Mode 4 is Blackhole
+        only — the Wormhole silicon has a bug in it, and ttsim rejects it there.
+        The remaining modes (the LReg[3:0] block copies, and mode 6's immediate
+        shift amount) are not modelled by the reference either.
+        """
+        mod1 = instr_args["instr_mod1"]
+        vd = instr_args["lreg_dest"]
+        vc = instr_args["lreg_src_c"]
+        imm12 = instr_args["imm12_math"]
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = shft2(lreg[{vc}]) mode {mod1}")
+
+        if (
+            mod1 == VectorUnit.SFPSHFT2_MOD1_SUBVEC_SHFLSHR1
+            and not self.backend.blackhole
+        ):
+            raise NotImplementedError(
+                "SFPSHFT2 SUBVEC_SHFLSHR1 (instr_mod1 4) must not be used on "
+                "Wormhole, where it is broken in hardware"
+            )
+        if mod1 not in (
+            VectorUnit.SFPSHFT2_MOD1_SUBVEC_SHFLROR1,
+            VectorUnit.SFPSHFT2_MOD1_SUBVEC_SHFLSHR1,
+            VectorUnit.SFPSHFT2_MOD1_SHFT_LREG,
+        ):
+            raise NotImplementedError(f"SFPSHFT2 instr_mod1 {mod1} is not modelled")
+
+        if not (vd < 8 or vd == 16):
+            return
+
+        if mod1 == VectorUnit.SFPSHFT2_MOD1_SHFT_LREG:
+            # imm12 names the LReg holding the value to shift; VC holds a signed
+            # per-lane shift amount (negative shifts right, logically).
+            assert imm12 < 16, f"SFPSHFT2 source register {imm12} out of range"
+            for lane in range(32):
+                if self.isLaneEnabled(lane):
+                    amount = conv_to_int32(self.lregs[vc][lane])
+                    b = conv_to_uint32(self.lregs[imm12][lane])
+                    if amount >= 0:
+                        b = (b << (amount & 31)) & 0xFFFFFFFF
+                    else:
+                        b = b >> ((-amount) & 31)
+                    self.lregs[vd][lane] = b
+            return
+
+        # Snapshot VC before writing: VD and VC are often the same register, and
+        # every lane reads its neighbour's pre-shift value (ttsim copies the
+        # source register first for exactly this reason).
+        src = [conv_to_uint32(self.lregs[vc][lane]) for lane in range(32)]
+        for lane in range(32):
+            if not self.isLaneEnabled(lane):
+                continue
+            if lane & 7:
+                self.lregs[vd][lane] = src[lane - 1]
+            elif mod1 == VectorUnit.SFPSHFT2_MOD1_SUBVEC_SHFLROR1:
+                self.lregs[vd][lane] = src[lane + 7]  # rotate within the subvector
+            else:
+                self.lregs[vd][lane] = 0  # zero fill
 
     def handle_addi(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]

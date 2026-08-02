@@ -7,8 +7,11 @@
 #
 # Run in a NORMAL shell (not a sandbox that kills the spawned sim servers):
 #   TT_METAL_HOME=/path/to/tt-metal \
-#   TTSIM_ORACLE=/path/to/dir/with/libttsim_bh.so+soc_descriptor.yaml \
+#   TTSIM_ORACLE=/path/to/dir/with/libttsim_bh.so + a SoC descriptor \
 #   ./optests/diff.sh [op-program-name]      # default: optest
+#
+# The descriptor may be named `soc_descriptor.yaml` or `blackhole_140_arch.yaml`
+# (what ttsim's own oracle-bh/ ships) -- see _stage_oracle below.
 #
 # Add op programs under optests/<name>/src (a tt-metal host that dumps its
 # output tile as `OPDIFF_RESULT:<hex>`); the compute kernel picks the op.
@@ -21,7 +24,7 @@ COORDS="${TT_SIM_TENSIX_COORDS:-1-2}"          # tt-sim needs the worker tile(s)
 TIMEOUT="${TT_SIM_EXAMPLE_TIMEOUT:-300}"
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
-: "${TTSIM_ORACLE:?set TTSIM_ORACLE to a dir holding libttsim_bh.so + soc_descriptor.yaml}"
+: "${TTSIM_ORACLE:?set TTSIM_ORACLE to a dir holding libttsim_bh.so + a SoC descriptor}"
 export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
 export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:${LD_LIBRARY_PATH:-}"
 export TT_METAL_SLOW_DISPATCH_MODE=1
@@ -33,6 +36,44 @@ VENV="${TT_SIM_VENV:-$REPO/../venv}"
 [ -x "$VENV/bin/python3" ] && export PATH="$VENV/bin:$PATH"
 
 [ -d "$SRC" ] || { echo "no op program at $SRC" >&2; exit 2; }
+
+# UMD hardcodes the descriptor's *filename*: for a .so simulator it reads
+# `<dir-of-so>/soc_descriptor.yaml` (umd device/simulation/simulation_chip.cpp),
+# so we cannot just hand it a differently-named file. ttsim's own oracle-bh/
+# ships the descriptor as `blackhole_140_arch.yaml`, which would otherwise make
+# every run die in the YAML loader with a bare `bad file:` and report "no result
+# from ttsim". When the expected name is missing, stage a scratch directory of
+# symlinks with the name UMD wants, rather than writing into the ttsim checkout.
+# Sets ORACLE_DIR (the directory to load the simulator from) and, when it had to
+# build one, STAGED_ORACLE (removed on exit). Assigns rather than echoes: a
+# command substitution runs in a subshell, so STAGED_ORACLE set there would be
+# lost and the scratch directory would leak.
+STAGED_ORACLE=""
+ORACLE_DIR=""
+_stage_oracle() {
+  local abs_so abs_desc desc
+  abs_so="$(cd "$TTSIM_ORACLE" 2>/dev/null && pwd)/libttsim_bh.so"
+  [ -f "$abs_so" ] || { echo "no libttsim_bh.so in $TTSIM_ORACLE" >&2; return 1; }
+  if [ -f "$TTSIM_ORACLE/soc_descriptor.yaml" ]; then
+    ORACLE_DIR="$TTSIM_ORACLE"
+    return 0
+  fi
+  for desc in "$TTSIM_ORACLE/blackhole_140_arch.yaml" "$TTSIM_ORACLE"/*_arch.yaml; do
+    [ -f "$desc" ] || continue
+    abs_desc="$(cd "$(dirname "$desc")" && pwd)/$(basename "$desc")"
+    STAGED_ORACLE="$(mktemp -d)" || return 1
+    ln -s "$abs_so" "$STAGED_ORACLE/libttsim_bh.so"
+    ln -s "$abs_desc" "$STAGED_ORACLE/soc_descriptor.yaml"
+    ORACLE_DIR="$STAGED_ORACLE"
+    echo "[oracle] staged $(basename "$abs_desc") as soc_descriptor.yaml"
+    return 0
+  done
+  echo "no soc_descriptor.yaml or *_arch.yaml in $TTSIM_ORACLE" >&2
+  return 1
+}
+
+trap '[ -n "$STAGED_ORACLE" ] && rm -rf "$STAGED_ORACLE"' EXIT
+_stage_oracle || exit 2
 
 if [ ! -x "$SRC/build/$NAME" ]; then
   echo "BUILD $NAME"
@@ -54,8 +95,8 @@ _result() { grep -o 'OPDIFF_RESULT:[0-9a-f]*' "$1" | head -1 | cut -d: -f2; }
 ora_log="/tmp/optest_${NAME}_oracle.out"
 our_log="/tmp/optest_${NAME}_ours.out"
 
-echo "[oracle: ttsim]  $TTSIM_ORACLE/libttsim_bh.so"
-_run "$TTSIM_ORACLE/libttsim_bh.so" "" "$ora_log"
+echo "[oracle: ttsim]  $ORACLE_DIR/libttsim_bh.so"
+_run "$ORACLE_DIR/libttsim_bh.so" "" "$ora_log"
 echo "[ours:   tt-sim] $REPO/driver/blackhole  (coords=$COORDS)"
 _run "$REPO/driver/blackhole" "$COORDS" "$our_log"
 pkill -9 -f 'driver.(wormhole|blackhole).server' 2>/dev/null

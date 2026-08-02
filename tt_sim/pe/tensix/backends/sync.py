@@ -1,7 +1,7 @@
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
-from tt_sim.util.bits import get_nth_bit
+from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
@@ -141,8 +141,23 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             if get_nth_bit(sem_sel, i) and self.semaphores[i].value > 0:
                 self.semaphores[i].value -= 1
 
+    def _read_wait_res(self, instruction_info, instr_args):
+        # STALLWAIT's ``wait_res`` condition mask is 12 bits on Blackhole (raw
+        # bits 11:0, conditions C0-C11) but 15 bits on Wormhole (14:0). The
+        # shared instruction table encodes the Wormhole width, so on Blackhole
+        # bits 14:12 - which are not part of the field there - leak into the
+        # mask and select spurious conditions. Read the true field from the raw
+        # word on Blackhole (widths from ttsim's data/{bh,wh}/tensix_isa.json).
+        # Blackhole's LLK does define one condition above the field - CFGEXU,
+        # bit 12, which WaitGate models as C12 - but never emits it; such a
+        # wait now falls back to the "wait for all resources" 0x7F mask below.
+        # See docs/plans/blackhole-support.md (Phase 8).
+        if self.backend.blackhole:
+            return extract_bits(instruction_info["raw_instruction"], 12, 0)
+        return instr_args["wait_res"]
+
     def handle_stallwait(self, instruction_info, issue_thread, instr_args):
-        cond_mask = instr_args["wait_res"]
+        cond_mask = self._read_wait_res(instruction_info, instr_args)
         block_mask = instr_args["stall_res"]
 
         self.backend.getFrontendThread(

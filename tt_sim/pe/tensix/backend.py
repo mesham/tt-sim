@@ -16,6 +16,23 @@ from tt_sim.pe.tensix.util import (
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
+#: Blackhole-only Tensix instructions that tt-sim decodes but does not model:
+#: name -> what the hardware does, for the error message. The vendor reference
+#: simulator (ttsim, ``data/bh/tensix_isa.json``) marks all four "unsupported"
+#: and raises on them, so there is no behaviour to port and nothing to validate
+#: an implementation against. Rather than silently no-op them (RESOURCEDECL in
+#: particular has ``ex_resource: NONE``, which would otherwise be ignored like a
+#: NOP) they are rejected loudly here — the same choice as the baby-RISC-V
+#: guards in ``tt_sim/pe/rv/isa/guard_isa.py``. Decoding them at least means the
+#: fields are named (see ``tensix_instructions.yaml``) for whoever implements one.
+UNMODELLED_BLACKHOLE_INSTRUCTIONS = {
+    "MOVDBGB2D": "moves SrcB into Dst in debug mode, bypassing the ready signals",
+    "RESOURCEDECL": "declares the resources a class of Tensix instructions uses, "
+    "for the Tensix-TRISC sync mechanism",
+    "STREAMWAIT": "stalls resources until a NoC stream reaches a phase / message count",
+    "STREAMWRCFG": "copies a NoC stream register into a config register",
+}
+
 
 class TensixBackend:
     """
@@ -164,6 +181,16 @@ class TensixBackend:
 
     def issueInstruction(self, instruction, from_thread):
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+        instruction_name = instruction_info["name"]
+        if instruction_name in UNMODELLED_BLACKHOLE_INSTRUCTIONS:
+            raise NotImplementedError(
+                f"Tensix instruction {instruction_name} ({hex(instruction)}) from thread "
+                f"{from_thread} is not modelled in tt-sim: it "
+                f"{UNMODELLED_BLACKHOLE_INSTRUCTIONS[instruction_name]}, and the vendor "
+                f"reference simulator does not implement it either, so its behaviour "
+                f"cannot be ported. Implement it here (tt_sim/pe/tensix/backend.py) when "
+                f"a kernel needs it."
+            )
         tgt_backend_unit = instruction_info["ex_resource"]
         if tgt_backend_unit != "NONE":
             if tgt_backend_unit == "UNPACK":

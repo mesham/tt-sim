@@ -72,6 +72,11 @@ class SrcRegister:
     def __init__(self):
         self.allowedClient = SrcRegister.SrcClient.Unpackers
         self.data = np.empty([64, 16], dtype=np.uint32)
+        # The format the unpacker wrote this bank in, latched when the bank was
+        # handed to the matrix unit. Blackhole's matrix unit reads the operand
+        # format from here rather than from ALU_FORMAT_SPEC_REG0_SrcA/1_SrcB;
+        # see MatrixUnit.get_dataformat_and_useDst. None until first set.
+        self.dataFormat = None
 
     def flipAllowedClient(self):
         if self.allowedClient == SrcRegister.SrcClient.Unpackers:
@@ -84,6 +89,12 @@ class SrcRegister:
 
     def setAllowedClient(self, c):
         self.allowedClient = c
+
+    def getDataFormat(self):
+        return self.dataFormat
+
+    def setDataFormat(self, fmt):
+        self.dataFormat = fmt
 
     def __getitem__(self, key):
         x, y = key
