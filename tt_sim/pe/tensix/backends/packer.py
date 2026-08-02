@@ -42,6 +42,10 @@ class PackerUnit(TensixBackendUnit):
             self.datastreamNeedsNewAddr = True
             self.outBytes = 0
             self.outDataFormat = None
+            # Tile-pack-generator row/column counters, used to pick the edge
+            # mask for each datum (see PackerUnit.edge_masks_for_pacr).
+            self.tpgX = 0
+            self.tpgY = 0
 
     class InputSource(IntEnum):
         L1 = 1
@@ -357,6 +361,11 @@ class PackerUnit(TensixBackendUnit):
             if self.packerI[i].datastreamNeedsNewAddr:
                 self.packerI[i].byteAddress = (addr & 0x1FFFF) << 4
                 self.packerI[i].datastreamNeedsNewAddr = False
+                # The tile-pack-generator counters are per datastream: they only
+                # advance while a datastream is open and restart at zero on the
+                # first PACR of the next one (ttsim's `packer_valid ? tpg : 0`).
+                self.packerI[i].tpgX = 0
+                self.packerI[i].tpgY = 0
 
             if last or flush:
                 self.packerI[i].datastreamNeedsNewAddr = True
@@ -411,6 +420,52 @@ class PackerUnit(TensixBackendUnit):
                 else:
                     adc.Z = z_incr
 
+    def edge_masks_for_pacr(self, stateID, packer):
+        """Resolve packer ``packer``'s per-tile-row edge masks for this PACR.
+
+        Every datum the packer emits is gated by a 16-bit mask, one bit per
+        column: a zero bit writes a zero datum instead of reading Dst. Which
+        mask applies is chosen per tile row: ``PCK_EDGE_TILE_ROW_SET_SELECT``
+        picks one of the two ``TILE_ROW_SET_MAPPING`` tables for this packer,
+        and that table maps the current tile-pack-generator row to
+        ``PCK_EDGE_OFFSET_SEC0_mask`` or ``PCK_EDGE_OFFSET_SEC1_mask``.
+
+        The reduce LLK drives exactly this to zero everything but the reduced
+        datums (``_llk_pack_reduce_mask_config_``): a whole column for a row
+        reduce, the first row for a column reduce, a single datum for a scalar
+        reduce. Without it a reduce output carries whatever else was left in
+        Dst. The default configuration (mapping 0, SEC0 = 0xFFFF) passes every
+        datum through, so this is inert outside reduce.
+
+        Returns ``(masks, readsPerPlane)`` where ``masks[row]`` is the 16-bit
+        mask for tile-pack-generator row ``row`` and ``readsPerPlane`` is the
+        row count the generator wraps at.
+        """
+        if self.getConfigValue(stateID, "PCK_EDGE_MODE_mode"):
+            raise NotImplementedError("Packer per-datum edge mode is not modelled")
+
+        rowSetSelect = (
+            self.getConfigValue(stateID, "PCK_EDGE_TILE_ROW_SET_SELECT_select")
+            >> (2 * packer)
+        ) & 3
+        sectionMask = [
+            self.getConfigValue(stateID, f"PCK_EDGE_OFFSET_SEC{s}_mask")
+            for s in range(4)
+        ]
+        masks = [
+            sectionMask[
+                self.getConfigValue(
+                    stateID,
+                    f"TILE_ROW_SET_MAPPING_{rowSetSelect}_row_set_mapping_{row}",
+                )
+            ]
+            for row in range(16)
+        ]
+        readsPerPlane = self.getConfigValue(
+            stateID, "PACK_COUNTERS_SEC0_pack_reads_per_xy_plane"
+        )
+        return masks, max(1, min(16, readsPerPlane))
+
     def handle_pacr(self, instruction_info, issue_thread, instr_args):
         last = instr_args["Last"]
         flush = get_nth_bit(instr_args["Flush"], 0)
@@ -448,22 +503,37 @@ class PackerUnit(TensixBackendUnit):
                     f"{DATA_FORMAT_TO_NAME[self.packerI[i].outDataFormat]}"
                 )
 
+            edgeMasks, readsPerPlane = self.edge_masks_for_pacr(stateID, i)
+
             # For example four need an extra two for alignment also
             for j in range(self.packerI[i].inputNumDatums):
                 idx = self.packerI[i].inputSourceAddr + j
                 row = idx >> 4
                 col = idx & 0xF
-                if DATA_FORMAT_TO_BITS[self.packerI[i].inDataFormat] == 32:
-                    raw_datum = self.backend.getDst().getDst32b(row, col)
-                else:
-                    raw_datum = self.backend.getDst().getDst16b(row, col)
 
-                datum = self.formatConversion(
-                    stateID,
-                    self.packerI[i].inDataFormat,
-                    self.packerI[i].outDataFormat,
-                    raw_datum,
-                )
+                masked = not get_nth_bit(edgeMasks[self.packerI[i].tpgY & 0xF], col)
+                self.packerI[i].tpgX += 1
+                if self.packerI[i].tpgX == 16:
+                    self.packerI[i].tpgX = 0
+                    self.packerI[i].tpgY += 1
+                    if self.packerI[i].tpgY == readsPerPlane:
+                        self.packerI[i].tpgY = 0
+
+                if masked:
+                    # Edge-masked out: a zero datum is emitted and Dst is not read
+                    datum = 0
+                else:
+                    if DATA_FORMAT_TO_BITS[self.packerI[i].inDataFormat] == 32:
+                        raw_datum = self.backend.getDst().getDst32b(row, col)
+                    else:
+                        raw_datum = self.backend.getDst().getDst16b(row, col)
+
+                    datum = self.formatConversion(
+                        stateID,
+                        self.packerI[i].inDataFormat,
+                        self.packerI[i].outDataFormat,
+                        raw_datum,
+                    )
 
                 self.backend.addressable_memory.write(
                     addr, conv_to_bytes(datum, self.packerI[i].outBytes)

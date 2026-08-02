@@ -358,13 +358,119 @@ def test_sfppopc_matches_across_architectures():
     assert results[0][0] == [lane % 2 == 0 for lane in range(32)]
 
 
+def test_sfppushc_is_lifo_and_snapshots_by_value():
+    # ttsim writes cc_stack[cc_sp] then increments (and reverses on pop), so the
+    # stack is LIFO, and it stores the flags by value -- a later SFPSETCC must
+    # not rewrite an entry already pushed.
+    vu = _vector_unit(blackhole=True)
+    vu.useLaneFlagsForLaneEnable = [True] * 32
+    outer = [lane % 2 == 0 for lane in range(32)]
+    inner = [lane % 4 == 0 for lane in range(32)]
+
+    vu.laneFlags = list(outer)
+    _run(vu, 0x87 << 24)  # SFPPUSHC
+    vu.laneFlags[:] = inner  # in place, as SFPSETCC mutates it
+    _run(vu, 0x87 << 24)  # SFPPUSHC
+    vu.laneFlags = [False] * 32
+
+    _run(vu, 0x88 << 24)  # SFPPOPC -> the inner snapshot
+    assert vu.laneFlags == inner
+    _run(vu, 0x88 << 24)  # SFPPOPC -> the outer snapshot
+    assert vu.laneFlags == outer
+
+
+# --------------------------------------------------------------------------
+# SFPIADD / SFPSETCC lane flags. Both are arch-identical in ttsim, but their
+# operands are read as *signed 32-bit* there (`int32_t src = LReg[c]`), which
+# on Blackhole means the raw uint32 lane's bit 31 -- never `< 0` if compared as
+# a Python int. sfpi's `v_if` lowers onto exactly these two, so getting the
+# sign wrong silently disables every lane inside a conditional block.
+# --------------------------------------------------------------------------
+
+
+def _op_sfpiadd(imm12_math, lreg_c, lreg_dest, instr_mod1):
+    return (
+        (0x79 << 24)
+        | (imm12_math << 12)
+        | (lreg_c << 8)
+        | (lreg_dest << 4)
+        | instr_mod1
+    )
+
+
+def _op_sfpsetcc(imm12_math, lreg_c, lreg_dest, instr_mod1):
+    return (
+        (0x7B << 24)
+        | (imm12_math << 12)
+        | (lreg_c << 8)
+        | (lreg_dest << 4)
+        | instr_mod1
+    )
+
+
+def test_sfpiadd_sign_extends_the_immediate_and_sets_the_flag_from_bit31():
+    # The FP32 exp kernel's overflow guard is `sfpiadd_i(e, -255, CC_LT0)`, which
+    # arrives as imm12_math = 0xF01.
+    for blackhole in (True, False):
+        vu = _vector_unit(blackhole=blackhole)
+        vu.lregs[1][0] = 124  # e < 255 -> in range, flag set
+        vu.lregs[1][1] = 300  # e > 255 -> overflow, flag clear
+        _run(vu, _op_sfpiadd(-255 & 0xFFF, 1, 0, 1))  # ARG_IMM | CC_LT0
+        assert conv_to_uint32(vu.lregs[0][0]) == 0xFFFFFF7D  # 124 - 255
+        assert vu.lregs[0][1] == 45
+        assert vu.laneFlags[0] is True
+        assert vu.laneFlags[1] is False
+
+
+def test_sfpiadd_cc_gte0_inverts_and_cc_none_leaves_the_flag_alone():
+    vu = _vector_unit(blackhole=True)
+    vu.lregs[1][0] = 124
+    _run(vu, _op_sfpiadd(-255 & 0xFFF, 1, 0, 1 | 8))  # ARG_IMM | CC_GTE0
+    assert vu.laneFlags[0] is False
+    vu.laneFlags[0] = True
+    vu.lregs[1][0] = 124
+    _run(vu, _op_sfpiadd(-255 & 0xFFF, 1, 0, 1 | 4))  # ARG_IMM | CC_NONE
+    assert vu.laneFlags[0] is True
+
+
+def test_sfpsetcc_lt0_reads_the_fp32_sign_bit():
+    # sfpi's `v_if(t < 0)` -- e.g. the Newton-Raphson step of
+    # sfpu_reciprocal_iter. Blackhole holds -1.0 as the bit pattern 0xBF800000.
+    bh = _vector_unit(blackhole=True)
+    bh.useLaneFlagsForLaneEnable = [True] * 32
+    bh.laneFlags = [True] * 32
+    bh.lregs[1][0], bh.lregs[1][1] = 0xBF800000, 0x3F800000
+    _run(bh, _op_sfpsetcc(0, 1, 0, 0))  # LREG_LT0
+    assert bh.laneFlags[0] is True
+    assert bh.laneFlags[1] is False
+
+    # Wormhole keeps the mixed float/int LReg model, and must agree.
+    wh = _vector_unit(blackhole=False)
+    wh.useLaneFlagsForLaneEnable = [True] * 32
+    wh.laneFlags = [True] * 32
+    wh.lregs[1][0], wh.lregs[1][1] = -1.0, 1.0
+    _run(wh, _op_sfpsetcc(0, 1, 0, 0))
+    assert wh.laneFlags[:2] == bh.laneFlags[:2]
+
+
+def test_sfpsetcc_gte0_reads_the_fp32_sign_bit():
+    vu = _vector_unit(blackhole=True)
+    vu.useLaneFlagsForLaneEnable = [True] * 32
+    vu.laneFlags = [True] * 32
+    vu.lregs[1][0], vu.lregs[1][1] = 0xBF800000, 0x3F800000
+    _run(vu, _op_sfpsetcc(0, 1, 0, 4))  # LREG_GTE0
+    assert vu.laneFlags[0] is False
+    assert vu.laneFlags[1] is True
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
     print(
         "sfpu_blackhole_modes_test OK: SFPCAST/SFP_STOCH_RND/SFPSHFT/SFPSHFT2/"
-        "SFPMAD/SFPLOADMACRO/SFPPOPC arch behaviour verified"
+        "SFPMAD/SFPLOADMACRO/SFPPUSHC/SFPPOPC/SFPIADD/SFPSETCC arch behaviour "
+        "verified"
     )
 
 

@@ -1,3 +1,5 @@
+import math
+
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
 from tt_sim.pe.tensix.util import DataFormatConversions
@@ -116,6 +118,10 @@ class VectorUnit(TensixBackendUnit):
         "SFPMAD": "handle_mad",
         "SFPADD": "handle_add",
         "SFPMUL": "handle_mul",
+        "SFPLUT": "handle_sfplut",
+        "SFPLUTFP32": "handle_sfplutfp32",
+        "SFPTRANSP": "handle_sfptransp",
+        "SFPLOADMACRO": "handle_sfploadmacro",
         # Blackhole-only SFPU superset.
         "SFPGT": "handle_sfpgt",
         "SFPLE": "handle_sfple",
@@ -275,6 +281,35 @@ class VectorUnit(TensixBackendUnit):
     SFPSHFT2_MOD1_SUBVEC_SHFLROR1 = 3
     SFPSHFT2_MOD1_SUBVEC_SHFLSHR1 = 4  # Blackhole only: broken in Wormhole silicon
     SFPSHFT2_MOD1_SHFT_LREG = 5
+
+    # SFPLUT / SFPLUTFP32 instruction modifiers, per
+    # {WormholeB0,BlackholeA0}/TensixTile/TensixCoprocessor/SFPLUT{,FP32}.md
+    # (both architectures document identical behaviour). Both instructions
+    # evaluate a piecewise-linear function of Abs(LReg[3]) as a single
+    # multiply-add, picking the coefficients from a table selected by the range
+    # the input falls in.
+    SFPLUT_MOD0_SGN_RETAIN = 4  # Result takes LReg[3]'s sign bit
+    SFPLUT_MOD0_INDIRECT_VD = 8  # Destination index comes from LReg[7][3:0]
+    # SFPLUTFP32's table-selection modifiers are decoded as combinations rather
+    # than as an enum: bit 1 selects the FP16-packed tables (clear = one FP32
+    # coefficient per LReg), and within those (Mod1 & 10) == 10 selects the
+    # 3-entry table while bit 0 moves the 6-entry table's last cut from 3.0 to
+    # 4.0. Note FP16_3ENTRY_TABLE (10) has INDIRECT_VD (8) set as part of its
+    # encoding — that is the hardware workaround the ISA docs call out, not a
+    # typo, and the verbatim decode below reproduces it.
+    SFPLUTFP32_MOD1_FP32_3ENTRY_TABLE = 0
+    SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE1 = 2
+    SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE2 = 3
+    SFPLUTFP32_MOD1_FP16_3ENTRY_TABLE = 10
+    SFPLUTFP32_MOD1_SGN_RETAIN = 4
+    SFPLUTFP32_MOD1_INDIRECT_VD = 8
+    # FP32 bit patterns of the 6-entry table's range boundaries.
+    SFPLUT_RANGE_1_0 = 0x3F800000
+    SFPLUT_RANGE_2_0 = 0x40000000
+    SFPLUT_RANGE_0_5 = 0x3F000000
+    SFPLUT_RANGE_1_5 = 0x3FC00000
+    SFPLUT_RANGE_3_0 = 0x40400000
+    SFPLUT_RANGE_4_0 = 0x40800000
 
     # SFPCAST instruction modifiers. Modes 0 and 1 (int32 -> fp32, rounding to
     # nearest-even / stochastically) exist on both architectures; Blackhole adds
@@ -1104,6 +1139,251 @@ class VectorUnit(TensixBackendUnit):
         vc = 9  # hardcoded to be lanes containing 0
         self.perform_mad(va, vb, vc, vd, mod1)
 
+    @staticmethod
+    def _lut8_to_fp32(x):
+        """SFPLUT's ``Lut8ToFp32``: an 8-bit table entry as an FP32 bit pattern.
+
+        Sign in bit 7, a 3-bit *negated* exponent offset in bits 6:4 and 4
+        mantissa bits in bits 3:0, so the representable magnitudes run from
+        2**-7 to just under 2. 0xFF is the reserved "zero" encoding. Verbatim
+        from the ISA docs (and ttsim's ``lut8_to_fp32``).
+        """
+        if x == 0xFF:
+            return 0
+        return ((x >> 7) << 31) | ((127 - ((x >> 4) & 7)) << 23) | ((x & 0xF) << 19)
+
+    @staticmethod
+    def _lut16_to_fp32(x):
+        """SFPLUTFP32's ``Lut16ToFp32``: an FP16 table entry widened to FP32.
+
+        A plain FP16 -> FP32 widening except that the all-ones exponent (which
+        would be Inf/NaN) maps to exponent zero, i.e. to +/-0 rather than to
+        Inf. Verbatim from the ISA docs (and ttsim's ``lut16_to_fp32``).
+        """
+        exp = (x >> 10) & 0x1F
+        return (
+            ((x >> 15) << 31)
+            | ((0 if exp == 0x1F else 112 + exp) << 23)
+            | ((x & 0x3FF) << 13)
+        )
+
+    def _lut_fma(self, a, b, c, sign, sign_retain):
+        """``a * b + c`` for the LUT ops, in whichever LReg model the arch uses.
+
+        On Blackhole every operand is an FP32 bit pattern and the multiply-add
+        is the bit-exact hardware FMA, so the result is returned as bits (this
+        is exactly what ttsim does). On Wormhole the LRegs hold Python floats
+        for float values, so the historical double-precision ``a * b + c`` of
+        ``perform_mad`` is used and a float is returned. ``sign_retain``
+        replaces the result's sign bit with ``sign`` (LReg[3]'s sign bit),
+        which is the docs' ``copysignf(d, l3)``.
+        """
+        if self.backend.blackhole:
+            d = fma_model_bh(a, b, c)
+            if sign_retain:
+                d = (d & 0x7FFFFFFF) | sign
+            return d
+        d = conv_to_float(a) * conv_to_float(b) + conv_to_float(c)
+        if sign_retain:
+            d = math.copysign(d, -1.0 if sign else 1.0)
+        return d
+
+    def _lut_write_lane(self, vd, lane, indirect, value):
+        """Store one LUT result, honouring the shared INDIRECT_VD modifier."""
+        if indirect and vd != 16:
+            vd = conv_to_uint32(self.lregs[7][lane]) & 15
+        if vd < 8 or vd == 16:
+            self.lregs[vd][lane] = value
+
+    def _lut_lane_active(self, vd, lane):
+        return (
+            vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD)
+        ) and self.isLaneEnabled(lane)
+
+    def handle_sfplut(self, instruction_info, issue_thread, instr_args):
+        """SFPLUT: piecewise-linear evaluation from three 8-bit coefficient pairs.
+
+        Verbatim port of the functional model in
+        ``{WormholeB0,BlackholeA0}/TensixTile/TensixCoprocessor/SFPLUT.md``
+        (identical on both architectures, and matching ttsim's
+        ``TENSIX_EXECUTE_SFPLUT``). ``LReg[0..2]`` each hold a packed
+        (multiplier, addend) pair selected by which of |LReg[3]| < 1, < 2 or >=
+        2 holds; the result is ``a * |LReg[3]| + c``.
+
+        This is what the *approximate* ``tanh_tile`` / ``tanh_derivative`` /
+        ``sigmoid_tile`` compile down to — sfpi's ``lut()`` / ``lut_sign()``
+        emit it directly rather than via a ``TTI_SFPLUT`` macro, so it is easy
+        to miss in the LLK sources. (Their default FP32 paths take a polynomial
+        exp plus a Newton reciprocal instead and never reach a LUT.)
+        """
+        mod0 = instr_args["instr_mod0"]
+        vd = instr_args["lreg_ind"]
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = lut8(lreg[0:3], lreg[3]) mod {mod0}")
+
+        # Bits 0 and 1 are reserved (the ISA docs define only SGN_RETAIN and
+        # INDIRECT_VD, and ttsim rejects every modifier other than SGN_RETAIN),
+        # so there is nothing to port for them.
+        if mod0 & 3:
+            raise NotImplementedError(
+                f"SFPLUT instr_mod0 {mod0} sets a reserved bit (only "
+                "SGN_RETAIN (4) and INDIRECT_VD (8) are defined)"
+            )
+
+        for lane in range(32):
+            if not self._lut_lane_active(vd, lane):
+                continue
+            l3 = self._as_fp32_bits(self.lregs[3][lane])
+            b = l3 & 0x7FFFFFFF  # absolute value
+            if b < VectorUnit.SFPLUT_RANGE_1_0:
+                coeffs = self._as_fp32_bits(self.lregs[0][lane])
+            elif b < VectorUnit.SFPLUT_RANGE_2_0:
+                coeffs = self._as_fp32_bits(self.lregs[1][lane])
+            else:
+                coeffs = self._as_fp32_bits(self.lregs[2][lane])
+            a = self._lut8_to_fp32((coeffs >> 8) & 0xFF)
+            c = self._lut8_to_fp32(coeffs & 0xFF)
+            d = self._lut_fma(
+                a, b, c, l3 & 0x80000000, mod0 & VectorUnit.SFPLUT_MOD0_SGN_RETAIN
+            )
+            self._lut_write_lane(vd, lane, mod0 & VectorUnit.SFPLUT_MOD0_INDIRECT_VD, d)
+
+    def handle_sfplutfp32(self, instruction_info, issue_thread, instr_args):
+        """SFPLUTFP32: the wider-precision / finer-grained sibling of SFPLUT.
+
+        Verbatim port of the functional model in
+        ``{WormholeB0,BlackholeA0}/TensixTile/TensixCoprocessor/SFPLUTFP32.md``
+        (identical on both architectures). Same ``a * |LReg[3]| + c`` shape as
+        SFPLUT, but the coefficients come from ``LReg[0..2]`` (multipliers) and
+        ``LReg[4..6]`` (addends) at full FP32, or as FP16 halves giving a 3- or
+        6-entry table. ttsim only models the 6-entry table with the 3.0 cut, but
+        the ISA docs give the complete decode, so every modifier is ported here
+        — tt-llk's ``_calculate_sigmoid_`` emits the 4.0-cut table with
+        SGN_RETAIN (Mod1 = 7), which ttsim declines.
+        """
+        mod1 = instr_args["instr_mod1"]
+        # SFPLUTFP32 declares only two fields, so the shared instruction table
+        # hands ``lreg_dest`` everything above bit 3 rather than the real 7:4
+        # (ttsim's data/{bh,wh} agree it is 4 bits wide).
+        vd = instr_args["lreg_dest"] & 0xF
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print(f"SFPU: lreg[{vd}] = lut32(lreg[0:3], lreg[4:7], lreg[3]) mod {mod1}")
+
+        fp16_tables = mod1 & VectorUnit.SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE1
+        three_entry = (
+            mod1 & VectorUnit.SFPLUTFP32_MOD1_FP16_3ENTRY_TABLE
+        ) == VectorUnit.SFPLUTFP32_MOD1_FP16_3ENTRY_TABLE
+        cut = (
+            VectorUnit.SFPLUT_RANGE_4_0
+            if (mod1 & VectorUnit.SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE2)
+            == VectorUnit.SFPLUTFP32_MOD1_FP16_6ENTRY_TABLE2
+            else VectorUnit.SFPLUT_RANGE_3_0
+        )
+
+        for lane in range(32):
+            if not self._lut_lane_active(vd, lane):
+                continue
+            l3 = self._as_fp32_bits(self.lregs[3][lane])
+            b = l3 & 0x7FFFFFFF  # absolute value
+            if b < VectorUnit.SFPLUT_RANGE_1_0:
+                i = 0
+            elif b < VectorUnit.SFPLUT_RANGE_2_0:
+                i = 1
+            else:
+                i = 2
+
+            if fp16_tables:
+                if three_entry:
+                    # One LReg holds both halves of the pair for this range.
+                    entry = self._as_fp32_bits(self.lregs[i][lane])
+                    a = self._lut16_to_fp32((entry >> 16) & 0xFFFF)
+                    c = self._lut16_to_fp32(entry & 0xFFFF)
+                else:
+                    # Each range is split in two, the halfword selected by j.
+                    if b < VectorUnit.SFPLUT_RANGE_0_5:
+                        j = 0
+                    elif b < VectorUnit.SFPLUT_RANGE_1_0:
+                        j = 16
+                    elif b < VectorUnit.SFPLUT_RANGE_1_5:
+                        j = 0
+                    elif b < VectorUnit.SFPLUT_RANGE_2_0:
+                        j = 16
+                    elif b < cut:
+                        j = 0
+                    else:
+                        j = 16
+                    a = self._lut16_to_fp32(
+                        (self._as_fp32_bits(self.lregs[0 + i][lane]) >> j) & 0xFFFF
+                    )
+                    c = self._lut16_to_fp32(
+                        (self._as_fp32_bits(self.lregs[4 + i][lane]) >> j) & 0xFFFF
+                    )
+            else:
+                a = self._as_fp32_bits(self.lregs[0 + i][lane])
+                c = self._as_fp32_bits(self.lregs[4 + i][lane])
+
+            d = self._lut_fma(
+                a, b, c, l3 & 0x80000000, mod1 & VectorUnit.SFPLUTFP32_MOD1_SGN_RETAIN
+            )
+            self._lut_write_lane(
+                vd, lane, mod1 & VectorUnit.SFPLUTFP32_MOD1_INDIRECT_VD, d
+            )
+
+    def _transpose4(self, base):
+        """Transpose the 4x4 matrix each of the 8 columns of ``LReg[base:base+4]``
+        forms. Verbatim from SFPTRANSP.md's ``Transpose4`` (and ttsim's
+        ``TENSIX_EXECUTE_SFPTRANSP``): the lane index is ``row * 8 + column``, so
+        the movement is purely within a column — this is *not* a transpose of the
+        4x8 grid. Both halves of each swap read the pre-swap values, and each
+        write is gated on its own lane's enable."""
+        for column in range(8):
+            for i in range(4):
+                for j in range(i):
+                    ij = self.lregs[base + i][j * 8 + column]
+                    ji = self.lregs[base + j][i * 8 + column]
+                    if self.isLaneEnabled(j * 8 + column):
+                        self.lregs[base + i][j * 8 + column] = ji
+                    if self.isLaneEnabled(i * 8 + column):
+                        self.lregs[base + j][i * 8 + column] = ij
+
+    def handle_sfptransp(self, instruction_info, issue_thread, instr_args):
+        # SFPTRANSP transposes LReg[0:4] and LReg[4:8] independently, used by the
+        # topk / welfords / ema / binary-broadcast SFPU kernels to get at data
+        # held in a different lane. Identical on both architectures.
+        vd = instr_args["lreg_dest"]
+
+        if self.getDiagnosticSettings().reportSFPUCalculations():
+            print("SFPU: transpose lreg[0:4] and lreg[4:8]")
+
+        # The VD / backdoor-load gate is on the instruction as a whole rather
+        # than per lane (SFPTRANSP.md wraps the two Transpose4 calls in it), so
+        # it is the same "any lane permits it" test SFPPUSHC / SFPPOPC use.
+        do_transpose = any(
+            vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD)
+            for lane in range(32)
+        )
+        if do_transpose:
+            self._transpose4(0)
+            self._transpose4(4)
+
+    def handle_sfploadmacro(self, instruction_info, issue_thread, instr_args):
+        # SFPLOADMACRO is an SFPLOAD that additionally schedules up to four
+        # previously-configured vector instructions across the SFPU sub-units,
+        # with per-sub-unit delays. tt-sim's backend has no notion of SFPU
+        # sub-units or of deferred issue, and the reference simulator declines
+        # to model the op at all ("explicitly out of scope"), so there is no
+        # oracle to port and nothing here is invented. Fail loudly with the
+        # workaround tt-metal itself ships. Note the op still *decodes*, and its
+        # Blackhole ``sfpu_addr_mode`` shift is handled by _read_sfpu_addr_mode.
+        raise NotImplementedError(
+            "SFPLOADMACRO is not modelled (its macro-scheduling semantics are "
+            "out of scope for the reference simulator too); set "
+            "TT_METAL_DISABLE_SFPLOADMACRO=1 in the host environment to stop "
+            "tt-metal emitting it"
+        )
+
     def handle_sfpcompc(self, instruction_info, issue_thread, instr_args):
         vd = instr_args["lreg_dest"]
 
@@ -1115,9 +1395,14 @@ class VectorUnit(TensixBackendUnit):
 
         if do_compc:
             if len(self.flagStack) == 0:
-                top = (True, True)
+                # With nothing pushed, SFPCOMPC is a plain inversion of the lane
+                # flags (ttsim: `cc = ~cc` when cc_sp == 0). The per-lane loop
+                # below indexes both halves of `top`, so they must be vectors --
+                # scalars here raise TypeError the moment a kernel complements
+                # an empty stack, which `tanh_tile` and `where_tile` both do.
+                top = ([True] * 32, [True] * 32)
             else:
-                top = self.flagStack[0]
+                top = self.flagStack[-1]
 
             # Note we are doing this on a lane by lane basis, whereas have implemented
             # popc and pushc across all lanes
@@ -1140,25 +1425,26 @@ class VectorUnit(TensixBackendUnit):
 
         if do_pop:
             if len(self.flagStack) == 0:
-                top = (False, False)
+                # Both halves are indexed per lane, so they must be vectors.
+                top = ([False] * 32, [False] * 32)
             else:
-                top = self.flagStack[0]
+                top = self.flagStack[-1]
 
             if mod1 == 0:
                 # Plain pop from stack
                 assert len(self.flagStack) > 0
-                self.flagStack.pop(0)
+                self.flagStack.pop()
             elif len(self.flagStack) == 8:
                 self.flagStack[7] = top
 
             if mod1 == 0:
                 # Set LaneFlags and UseLaneFlagsForLaneEnable to Top
-                self.laneFlags = top[0]
-                self.useLaneFlagsForLaneEnable = top[1]
+                self.laneFlags = list(top[0])
+                self.useLaneFlagsForLaneEnable = list(top[1])
             elif mod1 <= 12:
                 # Mutate LaneFlags and UseLaneFlagsForLaneEnable based on Top
                 self.laneFlags = list(self.booleanOp(mod1, self.laneFlags, top[0]))
-                self.useLaneFlagsForLaneEnable = top[1]
+                self.useLaneFlagsForLaneEnable = list(top[1])
             elif mod1 == 13:
                 # Just invert laneFlags
                 self.laneFlags = [not v for v in self.laneFlags]
@@ -1210,7 +1496,13 @@ class VectorUnit(TensixBackendUnit):
 
         if do_push:
             assert len(self.flagStack) < 8
-            self.flagStack.append((self.laneFlags, self.useLaneFlagsForLaneEnable))
+            # Snapshot by value: SFPSETCC and friends mutate these lists in
+            # place, which would otherwise rewrite the entry already pushed.
+            # The stack is LIFO -- pushed at the end, read and popped from the
+            # end (ttsim writes at cc_sp then increments, and pops the reverse).
+            self.flagStack.append(
+                (list(self.laneFlags), list(self.useLaneFlagsForLaneEnable))
+            )
 
     def handle_sfpsetcc(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -1231,6 +1523,15 @@ class VectorUnit(TensixBackendUnit):
                         self.laneFlags[lane] = imm1 != 0
                     else:
                         c = self.lregs[vc][lane]
+                        if self.backend.blackhole:
+                            # Blackhole lanes are raw uint32 bit patterns, and
+                            # ttsim compares them as `int32_t src = LReg[c]` --
+                            # i.e. the FP32 sign bit is what decides `< 0`. An
+                            # unsigned Python int is never negative, so without
+                            # this every `v_if(x < 0)` (the Newton-Raphson step
+                            # in sfpu_reciprocal_iter, among others) silently
+                            # disabled all 32 lanes.
+                            c = conv_to_int32(conv_to_uint32(c))
                         match mod1:
                             case VectorUnit.SFPSETCC_MOD1_LREG_LT0:
                                 self.laneFlags[lane] = c < 0
@@ -1478,7 +1779,13 @@ class VectorUnit(TensixBackendUnit):
         mod1 = instr_args["instr_mod1"]
         vd = instr_args["lreg_dest"]
         vc = instr_args["lreg_c"]
+        # The immediate is a 12-bit two's-complement value, so it must be sign
+        # extended before use: sfpi's `sfpiadd_i(v, -255, ...)` (in the FP32 exp
+        # kernel's overflow check) arrives as 0xF01 and adding it raw both
+        # computes v+3841 and leaves the lane flag stuck at "not negative".
         imm12 = instr_args["imm12_math"] & 0xFFF
+        if imm12 >= 0x800:
+            imm12 -= 0x1000
 
         vb = vd
 
@@ -1488,26 +1795,39 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    if mod1 & VectorUnit.SFPIADD_MOD1_ARG_IMM:
-                        self.lregs[vd][lane] = self.lregs[vc][lane] + imm12
-                    elif mod1 & VectorUnit.SFPIADD_MOD1_ARG_2SCOMP_LREG_DST:
-                        self.lregs[vd][lane] = (
-                            self.lregs[vc][lane] - self.lregs[vb][lane]
-                        )
+                    if self.backend.blackhole:
+                        # Every lane is a raw uint32 bit pattern, so read the
+                        # operands as such (ttsim's TENSIX_EXECUTE_SFPIADD).
+                        c = conv_to_uint32(self.lregs[vc][lane])
+                        b = conv_to_uint32(self.lregs[vb][lane])
                     else:
-                        self.lregs[vd][lane] = (
-                            self.lregs[vc][lane] + self.lregs[vb][lane]
-                        )
+                        c = self.lregs[vc][lane]
+                        b = self.lregs[vb][lane]
+
+                    if mod1 & VectorUnit.SFPIADD_MOD1_ARG_IMM:
+                        result = c + imm12
+                    elif mod1 & VectorUnit.SFPIADD_MOD1_ARG_2SCOMP_LREG_DST:
+                        result = c - b
+                    else:
+                        result = c + b
+
+                    if self.backend.blackhole:
+                        # The add wraps, and "negative" is bit 31 of the wrapped
+                        # result (ttsim's `src & 0x80000000`). Testing an
+                        # unsigned Python int for `< 0` never fires.
+                        result &= 0xFFFFFFFF
+                        negative = bool(result & 0x80000000)
+                    else:
+                        negative = result < 0
+                    self.lregs[vd][lane] = result
 
                     if vd < 8:
-                        if mod1 & VectorUnit.SFPIADD_MOD1_CC_NONE:
-                            # Leave LaneFlags as-is
-                            pass
-                        else:
-                            self.laneFlags[lane] = self.lregs[vd][lane] < 0
-
+                        # Mod1 bit 3 (CC_GTE0) wins over bit 2 (CC_NONE), which
+                        # in turn leaves LaneFlags alone.
                         if mod1 & VectorUnit.SFPIADD_MOD1_CC_GTE0:
-                            self.laneFlags[lane] = not self.laneFlags[lane]
+                            self.laneFlags[lane] = not negative
+                        elif not (mod1 & VectorUnit.SFPIADD_MOD1_CC_NONE):
+                            self.laneFlags[lane] = negative
 
     def _read_sfpu_addr_mode(self, instruction_info, instr_args):
         # SFPLOAD/SFPSTORE/SFPLOADMACRO ``sfpu_addr_mode`` is 3 bits on Blackhole

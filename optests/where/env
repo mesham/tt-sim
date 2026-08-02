@@ -1,0 +1,10 @@
+# Sourced by optests/diff.sh before building/running this op program.
+#
+# `where_tile` normally lowers to SFPLOADMACRO on Blackhole, and *both*
+# simulators refuse it: ttsim raises "tensix_sfploadmacro: explicitly out of
+# scope" and tt-sim raises a matching NotImplementedError. There is therefore no
+# oracle for the macro form. Setting this makes tt-metal compile the LLK's
+# non-macro fallback (DISABLE_SFPLOADMACRO), which is the path both sims model —
+# so what this program actually diffs is the SFPU select sequence, not the macro
+# scheduler.
+export TT_METAL_DISABLE_SFPLOADMACRO=1

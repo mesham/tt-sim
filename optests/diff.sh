@@ -37,6 +37,17 @@ VENV="${TT_SIM_VENV:-$REPO/../venv}"
 
 [ -d "$SRC" ] || { echo "no op program at $SRC" >&2; exit 2; }
 
+# Per-program environment. A program needing a specific tt-metal knob (e.g.
+# `optests/where` needs TT_METAL_DISABLE_SFPLOADMACRO=1, since *both* sims
+# declare SFPLOADMACRO out of scope) drops an `env` file next to its src/ and
+# it is sourced here, so `diff.sh <name>` just works instead of failing with
+# "no result from ttsim". The file must only export variables.
+if [ -f "$REPO/optests/$NAME/env" ]; then
+  # shellcheck disable=SC1090
+  . "$REPO/optests/$NAME/env"
+  echo "[env] sourced optests/$NAME/env"
+fi
+
 # UMD hardcodes the descriptor's *filename*: for a .so simulator it reads
 # `<dir-of-so>/soc_descriptor.yaml` (umd device/simulation/simulation_chip.cpp),
 # so we cannot just hand it a differently-named file. ttsim's own oracle-bh/
@@ -84,7 +95,7 @@ fi
 
 # $1 = TT_METAL_SIMULATOR, $2 = TT_SIM_TENSIX_COORDS ("" to skip), $3 = logfile
 _run() {
-  pkill -9 -f 'driver.(wormhole|blackhole).server' 2>/dev/null; sleep 0.3
+  pkill -9 -f 'driver\.(wormhole|blackhole)\.server( |$)' 2>/dev/null; sleep 0.3
   ( cd "$SRC"
     export TT_METAL_SIMULATOR="$1"
     [ -n "$2" ] && export TT_SIM_TENSIX_COORDS="$2"
@@ -99,7 +110,7 @@ echo "[oracle: ttsim]  $ORACLE_DIR/libttsim_bh.so"
 _run "$ORACLE_DIR/libttsim_bh.so" "" "$ora_log"
 echo "[ours:   tt-sim] $REPO/driver/blackhole  (coords=$COORDS)"
 _run "$REPO/driver/blackhole" "$COORDS" "$our_log"
-pkill -9 -f 'driver.(wormhole|blackhole).server' 2>/dev/null
+pkill -9 -f 'driver\.(wormhole|blackhole)\.server( |$)' 2>/dev/null
 
 ora="$(_result "$ora_log")"
 our="$(_result "$our_log")"

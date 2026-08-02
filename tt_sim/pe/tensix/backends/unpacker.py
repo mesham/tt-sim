@@ -765,38 +765,55 @@ class UnPackerUnit(TensixBackendUnit):
                     datum = 0
                 inAddr_Datums += datumSizeBytes
 
+                # Destination row/column for this datum. Kept in locals: `row`
+                # and `col` are the loop variables, and the adjustments below
+                # used to write back into `row`, so every datum after the first
+                # in a row saw an already-adjusted row (harmless while the
+                # adjustment was zero, wrong as soon as it is not).
+                outRow, outCol = row, col
                 if self.unpacker_id == 1:
                     # always srcB
-                    row = (row + self.srcRow[issue_thread] + start_row) & 0x3F
-                    self.backend.getSrcB(self.srcBank)[row, col] = datum
+                    outRow = (outRow + self.srcRow[issue_thread] + start_row) & 0x3F
+                    self.backend.getSrcB(self.srcBank)[outRow, outCol] = datum
                 else:
                     # Always srcA
                     if not unpackToDst:
-                        col -= colShift
+                        outCol -= colShift
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
                         ):
-                            assert row < 64
+                            assert outRow < 64
                         else:
-                            assert row < 16
-                            row += self.srcRow[issue_thread] + start_row
+                            assert outRow < 16
+                            outRow += self.srcRow[issue_thread] + start_row
 
-                            if transpose:
-                                rowLowBits = col
-                                col = row & 0xF
-                                row = (row & ~0xF) | rowLowBits
-                        self.backend.getSrcA(self.srcBank)[row, col] = datum
+                        # Haloize transposes each 16x16 block on the way into
+                        # SrcA. It is driven by the destination row/column, so
+                        # it applies whichever way the row was derived -- the
+                        # SetOvrdWithAddr path (which every current LLK takes)
+                        # included. reduce_tile's REDUCE_ROW is the first path
+                        # to reach it: it transposes the data face so a
+                        # column-wise GMPOOL/MVMUL reduces along rows.
+                        if transpose:
+                            rowLowBits = outCol
+                            outCol = outRow & 0xF
+                            outRow = (outRow & ~0xF) | rowLowBits
+                        self.backend.getSrcA(self.srcBank)[outRow, outCol] = datum
                     else:
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
                         ):
-                            row &= 15
+                            outRow &= 15
                         else:
-                            row &= 0x3FF
+                            outRow &= 0x3FF
                         if DATA_FORMAT_TO_BITS[outDataFormat] == 32:
-                            self.backend.getDst().setDst32b(row + start_row, col, datum)
+                            self.backend.getDst().setDst32b(
+                                outRow + start_row, outCol, datum
+                            )
                         else:
-                            self.backend.getDst().setDst16b(row + start_row, col, datum)
+                            self.backend.getDst().setDst16b(
+                                outRow + start_row, outCol, datum
+                            )
                 outAddr += 1
 
     def increment_counter(

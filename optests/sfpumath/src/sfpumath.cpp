@@ -13,7 +13,7 @@
 #include <tt-metalium/tt_metal.hpp>
 
 #define TILE_ELEMS 1024  // 32x32 tile
-#define NUM_OPS 1        // MUST match the compute kernel's op count
+#define NUM_OPS 3        // MUST match the compute kernel's op count
 
 using namespace tt;
 using namespace tt::tt_metal;

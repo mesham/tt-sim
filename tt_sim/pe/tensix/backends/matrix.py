@@ -32,10 +32,13 @@ class MatrixUnit(TensixBackendUnit):
         "TRNSPSRCB": "handle_trnspsrcb",
         "MOVB2A": "handle_movb2a",
         "MOVA2D": "handle_mova2d",
+        "MOVB2D": "handle_movb2d",
+        "MOVD2A": "handle_movd2a",
         "MOVD2B": "handle_movd2b",
         "MVMUL": "handle_mvmul",
         "DOTPV": "handle_dotpv",
         "GAPOOL": "handle_gapool",
+        "GMPOOL": "handle_gmpool",
     }
 
     def __init__(self, backend):
@@ -62,6 +65,18 @@ class MatrixUnit(TensixBackendUnit):
             return extract_bits(instruction_info["raw_instruction"], 3, 14)
         return instr_args["addr_mode"]
 
+    def _read_dst_field(self, instruction_info, instr_args):
+        # ``dst`` (the instruction's own Dst row offset) runs 14:0 in the shared
+        # instruction table, because the next field along -- Wormhole's
+        # ``addr_mode`` -- starts at bit 15. Blackhole widened ``addr_mode``
+        # downwards into bit 14 (see ``_read_addr_mode``), so on Blackhole that
+        # bit belongs to the addressing mode and reading it as part of ``dst``
+        # adds a spurious 16384 whenever an odd ADDR_MOD is selected. Read the
+        # true 14-bit field from the raw word instead.
+        if self.backend.blackhole:
+            return extract_bits(instruction_info["raw_instruction"], 14, 0)
+        return instr_args["dst"]
+
     def _read_pool_addr_mode(self, instruction_info, instr_args):
         # GAPOOL and GMPOOL keep their addressing-mode field at bit 15 on
         # Blackhole (where it is renamed ``pool_addr_mode``), but widen it to 3
@@ -73,6 +88,17 @@ class MatrixUnit(TensixBackendUnit):
         if self.backend.blackhole:
             return extract_bits(instruction_info["raw_instruction"], 3, 15)
         return instr_args["addr_mode"]
+
+    def _read_movb2d_instr_mod(self, instruction_info, instr_args):
+        # MOVB2D's instruction modifier sits at raw 13:11 on Blackhole (where
+        # it is renamed ``movb2d_instr_mod``) but at 14:12 on Wormhole, because
+        # Blackhole widened ``addr_mode`` downwards into bit 14. The shared
+        # instruction table encodes the Wormhole position, so on Blackhole
+        # every modifier would be read doubled (and the Move4Rows bit lost into
+        # addr_mode's territory). Read the true field from the raw word.
+        if self.backend.blackhole:
+            return extract_bits(instruction_info["raw_instruction"], 3, 11)
+        return instr_args["instr_mod"]
 
     def handle_cleardvalid(self, instruction_info, issue_thread, instr_args):
         reset = instr_args["reset"] & 0x1
@@ -265,6 +291,261 @@ class MatrixUnit(TensixBackendUnit):
         # Advance the RWCs
         rwc.applyAddrMod(issue_thread, addrMod)
 
+    def handle_movb2d(self, instruction_info, issue_thread, instr_args):
+        dstRow = instr_args["dst"]
+        instrMod = self._read_movb2d_instr_mod(instruction_info, instr_args)
+        broadcastCol0 = get_nth_bit(instrMod, 0)
+        broadcast1RowTo8 = get_nth_bit(instrMod, 1)
+        move4Rows = get_nth_bit(instrMod, 2)
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
+        srcRow = instr_args["src"]
+        useDst32bLo = instr_args["dest_32b_lo"]
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        # Determine the data formats. Note that (as with MOVA2D / MOVD2B)
+        # SrcAFmt is deliberately used to pick the Dst style; this is not a typo.
+        if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_override"):
+            srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
+        else:
+            srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+        if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcB_override"):
+            srcBFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcB_val")
+        else:
+            srcBFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG1_SrcB")
+        # On Blackhole both selects are implied from the format SrcB was last
+        # written in, each behind its own disable bit.
+        srcAFmt = self.implied_srcB_format(
+            issue_thread, srcAFmt, "DISABLE_IMPLIED_SRCA_FMT_Base"
+        )
+        srcBFmt = self.implied_srcB_format(issue_thread, srcBFmt)
+
+        if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
+            use8bExponent = False
+        elif srcAFmt in [
+            DataFormat.FP32,
+            DataFormat.TF32,
+            DataFormat.BF16,
+            DataFormat.BFP8,
+            DataFormat.BFP4,
+            DataFormat.BFP2,
+            DataFormat.INT32,
+            DataFormat.UINT16,
+        ]:
+            use8bExponent = True
+        else:
+            use8bExponent = False
+
+        flushDenormals = not self.getConfigValue(
+            stateID, "ALU_ACC_CTRL_Zero_Flag_disabled_src"
+        )
+        rwc = self.backend.getRWC(issue_thread)
+
+        # Determine the row range
+        dstRow += self.getThreadConfigValue(
+            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+        )
+        dstRow += rwc.Dst + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
+        srcRow += rwc.SrcB
+
+        if broadcast1RowTo8:
+            numRows = 8
+            dstRow &= 0x3F8
+            srcRow &= 0x3F
+        elif move4Rows:
+            numRows = 4
+            dstRow &= 0x3FC
+            srcRow &= 0x3C
+        else:
+            numRows = 1
+            dstRow &= 0x3FF
+            srcRow &= 0x3F
+
+        # Now copy the row(s) from SrcB into Dst
+        srcB = self.getSrcB()
+        for _ in range(numRows):
+            for j in range(16):
+                if get_nth_bit(
+                    self.backend.vector_unit.laneConfigValue(
+                        int(j / 2), VectorUnit.BLOCK_DEST_MOV
+                    ),
+                    j & 1,
+                ):
+                    continue
+
+                srcBVal = srcB[srcRow, 0 if broadcastCol0 else j]
+                if flushDenormals and not (srcBVal & 0xFF):
+                    srcBVal = 0
+
+                # Src holds a datum as Sign,Man(10b),Exp(8b); narrow it to the
+                # precision the SrcB format actually carries.
+                if srcBFmt == DataFormat.FP16:
+                    srcBVal &= 0x7FF1F  # drop the high 3 exponent bits
+                elif srcBFmt != DataFormat.TF32:
+                    srcBVal &= 0x7F8FF  # drop the low 3 mantissa bits
+
+                val16b = (
+                    DataFormatConversions.removeLowMantissa(srcBVal)
+                    if use8bExponent
+                    else DataFormatConversions.removeHighExponent(srcBVal)
+                )
+
+                if srcAFmt == DataFormat.TF32:
+                    if useDst32bLo:
+                        # Undefined behaviour: on Blackhole the write data is
+                        # corrupted (HW erratum TEN-4245) and the Wormhole
+                        # behaviour is unlikely to be useful. ttsim declines it
+                        # too, so there is nothing to model against.
+                        raise NotImplementedError(
+                            "MOVB2D with SrcAFmt == TF32 and UseDst32bLo is undefined behaviour"
+                        )
+                    lowMantissa = ((srcBVal >> 8) & 7) << 13
+                    # dst holds TF32 as sign,himan(7b),exp(8b),loman(3b),zeros(13b)
+                    self.getDst().setDst32b(dstRow, j, (val16b << 16) | lowMantissa)
+                elif useDst32bLo:
+                    # Only useful if software has deliberately packed two
+                    # bf16/fp16 values into 32 bits and written them to Dst32b
+                    self.getDst().setDst32b(
+                        dstRow,
+                        j,
+                        (self.getDst().getDst32b(dstRow, j) & 0xFFFF0000) | val16b,
+                    )
+                else:
+                    self.getDst().setDst16b(dstRow, j, val16b)
+            dstRow += 1
+            if not broadcast1RowTo8:
+                srcRow += 1
+
+        # Advance the RWCs
+        rwc.applyAddrMod(issue_thread, addrMod)
+
+    def handle_movd2a(self, instruction_info, issue_thread, instr_args):
+        dstRow = instr_args["dst"]
+        move4Rows = (instr_args["instr_mod"] >> 1) & 0x1
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
+        srcRow = instr_args["src"]
+        useDst32bLo = instr_args["dest_32b_lo"]
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        # Determine the data formats
+        if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
+            useDst32b = False
+            srcAStyle = DataFormat.FP16
+        else:
+            if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_override"):
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
+            else:
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+            srcAFmt = self.implied_srcA_format(issue_thread, srcAFmt)
+
+            useDst32b = self.getConfigValue(
+                stateID, "ALU_ACC_CTRL_Fp32_enabled"
+            ) or self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled")
+
+            if srcAFmt in [
+                DataFormat.FP32,
+                DataFormat.BF16,
+                DataFormat.BFP8,
+                DataFormat.BFP4,
+                DataFormat.BFP2,
+                DataFormat.INT32,
+                DataFormat.UINT16,
+            ]:
+                srcAStyle = DataFormat.BF16
+            elif srcAFmt in [
+                DataFormat.FP16,
+                DataFormat.BFP8_b,
+                DataFormat.BFP4_b,
+                DataFormat.BFP2_b,
+                DataFormat.INT8,
+            ]:
+                srcAStyle = DataFormat.FP16
+            else:
+                # SrcAFmt == TF32
+                srcAStyle = DataFormat.TF32
+
+        rwc = self.backend.getRWC(issue_thread)
+
+        # Determine the row range
+        dstRow += self.getThreadConfigValue(
+            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+        )
+        dstRow += rwc.Dst + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
+        srcRow += rwc.SrcA
+
+        if move4Rows:
+            numRows = 4
+            dstRow &= 0x3FC
+            srcRow &= 0x3C
+        else:
+            numRows = 1
+            dstRow &= 0x3FF
+            srcRow &= 0x3F
+
+        # Now copy the row(s) from Dst into SrcA
+        srcA = self.getSrcA()
+        for i in range(numRows):
+            for j in range(16):
+                if get_nth_bit(
+                    self.backend.vector_unit.laneConfigValue(
+                        int(j / 2), VectorUnit.BLOCK_DEST_MOV
+                    ),
+                    j & 1,
+                ):
+                    continue
+
+                if useDst32b:
+                    # Read from Dst in 32-bit mode
+                    dstVal = self.getDst().getDst32b(dstRow, j)
+                    if useDst32bLo:
+                        # Only useful if software has deliberately packed two
+                        # bf16/fp16 values into 32 bits and written them to Dst32b
+                        dstVal = (dstVal << 16) | (dstVal & 0xFFFF)
+
+                    if srcAStyle == DataFormat.BF16:
+                        # Treat dstVal as fp32 or tf32, truncate to bf16
+                        srcAVal = DataFormatConversions.ShuffleBF16(dstVal >> 16)
+                    elif srcAStyle == DataFormat.FP16:
+                        srcAVal = DataFormatConversions.ShuffleFP16(dstVal >> 16)
+                    elif not useDst32bLo:
+                        # Treat dstVal as fp32 or tf32, truncate to tf32
+                        srcAVal = DataFormatConversions.ShuffleTF32(dstVal >> 13)
+                    else:
+                        # The 13 bits discarded by the fp32 -> tf32 conversion
+                        srcAVal = dstVal & 0x1FFF
+                else:
+                    # Read from Dst in 16-bit mode. Both of the combinations
+                    # rejected here are documented as undefined behaviour and
+                    # ttsim declines them as well, so there is no reference to
+                    # model them against.
+                    if useDst32bLo:
+                        raise NotImplementedError(
+                            "MOVD2A with UseDst32bLo and a 16-bit Dst is undefined behaviour"
+                        )
+                    dstVal = self.getDst().getDst16b(dstRow, j)
+                    if srcAStyle == DataFormat.BF16:
+                        # Treat dstVal as bf16
+                        srcAVal = DataFormatConversions.ShuffleBF16(dstVal)
+                    elif srcAStyle == DataFormat.FP16:
+                        # Treat dstVal as fp16 (int8 is overlaid onto fp16 here)
+                        srcAVal = DataFormatConversions.ShuffleFP16(dstVal)
+                    else:
+                        raise NotImplementedError(
+                            "MOVD2A with SrcAStyle == TF32 and a 16-bit Dst is undefined behaviour"
+                        )
+
+                srcA[srcRow, j] = srcAVal
+            dstRow += 1
+            srcRow += 1
+
+        # Advance the RWCs
+        rwc.applyAddrMod(issue_thread, addrMod)
+
     def handle_movd2b(self, instruction_info, issue_thread, instr_args):
         dstRow = instr_args["dst"]
         move4Rows = (instr_args["instr_mod"] >> 1) & 0x1
@@ -422,7 +703,7 @@ class MatrixUnit(TensixBackendUnit):
         clearSrcBBank = [False] * 2
 
         clearSrcA = get_nth_bit(instr_args["src_mask"], 0)
-        clearSrcB = get_nth_bit(instr_args["src_mask"], 0)
+        clearSrcB = get_nth_bit(instr_args["src_mask"], 1)
         bothBanks = instr_args["bank_mask"]
         singleBankMatrixUnit = instr_args["write_mode"]
         negativeInfSrcA = instr_args["zero_val"]
@@ -448,7 +729,7 @@ class MatrixUnit(TensixBackendUnit):
             elif singleBankMatrixUnit:
                 clearSrcBBank[self.srcBBank] = True
             else:
-                clearSrcABank[self.backend.unpacker_units[1].srcBank] = True
+                clearSrcBBank[self.backend.unpacker_units[1].srcBank] = True
 
         # Do the clearing
         for bank in range(2):
@@ -457,18 +738,216 @@ class MatrixUnit(TensixBackendUnit):
                     if clearSrcABank[bank]:
                         self.backend.getSrcA(bank)[i, j] = ~0 if negativeInfSrcA else 0
                     if clearSrcBBank[bank]:
-                        self.backend.getSrcA(bank)[i, j] = 0
+                        self.backend.getSrcB(bank)[i, j] = 0
 
     def handle_gapool(self, instruction_info, issue_thread, instr_args):
-        dstRow = instr_args["dst"]
+        dstRow = self._read_dst_field(instruction_info, instr_args)
         addrMod = self._read_pool_addr_mode(instruction_info, instr_args)
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
         self.perform_mvmul(issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4)
 
-    def handle_dotpv(self, instruction_info, issue_thread, instr_args):
+    @staticmethod
+    def _gmpool_read_dst(dstVal, dstStyle):
+        """Decode a Dst datum into GMPOOL's (sign, exp(9b), magOrMan(10b)) form."""
+        sign = (dstVal >> 31) & 1
+        if dstStyle == DataFormat.FP16:
+            # High 16 bits of Dst hold Sign,Man(10b),Exp(5b)
+            return sign, ((dstVal >> 16) & 0x1F) + 15, (dstVal >> 21) & 0x3FF
+        # BF16 / TF32: high 16 bits of Dst hold Sign,Man(7b),Exp(8b)
+        exponent = ((dstVal >> 16) & 0xFF) + 127
+        magOrMan = ((dstVal >> 24) & 0x7F) << 3
+        if dstStyle == DataFormat.TF32:
+            # The next three bits of Dst hold more of the mantissa
+            magOrMan += (dstVal >> 13) & 7
+        return sign, exponent, magOrMan
+
+    @staticmethod
+    def _gmpool_write_dst(datum, dstStyle):
+        """Re-encode a GMPOOL datum for Dst (the inverse of _gmpool_read_dst)."""
+        sign, exponent, magOrMan = datum
+        if dstStyle == DataFormat.FP16:
+            if (exponent & 0x3F) == 0:
+                return 0
+            # Can wrap around if the SrcB scaler was not 1.0
+            exponent -= 15
+            return (sign << 31) | (magOrMan << 21) | ((exponent & 0x1F) << 16)
+        if exponent == 0:
+            return 0
+        # Can wrap around if the SrcB scaler was not 1.0
+        exponent -= 127
+        x = (sign << 31) | ((magOrMan & 0x3F8) << 21) | ((exponent & 0xFF) << 16)
+        if dstStyle == DataFormat.TF32:
+            x += (magOrMan & 7) << 13
+        return x
+
+    @staticmethod
+    def _gmpool_read_and_scale_src(srcAVal, srcAStyle, srcBVal):
+        """Read a SrcA datum, scaled by the exponent of the paired SrcB datum.
+
+        Src holds BF16 as Sign,Man(10b),Exp(8b) with the bottom three mantissa
+        bits unused, TF32 as Sign,Man(10b),Exp(8b) and FP16 as
+        Sign,Man(10b),Zero(3b),Exp(5b).
+        """
+        srcAExponent = srcAVal & 0xFF
+        srcBExponent = srcBVal & 0xFF
+        if srcBExponent == 0:
+            # Scaling by zero, which is effectively minus infinity
+            return 1, 0x1FF, 0x3FF
+        if srcAExponent == 0:
+            # Flush denormals to zero
+            return 0, 0, 0
+        sign = (srcAVal >> 18) & 1
+        magOrMan = (srcAVal >> 8) & 0x3FF
+        if srcAStyle == DataFormat.FP16:
+            return sign, (srcAExponent & 0x1F) + (srcBExponent & 0x1F), magOrMan
+        if srcAStyle == DataFormat.TF32:
+            return sign, srcAExponent + srcBExponent, magOrMan
+        # BF16, whose bottom three mantissa bits are not carried
+        return sign, srcAExponent + srcBExponent, magOrMan & 0x3F8
+
+    @staticmethod
+    def _gmpool_as_comparable(datum):
+        sign, exponent, magOrMan = datum
+        magnitude = (exponent << 10) + magOrMan
+        return -magnitude if sign else magnitude
+
+    def handle_gmpool(self, instruction_info, issue_thread, instr_args):
+        """Reduce a 16x16 block of SrcA to one row by ``max`` along each column.
+
+        The result is element-wise ``max``-ed with the top row of an aligned 4x16
+        block of Dst and written back there, zeroing the other three rows. Each
+        SrcA column is first scaled by the exponent of the corresponding datum of
+        one SrcB row (so software passes a row of 1.0 when it wants no scaling).
+
+        **Known divergence:** the ISA documents undefined Dst rows as reading
+        back as minus infinity (all bits set), which is how software gets a
+        plain reduction by issuing ZEROACC first. tt-sim has no Dst row-validity
+        bits — ZEROACC zeroes the data instead — so a cleared row reads back as
+        +0 and a reduction over an entirely negative face saturates at zero.
+        """
         dstRow = instr_args["dst"]
+        addrMod = self._read_pool_addr_mode(instruction_info, instr_args)
+        flipSrcA = get_nth_bit(instr_args["clear_dvalid"], 0)
+        flipSrcB = get_nth_bit(instr_args["clear_dvalid"], 1)
+
+        # Only the 16x16 primitive is documented (and it is the only one
+        # tt-metal's reduce LLK emits); ttsim rejects everything else too.
+        if instr_args["instr_mod19"] != 1:
+            raise NotImplementedError(
+                f"GMPOOL only implements the 16x16 primitive, not instr_mod19={instr_args['instr_mod19']}"
+            )
+        if instr_args["max_pool_index_en"]:
+            # argmax returns a non-linearly transformed index instead of (or
+            # alongside) the max; the ISA calls its support partial and ttsim
+            # declines it, so there is no reference to model it against.
+            raise NotImplementedError(
+                "GMPOOL argmax (max_pool_index_en) is not modelled"
+            )
+
+        stateID = self.backend.getThreadConfigValue(
+            issue_thread, "CFG_STATE_ID_StateID"
+        )
+
+        # Determine the data formats
+        if self.getThreadConfigValue(issue_thread, "FP16A_FORCE_Enable"):
+            srcAStyle = DataFormat.FP16
+            dstStyle = DataFormat.FP16
+            useDst32b = False
+        elif self.getConfigValue(stateID, "ALU_ACC_CTRL_INT8_math_enabled"):
+            raise NotImplementedError("GMPOOL with INT8 math enabled is not modelled")
+        else:
+            if self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_override"):
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
+            else:
+                srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+            srcAFmt = self.implied_srcA_format(issue_thread, srcAFmt)
+
+            useDst32b = self.getConfigValue(stateID, "ALU_ACC_CTRL_Fp32_enabled")
+            if srcAFmt in [
+                DataFormat.FP32,
+                DataFormat.BF16,
+                DataFormat.BFP8,
+                DataFormat.BFP4,
+                DataFormat.BFP2,
+                DataFormat.INT32,
+                DataFormat.UINT16,
+            ]:
+                srcAStyle = DataFormat.BF16
+                dstStyle = DataFormat.TF32 if useDst32b else DataFormat.BF16
+            elif srcAFmt in [
+                DataFormat.FP16,
+                DataFormat.BFP8_b,
+                DataFormat.BFP4_b,
+                DataFormat.BFP2_b,
+                DataFormat.INT8,
+            ]:
+                srcAStyle = DataFormat.FP16
+                dstStyle = DataFormat.TF32 if useDst32b else DataFormat.FP16
+            else:
+                # SrcAFmt == TF32
+                srcAStyle = DataFormat.TF32
+                dstStyle = DataFormat.TF32 if useDst32b else DataFormat.BF16
+
+        rwc = self.getRWC(issue_thread)
+
+        # Determine the row range
+        srcARow = rwc.SrcA & 0x30
+        srcBRow = rwc.SrcB & 0x38
+        dstRow += self.getThreadConfigValue(
+            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+        )
+        dstRow += rwc.Dst + self.getConfigValue(stateID, "DEST_REGW_BASE_Base")
+        dstRow &= 0x3FC
+
+        if self.getDiagnosticSettings().reportFPUCalculations():
+            print(
+                f"FPU: perform gmpool, dst row {dstRow}, srcA starts at {srcARow} "
+                f"and srcB at {srcBRow} by thread {issue_thread}"
+            )
+
+        srcA = self.getSrcA()
+        srcB = self.getSrcB()
+        dst = self.getDst()
+
+        # Iterate over the SrcA columns
+        for j in range(16):
+            if useDst32b:
+                dstVal = dst.getDst32b(dstRow, j)
+            else:
+                dstVal = dst.getDst16b(dstRow, j) << 16
+            maximum = self._gmpool_read_dst(dstVal, dstStyle)
+
+            # Iterate over the SrcA rows (and the SrcB columns). The visitation
+            # order is tweaked exactly as the hardware does, which only makes a
+            # difference when resolving argmax ties.
+            for i_ in range(16):
+                i = (i_ ^ 4) if i_ < 8 else i_
+                x = self._gmpool_read_and_scale_src(
+                    srcA[srcARow + i, j], srcAStyle, srcB[srcBRow, i]
+                )
+                if self._gmpool_as_comparable(x) >= self._gmpool_as_comparable(maximum):
+                    maximum = x
+
+            # Write the result back, zeroing the rest of the 4x16 block
+            dstVal = self._gmpool_write_dst(maximum, dstStyle)
+            if useDst32b:
+                dst.setDst32b(dstRow, j, dstVal)
+                for i in range(1, 4):
+                    dst.setDst32b(dstRow + i, j, 0)
+            else:
+                dst.setDst16b(dstRow, j, dstVal >> 16)
+                for i in range(1, 4):
+                    dst.setDst16b(dstRow + i, j, 0)
+
+        self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB)
+
+        # Advance the RWCs
+        rwc.applyAddrMod(issue_thread, addrMod)
+
+    def handle_dotpv(self, instruction_info, issue_thread, instr_args):
+        dstRow = self._read_dst_field(instruction_info, instr_args)
         addrMod = self._read_addr_mode(instruction_info, instr_args)
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
@@ -476,7 +955,7 @@ class MatrixUnit(TensixBackendUnit):
         self.perform_mvmul(issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4)
 
     def handle_mvmul(self, instruction_info, issue_thread, instr_args):
-        dstRow = instr_args["dst"]
+        dstRow = self._read_dst_field(instruction_info, instr_args)
         addrMod = self._read_addr_mode(instruction_info, instr_args)
         broadcastSrcBRow = instr_args["instr_mod19"]
         flipSrcA = instr_args["clear_dvalid"] & 0x1
@@ -502,14 +981,34 @@ class MatrixUnit(TensixBackendUnit):
         rwc = self.getRWC(issue_thread)
 
         srcAStyle, useDst32b = self.get_dataformat_and_useDst(issue_thread, stateID)
-        srcARow, srcBRow, dstRow = self.get_base_row_ranges(
+        srcARow, srcBRow, baseDstRow = self.get_base_row_ranges(
             issue_thread, stateID, rwc, broadcastSrcBRow
         )
+        # The instruction's own Dst offset sits on top of the RWC/config base;
+        # dropping it made every MVMUL/GAPOOL write the base row, so e.g.
+        # reduce_tile's REDUCE_SCALAR pooled into Dst row 0 instead of the row 4
+        # scratch it then transposes back through SrcB.
+        dstRow += baseDstRow
         if broadcastSrcBRow:
             numRows -= 1
         dstRow &= 0x400 - numRows
 
         fidelityPhase = self.determine_fidelity_phase(issue_thread, rwc)
+
+        if self.backend.blackhole and srcAStyle in (DataFormat.BF16, DataFormat.TF32):
+            self.perform_mvmul_exact(
+                srcARow,
+                srcBRow,
+                dstRow,
+                numRows,
+                broadcastSrcBRow,
+                srcAStyle,
+                useDst32b,
+                fidelityPhase,
+            )
+            self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB)
+            rwc.applyAddrMod(issue_thread, addrMod)
+            return
 
         srcAMatrix = [[0 for _ in range(16)] for _ in range(16)]
         srcBMatrix = [[0 for _ in range(16)] for _ in range(numRows)]
@@ -565,6 +1064,198 @@ class MatrixUnit(TensixBackendUnit):
 
         # Advance the RWCs
         rwc.applyAddrMod(issue_thread, addrMod)
+
+    @staticmethod
+    def _fpu_group_sums(srcAVals, srcBVals, fidelityPhase, expProdAdj):
+        """Sixteen fidelity-masked products, reduced to one sum per group of eight.
+
+        This is the hardware's fixed-point datapath, not a real-number one:
+        each operand contributes only the mantissa slice its fidelity phase
+        selects (five bits of SrcA, seven of SrcB, with ``expProdAdj`` carrying
+        the slice's scale), so a product is at most twelve bits. The eight
+        products of a group are then aligned to the group's largest exponent —
+        anything smaller is rounded off there and then — and summed as
+        integers.
+
+        ``srcAVals`` / ``srcBVals`` are FP32 bit patterns (which is what the
+        8-bit-exponent Src formats widen to exactly). Returns two
+        ``(sign, exponent, mantissa)`` triples, mantissas in the 25-bit form
+        :meth:`_fpu_accumulate` expects.
+        """
+        zeroTermExp = max(expProdAdj, 0)
+        signs = [0] * 16
+        exps = [zeroTermExp] * 16
+        mans = [0] * 16
+        for k in range(16):
+            a, b = srcAVals[k], srcBVals[k]
+            if not (a & 0x7F800000) or not (b & 0x7F800000):
+                # A zero exponent is no magnitude at all: the product is zero
+                continue
+            manA = ((a >> 13) & 0x3FF) | 0x400
+            manB = ((b >> 13) & 0x3FF) | 0x400
+            manA = ((manA >> 1) & 0x1F) if fidelityPhase & 1 else manA >> 6
+            manB = ((manB & 0xF) << 3) if fidelityPhase & 2 else manB >> 4
+            signs[k] = (a >> 31) ^ (b >> 31)
+            exps[k] = ((a >> 23) & 0xFF) + ((b >> 23) & 0xFF) + expProdAdj
+            mans[k] = manA * manB
+
+        sums = []
+        for group in range(2):
+            lanes = range(8 * group, 8 * group + 8)
+            expSum = max(exps[k] for k in lanes)
+            if expSum <= 0:
+                sums.append((0, 0, 0))
+                continue
+            manSum = 0
+            for k in lanes:
+                shift = min(expSum - exps[k], 30)
+                man = ((mans[k] << 1) + (1 << shift)) >> (shift + 1)
+                manSum += -man if signs[k] else man
+            sign = 0
+            if manSum < 0:
+                sign, manSum = 1, -manSum
+            sums.append((sign, expSum, manSum << 13))
+        return sums
+
+    @staticmethod
+    def _fpu_accumulate(groupSums, dstVal, useDst32b):
+        """Add the two group sums into Dst, returning the new Dst value as FP32.
+
+        The three terms are aligned to the largest exponent of the three and —
+        when Dst is 16-bit — each is rounded to Dst's precision *before* the
+        add, which is why a long accumulation drifts differently from one done
+        in real numbers. The result is renormalised and rounded once more on
+        the way back out.
+        """
+        signDst = dstVal >> 31
+        expDst = (dstVal >> 23) & 0xFF
+        manDst = ((dstVal & 0x7FFFFF) | 0x800000) if expDst else 0
+
+        exp = max(groupSums[0][1], groupSums[1][1], expDst)
+        if exp <= 0:
+            # Underflows before it is even normalised
+            return 0
+
+        terms = []
+        for sign, termExp, man in groupSums:
+            if termExp < exp:
+                shift = exp - termExp
+                man = ((man + (1 << (shift - 1)) - sign) >> shift) if shift < 31 else 0
+            if not useDst32b:
+                man = (man + (1 << 12) - sign) & ~0x1FFF
+            terms.append((sign, man))
+        if expDst < exp:
+            shift = exp - expDst
+            manDst = ((manDst + (1 << (shift - 1))) >> shift) if shift < 31 else 0
+        if not useDst32b:
+            manDst = (manDst + (1 << 12)) & ~0x1FFF
+
+        sign = signDst
+        man = manDst
+        for termSign, termMan in terms:
+            man += termMan if termSign == sign else -termMan
+        if man < 0:
+            sign, man = sign ^ 1, -man
+        if not man:
+            # Exact cancellation
+            return 0
+
+        shift = (32 - man.bit_length()) - 8  # left-shift that normalises to 24 bits
+        exp -= shift
+        if not useDst32b:
+            shift -= 16
+        if shift < 0:
+            shift = -shift
+            man = (man + (1 << (shift - 1))) >> shift
+        else:
+            man <<= shift
+        if not useDst32b:
+            man <<= 16
+        if man & 0x1000000:
+            exp += 1
+        man &= 0x7FFFFF
+        if exp <= 0:
+            return 0
+        if exp >= 255:
+            # Dst holds no infinities, so this saturates
+            return (sign << 31) | (255 << 23)
+        return (sign << 31) | (exp << 23) | man
+
+    def perform_mvmul_exact(
+        self,
+        srcARow,
+        srcBRow,
+        dstRow,
+        numRows,
+        broadcastSrcBRow,
+        srcAStyle,
+        useDst32b,
+        fidelityPhase,
+    ):
+        """MVMUL/GAPOOL/DOTPV on Blackhole's 8-bit-exponent FPU datapath.
+
+        Models the datapath as the hardware builds it — truncated products,
+        per-group exponent alignment, and a round into Dst on every
+        instruction — rather than evaluating the dot product in real numbers
+        and rounding once. That matters as soon as an accumulation runs for
+        many instructions: reduce_tile at HiFi4 issues sixteen GAPOOLs into the
+        same Dst row, and doing the sums exactly drifts a couple of ULP away
+        from what the hardware lands on.
+
+        The FP16 and INT8 datapaths keep the real-number model in
+        :meth:`perform_mvmul`; only the BF16/TF32 (8-bit exponent) formats,
+        which is what every current kernel uses, are modelled exactly.
+        """
+        expProdAdj = -127
+        if fidelityPhase & 1:
+            expProdAdj -= 5
+        if fidelityPhase & 2:
+            expProdAdj -= 7
+
+        toFP32 = (
+            DataFormatConversions.TF32InSrcToFP32
+            if srcAStyle == DataFormat.TF32
+            else DataFormatConversions.BF16InSrcToFP32
+        )
+        srcA = self.backend.getSrcA(self.srcABank)
+        srcB = self.backend.getSrcB(self.srcBBank)
+        dst = self.backend.getDst()
+
+        srcAColumns = [
+            [toFP32(srcA[srcARow + k, j]) for k in range(16)] for j in range(16)
+        ]
+        for i in range(numRows):
+            row = srcBRow + (0 if broadcastSrcBRow else i)
+            srcBVals = [toFP32(srcB[row, k]) for k in range(16)]
+            for j in range(16):
+                if useDst32b:
+                    dstVal = DataFormatConversions.FP32InDstToFP32(
+                        dst.getDst32b(dstRow + i, j)
+                    )
+                else:
+                    dstVal = (
+                        DataFormatConversions.BF16InDstToBF16(
+                            dst.getDst16b(dstRow + i, j)
+                        )
+                        << 16
+                    )
+                result = self._fpu_accumulate(
+                    self._fpu_group_sums(
+                        srcAColumns[j], srcBVals, fidelityPhase, expProdAdj
+                    ),
+                    dstVal,
+                    useDst32b,
+                )
+                if useDst32b:
+                    dst.setDst32b(
+                        dstRow + i,
+                        j,
+                        DataFormatConversions.FP32ToDstFormatFP32(result),
+                    )
+                else:
+                    dst.setDst16b(
+                        dstRow + i, j, DataFormatConversions.FP32ToDstFormatBF16(result)
+                    )
 
     def get_dataformat_and_useDst(self, issue_thread, stateID):
         # Determine data formats
@@ -628,6 +1319,24 @@ class MatrixUnit(TensixBackendUnit):
         latched = self.backend.getSrcA(self.srcABank).getDataFormat()
         return configuredFmt if latched is None else latched
 
+    def implied_srcB_format(
+        self, issue_thread, configuredFmt, disableKey="DISABLE_IMPLIED_SRCB_FMT_Base"
+    ):
+        """The SrcB-bank counterpart of :meth:`implied_srcA_format`.
+
+        MOVB2D implies *both* of its format selects from the SrcB bank (that is
+        not a documentation typo — the instruction's "SrcAFmt" select reads
+        ImpliedSrcBFmt), each gated by its own thread-config disable bit, hence
+        ``disableKey``. Wormhole has neither register and always uses the
+        configured format.
+        """
+        if not self.backend.blackhole:
+            return configuredFmt
+        if self.getThreadConfigValue(issue_thread, disableKey):
+            return configuredFmt
+        latched = self.backend.getSrcB(self.srcBBank).getDataFormat()
+        return configuredFmt if latched is None else latched
+
     def get_base_row_ranges(self, issue_thread, stateID, rwc, broadcastSrcBRow):
         # Determine the row range
         srcARow = rwc.SrcA & 0x38
@@ -679,10 +1388,11 @@ class MatrixUnit(TensixBackendUnit):
     ):
         srcAStyle, useDst32b = self.get_dataformat_and_useDst(issue_thread, stateID)
 
-        srcARow, srcBRow, dstRow = self.get_base_row_ranges(
+        srcARow, srcBRow, baseDstRow = self.get_base_row_ranges(
             issue_thread, stateID, rwc, broadcastSrcBRow
         )
-        dstRow &= 0x3F8
+        # As in perform_mvmul, the instruction's own Dst offset adds to the base.
+        dstRow = (dstRow + baseDstRow) & 0x3F8
 
         fidelityPhase = self.determine_fidelity_phase(issue_thread, rwc)
 
@@ -862,7 +1572,7 @@ class MatrixUnit(TensixBackendUnit):
         rwc = self.getRWC(issue_thread)
         broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
         broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
-        dstRow = instr_args["dst"]
+        dstRow = self._read_dst_field(instruction_info, instr_args)
         addDst = True  # Always add for ELWMUL
         addrMode = self._read_addr_mode(instruction_info, instr_args)
 
@@ -898,7 +1608,7 @@ class MatrixUnit(TensixBackendUnit):
         rwc = self.getRWC(issue_thread)
         broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
         broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
-        dstRow = instr_args["dst"]
+        dstRow = self._read_dst_field(instruction_info, instr_args)
         addDst = instr_args["dest_accum_en"]
         addrMode = self._read_addr_mode(instruction_info, instr_args)
 
@@ -942,7 +1652,7 @@ class MatrixUnit(TensixBackendUnit):
         rwc = self.getRWC(issue_thread)
         broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
         broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
-        dstRow = instr_args["dst"]
+        dstRow = self._read_dst_field(instruction_info, instr_args)
         addDst = instr_args["dest_accum_en"]
         addrMode = self._read_addr_mode(instruction_info, instr_args)
 
@@ -1035,15 +1745,53 @@ class MatrixUnit(TensixBackendUnit):
                 ).allowedClient = SrcRegister.SrcClient.Unpackers
             self.srcBBank ^= 1
 
+    def _read_zeroacc_fields(self, instruction_info, instr_args):
+        """Decode ZEROACC's ``dst`` / ``clear_mode`` / ``addr_mode``.
+
+        Blackhole re-lays out three of ZEROACC's fields (per ttsim's
+        ``data/{bh,wh}/tensix_isa.json``)::
+
+            field              Wormhole                    Blackhole
+            dst / where        9:0                         9:0
+            addr_mode          16:15                       16:14
+            use_32_bit_mode    packed as clear_mode bit 2  18:18 (own field)
+            clear_mode         21:19                       20:19
+
+        The shared instruction table encodes the Wormhole layout, so on
+        Blackhole ``addr_mode`` silently drops bit 14 (the ADDR_MOD_3 the
+        ``clear_zero_flags`` ZEROACC of `copy_tile` asks for decodes as
+        ADDR_MOD_1) and ``use_32_bit_mode`` is read from bit 21, which Blackhole
+        leaves unassigned. Blackhole's extra ``addr_mode`` bit also leaks into
+        the table's ``dst`` — it runs 14:0 there, the next field starting at 15
+        — which is harmless for the modes today's kernels use but not for the
+        one-row mode.
+
+        So re-read all three from the raw word on Blackhole and fold
+        ``use_32_bit_mode`` back in as ``clear_mode`` bit 2, exactly as ttsim's
+        ``TENSIX_EXECUTE_ZEROACC`` does under ``TT_ARCH_VERSION == 1``, after
+        which the Wormhole-shaped logic below works unchanged.
+        """
+        if not self.backend.blackhole:
+            return (
+                instr_args["dst"],
+                instr_args["clear_mode"],
+                extract_bits(instr_args["AddrMode"], 2, 0),
+            )
+        raw = instruction_info["raw_instruction"]
+        clear_mode = extract_bits(raw, 2, 19) | (get_nth_bit(raw, 18) << 2)
+        return extract_bits(raw, 10, 0), clear_mode, extract_bits(raw, 3, 14)
+
     def handle_zeroacc(self, instruction_info, issue_thread, instr_args):
         ZEROACC_MODE_ONE_ROW = 0
         ZEROACC_MODE_16_ROWS = 1
         ZEROACC_MODE_HALF_OF_DST = 2
         ZEROACC_MODE_ALL_OF_DST = 3
 
-        mode = extract_bits(instr_args["clear_mode"], 2, 0)
-        useDst32b = extract_bits(instr_args["clear_mode"], 1, 2)
-        imm10 = instr_args["dst"]
+        imm10, clear_mode, addr_mod = self._read_zeroacc_fields(
+            instruction_info, instr_args
+        )
+        mode = extract_bits(clear_mode, 2, 0)
+        useDst32b = extract_bits(clear_mode, 1, 2)
 
         # Blackhole ZEROACC carries a `clear_zero_flags` bit (raw bit 17, absent
         # from the shared Wormhole-layout argument table). When set, the
@@ -1059,7 +1807,6 @@ class MatrixUnit(TensixBackendUnit):
             instruction_info["raw_instruction"], 17
         ):
             if mode == ZEROACC_MODE_ONE_ROW or mode == ZEROACC_MODE_16_ROWS:
-                addr_mod = extract_bits(instr_args["AddrMode"], 2, 0)
                 self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)
             return
 
@@ -1083,6 +1830,27 @@ class MatrixUnit(TensixBackendUnit):
         else:
             if mode == ZEROACC_MODE_16_ROWS:
                 imm10 &= 0xFF
+                if self.backend.blackhole and not useDst32b:
+                    # On Blackhole the 16-row clear is relative to the math
+                    # bank unless DEST_ACCESS_CFG_zeroacc_absolute_tile_mode is
+                    # set: a math offset into the high half of DEST moves the
+                    # cleared block up by 32 (i.e. 512 rows). ttsim
+                    # TENSIX_EXECUTE_ZEROACC case 1. (Its 32-bit sibling, case
+                    # 5, shifts by 16 on `dst_offset & 768`; not modelled here
+                    # because the useDst32b row mapping below already differs
+                    # from ttsim's swizzle, so half of that fix would mislead.)
+                    dst_offset = (
+                        self.getThreadConfigValue(
+                            issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
+                        )
+                        + self.getRWC(issue_thread).Dst
+                    )
+                    absolute_tile_mode = self.getConfigValue(
+                        self.getThreadConfigValue(issue_thread, "CFG_STATE_ID_StateID"),
+                        "DEST_ACCESS_CFG_zeroacc_absolute_tile_mode",
+                    )
+                    if not absolute_tile_mode and (dst_offset & 512):
+                        imm10 += 32
                 if useDst32b:
                     if imm10 < 32:
                         for i in range(16):
@@ -1108,7 +1876,6 @@ class MatrixUnit(TensixBackendUnit):
                 raise ValueError(f"Unknown mode {hex(mode)}")
 
         if mode == ZEROACC_MODE_ONE_ROW or mode == ZEROACC_MODE_16_ROWS:
-            addr_mod = extract_bits(instr_args["AddrMode"], 2, 0)
             self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)
 
     def srcAFidelityBits(self, x, fidelityPhase):

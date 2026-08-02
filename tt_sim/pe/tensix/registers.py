@@ -71,7 +71,11 @@ class SrcRegister:
 
     def __init__(self):
         self.allowedClient = SrcRegister.SrcClient.Unpackers
-        self.data = np.empty([64, 16], dtype=np.uint32)
+        # Zeroed, not uninitialised: kernels do read Src rows nothing has
+        # written this pass (reduce_tile's SrcB rows 16-31 scratch, or the rows
+        # a one-row scaler unpack leaves alone), so leaving them as whatever
+        # numpy handed back made results depend on unrelated allocations.
+        self.data = np.zeros([64, 16], dtype=np.uint32)
         # The format the unpacker wrote this bank in, latched when the bank was
         # handed to the matrix unit. Blackhole's matrix unit reads the operand
         # format from here rather than from ALU_FORMAT_SPEC_REG0_SrcA/1_SrcB;

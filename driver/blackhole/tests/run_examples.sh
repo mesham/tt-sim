@@ -75,7 +75,7 @@ for name in "${ORDER[@]}"; do
       echo "SKIP  $name (not built)"; continue
     fi
   fi
-  pkill -9 -f 'driver.blackhole.server' 2>/dev/null; sleep 0.5
+  pkill -9 -f 'driver\.blackhole\.server( |$)' 2>/dev/null; sleep 0.5
   log="/tmp/bh_$name.out"
   # Run from the example's own src/ dir: the host programs pass kernel paths to
   # CreateKernel relative to the CWD ("kernels/dataflow/read_kernel.cpp"), so a
@@ -96,7 +96,7 @@ for name in "${ORDER[@]}"; do
     echo "      ...tail:"; grep -vE "End of error message|Backtrace|^\s*#[0-9]" "$log" | tail -6 | sed 's/^/      | /'
   fi
 done
-pkill -9 -f 'driver.blackhole.server' 2>/dev/null
+pkill -9 -f 'driver\.blackhole\.server( |$)' 2>/dev/null
 
 echo "----"
 echo "Blackhole examples: $pass passed, $fail failed"
