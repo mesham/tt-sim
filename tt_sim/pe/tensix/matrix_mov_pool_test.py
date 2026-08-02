@@ -417,6 +417,48 @@ def test_gmpool_flushes_srca_denormals():
         assert backend.getDst().getDst16b(0, 0) == 0
 
 
+def test_gmpool_reads_a_flag_cleared_dst_row_as_minus_infinity():
+    # ZEROACC clears a row's zero flag rather than its data, and GMPOOL is the
+    # one Dst consumer that reads a cleared row as all-ones, i.e. minus
+    # infinity. That is what makes `reduce_tile(MAX)` over negative data work:
+    # read the row as its (zeroed) data instead and every result saturates at 0.
+    for blackhole in (True, False):
+        with _backend(blackhole) as backend:
+            _load_gmpool_operands(backend, [-1.0, -2.0, -3.5, -0.5] * 4)
+            backend.getDst().setUndefinedRow(0)
+            _issue(backend, _gmpool())
+            for col in range(16):
+                assert backend.getDst().getDst16b(0, col) == _dst_bf16(-0.5)
+
+
+def test_gmpool_reads_a_valid_zero_dst_row_as_zero():
+    # The flag, not the data, is what makes the row lose: an explicitly written
+    # zero is a real 0.0 seed and clamps a max over negative SrcA at zero.
+    with _backend(True) as backend:
+        _load_gmpool_operands(backend, [-1.0] * 16, dst_seed=0.0)
+        _issue(backend, _gmpool())
+        assert backend.getDst().getDst16b(0, 0) == 0
+
+
+def test_gmpool_holds_the_flag_until_the_last_column():
+    # The accumulating row's flag is re-asserted only once column 15 lands, so
+    # every column of one pass reduces against minus infinity rather than
+    # against the max column 0 just wrote. Column 0 gets the largest datum, so
+    # a flag re-asserted early would leak -0.5 into columns 1-15.
+    with _backend(True) as backend:
+        srcA = backend.getSrcA(backend.matrix_unit.srcABank)
+        srcB = backend.getSrcB(backend.matrix_unit.srcBBank)
+        for row in range(16):
+            for col in range(16):
+                srcA[row, col] = _src_bf16(-0.5 if col == 0 else -4.0)
+            srcB[0, row] = _src_bf16(1.0)
+        backend.getDst().setUndefinedRow(0)
+        _issue(backend, _gmpool())
+        assert backend.getDst().getDst16b(0, 0) == _dst_bf16(-0.5)
+        for col in range(1, 16):
+            assert backend.getDst().getDst16b(0, col) == _dst_bf16(-4.0)
+
+
 def test_gmpool_clears_dvalid_and_flips_banks():
     with _backend(True) as backend:
         _load_gmpool_operands(backend, [1.0] * 16)

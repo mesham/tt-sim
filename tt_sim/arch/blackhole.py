@@ -22,6 +22,10 @@ BLACKHOLE_PROFILE = ArchProfile(
     noc_grid_y=12,
     # Max single NoC transfer: 16384 bytes (config.h NOC_MAX_PACKET_SIZE).
     noc_max_burst_size=16384,
+    # DRAM-sourced NoC reads must be congruent modulo 64 (ttsim tile.cpp checks
+    # `(src_addr & 63) == (dst_addr & 63)` under TT_ARCH_VERSION == 1), matching
+    # Blackhole's 64 B NoC byte-enable span vs Wormhole's 32 B.
+    noc_dram_read_congruence=64,
     # Tensix L1 SRAM: TENSIX_SRAM_SIZE = 1536 * 1024 = 1,572,864 bytes.
     tensix_l1_size=1536 * 1024,
     # Baby-core local data memories are doubled vs Wormhole (ttsim config.h,

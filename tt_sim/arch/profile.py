@@ -106,6 +106,16 @@ class ArchProfile:
     #: from Wormhole's. See ``TensixConfigurationConstants`` and ``WaitGate``.
     tensix_blackhole: bool = False
 
+    #: Congruence modulus a NoC **read whose source is DRAM** must satisfy:
+    #: ``(src_addr % m) == (dst_addr % m)``. Per ``WormholeB0/NoC/Alignment.md``
+    #: the "Other -> L1" cell of the length-mode table is ``C32``, and the vendor
+    #: reference simulator (``ttsim`` ``src/tile.cpp``, the ``src_tile_type ==
+    #: 'D'`` branch of ``noc_cmd_start``) checks ``(src_addr & 31) == (dst_addr &
+    #: 31)`` on Wormhole and ``& 63`` on Blackhole -- matching the 32 B / 64 B NoC
+    #: byte-enable span. Violations are ``UndefinedBehavior`` on silicon: the
+    #: transfer is skewed or dropped rather than faulting.
+    noc_dram_read_congruence: int = 32
+
     #: Per-channel SoC-physical coordinate of the DRAM tile's **NoC 1** worker
     #: endpoint, parallel to :attr:`dram_channel_unified_coords`. A DRAM channel
     #: exposes several sub-endpoints and NoC 0 / NoC 1 use *different* ones (the
@@ -125,4 +135,5 @@ class ArchProfile:
             "noc_max_burst_size": self.noc_max_burst_size,
             "noc_coord_strategy": self.noc_coord_strategy,
             "noc_blackhole_cmd_buf_layout": self.noc_blackhole_cmd_buf_layout,
+            "noc_dram_read_congruence": self.noc_dram_read_congruence,
         }

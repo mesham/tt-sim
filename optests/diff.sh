@@ -7,11 +7,18 @@
 #
 # Run in a NORMAL shell (not a sandbox that kills the spawned sim servers):
 #   TT_METAL_HOME=/path/to/tt-metal \
-#   TTSIM_ORACLE=/path/to/dir/with/libttsim_bh.so + a SoC descriptor \
+#   TTSIM_ORACLE=/path/to/dir/with/libttsim_<bh|wh>.so + a SoC descriptor \
 #   ./optests/diff.sh [op-program-name]      # default: optest
 #
-# The descriptor may be named `soc_descriptor.yaml` or `blackhole_140_arch.yaml`
-# (what ttsim's own oracle-bh/ ships) -- see _stage_oracle below.
+# The architecture defaults to blackhole; set TT_SIM_ARCH=wormhole to diff the
+# same program against ttsim-Wormhole instead. That picks the oracle library
+# name (libttsim_wh.so), our driver (driver/wormhole) and the default worker
+# coordinate (logical (0,0) is physical 1-1 on WH, 1-2 on BH). TTSIM_ORACLE
+# then has to point at the matching oracle dir (ttsim's oracle-wh/).
+#
+# The descriptor may be named `soc_descriptor.yaml` or, as ttsim's own oracle
+# dirs ship it, `<arch>_arch.yaml` (`blackhole_140_arch.yaml` /
+# `wormhole_b0_80_arch.yaml`) -- see _stage_oracle below.
 #
 # Add op programs under optests/<name>/src (a tt-metal host that dumps its
 # output tile as `OPDIFF_RESULT:<hex>`); the compute kernel picks the op.
@@ -20,11 +27,17 @@ set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NAME="${1:-optest}"
 SRC="$REPO/optests/$NAME/src"
-COORDS="${TT_SIM_TENSIX_COORDS:-1-2}"          # tt-sim needs the worker tile(s); ttsim doesn't
+ARCH="${TT_SIM_ARCH:-blackhole}"
+case "$ARCH" in
+  blackhole|bh) ARCH=blackhole; ORACLE_SO=libttsim_bh.so; DEF_COORDS=1-2 ;;
+  wormhole|wh)  ARCH=wormhole;  ORACLE_SO=libttsim_wh.so; DEF_COORDS=1-1 ;;
+  *) echo "unknown TT_SIM_ARCH=$ARCH (want blackhole|wormhole)" >&2; exit 2 ;;
+esac
+COORDS="${TT_SIM_TENSIX_COORDS:-$DEF_COORDS}"  # tt-sim needs the worker tile(s); ttsim doesn't
 TIMEOUT="${TT_SIM_EXAMPLE_TIMEOUT:-300}"
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
-: "${TTSIM_ORACLE:?set TTSIM_ORACLE to a dir holding libttsim_bh.so + a SoC descriptor}"
+: "${TTSIM_ORACLE:?set TTSIM_ORACLE to a dir holding $ORACLE_SO + a SoC descriptor}"
 export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
 export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:${LD_LIBRARY_PATH:-}"
 export TT_METAL_SLOW_DISPATCH_MODE=1
@@ -50,9 +63,9 @@ fi
 
 # UMD hardcodes the descriptor's *filename*: for a .so simulator it reads
 # `<dir-of-so>/soc_descriptor.yaml` (umd device/simulation/simulation_chip.cpp),
-# so we cannot just hand it a differently-named file. ttsim's own oracle-bh/
-# ships the descriptor as `blackhole_140_arch.yaml`, which would otherwise make
-# every run die in the YAML loader with a bare `bad file:` and report "no result
+# so we cannot just hand it a differently-named file. ttsim's own oracle dirs
+# ship the descriptor as `<arch>_arch.yaml`, which would otherwise make every
+# run die in the YAML loader with a bare `bad file:` and report "no result
 # from ttsim". When the expected name is missing, stage a scratch directory of
 # symlinks with the name UMD wants, rather than writing into the ttsim checkout.
 # Sets ORACLE_DIR (the directory to load the simulator from) and, when it had to
@@ -63,17 +76,17 @@ STAGED_ORACLE=""
 ORACLE_DIR=""
 _stage_oracle() {
   local abs_so abs_desc desc
-  abs_so="$(cd "$TTSIM_ORACLE" 2>/dev/null && pwd)/libttsim_bh.so"
-  [ -f "$abs_so" ] || { echo "no libttsim_bh.so in $TTSIM_ORACLE" >&2; return 1; }
+  abs_so="$(cd "$TTSIM_ORACLE" 2>/dev/null && pwd)/$ORACLE_SO"
+  [ -f "$abs_so" ] || { echo "no $ORACLE_SO in $TTSIM_ORACLE" >&2; return 1; }
   if [ -f "$TTSIM_ORACLE/soc_descriptor.yaml" ]; then
     ORACLE_DIR="$TTSIM_ORACLE"
     return 0
   fi
-  for desc in "$TTSIM_ORACLE/blackhole_140_arch.yaml" "$TTSIM_ORACLE"/*_arch.yaml; do
+  for desc in "$TTSIM_ORACLE"/*_arch.yaml; do
     [ -f "$desc" ] || continue
     abs_desc="$(cd "$(dirname "$desc")" && pwd)/$(basename "$desc")"
     STAGED_ORACLE="$(mktemp -d)" || return 1
-    ln -s "$abs_so" "$STAGED_ORACLE/libttsim_bh.so"
+    ln -s "$abs_so" "$STAGED_ORACLE/$ORACLE_SO"
     ln -s "$abs_desc" "$STAGED_ORACLE/soc_descriptor.yaml"
     ORACLE_DIR="$STAGED_ORACLE"
     echo "[oracle] staged $(basename "$abs_desc") as soc_descriptor.yaml"
@@ -103,13 +116,13 @@ _run() {
 }
 _result() { grep -o 'OPDIFF_RESULT:[0-9a-f]*' "$1" | head -1 | cut -d: -f2; }
 
-ora_log="/tmp/optest_${NAME}_oracle.out"
-our_log="/tmp/optest_${NAME}_ours.out"
+ora_log="/tmp/optest_${NAME}_${ARCH}_oracle.out"
+our_log="/tmp/optest_${NAME}_${ARCH}_ours.out"
 
-echo "[oracle: ttsim]  $ORACLE_DIR/libttsim_bh.so"
-_run "$ORACLE_DIR/libttsim_bh.so" "" "$ora_log"
-echo "[ours:   tt-sim] $REPO/driver/blackhole  (coords=$COORDS)"
-_run "$REPO/driver/blackhole" "$COORDS" "$our_log"
+echo "[oracle: ttsim]  $ORACLE_DIR/$ORACLE_SO"
+_run "$ORACLE_DIR/$ORACLE_SO" "" "$ora_log"
+echo "[ours:   tt-sim] $REPO/driver/$ARCH  (coords=$COORDS)"
+_run "$REPO/driver/$ARCH" "$COORDS" "$our_log"
 pkill -9 -f 'driver\.(wormhole|blackhole)\.server( |$)' 2>/dev/null
 
 ora="$(_result "$ora_log")"

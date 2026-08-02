@@ -684,3 +684,387 @@ A rough mapping from question to writer:
 - [`driver/wormhole/server/README.md`](../server/README.md) — how the
   wire-bridge server, UMD hand-off, and `TT_METAL_SIMULATOR`
   spawning fit together.
+
+---
+
+# Appendix: where tt-sim's own wall clock goes
+
+Everything above is about profiling *your kernel*. This appendix is
+about profiling *the simulator*, which is what [`ROADMAP.md`
+§L](../../../ROADMAP.md) asks for before any JIT / rewrite decision is
+taken: "no 'use Numba' or 'rewrite in Cython' decision without trace
+data showing where the cycles go". §I (cycle-approximate performance
+modelling) is the headline goal and it adds per-cycle work on top of
+what is measured here, so the numbers below are the budget that work
+has to fit into.
+
+**Measured 2026-08-02** against `0b7e1c6` plus an unrelated dirty tree
+(`git diff --stat`: 14 files, +413/-107, concurrent work in
+`tensix/backends/{matrix,packer,unpacker}.py`, `tensix/registers.py`,
+`network/tt_noc.py`, `arch/`, `optests/`). Machine: 12th Gen Core
+i7-12700H, 16 threads, CPython 3.12.13, `TT_SIM_THREADED` unset
+(sequential pump). Re-measure before quoting these against a later
+tree.
+
+## Method
+
+Workloads are the **Blackhole offline replay guards**
+(`driver/blackhole/server/*_replay_test.py`). Each replays a captured
+tt-metal wire trace socket-free, in one process, with no tt-metal, no
+UMD and no IPC in the measurement — so the wall clock is the
+simulator and nothing else. That is confirmed by the numbers: with
+module import excluded, 97–99 % of each run is inside
+`MultiTileClock.run`.
+
+Three instruments, all driven from throw-away scripts that monkeypatch
+rather than edit the tree:
+
+- **`cProfile`/`pstats`** for exact call counts. Note its distortion on
+  this workload is large — `six` goes 35.8 s → 86.4 s (2.4×) — because
+  the hot code is call-dense, so cProfile *over*-weights the leafiest
+  code. Call counts are trusted; time shares are not.
+- **A stack-sampling profiler** (2 ms interval, background thread +
+  `sys._current_frames`) for undistorted time shares — overhead is
+  inside run-to-run noise (`six`: 34.0 s sampled vs 35.8 s not).
+  `py-spy` is **not installed** in this environment and nothing was
+  installed system-wide to get it; the hand-rolled sampler stands in.
+  Samples are attributed twice: to the leaf frame, and to the
+  outermost tt-sim subsystem on the stack ("who owns this cycle").
+- **Microbenchmarks** (`timeit`) isolating individual per-instruction
+  costs, so the writeup can quote nanoseconds and not only percentages.
+
+Simulated cycles are counted by wrapping `MultiTileClock.run`. Note
+the replay guards pump in chunks driven by the captured host polling
+(mostly `cycles_per_poll` = 100), so cycle counts are the real number
+of device cycles the kernel needed.
+
+## Headline: cycles per wall-clock second
+
+| workload | what it is | device cycles | pump wall | **cycles/s** | RV instrs retired |
+|---|---|---|---|---|---|
+| `two` | NoC/L1 smoke | 8,200 | 2.10 s | 3,900 | — |
+| `reduce` | 5 reduction variants | 10,200 | 2.97 s | 3,439 | — |
+| `nine` | multi-CB dataflow | 11,500 | 5.87 s | 1,958 | — |
+| `sfpumath` | SFPU transcendentals | 19,300 | 7.23 s | 2,671 | — |
+| `four` | Int8 add via FPU | 107,400 | 29.51 s | 3,639 | 524,956 |
+| `six` | **128³ bf16 matmul** | 27,500 | 35.68 s | **771** | 125,456 |
+
+**tt-sim currently runs at roughly 1–4 k simulated cycles per second**,
+dropping to ~770 cycles/s when the Tensix matrix unit is busy. Per
+simulated RV instruction that is ~50 µs (`four`: 524,956 instructions
+in the 84 % of 29.5 s owned by the RV cores ⇒ ~21 k instr/s), and
+~84 M Python function calls for 525 k instructions is **~120 Python
+calls per simulated RV instruction**.
+
+## The wall-clock partition
+
+Sampled shares, attributed to the outermost owning subsystem. Two
+clearly distinct regimes:
+
+| subsystem | `six` (matmul) | `four` | `nine` | `reduce` | `sfpumath` |
+|---|---|---|---|---|---|
+| Tensix matrix / FPU | **70.3 %** | 0.1 % | 0.4 % | 2.1 % | 0.8 % |
+| RV32IM baby cores | 20.5 % | **84.2 %** | **77.4 %** | **69.7 %** | **65.0 %** |
+| Tensix vector / SFPU | — | — | — | — | 11.2 % |
+| Tensix unpacker | 2.7 % | 0.5 % | 2.0 % | 3.3 % | 1.5 % |
+| Tensix packer | 0.7 % | 0.2 % | 0.4 % | 1.5 % | 0.4 % |
+| Tensix frontend (decode) | 1.0 % | 0.9 % | 1.5 % | 3.9 % | 4.5 % |
+| NoC (NIU ticks) | 1.8 % | 6.1 % | 5.3 % | 7.2 % | 4.3 % |
+| bridge (trace replay, host msgs) | 1.0 % | 5.1 % | 6.6 % | 5.6 % | 4.3 % |
+| clock/pump dispatch itself | 0.8 % | 0.4 % | 1.5 % | 0.3 % | 3.9 % |
+| trace/event bus (disabled) | 0.1 % | — | — | — | 0.4 % |
+| everything else | 1.0 % | 2.5 % | 5.0 % | 6.4 % | 3.7 % |
+
+Read across the row: **outside matmul, the RV32IM interpreter is
+two-thirds to five-sixths of the entire simulator.** Inside matmul, one
+function — `matrix.py:_fpu_group_sums` — is 42 % of the whole process.
+
+Top leaf frames, `six`:
+
+```
+  42.21%  tensix/backends/matrix.py:_fpu_group_sums
+   5.31%  tensix/backends/matrix.py:_fpu_accumulate
+   3.91%  tensix/registers.py:__getitem__
+   3.89%  tensix/backends/matrix.py:<genexpr>
+   3.10%  tensix/util.py:FP32ToDstFormatBF16
+   2.67%  tensix/registers.py:getDst16b
+   2.42%  pe/register/register.py:write
+```
+
+Top leaf frames, `four` (representative of the RV-bound majority):
+
+```
+  11.17%  pe/register/register.py:write
+   8.51%  pe/register/register.py:read
+   6.45%  network/tt_noc.py:clock_tick
+   5.87%  util/conversion.py:conv_to_int32
+   5.63%  pe/rv/isa/rv_isa.py:get_int
+   5.08%  pe/rv/isa/rv_isa.py:get_bits
+   4.74%  device/clock.py:clock_tick
+   3.77%  pe/register/register_file.py:clear_write_record
+   3.72%  trace/bus.py:get_bus
+   3.48%  memory/memory.py:read
+   3.46%  pe/rv/isa/rv_isa.py:<genexpr>
+```
+
+## The idle-pump floor, and how it scales
+
+A device with every baby core held in soft reset still has to be
+ticked. Running the `driver/blackhole` device (8 DRAM tiles + N Tensix
+tiles) with nothing happening:
+
+| Tensix tiles | registered clockables | idle cycles/s | µs/cycle |
+|---|---|---|---|
+| 1 | 44 | 24,850 | 40.2 |
+| 2 | 72 | 15,095 | 66.2 |
+| 4 | 128 | 9,230 | 108.3 |
+| 8 | 240 | 4,428 | 225.9 |
+
+Dead linear in component count at **~0.94 µs per component-tick**. Two
+consequences:
+
+1. **The pump is not today's bottleneck.** On `six` it is 0.8 % of the
+   wall clock; on the single-Tensix workloads the 24.8 k cycles/s floor
+   is 7–30× above the 0.8–3.9 k cycles/s actually achieved.
+2. **It is a hard ceiling, and it moves the wrong way.** Even with all
+   modelled work made free, one Tensix tile caps at ~25 k cycles/s, and
+   a realistic 8-Tensix device at ~4.4 k cycles/s — *below* what a
+   single tile achieves doing real work today.
+
+Where the idle 40 µs/cycle goes (sampled, 1 Tensix tile):
+
+```
+  38.5%  network/tt_noc.py:clock_tick     (18 NIUs x empty request list,
+                                           each taking self._inbox_lock and
+                                           allocating a fresh list)
+  13.6%  device/clock.py:clock_tick       (the dispatch loop itself)
+ ~28%    the per-core soft-reset poll     (conv_to_int32 7.5%, memory
+                                           convert_addr_to_target_range 6.8%,
+                                           memory_map.locate 3.4%,
+                                           get_nth_bit 2.7%, ...)
+```
+
+That last one is worth calling out on its own: `BabyRISCV.clock_tick`
+reads `SOFT_RESET` (`0xFFB121B0`) through the **full memory map** —
+interval lookup, polymorphic `mem_mapable` dispatch, byte→int
+conversion — for all five cores on every cycle, whether or not the core
+is running. That is 5 memory-map traversals per tile per cycle of pure
+overhead, and it is ~28 % of the idle floor.
+
+## Anatomy of one simulated RV instruction
+
+~50 µs each, ~120 Python calls each. Microbenchmarks of the individual
+pieces (200 k iterations, ns per call):
+
+| operation | current | obvious alternative |
+|---|---|---|
+| `Register.read()` (4-byte numpy `uint8` array → `bytes`) | 511 ns | 30 ns (plain int) |
+| `Register.write(bytes)` (`np.frombuffer` + slice assign) | 2,234 ns | 16 ns |
+| opcode decode: `get_bits(instr,0,6)` + `.reverse()` + `bits_to_int()` | 4,303 ns | 327 ns (`int.from_bytes & 0x7F`) |
+| the two disassembly f-strings passed to `print_snoop` | 1,477 ns | 0 ns (not built) |
+| `get_bus().is_enabled(...)` with tracing off | 125 ns | ~0 ns (hoisted flag) |
+
+Four structural findings behind those numbers, all confirmed by call
+counts in the cProfile run of `four`:
+
+- **Every GPR is a 4-element numpy array.** 2.41 M `Register.read` and
+  1.41 M `Register.write` calls for 525 k instructions; `numpy.frombuffer`
+  is called 1.42 M times. numpy's per-call overhead is being paid on
+  4-byte scalars, where it is pure loss.
+- **The opcode is decoded by building a string.** `RV_I_ISA.run` calls
+  `get_bits(instr, 0, 6)` (a 7-element list comprehension), reverses it,
+  then `bits_to_int` does `"".join(str(bit) ...)` and `int(s, 2)` —
+  530,625 `str.join` calls, one per instruction.
+- **Disassembly text is built even when diagnostics are off.** The
+  handlers call `RV_ISA.print_snoop(snoop, f"lb {cls.get_reg_name(rd)},
+  {hex(offset)}(...)", f"...")` — Python evaluates the f-strings *before*
+  the call, so the strings and the `get_reg_name` lookups happen
+  unconditionally and are then discarded. `get_reg_name` shows up at
+  3–4 % of total wall clock on the RV-bound workloads.
+- **Tracing bookkeeping runs with tracing off.** `RegisterFile` installs
+  a Python closure over every `Register.write` (1.41 M extra calls), and
+  `rv32.clock_tick` calls `clear_write_record()` (3.8 % of wall clock on
+  `four`) plus `get_bus()` (3.7 %) on every instruction.
+
+## Anatomy of one MVMUL
+
+`six` issues **4,096 MVMULs** and spends ~70 % of 35.7 s in them ⇒
+**~6.1 ms per MVMUL**. Each one calls `_fpu_group_sums` 128 times
+(524,288 calls total, ~29 µs each) and `_fpu_accumulate` 128 times.
+
+`_fpu_group_sums` is a faithful model of the hardware's fixed-point
+datapath: 16 fidelity-masked mantissa products, then two 8-lane
+exponent-aligned integer reductions. It is written with Python lists,
+`range`, `max`/`min` over generators (2.1 M `max` and 8.4 M `min` calls
+in the profile) and arbitrary-precision ints.
+
+**It is not numpy.** §L's Numba bullet assumes the Tensix numeric
+inner loops are "already numpy" and predicts a 2–3× win on top; that
+assumption does not hold for the matrix path. The values involved all
+fit comfortably in `int64` (mantissa products ≤ 2²², exponents 8-bit),
+so the loop *is* `@njit`-able with explicit typing — but the expected
+win is one to two orders of magnitude, not 2–3×, because the baseline
+is interpreted scalar Python, not vectorised numpy.
+
+## Tracing overhead
+
+Measured on the same workloads by enabling the writers and re-running
+(pump-only wall clock, so import and trace-file parsing are excluded):
+
+| workload | off | `TT_SIM_TRACE_COUNTERS` (interval 100) | interval 1000 | `TT_SIM_TRACE` (JSONL) |
+|---|---|---|---|---|
+| `reduce` | 2.97 s | 5.98 s (**2.0×**) | 5.47 s (1.8×) | 11.05 s (**3.7×**) |
+| `nine` | 5.87 s | 12.03 s (**2.0×**) | 12.08 s (2.1×) | 23.32 s (**4.0×**) |
+| `six` | 35.68 s | 45.15 s (**1.27×**) | 45.38 s (1.27×) | 57.48 s (1.6×) |
+
+Perfetto (`TT_SIM_TRACE_PERFETTO`) measures the same as counters
+(1.9–2.4×).
+
+- Counter tracing costs **~2× on RV-bound workloads**, and only ~1.27×
+  on `six` — because `six`'s time is inside one Tensix op that publishes
+  a handful of events, while the RV-bound runs publish per instruction
+  and per memory access.
+- **`TT_SIM_TRACE_COUNTERS_INTERVAL` barely matters** (interval 1000 is
+  within noise of interval 100, in both directions across repeats). The
+  cost is `EventBus.enabled = True` turning on publication everywhere,
+  not the flush cadence. Tuning the interval is not a lever.
+- Output size is the real differentiator: the counter Parquet dataset
+  for `nine` is **40 KB**; the JSONL for the same run is **61 MB** and
+  the Perfetto JSON **11 MB**. Counters are the only writer that is
+  plausibly usable at kernel scale — a 2× slowdown on a run that already
+  takes an hour is a different proposition, but the dataset stays small.
+- **Caveat: `TT_SIM_TRACE_*` is Wormhole-only.**
+  `tt_sim.trace.auto.enable_from_env` is called from
+  `tt_sim/device/wormhole.py` and nowhere else, so a `Blackhole` device
+  silently ignores every trace env var. The measurements above were
+  obtained by calling `enable_from_env()` explicitly from the harness.
+  Wiring it into `Blackhole.__init__` is a one-line fix and is a
+  prerequisite for using any of §H's observability on Blackhole.
+
+## How far is a 640³ matmul?
+
+`six` is 128³ bf16 = 4×4×4 tiles = 64 tile-matmuls = 4,096 MVMULs in
+35.7 s. `matmul_single_core` at 640³ is 20×20×20 = 8,000 tile-matmuls =
+**512,000 MVMULs**, 125× more work on the same single-core code path.
+Scaling the measured 6.1 ms/MVMUL:
+
+- MVMUL alone: 512,000 × 6.1 ms ≈ **3,100 s ≈ 52 minutes**
+- with the RV dataflow that feeds it scaling similarly: **~1.5–2 hours**
+- cross-check via cycles: ~125 × 27,500 ≈ 3.4 M device cycles at 771
+  cycles/s ≈ 4,400 s. Same order.
+
+So §L's "already times out" is not marginal — it is off by two orders
+of magnitude from interactive. To run 640³ in **one minute** needs
+~57,000 cycles/s, a **~75× speedup**; that is above even the *idle*
+single-tile pump ceiling of 24.8 k cycles/s, so no amount of making the
+modelled work cheaper gets there on its own. A "tolerable" ten-minute
+run needs ~10×, which is reachable without touching the pump.
+
+## Ranked optimisation targets
+
+Ranked by (measured share × confidence that the fix is mechanical).
+None of this has been implemented — this document is the measurement
+half of §L's "profile first, optimise second".
+
+1. **RV32IM instruction interpreter — GPR representation and decode.**
+   65–84 % of wall clock on every non-matmul workload. Four independent
+   sub-targets, each backed by a microbenchmark above: numpy-backed
+   4-byte GPRs (0.5 µs read / 2.2 µs write vs ~20 ns for ints); the
+   string-join opcode decode (4.3 µs vs 0.33 µs); unconditionally-built
+   disassembly f-strings (1.5 µs, and 3–4 % of total wall clock in
+   `get_reg_name` alone); and the always-on tracing bookkeeping
+   (`clear_write_record` 3.8 %, `get_bus` 3.7 %, the `wrapped_write`
+   closure 1.4 M calls). These are ~12 µs of the ~50 µs per instruction
+   and none of them requires a JIT — they are pure-Python wins, which
+   makes them the cheapest thing on this list.
+2. **`matrix.py:_fpu_group_sums` / `_fpu_accumulate`.** 47.5 % of the
+   matmul workload in two static methods with no I/O, no state, and
+   int64-representable arithmetic. Best Numba target in the codebase by
+   a distance; also the one place where a numpy rewrite (16 products as
+   a vector op) is plausible.
+3. **The per-cycle soft-reset poll in `BabyRISCV.clock_tick`.** ~28 % of
+   the idle floor, five full memory-map traversals per tile per cycle,
+   for a register that changes a handful of times per run. Caching it,
+   or having the reset write invalidate a flag, is a contained change.
+4. **`NUI.clock_tick` when idle.** 38 % of the idle floor and 4–7 % of
+   real workloads: 18 NIUs per tile-pair each take a `threading.Lock`
+   and allocate a list every cycle, in a mode (`TT_SIM_THREADED`) that
+   is off by default. Early-out when both queues are empty.
+5. **`MemoryMap` interval lookup / `MemorySpace.read`.**
+   `convert_addr_to_target_range` + `locate` + `_publish_mem_event` are
+   3–7 % across workloads and 1.27 M calls on `four`. §L correctly flags
+   this as Numba-hostile; the win here is caching the last-hit range,
+   not JIT.
+6. **The clock pump itself.** 0.3–1.5 % today, so *not* worth touching
+   for its own sake — but it is a ceiling that degrades linearly with
+   tile count (§I's multi-tile ambitions and §A's threading both push
+   straight into it). Fix it when §I lands, not before.
+
+## What this says about §L's own hypotheses
+
+- **"The tick-every-component pump is the wrong shape"** — *supported
+  as a ceiling, contradicted as today's bottleneck.* The pump is
+  0.3–1.5 % of current wall clock; rewriting it now would be invisible.
+  But it caps a single-Tensix device at ~25 k cycles/s and an
+  8-Tensix device at ~4.4 k cycles/s, which is below the target for any
+  kernel-scale workload. §L's sequencing ("land the event-driven pump
+  *before* JIT'ing") is right for a different reason than stated: not
+  because the pump is slow, but because the JIT targets in the current
+  shape (per-component `clock_tick`) are not the JIT targets in the
+  event-driven shape.
+- **"Numba on the Tensix numeric inner loops; already numpy so expect
+  2–3×"** — *target supported, rationale contradicted.*
+  `_fpu_group_sums` is scalar interpreted Python over lists and
+  arbitrary-precision ints, not numpy. The upside is therefore much
+  larger than 2–3× — but it also means the cheaper move (rewrite the
+  16 products as a numpy/int64 vector op, no JIT, no new dependency)
+  should be tried first, and Numba evaluated against *that* baseline.
+- **"RV32IM execute — only if rewritten table-driven over typed
+  arrays; significant refactor"** — *supported, and under-prioritised.*
+  RV32IM is the single largest consumer of wall clock across the suite
+  (65–84 % on four of the five workloads measured), well ahead of the
+  Tensix backends outside matmul. §L lists it second behind the Tensix
+  loops; the data says it should be first. It also does not need the
+  full table-driven-over-typed-arrays refactor to pay: the four
+  sub-targets in item 1 above are local edits worth an estimated ~25 %
+  of RV time on their own.
+- **"MemoryMap lookup is the most-called function in the sim"** —
+  *contradicted on call count, supported on cost class.* On `four` the
+  most-called tt-sim functions are `Register.read` (2.41 M) and
+  `RegisterFile.get` (2.83 M); `memory_map.locate` is 1.27 M. It is
+  still 3–7 % of wall clock and still Numba-hostile, so the conclusion
+  drawn from it (don't JIT it) stands.
+- **`nogil=True` to revive §A threading** — *no new evidence either
+  way, but note the arithmetic.* On the matmul workload 70 % of the
+  time is in one Tensix unit on one tile, so releasing the GIL there
+  helps only multi-tile runs; and the barrier those runs must cross is
+  the ~0.94 µs/component-tick pump, which threading does not remove.
+
+## Reproducing
+
+The harnesses used here are deliberately throw-away (they monkeypatch;
+they do not modify the simulator). To repeat the baseline:
+
+```bash
+export PYTHONPATH=~/tt-sim
+# wall clock + simulated cycles for any replay guard
+time python3 -m driver.blackhole.server.six_replay_test
+
+# exact call counts
+python3 -c "
+import cProfile, pstats, importlib
+m = importlib.import_module('driver.blackhole.server.six_replay_test')
+cProfile.run('m.main()', '/tmp/six.prof')
+pstats.Stats('/tmp/six.prof').sort_stats('tottime').print_stats(30)"
+
+# tracing overhead: same run, writers on (Wormhole; on Blackhole call
+# tt_sim.trace.enable_from_env() by hand first — see the caveat above)
+TT_SIM_TRACE_COUNTERS=/tmp/counters \
+  python3 -m driver.wormhole.server.offline_replay_test
+```
+
+For the undistorted time shares, a sampling profiler is required —
+`cProfile` inflates this workload 2.4× and skews toward call-dense
+code. `py-spy record -o out.svg -- python3 -m
+driver.blackhole.server.six_replay_test` is the tool of choice if it is
+available; it was not installed here.

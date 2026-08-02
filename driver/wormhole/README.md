@@ -244,3 +244,31 @@ soft reset (the normal state before firmware launch).
 | --- | --- |
 | `TT_SIM_DEADLOCK` | Set falsy (`0`/`false`/`no`/`off`) to disable the watchdog. On by default. |
 | `TT_SIM_DEADLOCK_THRESHOLD` | Cycles of no observable progress before a warning fires (default `50000`). Raise it if a long compute loop trips a false positive; lower it to surface stalls sooner. |
+
+## NoC alignment checking
+
+Real silicon requires the source and destination addresses of a NoC transfer to
+agree in their low bits — a *congruence* requirement, because the NIU rotates the
+payload by the shared low-address bits rather than byte-shifting it. Violations
+are `UndefinedBehavior`: the transfer is skewed or dropped, it does not fault, so
+an unchecked simulator quietly returns wrong data.
+
+tt-sim enforces the rules that
+[`WormholeB0/NoC/Alignment.md`](https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/NoC/Alignment.md)
+states and that the vendor reference simulator flags as `UndefinedBehavior`:
+
+| Path | Requirement |
+| --- | --- |
+| write, L1 → anywhere (incl. multicast) | `(src % 16) == (dst % 16)` |
+| read, DRAM → L1 | `(src % 32) == (dst % 32)` on Wormhole, `% 64` on Blackhole |
+| read, L1 → L1 | `(src % 16) == (dst % 16)` |
+| read, MMIO → L1 | `(src % 4) == (dst % 4)` |
+
+A violation raises `NoCAlignmentError` naming the access path, both addresses and
+the required alignment, and stops. The per-arch DRAM modulus lives in
+`ArchProfile.noc_dram_read_congruence` (32 Wormhole / 64 Blackhole), matching each
+architecture's NoC byte-enable span.
+
+| Env var | Effect |
+| --- | --- |
+| `TT_SIM_DISABLE_ALIGNMENT_CHECKS` | Set truthy (`1`/`true`/`yes`/`on`) to turn alignment checking off. Off by default, i.e. **checking is on**. |

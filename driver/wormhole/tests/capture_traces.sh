@@ -54,7 +54,7 @@ for name in "${ORDER[@]}"; do
       && cmake --build build -j4 >>/tmp/wh_${name}_build.log 2>&1 ) \
       || { echo "FAIL  $name (build; see /tmp/wh_${name}_build.log)"; fail=$((fail+1)); failed+=("$name"); continue; }
   fi
-  pkill -9 -f 'driver.wormhole.server' 2>/dev/null; sleep 0.5
+  pkill -9 -f 'driver\.wormhole\.server( |$)' 2>/dev/null; sleep 0.5
   log="/tmp/wh_$name.out"
   # Run from the example's own src/ dir: host programs pass kernel paths relative
   # to CWD, so a wrong CWD aborts host-side before the device runs.
@@ -70,7 +70,7 @@ for name in "${ORDER[@]}"; do
     grep -iE "NotImplementedError|AssertionError|Error:|not.*supported|mismatch|Failure on the device" "$log" | head -3 | sed 's/^/      > /'
   fi
 done
-pkill -9 -f 'driver.wormhole.server' 2>/dev/null
+pkill -9 -f 'driver\.wormhole\.server( |$)' 2>/dev/null
 
 echo "----"
 echo "Wormhole trace capture: $pass captured, $fail failed"

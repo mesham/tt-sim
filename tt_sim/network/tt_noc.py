@@ -3,6 +3,11 @@ from enum import IntEnum
 
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.network.alignment import (
+    L1_CONGRUENCE,
+    check_congruence,
+    congruence_for_read,
+)
 from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.trace import EventCategory, NoCEvent, get_bus
 from tt_sim.util.bits import clear_bit, extract_bits, replace_bits
@@ -175,6 +180,23 @@ class NUI(MemMapable, Clockable):
             self.cmd_ctrl = 0
             self.nui = nui
 
+        @staticmethod
+        def _kind_name(endpoint):
+            """Human-readable name of a NoC endpoint's memory kind, for messages."""
+            return {"D": "DRAM", "T": "L1", "E": "L1"}.get(
+                getattr(endpoint, "tile_kind", None), "unmodelled tile"
+            )
+
+        def _check_alignment(self, modulus, src_addr, dst_addr, *, path):
+            check_congruence(
+                modulus,
+                src_addr,
+                dst_addr,
+                path=path,
+                noc_number=self.nui.noc_number,
+                initiator=self.nui.id_pair,
+            )
+
         def handle_read_transfer(self):
             noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
             total_size = self.at_len_be
@@ -204,6 +226,19 @@ class NUI(MemMapable, Clockable):
                 self
             )
             destination = self.nui.resolve_destination((target_tile_x, target_tile_y))
+
+            # Source is the remote tile, destination is this tile's L1. Which
+            # congruence applies depends on what we are reading *from*.
+            self._check_alignment(
+                congruence_for_read(
+                    self.target_addr_low,
+                    getattr(destination, "tile_kind", None) == "D",
+                    self.nui.noc_dram_read_congruence,
+                ),
+                self.target_addr_low,
+                self.ret_addr_low,
+                path=f"{self._kind_name(destination)} -> L1 read",
+            )
 
             for chunk_offset, chunk_size in chunks:
                 read_req = NUI.NoCDataRequest(
@@ -336,6 +371,16 @@ class NUI(MemMapable, Clockable):
             # decrements OUTSTANDING by one.
             ret_tile_x, ret_tile_y = self.nui.noc_coord_strategy.ret_coord(self)
             destination = self.nui.resolve_destination((ret_tile_x, ret_tile_y))
+
+            # Source is this tile's L1, destination is the remote tile. The
+            # length-mode table gives C16 for L1 -> L1 and L1 -> Other alike, so
+            # the destination kind does not change the rule here.
+            self._check_alignment(
+                L1_CONGRUENCE,
+                self.target_addr_low,
+                self.ret_addr_low,
+                path=f"L1 -> {self._kind_name(destination)} write",
+            )
 
             for chunk_offset, chunk_size in chunks:
                 data = self.nui.attached_memory.read(
@@ -480,6 +525,16 @@ class NUI(MemMapable, Clockable):
                 NUI.NUICounters.CounterNames.NIU_MST_CMD_ACCEPTED
             )
             self.cmd_ctrl = 0
+
+            # A multicast write is still an L1 -> L1 write per destination, so
+            # the same C16 rule applies (and the single source/destination
+            # address pair is shared by every destination in the rectangle).
+            self._check_alignment(
+                L1_CONGRUENCE,
+                self.target_addr_low,
+                self.ret_addr_low,
+                path="L1 -> L1 multicast write",
+            )
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
 
@@ -703,6 +758,8 @@ class NUI(MemMapable, Clockable):
         noc_max_burst_size=None,
         noc_coord_strategy=None,
         noc_blackhole_cmd_buf_layout=False,
+        noc_dram_read_congruence=32,
+        tile_kind="T",
     ):
         """``x_coord`` / ``y_coord`` are the tile's canonical SoC-physical
         NoC 0 coord. The NUI's ``id_pair`` (directory key + the ``source``
@@ -729,6 +786,11 @@ class NUI(MemMapable, Clockable):
             WormholeNocCoords() if noc_coord_strategy is None else noc_coord_strategy
         )
         self.blackhole_cmd_buf_layout = noc_blackhole_cmd_buf_layout
+        # Congruence modulus for DRAM-sourced reads (32 Wormhole / 64 Blackhole)
+        # and this endpoint's memory kind ('D' DRAM, 'T' Tensix L1, 'E' Eth L1),
+        # both used by the alignment checks in ``RequestInitiator``.
+        self.noc_dram_read_congruence = noc_dram_read_congruence
+        self.tile_kind = tile_kind
         if noc_number == 0:
             self.x_coord = x_coord
             self.y_coord = y_coord

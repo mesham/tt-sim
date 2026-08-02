@@ -1,7 +1,9 @@
 """Environment-driven auto-setup for tracing.
 
-Called from `Wormhole.__init__` so any driver script that constructs a
-device picks up trace env vars automatically — no per-example wiring.
+Called from `Wormhole.__init__` and `Blackhole.__init__` so any driver
+script that constructs a device picks up trace env vars automatically —
+no per-example wiring. A new architecture must call it too, or its
+devices silently ignore every var below.
 
 Supported env vars (all optional, all default-off):
 
@@ -69,13 +71,14 @@ _INVARIANTS: InvariantRunner | None = None
 _STATE_WRITER: StateDumpWriter | None = None
 
 
-def enable_from_env(wormhole=None) -> None:
+def enable_from_env(device=None) -> None:
     """Wire up any tracing writers configured via environment variables.
 
     Idempotent — calling more than once is safe; only the first call
-    per process actually opens files. The ``wormhole`` argument is
-    used by the state-dump writer (which needs to poll device state at
-    lifecycle boundaries); other writers don't need it.
+    per process actually opens files. The ``device`` argument is used
+    by the state-dump writer (which needs to poll device state at
+    lifecycle boundaries); other writers don't need it. Any arch's
+    device works -- this is called from both Wormhole and Blackhole.
     """
     global _JSONL, _PERFETTO, _COMMITLOG, _COUNTERS_AGG, _COUNTERS_WRITER
     global _NOC_WRITER, _MEMORY_WRITER, _LCOV_WRITER, _INVARIANTS, _STATE_WRITER
@@ -150,8 +153,8 @@ def enable_from_env(wormhole=None) -> None:
         )
         _INVARIANTS = InvariantRunner(strict=strict)
 
-    if state_dump_path and _STATE_WRITER is None and wormhole is not None:
-        _STATE_WRITER = StateDumpWriter(state_dump_path, wormhole)
+    if state_dump_path and _STATE_WRITER is None and device is not None:
+        _STATE_WRITER = StateDumpWriter(state_dump_path, device)
 
     if not getattr(enable_from_env, "_atexit_registered", False):
 

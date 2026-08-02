@@ -821,11 +821,13 @@ class MatrixUnit(TensixBackendUnit):
         SrcA column is first scaled by the exponent of the corresponding datum of
         one SrcB row (so software passes a row of 1.0 when it wants no scaling).
 
-        **Known divergence:** the ISA documents undefined Dst rows as reading
-        back as minus infinity (all bits set), which is how software gets a
-        plain reduction by issuing ZEROACC first. tt-sim has no Dst row-validity
-        bits — ZEROACC zeroes the data instead — so a cleared row reads back as
-        +0 and a reduction over an entirely negative face saturates at zero.
+        GMPOOL is the one consumer that sees a flag-cleared (ZEROACC'd) Dst row
+        as **minus infinity** rather than as zero — all bits set, which decodes
+        to the most negative datum in the comparison order below. That is how
+        software gets a plain reduction out of an accumulating instruction: it
+        ZEROACCs the destination first, and without the substitution a reduction
+        over an entirely negative face would saturate at +0. See
+        ``DstRegister.dstRowValid``; ttsim's ``read_dst{16,32}b<is_gmpool>``.
         """
         dstRow = instr_args["dst"]
         addrMod = self._read_pool_addr_mode(instruction_info, instr_args)
@@ -913,10 +915,12 @@ class MatrixUnit(TensixBackendUnit):
 
         # Iterate over the SrcA columns
         for j in range(16):
+            # isGmpool: a row whose zero flag is clear reads as all-ones here
+            # (minus infinity), not as its zeroed data.
             if useDst32b:
-                dstVal = dst.getDst32b(dstRow, j)
+                dstVal = dst.getDst32b(dstRow, j, isGmpool=True)
             else:
-                dstVal = dst.getDst16b(dstRow, j) << 16
+                dstVal = dst.getDst16b(dstRow, j, isGmpool=True) << 16
             maximum = self._gmpool_read_dst(dstVal, dstStyle)
 
             # Iterate over the SrcA rows (and the SrcB columns). The visitation
@@ -930,14 +934,17 @@ class MatrixUnit(TensixBackendUnit):
                 if self._gmpool_as_comparable(x) >= self._gmpool_as_comparable(maximum):
                     maximum = x
 
-            # Write the result back, zeroing the rest of the 4x16 block
+            # Write the result back, zeroing the rest of the 4x16 block. The
+            # accumulating row re-asserts its zero flag only once the last
+            # column lands, so the remaining columns of this same pass still
+            # read the row as minus infinity rather than as the max of column 0.
             dstVal = self._gmpool_write_dst(maximum, dstStyle)
             if useDst32b:
-                dst.setDst32b(dstRow, j, dstVal)
+                dst.setDst32b(dstRow, j, dstVal, validOnLastColumn=True)
                 for i in range(1, 4):
                     dst.setDst32b(dstRow + i, j, 0)
             else:
-                dst.setDst16b(dstRow, j, dstVal >> 16)
+                dst.setDst16b(dstRow, j, dstVal >> 16, validOnLastColumn=True)
                 for i in range(1, 4):
                     dst.setDst16b(dstRow + i, j, 0)
 
@@ -995,7 +1002,7 @@ class MatrixUnit(TensixBackendUnit):
 
         fidelityPhase = self.determine_fidelity_phase(issue_thread, rwc)
 
-        if self.backend.blackhole and srcAStyle in (DataFormat.BF16, DataFormat.TF32):
+        if srcAStyle in (DataFormat.BF16, DataFormat.TF32):
             self.perform_mvmul_exact(
                 srcARow,
                 srcBRow,
@@ -1118,7 +1125,7 @@ class MatrixUnit(TensixBackendUnit):
         return sums
 
     @staticmethod
-    def _fpu_accumulate(groupSums, dstVal, useDst32b):
+    def _fpu_accumulate(groupSums, dstVal, useDst32b, negOneRenormBug=False):
         """Add the two group sums into Dst, returning the new Dst value as FP32.
 
         The three terms are aligned to the largest exponent of the three and —
@@ -1126,6 +1133,11 @@ class MatrixUnit(TensixBackendUnit):
         add, which is why a long accumulation drifts differently from one done
         in real numbers. The result is renormalised and rounded once more on
         the way back out.
+
+        ``negOneRenormBug`` models Wormhole's renormalisation of a result whose
+        sign/magnitude form is exactly -1: the hardware counts leading *sign*
+        bits, and the all-ones two's-complement pattern makes the count come
+        out 27 too large. Blackhole fixed it.
         """
         signDst = dstVal >> 31
         expDst = (dstVal >> 23) & 0xFF
@@ -1161,6 +1173,8 @@ class MatrixUnit(TensixBackendUnit):
             return 0
 
         shift = (32 - man.bit_length()) - 8  # left-shift that normalises to 24 bits
+        if negOneRenormBug and sign and man == 1:
+            shift -= 27  # the correct shift is 23; the hardware acts as if it were -4
         exp -= shift
         if not useDst32b:
             shift -= 16
@@ -1192,7 +1206,7 @@ class MatrixUnit(TensixBackendUnit):
         useDst32b,
         fidelityPhase,
     ):
-        """MVMUL/GAPOOL/DOTPV on Blackhole's 8-bit-exponent FPU datapath.
+        """MVMUL/GAPOOL/DOTPV on the 8-bit-exponent FPU datapath.
 
         Models the datapath as the hardware builds it — truncated products,
         per-group exponent alignment, and a round into Dst on every
@@ -1202,9 +1216,12 @@ class MatrixUnit(TensixBackendUnit):
         same Dst row, and doing the sums exactly drifts a couple of ULP away
         from what the hardware lands on.
 
-        The FP16 and INT8 datapaths keep the real-number model in
-        :meth:`perform_mvmul`; only the BF16/TF32 (8-bit exponent) formats,
-        which is what every current kernel uses, are modelled exactly.
+        Both arches share the datapath (verified against ttsim, whose FPU model
+        is arch-independent bar the -1 renormalisation quirk
+        :meth:`_fpu_accumulate` takes as ``negOneRenormBug``). The FP16 and
+        INT8 datapaths keep the real-number model in :meth:`perform_mvmul`;
+        only the BF16/TF32 (8-bit exponent) formats, which is what every
+        current kernel uses, are modelled exactly.
         """
         expProdAdj = -127
         if fidelityPhase & 1:
@@ -1220,6 +1237,7 @@ class MatrixUnit(TensixBackendUnit):
         srcA = self.backend.getSrcA(self.srcABank)
         srcB = self.backend.getSrcB(self.srcBBank)
         dst = self.backend.getDst()
+        negOneRenormBug = not self.backend.blackhole
 
         srcAColumns = [
             [toFP32(srcA[srcARow + k, j]) for k in range(16)] for j in range(16)
@@ -1245,6 +1263,7 @@ class MatrixUnit(TensixBackendUnit):
                     ),
                     dstVal,
                     useDst32b,
+                    negOneRenormBug,
                 )
                 if useDst32b:
                     dst.setDst32b(
@@ -1799,10 +1818,12 @@ class MatrixUnit(TensixBackendUnit):
         # data: it is the workaround `copy_tile` issues immediately after
         # unpack-to-dest (a Blackhole HW bug drops the zero-flag clear when
         # unpack-to-dest and a packer ZEROACC land in the same cycle), so the
-        # rows it names hold the freshly-unpacked operands. tt-sim emulates
-        # zero-flags by zeroing the data, so here it must skip the clear or it
-        # wipes those operands (the SFPU then reads 0). The RWC still advances.
-        # See ttsim TT_ARCH_VERSION==1 ZEROACC (clear_zero_flags -> valid=true).
+        # rows it names hold the freshly-unpacked operands and clearing either
+        # the flags or the data would wipe them (the SFPU then reads 0). ttsim
+        # sets the flags *true* here; the unpack-to-dest that just wrote those
+        # rows already did that (every Dst write re-asserts the row's flag), so
+        # skipping the whole clear is equivalent. The RWC still advances. See
+        # ttsim TT_ARCH_VERSION==1 ZEROACC (clear_zero_flags -> valid=true).
         if self.backend.blackhole and get_nth_bit(
             instruction_info["raw_instruction"], 17
         ):

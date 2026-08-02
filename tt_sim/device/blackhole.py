@@ -17,6 +17,7 @@ construct the device and move data DRAM<->Tensix over the NoC.
 from tt_sim.arch import BLACKHOLE_PROFILE
 from tt_sim.device.tiles import DRAMTile, TensixTile
 from tt_sim.device.tt_device import DeviceTileDiagnostics, TT_Device
+from tt_sim.trace import enable_from_env
 
 
 class _BlackholeTileCoords:
@@ -48,6 +49,12 @@ class Blackhole(TT_Device):
         self.profile = BLACKHOLE_PROFILE
         if tensix_coords is None:
             tensix_coords = self.profile.tensix_unified_coords
+        # Opt-in structured tracing, exactly as Wormhole does it: enable the
+        # bus before any tile is built so no device-construction event is
+        # missed, then call again below with the device once the tiles exist
+        # (the state-dump writer needs a device to poll). Without this every
+        # TT_SIM_TRACE_* var is silently ignored on Blackhole.
+        enable_from_env()
 
         dram_tiles = []
         noc1_coords = self.profile.dram_channel_physical_noc1_coords or (
@@ -75,6 +82,9 @@ class Blackhole(TT_Device):
         tensix_tiles = [self._build_tensix_tile(coord) for coord in tensix_coords]
 
         super().__init__(None, dram_tiles, tensix_tiles, profile=self.profile)
+
+        # Second call wires the state-dump writer now that we have tiles.
+        enable_from_env(device=self)
 
     def _build_tensix_tile(self, coord):
         # Blackhole addresses tiles by physical NoC 0 coord, so the tile coord

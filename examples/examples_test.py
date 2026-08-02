@@ -105,8 +105,11 @@ def skip_reason():
 def _reap_servers():
     # Bracket the pattern so pkill can't match this process's own command line.
     # Reap either arch's bridge server (the shared examples can target either).
+    # Anchored on the module name's end: unanchored, the pattern also matches
+    # `python3 -m driver.<arch>.server.<name>_replay_test`, so a live run would
+    # silently kill any offline replay guard running beside it.
     subprocess.run(
-        ["pkill", "-9", "-f", "[d]river.(wormhole|blackhole).server"],
+        ["pkill", "-9", "-f", r"[d]river\.(wormhole|blackhole)\.server( |$)"],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

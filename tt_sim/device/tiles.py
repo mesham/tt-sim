@@ -52,8 +52,24 @@ class DRAMTile(TTDeviceTile):
 
         self.dram_memory = TileMemory(dram_tile_mem_map, safe, snoop_addresses)
 
-        r0 = NUI(0, physical_x, physical_y, self.dram_memory, **profile.noc_kwargs)
-        r1 = NUI(1, physical_x, physical_y, self.dram_memory, **profile.noc_kwargs)
+        # tile_kind="D" so NoC reads sourced from this tile pick the DRAM
+        # congruence rule (32 B Wormhole / 64 B Blackhole) rather than L1's 16 B.
+        r0 = NUI(
+            0,
+            physical_x,
+            physical_y,
+            self.dram_memory,
+            tile_kind="D",
+            **profile.noc_kwargs,
+        )
+        r1 = NUI(
+            1,
+            physical_x,
+            physical_y,
+            self.dram_memory,
+            tile_kind="D",
+            **profile.noc_kwargs,
+        )
 
         # Register DRAM-tile NoC routers so their NoCEvents (request-phase
         # arrivals at the destination tile) appear in the trace.

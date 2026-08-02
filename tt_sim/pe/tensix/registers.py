@@ -8,6 +8,20 @@ from tt_sim.util.conversion import conv_to_uint32
 class DstRegister:
     def __init__(self):
         self.dstBits = np.zeros([1024, 16], dtype=np.uint32)
+        # Per-row validity, the hardware's Dst "zero flags" (ttsim
+        # ``dst_row_valid``). Reset asserts them all, ZEROACC *clears the flags*
+        # rather than the data, and any write re-asserts the flag for the row it
+        # touched. A read of a flag-cleared row does not return the underlying
+        # bits: every consumer sees zero except the max-pool path (GMPOOL),
+        # which sees all-ones — the most negative datum in its comparison
+        # order, i.e. minus infinity. That asymmetry is the whole point of the
+        # flags: it is how a plain `reduce(max)` over negative data works, and
+        # it is why the GMPOOL reads below pass ``isGmpool=True`` and nothing
+        # else does (ttsim's ``read_dst16b``/``read_dst32b`` take the same
+        # ``is_gmpool`` template flag, set only by ``TENSIX_EXECUTE_GMPOOL``).
+        # tt-sim additionally keeps zeroing the backing data on a clear, so the
+        # zero every other consumer sees comes out of the array either way.
+        self.dstRowValid = np.ones(1024, dtype=bool)
         # DEST_ACCESS_CFG row-remap gates (Blackhole). Both default off, which
         # is the hardware reset state and every path tt-sim currently drives.
         # With them off, Adj16 is the identity and Adj32 reduces to the shared
@@ -37,30 +51,62 @@ class DstRegister:
             r = (r & 0x3F3) ^ ((r & 0x018) >> 1) ^ ((r & 0x004) << 1)
         return ((r & 0x1F8) << 1) | (r & 0x207)
 
-    def getDst16b(self, idx0, idx1):
-        return int(self.dstBits[self.adj16(idx0)][idx1])
+    def getDst16b(self, idx0, idx1, isGmpool=False):
+        row = self.adj16(idx0)
+        if not self.dstRowValid[row]:
+            return 0xFFFF if isGmpool else 0
+        return int(self.dstBits[row][idx1])
 
-    def setDst16b(self, idx0, idx1, value):
-        self.dstBits[self.adj16(idx0)][idx1] = value
+    def setDst16b(self, idx0, idx1, value, validOnLastColumn=False):
+        row = self.adj16(idx0)
+        self.dstBits[row][idx1] = value
+        self._setRowValid(row, idx1, validOnLastColumn)
 
-    def getDst32b(self, idx0, idx1):
+    def getDst32b(self, idx0, idx1, isGmpool=False):
         br = self.adj32(idx0)
+        if not self.dstRowValid[br]:
+            return 0xFFFFFFFF if isGmpool else 0
         v1 = self.dstBits[br][idx1]
         v2 = self.dstBits[br + 8][idx1]
         return int((v1 << 16) | (v2 & 0xFFFF))
 
-    def setDst32b(self, idx0, idx1, value):
+    def setDst32b(self, idx0, idx1, value, validOnLastColumn=False):
         br = self.adj32(idx0)
         self.dstBits[br][idx1] = value >> 16
         self.dstBits[br + 8][idx1] = value & 0xFFFF
+        self._setRowValid(br, idx1, validOnLastColumn)
+
+    def _setRowValid(self, row, column, validOnLastColumn):
+        """Re-assert a row's zero flag on write.
+
+        ``validOnLastColumn`` mirrors ttsim's ``set_valid_on_last_column_only``
+        template flag: the accumulating writers hold the flag off until the last
+        column of the row lands, so a read-modify-write loop over the 16 columns
+        of a flag-cleared row keeps seeing it as cleared for the whole pass.
+        That only matters where reading a cleared row differs from reading its
+        (zeroed) data, i.e. GMPOOL.
+        """
+        if not validOnLastColumn or column == 15:
+            self.dstRowValid[row] = True
 
     def setUndefinedRow(self, row, isDst32=False):
-        # ZEROACC zeroes the accumulator. On real hardware reads after this
-        # return zero bits, so just clear the backing storage.
+        # ZEROACC clears a row's zero flag, it does not touch the data. Every
+        # consumer but GMPOOL then reads the row as zero, so tt-sim also zeroes
+        # the backing store: that keeps the array agreeing with the flag and
+        # keeps the paths that rely on reading a cleared row as +0 (e.g. the
+        # FP32 copy_tile's zeroed SrcB operand) working unchanged. The 32-bit
+        # clear therefore names the pair ``getDst32b`` actually reads --
+        # ``Adj32(row)`` and ``+8``, ttsim's ``dst32b_adjust_row`` -- rather than
+        # ``row*2``/``row*2+1``, which covered the same 32 backing rows for the
+        # aligned 16-row block ZEROACC uses but the wrong two for a single row.
         if isDst32:
-            self.dstBits[row * 2, :] = 0
-            self.dstBits[row * 2 + 1, :] = 0
+            br = self.adj32(row)
+            self.dstRowValid[br] = False
+            self.dstBits[br, :] = 0
+            self.dstBits[br + 8, :] = 0
         else:
+            row = self.adj16(row)
+            self.dstRowValid[row] = False
             self.dstBits[row, :] = 0
 
 

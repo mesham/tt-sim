@@ -167,7 +167,7 @@ class Wormhole(TT_Device):
         )
         self.clocks[0].on_tick = self.deadlock_detector.tick
         # Second call wires the state-dump writer now that we have tiles.
-        enable_from_env(wormhole=self)
+        enable_from_env(device=self)
 
     def _build_tensix_tile(self, coord):
         x, y = coord
