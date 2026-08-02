@@ -6,16 +6,13 @@ from tt_sim.util.conversion import conv_to_bytes, conv_to_int32, conv_to_uint32
 
 class RV_I_ISA(RV_ISA):
     @classmethod
-    def run(cls, register_file, memory_space, snoop):
-        pc = register_file["pc"]
-        addr = conv_to_uint32(pc.read())
-        instr = memory_space.read(addr, 4)
+    def run(cls, register_file, memory_space, snoop, instr=None):
+        # ``instr`` is the 32-bit instruction word (see RV_ISA.fetch); the
+        # handlers below index bit fields out of it directly.
+        if instr is None:
+            instr = cls.fetch(register_file, memory_space)
 
-        opcode_bin = RV_ISA.get_bits(instr, 0, 6)
-        opcode_bin.reverse()
-        opcode = RV_ISA.bits_to_int(opcode_bin)
-
-        match opcode:
+        match instr & 0x7F:
             case 0x37:
                 return RV_I_ISA.handle_u_lui(instr, register_file, memory_space, snoop)
             case 0x17:
@@ -56,57 +53,60 @@ class RV_I_ISA(RV_ISA):
     @classmethod
     def handle_u_lui(cls, instr, register_file, memory_space, snoop):
         rd = RV_ISA.get_int(instr, 7, 11)
-        immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "U")
+        immediate = RV_I_ISA.extract_immediate(instr, "U")
         register_file[rd].write(conv_to_bytes(immediate))
-        RV_ISA.print_snoop(
-            snoop,
-            f"lui {cls.get_reg_name(rd)}, {hex(immediate)}",
-            f"{cls.get_reg_name(rd)} = {hex(immediate)}",
-        )
+        if snoop:
+            RV_ISA.print_snoop(
+                snoop,
+                f"lui {cls.get_reg_name(rd)}, {hex(immediate)}",
+                f"{cls.get_reg_name(rd)} = {hex(immediate)}",
+            )
         return True
 
     @classmethod
     def handle_u_auipc(cls, instr, register_file, memory_space, snoop):
         rd = RV_ISA.get_int(instr, 7, 11)
-        immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "U")
+        immediate = RV_I_ISA.extract_immediate(instr, "U")
         pc = register_file["pc"]
-        pc_val = conv_to_uint32(pc.read())
+        pc_val = pc.read_uint()
         register_file[rd].write(conv_to_bytes(immediate + pc_val))
-        RV_ISA.print_snoop(
-            snoop,
-            f"auipc {cls.get_reg_name(rd)}, {hex(immediate)}",
-            f"{cls.get_reg_name(rd)} = pc + {hex(immediate)}",
-        )
+        if snoop:
+            RV_ISA.print_snoop(
+                snoop,
+                f"auipc {cls.get_reg_name(rd)}, {hex(immediate)}",
+                f"{cls.get_reg_name(rd)} = pc + {hex(immediate)}",
+            )
         return True
 
     @classmethod
     def handle_j_jal(cls, instr, register_file, memory_space, snoop):
         rd = RV_ISA.get_int(instr, 7, 11)
         pc = register_file["pc"]
-        pc_val = conv_to_uint32(pc.read())
+        pc_val = pc.read_uint()
         if rd > 0:
             # If provided register is x0 then don't store
             register_file[rd].write(
                 conv_to_bytes(pc_val + 4)
             )  # Address of the next instruction
 
-        offset = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "J")
+        offset = RV_I_ISA.extract_immediate(instr, "J")
         new_pc_val = pc_val + offset
 
         nextpc = register_file["nextpc"]
         nextpc.write(conv_to_bytes(new_pc_val))
-        RV_ISA.print_snoop(
-            snoop,
-            f"jal {cls.get_reg_name(rd)}, {hex(offset)}",
-            f"jump to {hex(new_pc_val)}",
-        )
+        if snoop:
+            RV_ISA.print_snoop(
+                snoop,
+                f"jal {cls.get_reg_name(rd)}, {hex(offset)}",
+                f"jump to {hex(new_pc_val)}",
+            )
         return True
 
     @classmethod
     def handle_i_jalr(cls, instr, register_file, memory_space, snoop):
         rd = RV_ISA.get_int(instr, 7, 11)
         pc = register_file["pc"]
-        pc_val = conv_to_uint32(pc.read())
+        pc_val = pc.read_uint()
         if rd > 0:
             # If provided register is x0 then don't store
             register_file[rd].write(
@@ -114,18 +114,19 @@ class RV_I_ISA(RV_ISA):
             )  # Address of the next instruction
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
-        rs1_val = conv_to_uint32(register_file[rs1].read())
-        offset = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "I")
+        rs1_val = register_file[rs1].read_uint()
+        offset = RV_I_ISA.extract_immediate(instr, "I")
 
         new_pc_val = (rs1_val + offset) & ~1
 
         nextpc = register_file["nextpc"]
         nextpc.write(conv_to_bytes(new_pc_val))
-        RV_ISA.print_snoop(
-            snoop,
-            f"jalr {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-            f"jump to {hex(new_pc_val)}",
-        )
+        if snoop:
+            RV_ISA.print_snoop(
+                snoop,
+                f"jalr {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                f"jump to {hex(new_pc_val)}",
+            )
         return True
 
     @classmethod
@@ -133,14 +134,14 @@ class RV_I_ISA(RV_ISA):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
-        rs1_val = conv_to_uint32(register_file[rs1].read())
+        rs1_val = register_file[rs1].read_uint()
         rs2 = RV_ISA.get_int(instr, 20, 24)
-        rs2_val = conv_to_uint32(register_file[rs2].read())
+        rs2_val = register_file[rs2].read_uint()
 
-        offset = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "B")
+        offset = RV_I_ISA.extract_immediate(instr, "B")
 
         pc = register_file["pc"]
-        pc_val = conv_to_uint32(pc.read())
+        pc_val = pc.read_uint()
         new_pc_val = pc_val + offset
 
         nextpc = register_file["nextpc"]
@@ -150,35 +151,37 @@ class RV_I_ISA(RV_ISA):
             info_msg = None
             if rs1_val == rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
-                info_msg = f"taken to {hex(new_pc_val)}"
+                info_msg = f"taken to {hex(new_pc_val)}" if snoop else None
             else:
                 info_msg = "false"
-            RV_ISA.print_snoop(
-                snoop,
-                f"beq {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
-                info_msg,
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"beq {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
+                    info_msg,
+                )
             return True
         elif type_val == 0x1:
             # bne
             info_msg = None
             if rs1_val != rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
-                info_msg = f"taken to {hex(new_pc_val)}"
+                info_msg = f"taken to {hex(new_pc_val)}" if snoop else None
             else:
                 info_msg = "false"
-            RV_ISA.print_snoop(
-                snoop,
-                f"bne {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
-                info_msg,
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"bne {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
+                    info_msg,
+                )
             return True
         elif type_val == 0x4 or type_val == 0x6:
             # blt (funct3 0x4, signed) or bltu (funct3 0x6, unsigned)
             instr_str = None
             if type_val == 0x4:
-                rs1_val = conv_to_int32(register_file[rs1].read())
-                rs2_val = conv_to_int32(register_file[rs2].read())
+                rs1_val = register_file[rs1].read_int()
+                rs2_val = register_file[rs2].read_int()
                 instr_str = "blt"
             else:
                 instr_str = "bltu"
@@ -186,22 +189,23 @@ class RV_I_ISA(RV_ISA):
             info_msg = None
             if rs1_val < rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
-                info_msg = f"taken to {hex(new_pc_val)}"
+                info_msg = f"taken to {hex(new_pc_val)}" if snoop else None
             else:
                 info_msg = "false"
             assert instr_str is not None
-            RV_ISA.print_snoop(
-                snoop,
-                f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
-                info_msg,
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
+                    info_msg,
+                )
             return True
         elif type_val == 0x5 or type_val == 0x7:
             # bge (funct3 0x5, signed) or bgeu (funct3 0x7, unsigned)
             instr_str = None
             if type_val == 0x5:
-                rs1_val = conv_to_int32(register_file[rs1].read())
-                rs2_val = conv_to_int32(register_file[rs2].read())
+                rs1_val = register_file[rs1].read_int()
+                rs2_val = register_file[rs2].read_int()
                 instr_str = "bge"
             else:
                 instr_str = "bgeu"
@@ -209,15 +213,16 @@ class RV_I_ISA(RV_ISA):
             info_msg = None
             if rs1_val >= rs2_val:
                 nextpc.write(conv_to_bytes(new_pc_val))
-                info_msg = f"taken to {hex(new_pc_val)}"
+                info_msg = f"taken to {hex(new_pc_val)}" if snoop else None
             else:
                 info_msg = "false"
             assert instr_str is not None
-            RV_ISA.print_snoop(
-                snoop,
-                f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
-                info_msg,
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"{instr_str} {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}, {hex(offset)}",
+                    info_msg,
+                )
             return True
         else:
             return False
@@ -227,20 +232,21 @@ class RV_I_ISA(RV_ISA):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
-        rs1_val = conv_to_uint32(register_file[rs1].read())
+        rs1_val = register_file[rs1].read_uint()
         rd = RV_ISA.get_int(instr, 7, 11)
-        offset = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "I")
+        offset = RV_I_ISA.extract_immediate(instr, "I")
 
         tgt_mem_address = rs1_val + offset
 
         write_result = True
         if type_val == 0x0:
             # lb
-            RV_ISA.print_snoop(
-                snoop,
-                f"lb {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"lb {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
+                )
             byte_val = memory_space.read(tgt_mem_address, 1)
             if byte_val != MemoryStall:
                 result = conv_to_bytes(
@@ -249,11 +255,12 @@ class RV_I_ISA(RV_ISA):
 
         elif type_val == 0x4:
             # lu
-            RV_ISA.print_snoop(
-                snoop,
-                f"lu {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"lu {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
+                )
             byte_val = memory_space.read(tgt_mem_address, 1)
             if byte_val != MemoryStall:
                 result = conv_to_bytes(
@@ -262,11 +269,12 @@ class RV_I_ISA(RV_ISA):
 
         elif type_val == 0x1:
             # lh
-            RV_ISA.print_snoop(
-                snoop,
-                f"lh {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"lh {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
+                )
             byte_val = memory_space.read(tgt_mem_address, 2)
             if byte_val != MemoryStall:
                 result = conv_to_bytes(
@@ -275,11 +283,12 @@ class RV_I_ISA(RV_ISA):
 
         elif type_val == 0x5:
             # lhu
-            RV_ISA.print_snoop(
-                snoop,
-                f"lhu {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"lhu {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
+                )
             byte_val = memory_space.read(tgt_mem_address, 2)
             if byte_val != MemoryStall:
                 result = conv_to_bytes(
@@ -288,11 +297,12 @@ class RV_I_ISA(RV_ISA):
 
         elif type_val == 0x2:
             # lw
-            RV_ISA.print_snoop(
-                snoop,
-                f"lw {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"lw {cls.get_reg_name(rd)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"{cls.get_reg_name(rd)} = mem[{hex(tgt_mem_address)}]",
+                )
             result = memory_space.read(tgt_mem_address, 4)
         else:
             write_result = False
@@ -310,10 +320,10 @@ class RV_I_ISA(RV_ISA):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
-        rs1_val = conv_to_uint32(register_file[rs1].read())
+        rs1_val = register_file[rs1].read_uint()
         rs2 = RV_ISA.get_int(instr, 20, 24)
 
-        offset = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "S")
+        offset = RV_I_ISA.extract_immediate(instr, "S")
         tgt_mem_address = rs1_val + offset
 
         rs2_val = register_file[rs2].read()
@@ -321,29 +331,32 @@ class RV_I_ISA(RV_ISA):
         ret_val = None
         if type_val == 0x0:
             # sb
-            RV_ISA.print_snoop(
-                snoop,
-                f"sb {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"sb {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
+                )
             ret_val = memory_space.write(tgt_mem_address, conv_to_bytes(rs2_val[0], 1))
         elif type_val == 0x1:
             # sh
-            RV_ISA.print_snoop(
-                snoop,
-                f"sh {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"sh {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
+                )
             ret_val = memory_space.write(
                 tgt_mem_address, conv_to_bytes(rs2_val[0:1], 2)
             )
         elif type_val == 0x2:
             # sw
-            RV_ISA.print_snoop(
-                snoop,
-                f"sw {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
-                f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"sw {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
+                    f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
+                )
             ret_val = memory_space.write(tgt_mem_address, rs2_val)
         else:
             return False
@@ -358,7 +371,7 @@ class RV_I_ISA(RV_ISA):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
-        rs1_val = conv_to_uint32(register_file[rs1].read())
+        rs1_val = register_file[rs1].read_uint()
         rd1 = RV_ISA.get_int(instr, 7, 11)
 
         signed_op = False
@@ -373,18 +386,19 @@ class RV_I_ISA(RV_ISA):
             or type_val == 0x6
             or type_val == 0x7
         ):
-            immediate = RV_I_ISA.extract_immediate(RV_ISA.get_int(instr, 0, 31), "I")
+            immediate = RV_I_ISA.extract_immediate(instr, "I")
             immediate_unsigned = immediate & 0xFFFFFFFF
 
             if type_val == 0x0:
                 # addi
                 result = (rs1_val + immediate) % (1 << 32)  # Overflow is ignored
                 snoop_str = "addi"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} + {hex(immediate)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} + {hex(immediate)}"
             elif type_val == 0x2 or type_val == 0x3:
                 # slti and sltiu
                 if type_val == 0x2:
-                    rs1_val = conv_to_int32(register_file[rs1].read())
+                    rs1_val = register_file[rs1].read_int()
                     signed_op = True
                     snoop_str = "slti"
                     result = 1 if rs1_val < immediate else 0
@@ -392,35 +406,40 @@ class RV_I_ISA(RV_ISA):
                     snoop_str = "sltiu"
                     result = 1 if rs1_val < immediate_unsigned else 0
 
-                info_msg = (
-                    f"{cls.get_reg_name(rd1)} = 1 if {cls.get_reg_name(rs1)} < "
-                    f"{hex(immediate if signed_op else immediate_unsigned)} else 0 : "
-                    f"{'TRUE' if result == 1 else 'FALSE'}"
-                )
+                if snoop:
+                    info_msg = (
+                        f"{cls.get_reg_name(rd1)} = 1 if {cls.get_reg_name(rs1)} < "
+                        f"{hex(immediate if signed_op else immediate_unsigned)} else 0 : "
+                        f"{'TRUE' if result == 1 else 'FALSE'}"
+                    )
             elif type_val == 0x4:
                 # xori
                 result = rs1_val ^ immediate
                 snoop_str = "xori"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} ^ {hex(immediate)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} ^ {hex(immediate)}"
             elif type_val == 0x6:
                 # ori
                 result = rs1_val | immediate
                 snoop_str = "ori"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} | {hex(immediate)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} | {hex(immediate)}"
             elif type_val == 0x7:
                 # andi
                 result = rs1_val & immediate
                 snoop_str = "andi"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} & {hex(immediate)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} & {hex(immediate)}"
             else:
                 write_result = False
             if write_result:
                 assert snoop_str is not None
-                RV_ISA.print_snoop(
-                    snoop,
-                    f"{snoop_str} {cls.get_reg_name(rd1)}, {cls.get_reg_name(rs1)}, {hex(immediate)}",
-                    info_msg,
-                )
+                if snoop:
+                    RV_ISA.print_snoop(
+                        snoop,
+                        f"{snoop_str} {cls.get_reg_name(rd1)}, {cls.get_reg_name(rs1)}, {hex(immediate)}",
+                        info_msg,
+                    )
         elif type_val == 0x1 or type_val == 0x5:
             # Base shift-immediate uses shamt in bits [20:24] with a fixed high
             # field: 0x00 for slli/srli, 0x20 for srai. Any other high field is
@@ -437,7 +456,8 @@ class RV_I_ISA(RV_ISA):
                 # slli
                 result = (rs1_val << bit_pos) % (1 << 32)  # Overflow is ignored
                 snoop_str = "slli"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} << {hex(bit_pos)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} << {hex(bit_pos)}"
             elif type_val == 0x5:
                 # srli or srai
                 arithmetic_variant = RV_ISA.get_int(instr, 30, 30) == 1
@@ -447,16 +467,18 @@ class RV_I_ISA(RV_ISA):
                     snoop_str = "srai"
                 else:
                     snoop_str = "srli"
-                info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} >> {hex(bit_pos)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} >> {hex(bit_pos)}"
             else:
                 write_result = False
             if write_result:
                 assert snoop_str is not None
-                RV_ISA.print_snoop(
-                    snoop,
-                    f"{snoop_str} {cls.get_reg_name(rd1)}, {cls.get_reg_name(rs1)}, {hex(bit_pos)}",
-                    info_msg,
-                )
+                if snoop:
+                    RV_ISA.print_snoop(
+                        snoop,
+                        f"{snoop_str} {cls.get_reg_name(rd1)}, {cls.get_reg_name(rs1)}, {hex(bit_pos)}",
+                        info_msg,
+                    )
 
         if write_result:
             register_file[rd1].write(conv_to_bytes(result, signed=signed_op))
@@ -469,9 +491,9 @@ class RV_I_ISA(RV_ISA):
         type_val = RV_ISA.get_int(instr, 12, 14)
 
         rs1 = RV_ISA.get_int(instr, 15, 19)
-        rs1_val = conv_to_uint32(register_file[rs1].read())
+        rs1_val = register_file[rs1].read_uint()
         rs2 = RV_ISA.get_int(instr, 20, 24)
-        rs2_val = conv_to_uint32(register_file[rs2].read())
+        rs2_val = register_file[rs2].read_uint()
         rd = RV_ISA.get_int(instr, 7, 11)
 
         # Base RV32I R-type uses funct7 == 0x00 for every funct3, plus 0x20 for
@@ -497,38 +519,41 @@ class RV_I_ISA(RV_ISA):
             if is_sub:
                 snoop_str = "sub"
                 result = (rs1_val - rs2_val) % (1 << 32)  # Overflow is ignored
-                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} - {cls.get_reg_name(rs2)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} - {cls.get_reg_name(rs2)}"
             else:
                 snoop_str = "add"
                 result = (rs1_val + rs2_val) % (1 << 32)  # Overflow is ignored
-                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} + {cls.get_reg_name(rs2)}"
+                if snoop:
+                    info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} + {cls.get_reg_name(rs2)}"
         elif type_val == 0x1:
             # sll
             shift_bits = rs2_val & 0x1F  # Least significant 5 bits for RV32I
             result = (rs1_val << shift_bits) % (1 << 32)  # Overflow is ignored
             snoop_str = "sll"
-            info_msg = (
-                f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} << {hex(shift_bits)}"
-            )
+            if snoop:
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} << {hex(shift_bits)}"
         elif type_val == 0x2 or type_val == 0x3:
             # slt or sltu
             if type_val == 0x2:
-                rs1_val = conv_to_int32(register_file[rs1].read())
-                rs2_val = conv_to_int32(register_file[rs2].read())
+                rs1_val = register_file[rs1].read_int()
+                rs2_val = register_file[rs2].read_int()
                 signed_op = True
                 snoop_str = "slt"
             else:
                 snoop_str = "sltu"
             result = 1 if rs1_val < rs2_val else 0
-            info_msg = (
-                f"{cls.get_reg_name(rd)} = 1 if {cls.get_reg_name(rs1)} < "
-                f"{cls.get_reg_name(rs2)} else 0 : {'TRUE' if result == 1 else 'FALSE'}"
-            )
+            if snoop:
+                info_msg = (
+                    f"{cls.get_reg_name(rd)} = 1 if {cls.get_reg_name(rs1)} < "
+                    f"{cls.get_reg_name(rs2)} else 0 : {'TRUE' if result == 1 else 'FALSE'}"
+                )
         elif type_val == 0x4:
             # xor
             result = rs1_val ^ rs2_val
             snoop_str = "xor"
-            info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} ^ {cls.get_reg_name(rs2)}"
+            if snoop:
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} ^ {cls.get_reg_name(rs2)}"
         elif type_val == 0x5:
             # srl or sra
             arithmetic_variant = RV_ISA.get_int(instr, 30, 30) == 1
@@ -539,29 +564,31 @@ class RV_I_ISA(RV_ISA):
                 snoop_str = "sra"
             else:
                 snoop_str = "srl"
-            info_msg = (
-                f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} >> {hex(shift_bits)}"
-            )
+            if snoop:
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} >> {hex(shift_bits)}"
         elif type_val == 0x6:
             # or
             result = rs1_val | rs2_val
             snoop_str = "or"
-            info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} | {cls.get_reg_name(rs2)}"
+            if snoop:
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} | {cls.get_reg_name(rs2)}"
         elif type_val == 0x7:
             # and
             result = rs1_val & rs2_val
             snoop_str = "and"
-            info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} & {cls.get_reg_name(rs2)}"
+            if snoop:
+                info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} & {cls.get_reg_name(rs2)}"
         else:
             write_result = False
 
         if write_result:
             assert snoop_str is not None
-            RV_ISA.print_snoop(
-                snoop,
-                f"{snoop_str} {cls.get_reg_name(rd)}, {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}",
-                info_msg,
-            )
+            if snoop:
+                RV_ISA.print_snoop(
+                    snoop,
+                    f"{snoop_str} {cls.get_reg_name(rd)}, {cls.get_reg_name(rs1)}, {cls.get_reg_name(rs2)}",
+                    info_msg,
+                )
             register_file[rd].write(conv_to_bytes(result, signed=signed_op))
             return True
         else:

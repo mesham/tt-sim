@@ -57,9 +57,9 @@ def _float_to_half_bits(value):
 
 class RV_ZFH_ISA(RV_ISA):
     @classmethod
-    def run(cls, register_file, memory_space, snoop):
-        addr = conv_to_uint32(register_file["pc"].read())
-        instr = conv_to_uint32(memory_space.read(addr, 4))
+    def run(cls, register_file, memory_space, snoop, instr=None):
+        if instr is None:
+            instr = cls.fetch(register_file, memory_space)
         opcode = instr & 0x7F
         fmt = (instr >> 25) & 0x3  # OP-FP / FMA format field: 2 = half
         width = (instr >> 12) & 0x7  # load/store width field: 1 = half
@@ -77,7 +77,7 @@ class RV_ZFH_ISA(RV_ISA):
     # -- register helpers ---------------------------------------------------
     @staticmethod
     def _rd_h(rf, idx):
-        raw = conv_to_uint32(rf[FP_REGISTER_BASE + idx].read())
+        raw = rf[FP_REGISTER_BASE + idx].read_uint()
         # NaN-boxing: a register that does not hold a boxed half reads as NaN.
         return raw & 0xFFFF if (raw >> 16) == 0xFFFF else _CANONICAL_QNAN_H
 
@@ -105,7 +105,8 @@ class RV_ZFH_ISA(RV_ISA):
             res = {0x00: a + b, 0x01: a - b, 0x02: a * b}[funct5]
             cls._wr_h(rf, rd, _float_to_half_bits(res))
             name = {0x00: "fadd", 0x01: "fsub", 0x02: "fmul"}[funct5]
-            RV_ISA.print_snoop(snoop, f"{name}.h f{rd}, f{rs1}, f{rs2}", None)
+            if snoop:
+                RV_ISA.print_snoop(snoop, f"{name}.h f{rd}, f{rs1}, f{rs2}", None)
             return True
         if funct5 in (0x03, 0x0B):  # fdiv / fsqrt — unsupported on hardware
             raise NotImplementedError(
@@ -137,13 +138,13 @@ class RV_ZFH_ISA(RV_ISA):
             cls._wr_x(rf, rd, cls._fclass(cls._rd_h(rf, rs1)))
             return True
         if funct5 == 0x1E:  # fmv.h.x (int bits -> boxed half)
-            cls._wr_h(rf, rd, conv_to_uint32(rf[rs1].read()) & 0xFFFF)
+            cls._wr_h(rf, rd, rf[rs1].read_uint() & 0xFFFF)
             return True
         if funct5 == 0x18:  # fcvt.w.h / fcvt.wu.h (half -> int)
             cls._wr_x(rf, rd, cls._to_int(_half_bits_to_float(cls._rd_h(rf, rs1)), rs2))
             return True
         if funct5 == 0x1A:  # fcvt.h.w / fcvt.h.wu (int -> half)
-            iv = conv_to_uint32(rf[rs1].read())
+            iv = rf[rs1].read_uint()
             fv = float(iv - (1 << 32) if (rs2 == 0 and iv & 0x80000000) else iv)
             cls._wr_h(rf, rd, _float_to_half_bits(fv))
             return True
@@ -230,7 +231,7 @@ class RV_ZFH_ISA(RV_ISA):
         rs1 = (instr >> 15) & 0x1F
         imm = instr >> 20
         imm -= 1 << 12 if imm & 0x800 else 0
-        base = conv_to_uint32(rf[rs1].read())
+        base = rf[rs1].read_uint()
         bits = conv_to_uint32(mem.read((base + imm) & _MASK32, 2)) & 0xFFFF
         cls._wr_h(rf, rd, bits)
         return True
@@ -241,6 +242,6 @@ class RV_ZFH_ISA(RV_ISA):
         rs2 = (instr >> 20) & 0x1F
         imm = ((instr >> 25) << 5) | ((instr >> 7) & 0x1F)
         imm -= 1 << 12 if imm & 0x800 else 0
-        base = conv_to_uint32(rf[rs1].read())
+        base = rf[rs1].read_uint()
         mem.write((base + imm) & _MASK32, conv_to_bytes(cls._rd_h(rf, rs2) & 0xFFFF, 2))
         return True

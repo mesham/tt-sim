@@ -314,12 +314,12 @@ def test_sfpmad_blackhole_negates_operands():
 
 
 def test_sfpmad_wormhole_ignores_negation_bits():
-    # Wormhole reserves those bits; a kernel never sets them, and the Wormhole
-    # float path must stay a plain a*b+c.
+    # Wormhole reserves those bits (ttsim rejects a non-zero instr_mod1 there),
+    # so the same word must still compute a*b+c = 7.0 through the Wormhole FMA.
     vu = _vector_unit(blackhole=False)
     vu.lregs[1][0], vu.lregs[2][0], vu.lregs[3][0] = 2.0, 3.0, 1.0
     _run(vu, _op_sfpmad(1, 2, 3, 0, 1))
-    assert vu.lregs[0][0] == 7.0
+    assert vu.lregs[0][0] == 0x40E00000
 
 
 # --------------------------------------------------------------------------
@@ -444,7 +444,7 @@ def test_sfpsetcc_lt0_reads_the_fp32_sign_bit():
     assert bh.laneFlags[0] is True
     assert bh.laneFlags[1] is False
 
-    # Wormhole keeps the mixed float/int LReg model, and must agree.
+    # Wormhole uses the same uint32 lane model, and must agree.
     wh = _vector_unit(blackhole=False)
     wh.useLaneFlagsForLaneEnable = [True] * 32
     wh.laneFlags = [True] * 32

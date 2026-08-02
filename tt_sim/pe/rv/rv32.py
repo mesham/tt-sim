@@ -130,6 +130,13 @@ class RV32I(ProcessingElement):
             registers.append(Register(4))  # fcsr
 
         self.register_file = RegisterFile(registers, REGISTER_NAME_MAPPING)
+        # PC and next-PC are touched several times per simulated cycle; resolve
+        # them once instead of going through the name map every time.
+        self.pc_register = self.register_file["pc"]
+        self.nextpc_register = self.register_file["nextpc"]
+        # The event bus is a process-wide singleton that is never replaced, so
+        # hold it directly rather than calling get_bus() per instruction.
+        self.bus = get_bus()
         self.unknown_instr_is_error = unknown_instr_is_error
 
         # Now determine the visible memory for the core, this will either be a combination of
@@ -144,7 +151,7 @@ class RV32I(ProcessingElement):
             self.visible_memory = VisibleMemory.merge(*memory_spaces)
 
     def print_snoop(self, pc, nextpc, actioned):
-        addr = conv_to_uint32(pc.read())
+        addr = pc.read_uint()
         instr = self.visible_memory.read(addr, 4)
 
         opcode_bin = RV_I_ISA.get_bits(instr, 0, 6)
@@ -156,22 +163,37 @@ class RV32I(ProcessingElement):
         if not self.active:
             return
 
-        pc = self.register_file["pc"]
-        nextpc = self.register_file["nextpc"]
-        pc_val = conv_to_uint32(pc.read())
+        register_file = self.register_file
+        pc = self.pc_register
+        nextpc = self.nextpc_register
+        pc_val = pc.read_uint()
         nextpc.write(conv_to_bytes(pc_val + 4))
         self.visible_memory.caller_context = (self.unit_id, self.core_label, pc_val)
-        # Clear last-write record so the InstrEvent below captures only
-        # this instruction's destination register write.
-        self.register_file.clear_write_record()
+
+        # The InstrEvent below reports which GPR the instruction wrote, which
+        # needs a recording hook on every Register.write — the hottest call in
+        # the simulator. Install it only while a subscriber is listening, and
+        # clear the last-write record so the event sees this instruction alone.
+        trace_instr = self.unit_id is not None and self.bus.is_enabled(
+            EventCategory.INSTR
+        )
+        if trace_instr != register_file.write_recording:
+            register_file.set_write_recording(trace_instr)
+        if trace_instr:
+            register_file.clear_write_record()
 
         if self.snoop:
             print(f"[{self.core_id}-> {cycle_num}][{hex(pc_val)}] ", end="")
 
+        # Fetch once per cycle and hand the word to every ISA in the list —
+        # each one used to re-read it from memory, which cost a full memory-map
+        # traversal per ISA tried.
+        instr = int.from_bytes(self.visible_memory.read(pc_val, 4), "little")
+
         actioned = False
         pe_stall = False
         for isa in self.isas:
-            actioned = isa.run(self.register_file, self.visible_memory, self.snoop)
+            actioned = isa.run(register_file, self.visible_memory, self.snoop, instr)
             pe_stall = actioned == ProcessingElement.PEStall
             if actioned or pe_stall:
                 break
@@ -181,36 +203,30 @@ class RV32I(ProcessingElement):
             if self.unknown_instr_is_error:
                 raise Exception("Unknown instruction")
             if self.snoop:
-                instr = self.visible_memory.read(pc_val, 4)
-                instr_bits = RV_I_ISA.get_bits(instr, 0, 31)
-                instr_bits.reverse()
-                binary_str = "".join(str(bit) for bit in instr_bits)
-                print(f"unknown # {binary_str}", end="")
+                print(f"unknown # {instr:032b}", end="")
 
         if self.snoop:
             if pe_stall:
                 print("[Stalled]")
             print("")
 
-        bus = get_bus()
-        if self.unit_id is not None and bus.is_enabled(EventCategory.INSTR):
-            instr_raw = self.visible_memory.read(pc_val, 4)
+        if trace_instr:
             # Capture the architectural register write (x1-x31). Index 0
             # (x0) is read-only and not logged by Spike-style commitlogs;
             # indices 32+ are PC/nextpc, not architectural state.
-            wi = self.register_file.last_write_idx
+            wi = register_file.last_write_idx
             if 1 <= wi <= 31:
                 reg_idx = wi
-                reg_val = conv_to_uint32(self.register_file.last_write_value)
+                reg_val = conv_to_uint32(register_file.last_write_value)
             else:
                 reg_idx = -1
                 reg_val = 0
-            bus.publish(
+            self.bus.publish(
                 InstrEvent(
                     cycle=cycle_num,
                     unit_id=self.unit_id,
                     pc=pc_val,
-                    instruction=conv_to_uint32(instr_raw),
+                    instruction=instr,
                     stalled=pe_stall,
                     reg_write_idx=reg_idx,
                     reg_write_value=reg_val,

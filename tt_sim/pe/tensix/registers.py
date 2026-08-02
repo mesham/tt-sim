@@ -158,16 +158,26 @@ class SrcRegister:
 class LReg:
     """One SFPU LReg (32 lanes).
 
-    On Blackhole every lane holds a **uint32 bit pattern**, matching ttsim's
-    ``l_regs`` — so a float value is stored as its FP32 bits and integer/bitwise
-    results as their bits, and each op reads with the right accessor
-    (``conv_to_float`` for the float value, the raw int for bits). This keeps the
-    whole SFPU pipeline bit-exact with the reference (e.g. recip's Newton
-    refinement). Wormhole keeps the historical mixed float/int model untouched
-    (its replay guards encode that behaviour), selected by ``blackhole=False``.
+    Every lane holds a **uint32 bit pattern**, matching ttsim's ``l_regs`` — a
+    float value is stored as its FP32 bits and integer/bitwise results as their
+    bits, and each op reads with the right accessor (``conv_to_float`` for the
+    float value, the raw int for bits). This is what keeps the SFPU pipeline
+    bit-exact with the reference on both architectures.
+
+    tt-sim used to keep a *mixed* model on Wormhole, where a lane could hold a
+    Python float instead. That silently destroyed information the SFPU relies
+    on: NaN payloads (the accurate FP32 exp builds ``2**n`` through an integer
+    ``0x7ffffffd``-shaped lane, which becomes a payload-less ``nan`` the moment
+    it is stored as a Python float), and it made the *integer* ops (SFPIADD,
+    SFPSHFT) do float arithmetic whenever their operand happened to have been
+    written by a float op. It also carried full double precision between ops
+    instead of rounding to FP32 each time. See docs/plans/blackhole-support.md.
     """
 
     def __init__(self, blackhole=False):
+        # ``blackhole`` no longer selects a value model (both are uint32); it is
+        # kept because callers construct LRegs per-arch and future per-arch
+        # register behaviour would land here.
         self.blackhole = blackhole
         self.read_only = False
         self.hard_wired_value = None
@@ -182,7 +192,7 @@ class LReg:
 
     def __setitem__(self, key, value):
         assert not self.read_only
-        self.data[key] = self._coerce(value) if self.blackhole else value
+        self.data[key] = self._coerce(value)
 
     def __getitem__(self, key):
         if self.hard_wired_value is not None:
@@ -195,6 +205,6 @@ class LReg:
         self.setHardwiredValue(hard_wired_value)
 
     def setHardwiredValue(self, value):
-        if self.blackhole and value is not None:
+        if value is not None:
             value = self._coerce(value)
         self.hard_wired_value = value

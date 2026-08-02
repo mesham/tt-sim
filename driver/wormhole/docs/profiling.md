@@ -963,8 +963,10 @@ run needs ~10×, which is reachable without touching the pump.
 ## Ranked optimisation targets
 
 Ranked by (measured share × confidence that the fix is mechanical).
-None of this has been implemented — this document is the measurement
-half of §L's "profile first, optimise second".
+This section was written as the measurement half of §L's "profile
+first, optimise second"; **targets 1 and 3 have since been done** — see
+"[What landed: targets 1 and 3](#what-landed-targets-1-and-3)" at the
+end of this document for the changes and the measured result.
 
 1. **RV32IM instruction interpreter — GPR representation and decode.**
    65–84 % of wall clock on every non-matmul workload. Four independent
@@ -1068,3 +1070,311 @@ For the undistorted time shares, a sampling profiler is required —
 code. `py-spy record -o out.svg -- python3 -m
 driver.blackhole.server.six_replay_test` is the tool of choice if it is
 available; it was not installed here.
+
+# What landed: target 2, batching the FPU accumulate datapath
+
+**Measured 2026-08-02**, same machine as the appendix above (12th Gen
+Core i7-12700H, CPython 3.12.13, `TT_SIM_THREADED` unset). The tree was
+busy with other concurrent work, so every number here is an A/B between
+two git worktrees — `HEAD` and `HEAD` plus this change only — run
+**interleaved** (base, then after, per workload) and reported as the
+**minimum of 3–8 repeats**, because contention can only add time. An
+earlier non-interleaved sweep showed every workload "improving",
+including ones that never enter this code; that pass is discarded.
+
+## What changed
+
+`MatrixUnit._fpu_group_sums` / `_fpu_accumulate` are unchanged and are
+now the *reference*: they stay the readable port of ttsim's C and the
+oracle the tests fuzz against. `perform_mvmul_exact` instead calls two
+new batched methods, `_fpu_group_sums_batch` / `_fpu_accumulate_batch`,
+which are the same arithmetic in numpy over a whole MVMUL at once
+(16 lanes × up to 16 SrcB rows × 16 Dst columns). This is legal because
+nothing in an MVMUL sequences: each of the 256 (row, column)
+accumulations reads and writes its own Dst element.
+
+No JIT, no new dependency. §L's premise that this code was "already
+numpy" was wrong (see above); a plain numpy/int64 rewrite was tried
+first, as the appendix recommended, and it is enough.
+
+## Result
+
+| workload | uses this path | base | after | factor |
+|---|---|---|---|---|
+| `six` (128³ bf16 matmul) | 70 % of wall clock | 30.87 s | **16.78 s** | **1.84×** |
+| `matmulidx` | matmul | 5.53 s | **3.93 s** | **1.41×** |
+| `reduce` (GAPOOL) | 2 % | 2.83 s | 2.84 s | 1.00× |
+| `four`, `nine`, `two`, `eight`, `three`, `five`, `sfpumath`, … | no | — | — | within ±7 % noise, no direction |
+
+`six` is now ~1,640 device cycles/s, up from ~890 on this machine.
+
+The datapath itself, timed in one process against the scalar pair on
+identical inputs (min of 7 × 100 iterations, one MVMUL = 8 rows × 16
+columns × 16 lanes = 128 group-sum calls):
+
+| implementation | µs per MVMUL | µs per group-sum call |
+|---|---|---|
+| scalar (the reference) | 4,991 | 39.0 |
+| batched, first cut | 798 | 6.2 |
+| batched, final | **516** | **4.0** |
+
+**9.7× on the two functions**, which is why a 47.5 % share turns into a
+1.84× workload win rather than a 1.9× one — Amdahl, plus the operand
+gather that is now the larger half of an MVMUL (below).
+
+Two numpy details were worth 1.55× between the first cut and the final
+one, and are worth knowing before optimising any other backend:
+
+- **Reduce over a *leading* axis, never a trailing one.** The lane axis
+  is what gets reduced, so the arrays are laid out lane-first.
+  `y.max(axis=1)` on `(2, 8, rows, cols)` is **4.2 µs**; the identical
+  reduction written as `y.max(axis=-1)` on `(rows, cols, 2, 8)` is
+  **21.7 µs**. numpy reduces a leading axis as one vectorised pass per
+  index over contiguous blocks; a trailing one becomes an interpreted
+  loop over every outer element.
+- **`np.clip` is ~3× `np.minimum(np.maximum(...))`** (9.5 µs vs 3.6 µs
+  on these shapes), and with only two groups, combining them by index
+  (`np.maximum(g[0], g[1])`, 2.8 µs) beats any reduction call.
+
+Broadcasting is the remaining tax: the one op that broadcasts SrcA
+against SrcB costs 16.0 µs where the same shape contiguous costs 6.1 µs.
+At these array sizes (2,048 and 256 elements) numpy is overhead-bound at
+roughly 3–10 µs per operation, so the ~55 operations are close to the
+floor for this approach. Getting materially below 516 µs/MVMUL would
+need a JIT — and that is now a ~30 % of `six` target, not a 47.5 % one,
+so it should be re-argued against the new baseline rather than assumed.
+
+## Bit-identity
+
+Required, not approximated: this code feeds a bit-exact differential
+against the vendor simulator.
+
+- `tt_sim/pe/tensix/fpu_accumulate_test.py` keeps pinning the **scalar**
+  pair against the vectors generated from ttsim's C model for both
+  architectures, and gains two fuzz tests that assert the batched pair is
+  **equal**, not close, to the scalar one: 8,000 lane sets across all
+  four fidelity phases, and 16,000 accumulations (half from the real
+  datapath, half synthetic and biased toward tiny mantissas, since a
+  magnitude of exactly 1 is what trips the Wormhole −1 renormalisation
+  and a uniform draw never produces one). 203 tests pass.
+- `driver.wormhole.server.offline_replay_test` reproduces **126/126**
+  host READs bit-for-bit, which is the end-to-end statement.
+- All 16 Blackhole replay guards pass, as do the 11 Wormhole example
+  replays.
+- The live differential against the vendor simulator still matches on
+  both FPU programs: `./optests/diff.sh reduce` and
+  `./optests/diff.sh matmulidx`, 2,560 elements each, PASS.
+
+The overflow argument, which is the thing a numpy rewrite can get wrong
+silently where Python bigints would not: the fidelity slices cap manA at
+31 and manB at 127 (checked exhaustively over all 1,024 mantissa
+patterns × 4 phases), so a product is < 2¹²; the alignment shift is
+clamped to 30, so `(man << 1) + (1 << shift)` < 2³¹ and the shifted-down
+term never exceeds the product; eight of those sum to < 2¹⁵ and
+`<< 13` to < 2²⁸; three aligned terms plus a ≤ 2²⁴ Dst mantissa stay
+< 2³⁰. Everything is int64 with ~33 bits of headroom, and < 2³⁰ is also
+what makes `np.frexp` on the float64 view an exact `bit_length`.
+
+## What did not pay off
+
+- **Vectorising each `_fpu_group_sums` call on its own**, i.e. 16 lanes
+  per numpy call. At ~1.5 µs of ufunc overhead × ~25 operations that is
+  roughly the 29 µs it replaces. The win comes entirely from batching the
+  whole instruction; anything narrower is a wash.
+- **Keeping the natural `(row, column, lane)` layout.** It reads better
+  and costs 1.55× (see above).
+- **`np.where(cond, x, 0)` → `x * cond`** and `np.int64(1) << shift` →
+  a power-of-two lookup table: both measured 20–30 % faster on the
+  individual operation, which is under 1 % of the MVMUL, and both make
+  the correspondence with ttsim's C harder to see. Not taken.
+
+## The new shape of an MVMUL, and the next target
+
+With the datapath at 516 µs, the **operand gather is now the larger half
+of an MVMUL**. Per MVMUL `perform_mvmul_exact` still makes ~384 scalar
+`SrcRegister.__getitem__` calls and ~1,150 `DataFormatConversions` calls
+(`BF16InSrcToFP32` → `BF16InSrcToBF16` → `TF32InSrcToTF32`, three Python
+frames per lane), plus 256 `getDst16b`/`setDst16b` pairs. In the
+post-change cProfile of `six` those are the top tt-sim leaves after the
+batch methods themselves.
+
+That is a contained follow-up — `SrcRegister` already stores a numpy
+array, so the gather can be a slice — but it duplicates the bit
+permutations that live in `util.py`, so it wants an exhaustive
+equivalence test (the Src word is only 19 bits) rather than a copied
+expression. It was left out of this pass deliberately: it is a different
+target from the one the ranking above named.
+
+Revised ranking after this change: item 1 (the RV32IM interpreter) is
+now the largest consumer on *every* workload including `six`, item 2 is
+retired, and the Src/Dst gather above enters roughly where item 2 was.
+
+# What landed: targets 1 and 3
+
+**Measured 2026-08-02**, same machine and method as the appendix above
+(12th Gen Core i7-12700H, CPython 3.12.13, `TT_SIM_THREADED` unset).
+The working tree had moved on since the baseline measurements — concurrent
+work in `tensix/backends/{matrix,vector}.py` had already roughly halved
+`six` — so every number here comes from an **interleaved A/B**: the same
+tree, with only `tt_sim/pe/rv/` + `tt_sim/pe/register/` swapped between
+the pre-change and post-change versions, alternating variants round by
+round and taking the minimum over rounds. Absolute "before" figures
+therefore differ from the tables above; the ratios are the point.
+
+## Result
+
+| workload | before (pump) | after (pump) | speedup | before cyc/s | after cyc/s |
+|---|---|---|---|---|---|
+| `two` | 1.43 s | 0.64 s | **2.23×** | 5,750 | 12,809 |
+| `reduce` | 2.25 s | 1.06 s | **2.12×** | 4,534 | 9,614 |
+| `nine` | 4.31 s | 1.85 s | **2.33×** | 2,669 | 6,232 |
+| `sfpumath` | 5.51 s | 2.82 s | **1.96×** | 3,503 | 6,852 |
+| `four` | 27.26 s | 10.35 s | **2.64×** | 3,939 | 10,381 |
+| `six` (matmul) | 17.33 s | 12.80 s | **1.35×** | 1,587 | 2,148 |
+
+A second, independent A/B run on a more loaded machine reproduced
+1.90–2.87× on the five non-matmul workloads. `six` gains least because
+only ~20 % of it was ever RV; that ~20 % is now ~5 %.
+
+**The RV-bound workloads went from 2.7–5.8 k to 6.2–12.8 k simulated
+cycles/s.** For reference, the idle-pump ceiling for one Tensix tile
+measured above is 24.8 k cycles/s — the interpreter is now within 2–4×
+of the pump floor rather than 7–30× below it, which moves targets 4
+(`NUI.clock_tick`) and 6 (the pump) up the list.
+
+## The changes
+
+Six edits, all in `tt_sim/pe/rv/` and `tt_sim/pe/register/`. Per-change
+figures are single-run, taken in sequence during development (so they
+carry the machine's ±15 % run-to-run noise), on `four` / `nine`:
+
+1. **GPRs are `bytes`, not 4-element numpy arrays**
+   (`pe/register/register.py`). `read()` returns the stored object with
+   no copy; `write()` is an attribute store. `four` 31.3 → 24.2 s,
+   `nine` 5.4 → 3.9 s.
+2. **Fetch once per cycle; ISAs decode an integer word**
+   (`rv32.clock_tick` + every `isa/*.py`). `run()` gained an `instr`
+   parameter carrying the 32-bit word (defaulting to `RV_ISA.fetch()`
+   so direct callers and unit tests are unaffected). This kills the
+   `get_bits` → `reverse` → `bits_to_int` string-join opcode decode
+   *and* the repeated `int.from_bytes` inside every `get_int`, *and*
+   the duplicate instruction fetch each ISA in the chain used to do.
+3. **`RegisterFile` cheapened**: `get()` indexes the list directly and
+   falls back to the name map on `TypeError`; `__getitem__ = get`
+   removes a call per access; the tracing write-hook closure is now
+   installed only while an `INSTR` subscriber is listening, and
+   `clear_write_record()` / `get_bus()` no longer run per instruction
+   (the bus is held on the core). (2)+(3) together: `four` 24.2 →
+   19.3 s, `nine` 3.9 → 3.4 s.
+4. **The soft-reset poll resolves its component once**
+   (`babyriscv._read_soft_reset`). `0xFFB121B0` is looked up through
+   the memory map on the first tick and read directly thereafter, and
+   the bit test is a precomputed mask instead of `get_nth_bit`. This
+   was target 3. `four` 19.3 → 14.4 s, `nine` 3.4 → 2.9 s — much larger
+   than the "~28 % of the idle floor" estimate suggested, because the
+   poll was **half of every `MemorySpace.read` in the simulator**
+   (on `nine`: 115,000 of 241,307 calls).
+5. **Disassembly is built only when snooping.** Every `print_snoop`
+   call site is wrapped in `if snoop:`, and the `info_msg` f-strings
+   are assigned inside `if snoop:` blocks. `print_snoop` still takes
+   and re-checks the flag; its docstring now explains why the callers
+   guard anyway (Python evaluates the f-string before the call).
+   `four` 14.4 → 11.8 s, `nine` 2.9 → 1.8 s — **the single biggest
+   win on the list**, and the one that cost the least.
+6. **`Register.read_uint()` / `read_int()`** replace
+   `conv_to_uint32(reg.read())` at 50 call sites. Worth 1.10–1.21×,
+   which needed six interleaved rounds to resolve — see "noise floor"
+   below.
+
+Microbenchmarks, 200 k iterations (compare with the table in "Anatomy
+of one simulated RV instruction"):
+
+| operation | before | after |
+|---|---|---|
+| `Register.read()` | 294 ns | 72 ns |
+| `Register.write(bytes)` | 2,457 ns | 151 ns |
+| opcode decode | 4,980 ns | ~0 (a mask on the fetched word) |
+| `get_int` on one field | 1,049 ns | 370 ns |
+| the two disassembly f-strings | 1,722 ns | 0 ns (not built) |
+
+Call counts on `nine` (cProfile, so inflated but comparable):
+total calls **15.10 M → 7.69 M**; `MemorySpace.read` 241,307 →
+119,944; `RegisterFile.get` 485,186 → 207,607 (plus 485,186
+`__getitem__` frames gone); `str.join` 90,995 → 0; `wrapped_write`
+240,358 → 0; `clear_write_record` and `get_bus` → 0.
+
+## Behaviour deltas (all deliberate, all verified)
+
+Gates: `ruff` clean; `pytest tt_sim driver` 207 passed; 16/16 Blackhole
+replay guards; `driver.wormhole.server.offline_replay_test` **126/126
+byte-identical**; `examples_replay_test` 11 passed. Snoop output
+(`driver/simple/ex2`, `ex5` with `snoop=True`, covering
+add/addi/andi/auipc/beq/bge/ebreak/fence/fence.i/jal/jalr/lui/lw/**mul**/slli/sw)
+diffs clean against the old code.
+
+Three things do change, none of them architectural state:
+
+- **Uninitialised GPRs now read as zero.** The old `Register` used
+  `np.empty`, so a register read before its first write returned
+  whatever was in the freed numpy page. That was *non-deterministic*:
+  running the Wormhole replay twice under `TT_SIM_TRACE_COMMITLOG`
+  produced different values for `x22`/`x24`/`x25` in one BRISC function
+  epilogue (`0x0003633b` vs `0xc021ace0`, `0x2ae1ace0` vs
+  `0xc021ace0` — leaked host-process pointers). Those three lines are
+  the *only* commitlog difference across all five cores, and they are
+  now stably zero.
+- **The mem-event stream loses the soft-reset polls and the duplicate
+  instruction fetches.** Both were simulator artefacts that no hardware
+  bus transaction corresponds to; on `nine` they were half of all
+  memory-space reads, so `TT_SIM_TRACE`/counter output gets both
+  smaller and more faithful.
+- **The register protocol grew `read_uint`/`read_int`.** Anything
+  standing in for a `Register` must implement them — in-tree that is
+  the four `_Reg` fakes in `isa/*_test.py`, which were updated.
+
+## What did not pay off, and other notes
+
+- **`__slots__` on `Register`** looked free and is not compatible with
+  the tracing write hook, which installs a per-instance `write`
+  attribute shadowing the method. Dropped rather than restructure the
+  hook; plain attribute access was not measurably slower.
+- **Speeding up `util/conversion.py` itself** was rejected: the
+  helpers are used by every subsystem, so it is a wide blast radius
+  for a win that change 6 gets locally on the path that actually cares.
+  `conv_to_uint32(b)` is 435 ns against 153 ns for a bare
+  `int.from_bytes` — two thirds of that is the wrapper and the nested
+  `conv_to_int32` call. Worth revisiting as its own change.
+- **The noise floor matters at this point.** With two other agents
+  working on the same machine, single runs of `nine` varied 1.8–2.7 s
+  (±20 %). Change 6 (1.1×) is *below* that; it took six interleaved
+  A/B rounds with min-of-rounds to show it is real. Any further RV
+  micro-optimisation needs the same discipline or it is unfalsifiable.
+- **Readability tension, declared.** Two of the six changes trade
+  some directness for speed: `if snoop:` guards around calls to a
+  function that already checks `snoop` (documented in
+  `RV_ISA.print_snoop`'s docstring), and `run()` taking a
+  pre-fetched word instead of reading the PC itself. The second is
+  arguably a clarity *gain* ("the core fetches, the ISA decodes") and
+  the `instr=None` default keeps every ISA runnable standalone. What
+  was **not** done: no table-driven dispatch, no inlined bit-field
+  arithmetic replacing `RV_ISA.get_int`, no hand-unrolled handlers.
+  Those are the next ~10–15 %, and they are where the ISA modules
+  would stop reading like the RISC-V spec.
+- **Still on the table inside the interpreter:** `MemorySpace.read` is
+  now the largest single non-pump cost on the RV path (119,944 calls on
+  `nine`, with `_publish_mem_event` and `memory_map.locate` under it) —
+  that is target 5, unchanged. `conv_to_bytes` on the register-write
+  path (150,180 calls on `nine`) is the mirror image of change 6 and
+  cannot use the same trick without bypassing the tracing write hook.
+
+## Reproducing these numbers
+
+```bash
+export PYTHONPATH=~/tt-sim
+# per-workload wall clock; wrap MultiTileClock.run to get pump-only time
+time python3 -m driver.blackhole.server.four_replay_test
+
+# the A/B: snapshot tt_sim/pe/rv + tt_sim/pe/register at the two commits,
+# swap them into the same tree, alternate variants, take min over rounds.
+# Do not compare across sessions — the rest of the tree moves.
+```

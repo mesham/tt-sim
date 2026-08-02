@@ -1,19 +1,17 @@
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
-from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
+from tt_sim.util.conversion import conv_to_bytes
 
 
 class RV_TT_ISA(RV_ISA):
     @classmethod
-    def run(cls, register_file, memory_space, snoop):
-        pc = register_file["pc"]
-        addr = conv_to_uint32(pc.read())
-        instr = memory_space.read(addr, 4)
+    def run(cls, register_file, memory_space, snoop, instr=None):
+        if instr is None:
+            instr = cls.fetch(register_file, memory_space)
 
-        opcode_bin = RV_ISA.get_bits(instr, 0, 6)
-        opcode_bin.reverse()
-
-        if opcode_bin[5] != 1 or opcode_bin[6] != 1:
+        # A .ttinsn is anything whose two least-significant bits are not both
+        # set — see the comment below for why that encoding is unambiguous.
+        if instr & 0x3 != 0x3:
             # ttinsnt
             """
             This is an encoding of the .ttinst which copies a constant into INSTRN_BUF_BASE (0xFFE40000) to send to the
@@ -24,7 +22,7 @@ class RV_TT_ISA(RV_ISA):
             https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/BabyRISCV/PushTensixInstruction.md#ttinsn-instruction-set-extension
             """
 
-            constant = RV_TT_ISA.rotate_right(RV_ISA.get_int(instr, 0, 31), 2)
+            constant = RV_TT_ISA.rotate_right(instr, 2)
             memory_space.write(0xFFE40000, conv_to_bytes(constant))
             if snoop:
                 inst_info = TensixInstructionDecoder.getInstructionInfo(constant)

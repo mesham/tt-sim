@@ -4,6 +4,13 @@
 ``mvmul`` + ``fpu_accum_normalize_encode`` (``src/tensix.cpp``): the hardware's
 fixed-point datapath, where each product is truncated to ~12 bits, aligned
 within its group of eight lanes, and rounded into Dst on *every* instruction.
+What ``perform_mvmul_exact`` actually calls is the batched numpy pair
+``_fpu_group_sums_batch`` / ``_fpu_accumulate_batch``; the scalar pair stays the
+readable reference. The last two tests here fuzz the batched pair against the
+scalar one so the two cannot drift, which is also the standing proof that
+numpy's fixed-width int64 never wraps where the scalar code's Python ints would
+have widened.
+
 ttsim's model is architecture-independent bar one thing -- a
 ``#if TT_ARCH_VERSION == 0`` (Wormhole) fixup for renormalising a result whose
 sign/magnitude form is exactly -1, where the hardware's leading-sign count
@@ -15,6 +22,7 @@ both ``TT_ARCH_VERSION`` values; the same harness fuzz-matched this port on
 60k random cases (3351 of which exercised the Wormhole/Blackhole difference).
 """
 
+import numpy as np
 import pytest
 
 from tt_sim.pe.tensix.backends.matrix import MatrixUnit
@@ -105,6 +113,34 @@ def _exp_prod_adj(fidelityPhase):
     return adj
 
 
+def _batch_group_sums(lanePairs, fidelityPhase):
+    """Run a list of (srcAVals, srcBVals) lane sets through the batched path.
+
+    The batched methods want lanes (then groups) on the leading axis, so the
+    list of cases becomes the trailing axis here and the results are transposed
+    back into the scalar version's per-case list of two triples.
+    """
+    srcA = np.array([a for a, _ in lanePairs], dtype=np.int64).T
+    srcB = np.array([b for _, b in lanePairs], dtype=np.int64).T
+    fields = np.stack(
+        MatrixUnit._fpu_group_sums_batch(
+            srcA, srcB, fidelityPhase, _exp_prod_adj(fidelityPhase)
+        )
+    )  # (3 fields, 2 groups, n)
+    return [[tuple(g) for g in case] for case in fields.T.tolist()]
+
+
+def _batch_accumulate(groupSums, dstVals, useDst32b, negOneRenormBug):
+    """Run a list of group-sum pairs through the batched path."""
+    fields = np.array(groupSums, dtype=np.int64).T  # (3 fields, 2 groups, n)
+    return MatrixUnit._fpu_accumulate_batch(
+        (fields[0], fields[1], fields[2]),
+        np.array(dstVals, dtype=np.int64),
+        useDst32b,
+        negOneRenormBug,
+    ).tolist()
+
+
 @pytest.mark.parametrize(
     "dstVal,useDst32b,groupSums,wormhole,blackhole",
     ACCUMULATE_VECTORS,
@@ -117,6 +153,8 @@ def test_accumulate_matches_ttsim(dstVal, useDst32b, groupSums, wormhole, blackh
     assert (
         MatrixUnit._fpu_accumulate(groupSums, dstVal, useDst32b, False) == blackhole
     ), "Blackhole accumulate"
+    assert _batch_accumulate([groupSums], [dstVal], useDst32b, True) == [wormhole]
+    assert _batch_accumulate([groupSums], [dstVal], useDst32b, False) == [blackhole]
 
 
 def test_neg_one_renorm_quirk_is_wormhole_only():
@@ -149,3 +187,71 @@ def test_group_sums_matches_ttsim(
             MatrixUnit._fpu_accumulate(groupSums, dstVal, useDst32b, negOneRenormBug)
             == expected
         )
+    assert _batch_group_sums(
+        [
+            (
+                [int(v, 16) for v in srcAVals.split()],
+                [int(v, 16) for v in srcBVals.split()],
+            )
+        ],
+        fidelityPhase,
+    ) == [groupSums]
+
+
+@pytest.mark.parametrize("fidelityPhase", [0, 1, 2, 3])
+def test_batch_group_sums_matches_scalar(fidelityPhase):
+    """The batched datapath is bit-identical to the scalar reference.
+
+    Operands are drawn as (sign, exponent, mantissa) rather than as uniform
+    32-bit words so the exponent range -- which is what drives the alignment
+    shifts, the clamp at 30 and the whole-group underflow -- is actually swept,
+    and so the zero-exponent lanes the datapath drops are hit often.
+    """
+    rng = np.random.default_rng(20260802 + fidelityPhase)
+    lanes = (
+        (rng.integers(0, 2, (2000, 32)) << 31)
+        | (rng.integers(0, 256, (2000, 32)) * (rng.random((2000, 32)) > 0.1) << 23)
+        | (rng.integers(0, 1 << 23, (2000, 32)))
+    ).astype(np.int64)
+    cases = [(row[:16].tolist(), row[16:].tolist()) for row in lanes]
+
+    assert _batch_group_sums(cases, fidelityPhase) == [
+        MatrixUnit._fpu_group_sums(a, b, fidelityPhase, _exp_prod_adj(fidelityPhase))
+        for a, b in cases
+    ]
+
+
+@pytest.mark.parametrize("useDst32b", [False, True])
+@pytest.mark.parametrize("negOneRenormBug", [False, True])
+def test_batch_accumulate_matches_scalar(useDst32b, negOneRenormBug):
+    """As above, over both real and deliberately extreme group sums.
+
+    Half the cases come out of the datapath above, which is the distribution
+    that actually occurs; the other half are synthetic, biased toward tiny
+    mantissas (a magnitude of exactly 1 is what trips the Wormhole -1
+    renormalisation, and a uniform draw over the 28-bit range would never
+    produce one) and toward exponents far enough apart to exercise the
+    align-to-zero path at a shift of 31.
+    """
+    rng = np.random.default_rng(31415)
+    n = 2000
+    lanes = (
+        (rng.integers(0, 2, (n, 32)) << 31)
+        | (rng.integers(0, 256, (n, 32)) * (rng.random((n, 32)) > 0.1) << 23)
+        | (rng.integers(0, 1 << 23, (n, 32)))
+    ).astype(np.int64)
+    real = _batch_group_sums([(r[:16].tolist(), r[16:].tolist()) for r in lanes], 0)
+
+    mans = rng.integers(0, 1 << 28, (n, 2))
+    mans = np.where(rng.random((n, 2)) < 0.25, rng.integers(0, 4, (n, 2)), mans)
+    synthetic = np.stack(
+        [rng.integers(0, 2, (n, 2)), rng.integers(0, 384, (n, 2)), mans], axis=-1
+    ).tolist()
+
+    groupSums = [[tuple(g) for g in gs] for gs in real + synthetic]
+    dstVals = rng.integers(0, 1 << 32, 2 * n).tolist()
+
+    assert _batch_accumulate(groupSums, dstVals, useDst32b, negOneRenormBug) == [
+        MatrixUnit._fpu_accumulate(gs, dst, useDst32b, negOneRenormBug)
+        for gs, dst in zip(groupSums, dstVals)
+    ]

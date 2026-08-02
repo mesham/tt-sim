@@ -47,11 +47,26 @@ class RV_ISA(ABC):
         return [(word >> i) & 1 for i in range(start, end + 1)]
 
     @classmethod
-    def get_int(cls, bytes, start, end):
+    def get_int(cls, value, start, end):
         # Value of the inclusive bit field [start, end] where start is the
         # LSB position — equivalent to get_bits + reverse + bits_to_int.
-        word = int.from_bytes(builtins.bytes(bytes), "little")
-        return (word >> start) & ((1 << (end - start + 1)) - 1)
+        # ``value`` is either raw little-endian bytes or an already-assembled
+        # integer; the instruction path passes the integer so the bytes->int
+        # conversion is paid once per instruction rather than once per field.
+        if not isinstance(value, int):
+            value = int.from_bytes(builtins.bytes(value), "little")
+        return (value >> start) & ((1 << (end - start + 1)) - 1)
+
+    @classmethod
+    def fetch(cls, register_file, memory_space):
+        """Read the 32-bit instruction word at the PC.
+
+        The core fetches once per cycle and hands the word to every ISA in its
+        list (see ``RV32I.clock_tick``), so this is only used when an ISA's
+        ``run`` is invoked directly — e.g. from a unit test.
+        """
+        addr = int.from_bytes(register_file["pc"].read(), "little")
+        return int.from_bytes(memory_space.read(addr, 4), "little")
 
     @classmethod
     def get_reg_name(cls, reg_idx):
@@ -65,6 +80,14 @@ class RV_ISA(ABC):
 
     @classmethod
     def print_snoop(cls, snoop, message, info_msg=None):
+        """Emit one line of disassembly.
+
+        Call sites wrap this in ``if snoop:`` even though it re-checks the
+        flag: Python evaluates the f-strings that build ``message`` and
+        ``info_msg`` *before* the call, so an unguarded call pays for the
+        disassembly (~1.5 µs an instruction) with snooping off and then throws
+        it away.
+        """
         if snoop:
             print(message, end="")
             if info_msg is not None:
@@ -73,5 +96,5 @@ class RV_ISA(ABC):
 
     @classmethod
     @abstractmethod
-    def run(cls, register_file, device_memory):
+    def run(cls, register_file, device_memory, snoop, instr=None):
         raise NotImplementedError()

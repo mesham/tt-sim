@@ -19,7 +19,7 @@ encodings fall through to here rather than being mis-decoded as base ops.
 """
 
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
-from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
+from tt_sim.util.conversion import conv_to_bytes
 
 _MASK32 = 0xFFFFFFFF
 
@@ -41,25 +41,26 @@ class RV_ZBA_ISA(RV_ISA):
     _SHADD = {0x2: 1, 0x4: 2, 0x6: 3}
 
     @classmethod
-    def run(cls, register_file, memory_space, snoop):
-        addr = conv_to_uint32(register_file["pc"].read())
-        instr = memory_space.read(addr, 4)
-        if RV_ISA.get_int(instr, 0, 6) != 0x33:
+    def run(cls, register_file, memory_space, snoop, instr=None):
+        if instr is None:
+            instr = cls.fetch(register_file, memory_space)
+        if instr & 0x7F != 0x33:
             return False
         funct3, rs1, rs2, rd, funct7 = _decode_r(instr)
         if funct7 != 0x10 or funct3 not in cls._SHADD:
             return False
         shift = cls._SHADD[funct3]
-        rs1_val = conv_to_uint32(register_file[rs1].read())
-        rs2_val = conv_to_uint32(register_file[rs2].read())
+        rs1_val = register_file[rs1].read_uint()
+        rs2_val = register_file[rs2].read_uint()
         result = ((rs1_val << shift) + rs2_val) & _MASK32
-        RV_ISA.print_snoop(
-            snoop,
-            f"sh{shift}add {cls.get_reg_name(rd)}, {cls.get_reg_name(rs1)}, "
-            f"{cls.get_reg_name(rs2)}",
-            f"{cls.get_reg_name(rd)} = ({cls.get_reg_name(rs1)} << {shift}) + "
-            f"{cls.get_reg_name(rs2)}",
-        )
+        if snoop:
+            RV_ISA.print_snoop(
+                snoop,
+                f"sh{shift}add {cls.get_reg_name(rd)}, {cls.get_reg_name(rs1)}, "
+                f"{cls.get_reg_name(rs2)}",
+                f"{cls.get_reg_name(rd)} = ({cls.get_reg_name(rs1)} << {shift}) + "
+                f"{cls.get_reg_name(rs2)}",
+            )
         register_file[rd].write(conv_to_bytes(result))
         return True
 
@@ -106,10 +107,10 @@ class RV_ZBB_ISA(RV_ISA):
     byte/half sign/zero-extend, byte reverse, or-combine)."""
 
     @classmethod
-    def run(cls, register_file, memory_space, snoop):
-        addr = conv_to_uint32(register_file["pc"].read())
-        instr = memory_space.read(addr, 4)
-        opcode = RV_ISA.get_int(instr, 0, 6)
+    def run(cls, register_file, memory_space, snoop, instr=None):
+        if instr is None:
+            instr = cls.fetch(register_file, memory_space)
+        opcode = instr & 0x7F
         if opcode == 0x33:
             return cls._run_r(instr, register_file, snoop)
         if opcode == 0x13:
@@ -119,8 +120,8 @@ class RV_ZBB_ISA(RV_ISA):
     @classmethod
     def _run_r(cls, instr, register_file, snoop):
         funct3, rs1, rs2, rd, funct7 = _decode_r(instr)
-        a = conv_to_uint32(register_file[rs1].read())
-        b = conv_to_uint32(register_file[rs2].read())
+        a = register_file[rs1].read_uint()
+        b = register_file[rs2].read_uint()
 
         name = None
         result = 0
@@ -152,7 +153,8 @@ class RV_ZBB_ISA(RV_ISA):
 
         if name is None:
             return False
-        RV_ISA.print_snoop(snoop, f"{name} {cls.get_reg_name(rd)}", None)
+        if snoop:
+            RV_ISA.print_snoop(snoop, f"{name} {cls.get_reg_name(rd)}", None)
         register_file[rd].write(conv_to_bytes(result & _MASK32))
         return True
 
@@ -164,7 +166,7 @@ class RV_ZBB_ISA(RV_ISA):
         upper = RV_ISA.get_int(instr, 25, 31)  # funct7-like high immediate
         sel = RV_ISA.get_int(instr, 20, 24)  # unary op selector / shamt
         imm12 = RV_ISA.get_int(instr, 20, 31)
-        a = conv_to_uint32(register_file[rs1].read())
+        a = register_file[rs1].read_uint()
 
         name = None
         result = 0
@@ -190,6 +192,7 @@ class RV_ZBB_ISA(RV_ISA):
 
         if name is None:
             return False
-        RV_ISA.print_snoop(snoop, f"{name} {cls.get_reg_name(rd)}", None)
+        if snoop:
+            RV_ISA.print_snoop(snoop, f"{name} {cls.get_reg_name(rd)}", None)
         register_file[rd].write(conv_to_bytes(result & _MASK32))
         return True

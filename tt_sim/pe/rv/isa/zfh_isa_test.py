@@ -34,6 +34,12 @@ class _Reg:
     def read(self):
         return conv_to_bytes(self.v)
 
+    def read_uint(self):
+        return int.from_bytes(self.read(), "little")
+
+    def read_int(self):
+        return int.from_bytes(self.read(), "little", signed=True)
+
     def write(self, b):
         self.v = conv_to_uint32(b)
 

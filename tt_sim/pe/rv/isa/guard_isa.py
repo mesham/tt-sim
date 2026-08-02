@@ -24,7 +24,6 @@ every Blackhole baby core; the V guard goes on TRISC2 alone, matching the doc's
 """
 
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
-from tt_sim.util.conversion import conv_to_uint32
 
 
 class _OpcodeGuard(RV_ISA):
@@ -34,11 +33,12 @@ class _OpcodeGuard(RV_ISA):
     EXTENSION = "?"
 
     @classmethod
-    def run(cls, register_file, memory_space, snoop):
-        addr = conv_to_uint32(register_file["pc"].read())
-        instr = conv_to_uint32(memory_space.read(addr, 4))
+    def run(cls, register_file, memory_space, snoop, instr=None):
+        if instr is None:
+            instr = cls.fetch(register_file, memory_space)
         if (instr & 0x7F) not in cls.OPCODES:
             return False
+        addr = register_file["pc"].read_uint()
         raise NotImplementedError(
             f"{cls.EXTENSION} extension instruction {hex(instr)} at PC {hex(addr)} "
             f"is not yet modelled in tt-sim. It is (partially) supported by the "

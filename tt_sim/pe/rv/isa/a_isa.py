@@ -40,10 +40,10 @@ class RV_ZAAMO_ISA(RV_ISA):
     }
 
     @classmethod
-    def run(cls, register_file, memory_space, snoop):
-        addr = conv_to_uint32(register_file["pc"].read())
-        instr = memory_space.read(addr, 4)
-        if RV_ISA.get_int(instr, 0, 6) != 0x2F:
+    def run(cls, register_file, memory_space, snoop, instr=None):
+        if instr is None:
+            instr = cls.fetch(register_file, memory_space)
+        if instr & 0x7F != 0x2F:
             return False
         if RV_ISA.get_int(instr, 12, 14) != 0x2:  # funct3 010 = word width
             return False
@@ -55,16 +55,17 @@ class RV_ZAAMO_ISA(RV_ISA):
         rs1 = RV_ISA.get_int(instr, 15, 19)
         rs2 = RV_ISA.get_int(instr, 20, 24)
         rd = RV_ISA.get_int(instr, 7, 11)
-        mem_addr = conv_to_uint32(register_file[rs1].read())
+        mem_addr = register_file[rs1].read_uint()
         old = conv_to_uint32(memory_space.read(mem_addr, 4))
-        src = conv_to_uint32(register_file[rs2].read())
+        src = register_file[rs2].read_uint()
         memory_space.write(mem_addr, conv_to_bytes(fn(old, src) & _MASK32))
-        RV_ISA.print_snoop(
-            snoop,
-            f"{name}.w {cls.get_reg_name(rd)}, {cls.get_reg_name(rs2)}, "
-            f"({cls.get_reg_name(rs1)})",
-            f"{cls.get_reg_name(rd)} = [{hex(mem_addr)}] (={hex(old)}); "
-            f"[{hex(mem_addr)}] = {name}(old, {cls.get_reg_name(rs2)})",
-        )
+        if snoop:
+            RV_ISA.print_snoop(
+                snoop,
+                f"{name}.w {cls.get_reg_name(rd)}, {cls.get_reg_name(rs2)}, "
+                f"({cls.get_reg_name(rs1)})",
+                f"{cls.get_reg_name(rd)} = [{hex(mem_addr)}] (={hex(old)}); "
+                f"[{hex(mem_addr)}] = {name}(old, {cls.get_reg_name(rs2)})",
+            )
         register_file[rd].write(conv_to_bytes(old))
         return True

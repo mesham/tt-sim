@@ -1,5 +1,6 @@
 from enum import IntEnum
 
+from tt_sim.memory.memory import MemorySpace
 from tt_sim.pe.rv.isa.a_isa import RV_ZAAMO_ISA
 from tt_sim.pe.rv.isa.b_isa import RV_ZBA_ISA, RV_ZBB_ISA
 from tt_sim.pe.rv.isa.guard_isa import RV_F_GUARD_ISA, RV_V_GUARD_ISA
@@ -25,6 +26,9 @@ ISA_EXTENSION_REGISTRY = {
 
 # Extensions that require the floating-point register file to be allocated.
 _FP_EXTENSIONS = frozenset({"zfh", "f_guard"})
+
+# RISCV_DEBUG_REG_SOFT_RESET_0, in each tile's tile-control region.
+SOFT_RESET_ADDR = 0xFFB121B0
 
 
 class BabyRISCVCoreType(IntEnum):
@@ -65,6 +69,9 @@ class BabyRISCV(RV32IM_TT):
         self.reset_pc_debug_regs = reset_pc_debug_regs
         self.core_type = core_type
         self.soft_active = False
+        self.soft_reset_mask = 1 << BabyRISCV.CORE_TYPE_TO_SOFT_RESET_BIT[core_type]
+        # Resolved lazily by _read_soft_reset(): (component, offset).
+        self._soft_reset_src = None
         if core_type == BabyRISCVCoreType.BRISC:
             core_id = 0
             start_addr = 0x0
@@ -189,15 +196,32 @@ class BabyRISCV(RV32IM_TT):
             return self.start_address
         return rd(0x228 + idx * 4)
 
+    def _read_soft_reset(self):
+        """Value of ``RISCV_DEBUG_REG_SOFT_RESET_0``.
+
+        Every core polls this on every cycle, running or not, so the memory-map
+        traversal (interval lookup + polymorphic dispatch + event publication)
+        is resolved to the owning component once and then read directly. The
+        traversal was ~28% of the cost of ticking an otherwise idle device.
+        A space with snoop addresses configured keeps the slow path, so
+        ``add_snoop`` still sees the access.
+        """
+        src = self._soft_reset_src
+        if src is None:
+            memory = self.visible_memory
+            addr_range, target = memory.memory_map.locate(SOFT_RESET_ADDR)
+            if (
+                target is None
+                or isinstance(target, MemorySpace)
+                or memory.snoop_addresses
+            ):
+                return conv_to_uint32(memory.read(SOFT_RESET_ADDR, 4))
+            src = self._soft_reset_src = (target, SOFT_RESET_ADDR - addr_range.low)
+        return int.from_bytes(src[0].read(src[1], 4), "little")
+
     def clock_tick(self, cycle_num):
         # These cores have a soft reset that they need to check
-        reset_val = conv_to_uint32(self.visible_memory.read(0xFFB121B0, 4))
-        is_in_reset = (
-            get_nth_bit(
-                reset_val, BabyRISCV.CORE_TYPE_TO_SOFT_RESET_BIT[self.core_type]
-            )
-            == 1
-        )
+        is_in_reset = self._read_soft_reset() & self.soft_reset_mask != 0
         if not is_in_reset:
             if not self.soft_active:
                 # About to be restarted, move into the resetted state

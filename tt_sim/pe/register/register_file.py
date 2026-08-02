@@ -7,11 +7,27 @@ class RegisterFile:
         # anything) the instruction wrote. -1 = no write this window.
         self.last_write_idx: int = -1
         self.last_write_value: bytes = b""
-        # Install a wrapper on each Register's write so the recording
-        # happens transparently; ISA code keeps using
-        # `register_file[idx].write(bytes)` unchanged.
-        for idx, reg in enumerate(registers):
-            self._install_write_hook(reg, idx)
+        # Recording is off until someone asks for it: the hook is a Python
+        # closure wrapped around Register.write, which is on the simulator's
+        # hottest path, so it is not paid for when nothing is tracing.
+        self.write_recording: bool = False
+
+    def set_write_recording(self, enabled):
+        """Install/remove the per-Register write hooks used by tracing.
+
+        With the hooks installed, ``register_file[idx].write(bytes)`` records
+        what it wrote; ISA code is unchanged either way.
+        """
+        if enabled == self.write_recording:
+            return
+        for idx, reg in enumerate(self.registers):
+            if enabled:
+                self._install_write_hook(reg, idx)
+            else:
+                # Drop the instance attribute, exposing Register.write again.
+                del reg.write
+        self.write_recording = enabled
+        self.clear_write_record()
 
     def _install_write_hook(self, reg, idx):
         original_write = reg.write
@@ -28,16 +44,18 @@ class RegisterFile:
         self.last_write_value = b""
 
     def get(self, idx):
-        if isinstance(idx, int):
-            assert idx < len(self.registers)
+        # The most-called function in the simulator: take the integer index
+        # straight to the list and only consult the name map when that is not
+        # an index (i.e. a register name), rather than type-testing up front.
+        try:
             return self.registers[idx]
-        elif isinstance(idx, str):
-            assert idx in self.register_name_mapping.keys()
+        except TypeError:
+            pass
+        try:
             return self.registers[self.register_name_mapping[idx]]
-        else:
+        except (KeyError, TypeError):
             raise IndexError(
                 f"Index of type '{type(idx)}' can not be used as a register lookup"
-            )
+            ) from None
 
-    def __getitem__(self, idx):
-        return self.get(idx)
+    __getitem__ = get

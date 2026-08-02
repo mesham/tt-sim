@@ -1,3 +1,5 @@
+import numpy as np
+
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import SrcRegister
@@ -1195,6 +1197,146 @@ class MatrixUnit(TensixBackendUnit):
             return (sign << 31) | (255 << 23)
         return (sign << 31) | (exp << 23) | man
 
+    # -- Batched form of the two methods above --------------------------------
+    #
+    # The scalar pair above is the readable port of ttsim's C and stays the
+    # reference: ``fpu_accumulate_test.py`` pins it against vectors from ttsim's
+    # model *and* fuzzes the two ``_batch`` methods below against it, so the two
+    # cannot drift. What runs in anger is the batched pair -- the same
+    # arithmetic with the per-lane loops replaced by numpy over a whole MVMUL at
+    # once (up to 16 SrcB rows x 16 Dst columns x 16 lanes). Nothing in an MVMUL
+    # sequences: every (row, column) accumulation reads and writes its own Dst
+    # element, so the whole instruction is one batch.
+    #
+    # Every intermediate is int64 and each method's docstring carries the bound
+    # that keeps it there, because numpy wraps silently where the scalar code's
+    # Python ints would simply widen.
+
+    @staticmethod
+    def _fpu_group_sums_batch(srcAVals, srcBVals, fidelityPhase, expProdAdj):
+        """Batched :meth:`_fpu_group_sums`, one call per MVMUL.
+
+        ``srcAVals`` and ``srcBVals`` are int64 arrays of FP32 bit patterns
+        whose **leading** axis is the 16 lanes and whose remaining axes
+        broadcast against each other: :meth:`perform_mvmul_exact` passes a
+        ``(16, 1, columns)`` block of SrcA against a ``(16, rows, 1)`` block of
+        SrcB. Lanes lead because that is the axis being reduced, and numpy
+        reduces a leading axis (contiguous blocks, one pass per index) around
+        5x faster than a trailing one. Returns ``(signs, exps, mans)``, the same
+        triples the scalar version returns, with the lane axis replaced by a
+        leading length-2 group axis.
+
+        Widths: the fidelity slices cap manA at 31 and manB at 127, so a product
+        is under 2**12; the alignment shift is clamped to 30, so
+        ``(man << 1) + (1 << shift)`` stays under 2**31 and the shifted-down
+        term is never larger than the product it came from; eight of those sum
+        to under 2**15, and 2**15 << 13 is under 2**28.
+        """
+        nonZero = ((srcAVals & 0x7F800000) != 0) & ((srcBVals & 0x7F800000) != 0)
+
+        manA = ((srcAVals >> 13) & 0x3FF) | 0x400
+        manB = ((srcBVals >> 13) & 0x3FF) | 0x400
+        manA = ((manA >> 1) & 0x1F) if fidelityPhase & 1 else manA >> 6
+        manB = ((manB & 0xF) << 3) if fidelityPhase & 2 else manB >> 4
+
+        signs = np.where(nonZero, (srcAVals >> 31) ^ (srcBVals >> 31), 0)
+        exps = np.where(
+            nonZero,
+            ((srcAVals >> 23) & 0xFF) + ((srcBVals >> 23) & 0xFF) + expProdAdj,
+            max(expProdAdj, 0),
+        )
+        mans = np.where(nonZero, manA * manB, 0)
+
+        # Split the lane axis into two groups of eight, then reduce over the
+        # eight (lane k belongs to group k // 8, exactly as the reshape lays it
+        # out) to align each group to its own largest exponent and sum it.
+        groups = (2, 8) + signs.shape[1:]
+        signs = signs.reshape(groups)
+        exps = exps.reshape(groups)
+        mans = mans.reshape(groups)
+
+        expSum = exps.max(axis=1)
+        shift = np.minimum(expSum[:, np.newaxis] - exps, 30)
+        aligned = ((mans << 1) + (np.int64(1) << shift)) >> (shift + 1)
+        manSum = np.where(signs != 0, -aligned, aligned).sum(axis=1)
+
+        live = expSum > 0
+        return (
+            np.where(live & (manSum < 0), 1, 0),
+            np.where(live, expSum, 0),
+            np.where(live, np.abs(manSum) << 13, 0),
+        )
+
+    @staticmethod
+    def _fpu_accumulate_batch(groupSums, dstVals, useDst32b, negOneRenormBug=False):
+        """Batched :meth:`_fpu_accumulate`, one call per MVMUL.
+
+        ``groupSums`` is the ``(signs, exps, mans)`` triple of arrays
+        :meth:`_fpu_group_sums_batch` returns, whose leading axis is the group
+        of two; ``dstVals`` broadcasts against their remaining axes (a broadcast
+        SrcB row gives one set of group sums for every Dst row). Returns the new
+        Dst values as FP32 bit patterns. The two groups are combined by index
+        rather than by a reduction -- with only two of them a ``np.maximum``
+        pair beats calling into numpy's reduction machinery, and
+        ``np.minimum(np.maximum(...))`` likewise beats ``np.clip``.
+
+        Widths: an aligned group sum is under 2**28 and an aligned Dst mantissa
+        at most 2**24, so the three-term add stays under 2**30 -- which is also
+        why ``np.frexp`` on the float64 view of it is an exact ``bit_length``.
+        Normalising then brings it back under 2**25.
+        """
+        gSign, gExp, gMan = groupSums
+        signDst = dstVals >> 31
+        expDst = (dstVals >> 23) & 0xFF
+        manDst = np.where(expDst != 0, (dstVals & 0x7FFFFF) | 0x800000, 0)
+
+        exp = np.maximum(np.maximum(gExp[0], gExp[1]), expDst)
+
+        # Align the two group sums and Dst to the largest of the three
+        # exponents. A shift of 31 or more rounds the term away entirely; a
+        # 16-bit Dst additionally rounds every term to its precision here,
+        # before the add, which is what makes a long accumulation drift.
+        shift = exp - gExp
+        safeShift = np.minimum(np.maximum(shift, 1), 30)
+        rounded = (gMan + (np.int64(1) << (safeShift - 1)) - gSign) >> safeShift
+        man = np.where(shift == 0, gMan, np.where(shift < 31, rounded, 0))
+        if not useDst32b:
+            man = (man + (1 << 12) - gSign) & ~0x1FFF
+
+        shiftDst = exp - expDst
+        safeShiftDst = np.minimum(np.maximum(shiftDst, 1), 30)
+        roundedDst = (manDst + (np.int64(1) << (safeShiftDst - 1))) >> safeShiftDst
+        manDst = np.where(shiftDst == 0, manDst, np.where(shiftDst < 31, roundedDst, 0))
+        if not useDst32b:
+            manDst = (manDst + (1 << 12)) & ~0x1FFF
+
+        signed = np.where(gSign == signDst, man, -man)
+        acc = manDst + signed[0] + signed[1]
+        sign = np.where(acc < 0, signDst ^ 1, signDst)
+        man = np.abs(acc)
+
+        # Renormalise to 24 bits. np.frexp's exponent is exactly bit_length for
+        # a non-negative integer this small; man == 0 gives 0, as Python does.
+        shift = (32 - np.frexp(man.astype(np.float64))[1].astype(np.int64)) - 8
+        if negOneRenormBug:
+            shift = np.where((sign != 0) & (man == 1), shift - 27, shift)
+        expOut = exp - shift
+        if not useDst32b:
+            shift = shift - 16
+        rshift = np.minimum(np.maximum(-shift, 1), 30)
+        down = (man + (np.int64(1) << (rshift - 1))) >> rshift
+        man = np.where(shift < 0, down, man << np.maximum(shift, 0))
+        if not useDst32b:
+            man = man << 16
+        expOut = np.where((man & 0x1000000) != 0, expOut + 1, expOut)
+        man = man & 0x7FFFFF
+
+        result = (sign << 31) | (np.minimum(np.maximum(expOut, 0), 254) << 23) | man
+        # Dst holds no infinities, so an overflow saturates; an underflow before
+        # or after normalising, and an exact cancellation, all give zero.
+        result = np.where(expOut >= 255, (sign << 31) | (255 << 23), result)
+        return np.where((exp <= 0) | (acc == 0) | (expOut <= 0), 0, result)
+
     def perform_mvmul_exact(
         self,
         srcARow,
@@ -1239,41 +1381,76 @@ class MatrixUnit(TensixBackendUnit):
         dst = self.backend.getDst()
         negOneRenormBug = not self.backend.blackhole
 
-        srcAColumns = [
-            [toFP32(srcA[srcARow + k, j]) for k in range(16)] for j in range(16)
-        ]
+        if numRows <= 0:
+            return
+
+        # One batch for the whole instruction: lanes on the leading axis (see
+        # _fpu_group_sums_batch), SrcA columns on one of the trailing two and
+        # SrcB rows on the other, so the products broadcast into
+        # (lane, row, column). A broadcast SrcB row means one row's worth of
+        # group sums serves every Dst row, so only the distinct rows are
+        # gathered and numpy broadcasts the rest.
+        srcAColumns = np.array(
+            [[toFP32(srcA[srcARow + k, j]) for j in range(16)] for k in range(16)],
+            dtype=np.int64,
+        )[:, np.newaxis, :]
+        srcBRows = np.array(
+            [
+                [
+                    toFP32(srcB[srcBRow + i, k])
+                    for i in range(1 if broadcastSrcBRow else numRows)
+                ]
+                for k in range(16)
+            ],
+            dtype=np.int64,
+        )[:, :, np.newaxis]
+
+        # Every Dst element is read before any is written, where the scalar loop
+        # interleaved the two. That is safe because each (row, column) touches
+        # its own element *and* because a row whose zero flag is clear always
+        # holds zeroed data: ZEROACC zeroes on clear, and GMPOOL -- the one
+        # writer that holds the flag off mid-row -- always reaches its last
+        # column and re-asserts it before the instruction ends.
+        if useDst32b:
+            dstVals = [
+                [
+                    DataFormatConversions.FP32InDstToFP32(dst.getDst32b(dstRow + i, j))
+                    for j in range(16)
+                ]
+                for i in range(numRows)
+            ]
+        else:
+            dstVals = [
+                [
+                    DataFormatConversions.BF16InDstToBF16(dst.getDst16b(dstRow + i, j))
+                    << 16
+                    for j in range(16)
+                ]
+                for i in range(numRows)
+            ]
+
+        results = self._fpu_accumulate_batch(
+            self._fpu_group_sums_batch(
+                srcAColumns, srcBRows, fidelityPhase, expProdAdj
+            ),
+            np.array(dstVals, dtype=np.int64),
+            useDst32b,
+            negOneRenormBug,
+        ).tolist()
+
         for i in range(numRows):
-            row = srcBRow + (0 if broadcastSrcBRow else i)
-            srcBVals = [toFP32(srcB[row, k]) for k in range(16)]
             for j in range(16):
-                if useDst32b:
-                    dstVal = DataFormatConversions.FP32InDstToFP32(
-                        dst.getDst32b(dstRow + i, j)
-                    )
-                else:
-                    dstVal = (
-                        DataFormatConversions.BF16InDstToBF16(
-                            dst.getDst16b(dstRow + i, j)
-                        )
-                        << 16
-                    )
-                result = self._fpu_accumulate(
-                    self._fpu_group_sums(
-                        srcAColumns[j], srcBVals, fidelityPhase, expProdAdj
-                    ),
-                    dstVal,
-                    useDst32b,
-                    negOneRenormBug,
-                )
                 if useDst32b:
                     dst.setDst32b(
                         dstRow + i,
                         j,
-                        DataFormatConversions.FP32ToDstFormatFP32(result),
+                        DataFormatConversions.FP32ToDstFormatFP32(results[i][j]),
                     )
                 else:
                     dst.setDst16b(
-                        dstRow + i, j, DataFormatConversions.FP32ToDstFormatBF16(result)
+                        dstRow + i,
+                        j,
+                        DataFormatConversions.FP32ToDstFormatBF16(results[i][j]),
                     )
 
     def get_dataformat_and_useDst(self, issue_thread, stateID):

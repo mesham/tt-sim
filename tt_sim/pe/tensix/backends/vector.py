@@ -1,5 +1,3 @@
-import math
-
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
 from tt_sim.pe.tensix.util import DataFormatConversions
@@ -8,6 +6,19 @@ from tt_sim.util.conversion import conv_to_float, conv_to_int32, conv_to_uint32
 
 _M64 = 0xFFFFFFFFFFFFFFFF
 _M32 = 0xFFFFFFFF
+
+
+def _semi_sticky_shift(var, amount, mask):
+    """ttsim's ``semi_sticky_shift``: a right shift that ORs a sticky bit into
+    the result when it discarded anything — but only if the result is non-zero
+    (that is the "semi"). ``mask`` gives the C variable's width."""
+    if amount >= mask.bit_length():
+        return 0
+    orig = var
+    v = var >> amount
+    if v:
+        v |= 1 if (((v << amount) & mask) != orig) else 0
+    return v
 
 
 def fma_model_bh(x, y, z):
@@ -57,20 +68,11 @@ def fma_model_bh(x, y, z):
     if p_m == 0 or p_e < 0:
         return z if z_m else (z_sign & p_sign)
 
-    def semi_sticky_shift(var, amount, mask):
-        if amount >= mask.bit_length():
-            return 0
-        orig = var
-        v = var >> amount
-        if v:
-            v |= 1 if (((v << amount) & mask) != orig) else 0
-        return v
-
     r_e = p_e if p_e > z_e else z_e
     if p_e < r_e:
-        p_m = semi_sticky_shift(p_m, r_e - p_e, _M64)
+        p_m = _semi_sticky_shift(p_m, r_e - p_e, _M64)
     if z_e < r_e:
-        z_m = semi_sticky_shift(z_m, r_e - z_e, _M32)
+        z_m = _semi_sticky_shift(z_m, r_e - z_e, _M32)
     r_sign = p_sign if p_m >= z_m else z_sign
     if z_sign != r_sign:
         z_m = (~z_m) & _M32
@@ -98,6 +100,109 @@ def fma_model_bh(x, y, z):
     if not (r >> 23):  # flush denormals (post-round, keep sign)
         r = 0
     return (r_sign | r) & _M32
+
+
+def fma_model_wh(x, y, z):
+    """Wormhole SFPU FP32 fused multiply-add ``x*y + z`` on uint32 bit patterns.
+
+    Verbatim port of ttsim's ``src/fma.cpp`` ``fma_model_wh``. It is the same
+    shape as ``fma_model_bh`` but is a *different* piece of silicon, and the
+    differences are not cosmetic:
+
+    - NaNs are not returned immediately. Wormhole assembles ``nan_result``
+      (``0x7f800001``, sign-carrying) and keeps computing, so mantissa bits of
+      the real result leak into the returned NaN.
+    - An underflowing product returns ``+0`` rather than ``z_sign & p_sign``,
+      and a denormal result is flushed *discarding* the sign (``r_e < 0``
+      returns the NaN slot, i.e. ``0``) rather than being renormalised.
+    - The final sticky is ``r_m & 1`` rather than Blackhole's
+      ``(r_m & (n | 1)) != 0``, so a shifted-out bit below the low bit does not
+      make it into the rounding decision.
+
+    Fuzz-matched bit-for-bit against ttsim's C over 200k random triples
+    (``tt_sim/pe/tensix/fma_model_test.py`` pins the vectors).
+    """
+
+    def unpack(v):
+        e = (v >> 23) & 255
+        m = (v & 0x7FFFFF) ^ 0x800000
+        if e == 0:  # flush denormals
+            m = 0
+        return e, m
+
+    x_e, x_m = unpack(x)
+    y_e, y_m = unpack(y)
+    z_e, z_m = unpack(z)
+    z_sign = z & 0x80000000
+
+    p_sign = (x ^ y) & 0x80000000
+    p_m = x_m * y_m
+    p_e = x_e + y_e - 23 - 127
+
+    p_m = (p_m << 3) & _M64
+    z_m = (z_m << 3) & _M32
+    p_m = (p_m >> 23) | (1 if (p_m & 0x7FFFFF) else 0)
+    p_e += 23
+
+    nan_result = 0
+    if x_e == 255 or y_e == 255 or p_e >= 255 or z_e == 255:
+        if (
+            (x_e == 255 and (x_m != 0x800000 or y_m == 0))
+            or (y_e == 255 and (y_m != 0x800000 or x_m == 0))
+            or (
+                z_e == 255
+                and z_m == 0x4000000
+                and (x_e == 255 or y_e == 255 or p_e >= 255)
+                and z_sign != p_sign
+            )
+        ):
+            nan_result = p_sign | 0x7F800001
+        elif z_e == 255 and z_m != 0x4000000:  # z NaN
+            nan_result = z_sign | 0x7F800001
+        elif z_e == 255:  # z Inf
+            return z
+        else:  # (x * y) Inf
+            return p_sign | 0x7F800000
+        if p_e > 255:
+            p_e = 255
+
+    if p_m == 0 or p_e < 0:
+        if nan_result:
+            p_m, p_e = 0, 0
+        else:
+            return z if z_m else 0
+
+    r_e = p_e if p_e > z_e else z_e
+    if p_e < r_e:
+        p_m = _semi_sticky_shift(p_m, r_e - p_e, _M64)
+    if z_e < r_e:
+        z_m = _semi_sticky_shift(z_m, r_e - z_e, _M32)
+    r_sign = p_sign if p_m >= z_m else z_sign
+    if z_sign != r_sign:
+        z_m = (~z_m) & _M32
+    if p_sign != r_sign:
+        p_m = (~p_m) & _M64
+    r_m = (z_m + p_m + (1 if p_sign != z_sign else 0)) & _M32
+
+    if r_m == 0:
+        return nan_result
+
+    n = 5 - (32 - r_m.bit_length())  # 5 - clz(r_m)
+    r_e += n
+    if r_e >= 255:
+        return nan_result if nan_result else (r_sign | 0x7F800000)
+    if r_e < 0:  # flush blatant denormals (before rounding, discarding sign)
+        return nan_result
+    if n <= 0:
+        r_m = (r_m << (-n)) & _M32
+    else:
+        r_m = (r_m >> n) | (r_m & 1)
+
+    r = ((r_e << 23) + ((r_m >> 3) & 0x7FFFFF)) & _M32
+    r += 1 if (((r_m & 7) + (r & 1)) > 4) else 0  # round to nearest even
+    if not (r >> 23):  # flush denormals (after rounding, discarding sign)
+        return nan_result
+    return ((nan_result if nan_result else r_sign) | r) & _M32
 
 
 class VectorUnit(TensixBackendUnit):
@@ -357,6 +462,10 @@ class VectorUnit(TensixBackendUnit):
                 self.unitDelayKind ^= self.unitDelayKind
 
     def __init__(self, backend):
+        # The float ALU is per-architecture silicon: every SFPU float
+        # multiply/add rounds through the model for this chip (ttsim's
+        # ``#define fma_model fma_model_{wh,bh}``).
+        self.fma = fma_model_bh if backend.blackhole else fma_model_wh
         self.lregs = [LReg(blackhole=backend.blackhole) for i in range(17)]
         self.lregs[8].setReadOnly(0.8373)
         self.lregs[9].setReadOnly(0)
@@ -459,9 +568,7 @@ class VectorUnit(TensixBackendUnit):
                     else:
                         b = conv_to_uint32(self.lregs[vb][lane])
                         sign = b >> 31
-                    self.lregs[vd][lane] = conv_to_float(
-                        (sign << 31) | (exp << 23) | man
-                    )
+                    self.lregs[vd][lane] = (sign << 31) | (exp << 23) | man
 
     def handle_sfpabs(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -492,7 +599,7 @@ class VectorUnit(TensixBackendUnit):
                     else:
                         # Value is positive (or zero); leave it as-is
                         pass
-                    self.lregs[vd][lane] = conv_to_float(x) if is_float else x
+                    self.lregs[vd][lane] = x
 
     def handle_sfpmov(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -518,8 +625,7 @@ class VectorUnit(TensixBackendUnit):
                 if bypass_mask or self.isLaneEnabled(lane):
                     value = self.lregs[vc][lane]
                     if mod1 & VectorUnit.SFPMOV_MOD1_NEGATE:
-                        x = conv_to_uint32(value) ^ 0x80000000
-                        value = conv_to_float(x) if isinstance(value, float) else x
+                        value = conv_to_uint32(value) ^ 0x80000000
                     self.lregs[vd][lane] = value
 
     @staticmethod
@@ -646,7 +752,7 @@ class VectorUnit(TensixBackendUnit):
             # set and either the LSB or any sticky bit is set.
             if (norm & 0x80) and (norm & 0x17F):
                 d = (d + 1) & 0xFFFFFFFF
-            self.lregs[vd][lane] = conv_to_float(d)
+            self.lregs[vd][lane] = d
 
     def _read_rnd_mode(self, instruction_info):
         # SFP_STOCH_RND's ``rnd_mode`` is one bit on Wormhole (raw bit 21) and
@@ -713,7 +819,7 @@ class VectorUnit(TensixBackendUnit):
                     x -= discarded
                     if discarded >= (prng >> 7):
                         x += 0x10000
-                result = conv_to_float(x & 0xFFFFFFFF)
+                result = x & 0xFFFFFFFF
             elif mode in VectorUnit.SFP_STOCH_RND_FLOAT_TO_INT:
                 keep_sign, max_mag = VectorUnit.SFP_STOCH_RND_FLOAT_TO_INT[mode]
                 c = conv_to_uint32(self.lregs[vc][lane]) & 0xFFFFFFFF
@@ -793,7 +899,7 @@ class VectorUnit(TensixBackendUnit):
                     exp = (exp + imm8) & 0xFF
             else:
                 exp = imm8
-            self.lregs[vd][lane] = conv_to_float(sign | (exp << 23) | man)
+            self.lregs[vd][lane] = sign | (exp << 23) | man
 
     def handle_sfpexexp(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -859,9 +965,7 @@ class VectorUnit(TensixBackendUnit):
                             exp = (b >> 23) & 0xFF
                         else:
                             exp = b & 0xFF
-                    self.lregs[vd][lane] = conv_to_float(
-                        (sign << 31) | (exp << 23) | man
-                    )
+                    self.lregs[vd][lane] = (sign << 31) | (exp << 23) | man
 
     def handle_sfpsetman(self, instruction_info, issue_thread, instr_args):
         mod1 = instr_args["instr_mod1"]
@@ -884,9 +988,7 @@ class VectorUnit(TensixBackendUnit):
                     else:
                         b = conv_to_uint32(self.lregs[vb][lane])
                         man = b & 0x7FFFFF
-                    self.lregs[vd][lane] = conv_to_float(
-                        (sign << 31) | (exp << 23) | man
-                    )
+                    self.lregs[vd][lane] = (sign << 31) | (exp << 23) | man
 
     def handle_sfpshft(self, instruction_info, issue_thread, instr_args):
         # Wormhole reserves every instr_mod1 bit above bit 0 (shift amount from
@@ -1004,16 +1106,12 @@ class VectorUnit(TensixBackendUnit):
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
-                    if self.backend.blackhole:
-                        # ttsim SFPADDI: fma(imm<<16, 1.0, dst) = imm + dst.
-                        d = fma_model_bh(
-                            imm16 << 16,
-                            0x3F800000,
-                            self._as_fp32_bits(self.lregs[vc][lane]),
-                        )
-                    else:
-                        c = self._as_fp32(self.lregs[vc][lane])
-                        d = conv_to_float(self.BF16toFP32(imm16)) + c
+                    # ttsim SFPADDI: fma(imm<<16, 1.0, dst) = imm + dst.
+                    d = self.fma(
+                        imm16 << 16,
+                        0x3F800000,
+                        self._as_fp32_bits(self.lregs[vc][lane]),
+                    )
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
@@ -1033,14 +1131,10 @@ class VectorUnit(TensixBackendUnit):
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
-                    if self.backend.blackhole:
-                        # ttsim SFPMULI: fma(imm<<16, dst, 0) = imm * dst.
-                        d = fma_model_bh(
-                            imm16 << 16, self._as_fp32_bits(self.lregs[vc][lane]), 0
-                        )
-                    else:
-                        c = self._as_fp32(self.lregs[vc][lane])
-                        d = conv_to_float(self.BF16toFP32(imm16)) * c
+                    # ttsim SFPMULI: fma(imm<<16, dst, 0) = imm * dst.
+                    d = self.fma(
+                        imm16 << 16, self._as_fp32_bits(self.lregs[vc][lane]), 0
+                    )
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
@@ -1050,28 +1144,19 @@ class VectorUnit(TensixBackendUnit):
 
     @staticmethod
     def _as_fp32(value):
-        """Interpret an LReg lane as the FP32 value the float ALU sees.
+        """Interpret an LReg lane as the FP32 *value* the float ALU sees.
 
-        LReg lanes hold either a Python float (already an FP32 value) or a
-        raw 32-bit integer bit-pattern — e.g. a full-precision constant
-        assembled by ``SFPLOADI`` UPPER/LOWER halves and copied in via
-        ``SFPCONFIG``. The float MAD/ADD/MUL ops treat every operand as
-        FP32, so an int-stored operand must be reinterpreted from its bits
-        rather than used as an integer value (otherwise ``1.4427`` read back
-        as ``1069738555`` blows the result up to infinity). Float operands
-        pass through untouched, so all-float paths are unaffected.
+        Lanes hold uint32 bit patterns, so this is a reinterpretation, not a
+        conversion — using the pattern as an integer would turn ``1.4427`` into
+        ``1069738555``. Only the comparison ops need the value; everything
+        arithmetic goes through ``fma`` on the bits.
         """
-        if isinstance(value, float):
-            return value
         return conv_to_float(value & 0xFFFFFFFF)
 
     @staticmethod
     def _as_fp32_bits(value):
         """The FP32 bit-pattern (uint32) of an LReg lane, for the bit-exact
-        Blackhole float ALU (``fma_model_bh``). Floats are packed to FP32;
-        raw int patterns pass through masked."""
-        if isinstance(value, float):
-            return conv_to_uint32(value)
+        float ALU (``fma``)."""
         return value & 0xFFFFFFFF
 
     def perform_mad(self, va, vb, vc, vd, mod1):
@@ -1085,24 +1170,20 @@ class VectorUnit(TensixBackendUnit):
                         if mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VA
                         else va
                     )
+                    # Bit-exact hardware FMA. On Blackhole mod1 bit0 negates the
+                    # multiply operand a and bit1 negates the addend c (SFPMAD;
+                    # also gives SFPADD its -1.0 constant, and bit1 is never set
+                    # for SFPMUL). Wormhole reserves both bits — ttsim rejects a
+                    # non-zero instr_mod1 there — so the negation is gated.
+                    a_bits = self._as_fp32_bits(self.lregs[va][lane])
+                    b_bits = self._as_fp32_bits(self.lregs[vb][lane])
+                    c_bits = self._as_fp32_bits(self.lregs[vc][lane])
                     if self.backend.blackhole:
-                        # Bit-exact hardware FMA. mod1 bit0 negates the multiply
-                        # operand a, bit1 negates the addend c (SFPMAD; also gives
-                        # SFPADD its -1.0 constant and is unused by SFPMUL where
-                        # bit1 is never set). Result stored as an FP32 bit pattern.
-                        a_bits = self._as_fp32_bits(self.lregs[va][lane])
-                        b_bits = self._as_fp32_bits(self.lregs[vb][lane])
-                        c_bits = self._as_fp32_bits(self.lregs[vc][lane])
                         if mod1 & 1:
                             a_bits ^= 0x80000000
                         if mod1 & 2:
                             c_bits ^= 0x80000000
-                        d = fma_model_bh(a_bits, b_bits, c_bits)
-                    else:
-                        a = self._as_fp32(self.lregs[va][lane])
-                        b = self._as_fp32(self.lregs[vb][lane])
-                        c = self._as_fp32(self.lregs[vc][lane])
-                        d = a * b + c
+                    d = self.fma(a_bits, b_bits, c_bits)
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
@@ -1168,24 +1249,15 @@ class VectorUnit(TensixBackendUnit):
         )
 
     def _lut_fma(self, a, b, c, sign, sign_retain):
-        """``a * b + c`` for the LUT ops, in whichever LReg model the arch uses.
+        """``a * b + c`` for the LUT ops, through this arch's hardware FMA.
 
-        On Blackhole every operand is an FP32 bit pattern and the multiply-add
-        is the bit-exact hardware FMA, so the result is returned as bits (this
-        is exactly what ttsim does). On Wormhole the LRegs hold Python floats
-        for float values, so the historical double-precision ``a * b + c`` of
-        ``perform_mad`` is used and a float is returned. ``sign_retain``
-        replaces the result's sign bit with ``sign`` (LReg[3]'s sign bit),
-        which is the docs' ``copysignf(d, l3)``.
+        Every operand is an FP32 bit pattern and the result is returned as bits,
+        exactly as ttsim does it. ``sign_retain`` replaces the result's sign bit
+        with ``sign`` (LReg[3]'s sign bit), which is the docs' ``copysignf(d, l3)``.
         """
-        if self.backend.blackhole:
-            d = fma_model_bh(a, b, c)
-            if sign_retain:
-                d = (d & 0x7FFFFFFF) | sign
-            return d
-        d = conv_to_float(a) * conv_to_float(b) + conv_to_float(c)
+        d = self.fma(a, b, c)
         if sign_retain:
-            d = math.copysign(d, -1.0 if sign else 1.0)
+            d = (d & 0x7FFFFFFF) | sign
         return d
 
     def _lut_write_lane(self, vd, lane, indirect, value):
@@ -1522,16 +1594,14 @@ class VectorUnit(TensixBackendUnit):
                     elif mod1 & VectorUnit.SFPSETCC_MOD1_IMM_BIT0:
                         self.laneFlags[lane] = imm1 != 0
                     else:
-                        c = self.lregs[vc][lane]
-                        if self.backend.blackhole:
-                            # Blackhole lanes are raw uint32 bit patterns, and
-                            # ttsim compares them as `int32_t src = LReg[c]` --
-                            # i.e. the FP32 sign bit is what decides `< 0`. An
-                            # unsigned Python int is never negative, so without
-                            # this every `v_if(x < 0)` (the Newton-Raphson step
-                            # in sfpu_reciprocal_iter, among others) silently
-                            # disabled all 32 lanes.
-                            c = conv_to_int32(conv_to_uint32(c))
+                        # Lanes are raw uint32 bit patterns, and ttsim compares
+                        # them as `int32_t src = LReg[c]` -- i.e. for a float
+                        # lane the FP32 sign bit is what decides `< 0`. An
+                        # unsigned Python int is never negative, so without this
+                        # every `v_if(x < 0)` (the Newton-Raphson step in
+                        # sfpu_reciprocal_iter, among others) silently disabled
+                        # all 32 lanes.
+                        c = conv_to_int32(self.lregs[vc][lane])
                         match mod1:
                             case VectorUnit.SFPSETCC_MOD1_LREG_LT0:
                                 self.laneFlags[lane] = c < 0
@@ -1795,14 +1865,10 @@ class VectorUnit(TensixBackendUnit):
         if vd < 8 or vd == 16:
             for lane in range(32):
                 if self.isLaneEnabled(lane):
-                    if self.backend.blackhole:
-                        # Every lane is a raw uint32 bit pattern, so read the
-                        # operands as such (ttsim's TENSIX_EXECUTE_SFPIADD).
-                        c = conv_to_uint32(self.lregs[vc][lane])
-                        b = conv_to_uint32(self.lregs[vb][lane])
-                    else:
-                        c = self.lregs[vc][lane]
-                        b = self.lregs[vb][lane]
+                    # Every lane is a raw uint32 bit pattern, so read the
+                    # operands as such (ttsim's TENSIX_EXECUTE_SFPIADD).
+                    c = self.lregs[vc][lane]
+                    b = self.lregs[vb][lane]
 
                     if mod1 & VectorUnit.SFPIADD_MOD1_ARG_IMM:
                         result = c + imm12
@@ -1811,14 +1877,11 @@ class VectorUnit(TensixBackendUnit):
                     else:
                         result = c + b
 
-                    if self.backend.blackhole:
-                        # The add wraps, and "negative" is bit 31 of the wrapped
-                        # result (ttsim's `src & 0x80000000`). Testing an
-                        # unsigned Python int for `< 0` never fires.
-                        result &= 0xFFFFFFFF
-                        negative = bool(result & 0x80000000)
-                    else:
-                        negative = result < 0
+                    # The add wraps, and "negative" is bit 31 of the wrapped
+                    # result (ttsim's `src & 0x80000000`). Testing an unsigned
+                    # Python int for `< 0` never fires.
+                    result &= 0xFFFFFFFF
+                    negative = bool(result & 0x80000000)
                     self.lregs[vd][lane] = result
 
                     if vd < 8:
@@ -2014,24 +2077,16 @@ class VectorUnit(TensixBackendUnit):
                     match mod0:
                         case VectorUnit.MOD0_FMT_FP16:
                             rd = self.getDst().getDst16b(row, column)
-                            datum = conv_to_float(
-                                DataFormatConversions.FP16InDstToFP32(
-                                    rd,
-                                    self.laneConfigValue(
-                                        lane, VectorUnit.ENABLE_FP16A_INF
-                                    ),
-                                )
+                            datum = DataFormatConversions.FP16InDstToFP32(
+                                rd,
+                                self.laneConfigValue(lane, VectorUnit.ENABLE_FP16A_INF),
                             )
                         case VectorUnit.MOD0_FMT_BF16:
                             rd = self.getDst().getDst16b(row, column)
-                            datum = conv_to_float(
-                                DataFormatConversions.BF16InDstToBF16(rd) << 16
-                            )
+                            datum = DataFormatConversions.BF16InDstToBF16(rd) << 16
                         case VectorUnit.MOD0_FMT_FP32:
                             rd = self.getDst().getDst32b(row, column)
-                            datum = conv_to_float(
-                                DataFormatConversions.FP32InDstToFP32(rd)
-                            )
+                            datum = DataFormatConversions.FP32InDstToFP32(rd)
                         case VectorUnit.MOD0_FMT_INT32 | VectorUnit.MOD0_FMT_INT32_ALL:
                             # INT32 is stored verbatim in Dst, so load it raw. The
                             # FP32InDstToFP32 rearrangement is only for actual
@@ -2092,9 +2147,9 @@ class VectorUnit(TensixBackendUnit):
             if self.isLaneEnabled(lane):
                 match mod0:
                     case VectorUnit.SFPLOADI_MOD0_FLOATB:
-                        self.lregs[vd][lane] = conv_to_float(self.BF16toFP32(imm16))
+                        self.lregs[vd][lane] = self.BF16toFP32(imm16)
                     case VectorUnit.SFPLOADI_MOD0_FLOATA:
-                        self.lregs[vd][lane] = conv_to_float(self.FP16toFP32(imm16))
+                        self.lregs[vd][lane] = self.FP16toFP32(imm16)
                     case VectorUnit.SFPLOADI_MOD0_USHORT:
                         self.lregs[vd][lane] = imm16
                     case VectorUnit.SFPLOADI_MOD0_SHORT:

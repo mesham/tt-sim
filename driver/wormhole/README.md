@@ -25,7 +25,8 @@ driver/wormhole/
 ├── server/                 the wire-bridge server UMD talks to (run.sh spawns it)
 │   ├── examples_replay_test.py  byte-identical offline replay of every example trace
 │   ├── offline_replay_test.py   byte-identical replay of one.trace (the pinned baseline)
-│   └── traces/             one recorded wire trace per example
+│   ├── sfpumath_replay_test.py  optests/sfpumath vs the ttsim-Wormhole golden
+│   └── traces/             one recorded wire trace per example (+ optests/sfpumath)
 ├── run.sh                  UMD entry point → `python -m driver.wormhole.server`
 ├── soc_descriptor.yaml     the Wormhole worker/DRAM grid UMD sees
 ├── replay.py               wire-trace replayer (used by server regression tests)
@@ -124,6 +125,14 @@ replays a recorded wire trace per example (`server/traces/<name>.trace`) and
 asserts every host READ reply reproduces bit-for-bit — the Wormhole analogue of
 Blackhole's `server/*_replay_test.py`. Recapture the traces after a tt-metal
 bump with [`tests/capture_traces.sh`](tests/capture_traces.sh).
+
+One guard is not an example: [`server/sfpumath_replay_test.py`](server/sfpumath_replay_test.py)
+replays `optests/sfpumath` and checks the **values** against a frozen
+ttsim-Wormhole dump (`traces/sfpumath.expected`), so the SFPU's FP32 math stays
+bit-exact with the vendor reference without an oracle in the loop. Recapture it
+with `TT_SIM_ARCH=wormhole TT_SIM_RECORD=driver/wormhole/server/traces/sfpumath.trace
+./optests/diff.sh sfpumath` (and refresh `.expected` from that run's oracle
+output) — never to make the test pass, only when the trace itself is stale.
 
 ## The examples
 
