@@ -2,6 +2,8 @@ from enum import IntEnum
 
 import numpy as np
 
+from tt_sim.util.conversion import conv_to_uint32
+
 
 class DstRegister:
     def __init__(self):
@@ -93,14 +95,33 @@ class SrcRegister:
 
 
 class LReg:
-    def __init__(self):
+    """One SFPU LReg (32 lanes).
+
+    On Blackhole every lane holds a **uint32 bit pattern**, matching ttsim's
+    ``l_regs`` — so a float value is stored as its FP32 bits and integer/bitwise
+    results as their bits, and each op reads with the right accessor
+    (``conv_to_float`` for the float value, the raw int for bits). This keeps the
+    whole SFPU pipeline bit-exact with the reference (e.g. recip's Newton
+    refinement). Wormhole keeps the historical mixed float/int model untouched
+    (its replay guards encode that behaviour), selected by ``blackhole=False``.
+    """
+
+    def __init__(self, blackhole=False):
+        self.blackhole = blackhole
         self.read_only = False
         self.hard_wired_value = None
         self.data = [0] * 32
 
+    @staticmethod
+    def _coerce(value):
+        # Normalise any lane value to a uint32 bit pattern.
+        if isinstance(value, float):
+            return conv_to_uint32(value)
+        return int(value) & 0xFFFFFFFF
+
     def __setitem__(self, key, value):
         assert not self.read_only
-        self.data[key] = value
+        self.data[key] = self._coerce(value) if self.blackhole else value
 
     def __getitem__(self, key):
         if self.hard_wired_value is not None:
@@ -113,4 +134,6 @@ class LReg:
         self.setHardwiredValue(hard_wired_value)
 
     def setHardwiredValue(self, value):
+        if self.blackhole and value is not None:
+            value = self._coerce(value)
         self.hard_wired_value = value

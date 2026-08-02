@@ -4,6 +4,99 @@ from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.util.bits import extract_bits, get_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_float, conv_to_uint32
 
+_M64 = 0xFFFFFFFFFFFFFFFF
+_M32 = 0xFFFFFFFF
+
+
+def fma_model_bh(x, y, z):
+    """Blackhole SFPU FP32 fused multiply-add ``x*y + z`` on uint32 bit patterns.
+
+    Verbatim port of ttsim's ``src/fma.cpp`` ``fma_model_bh`` — the exact
+    hardware FMA the float ALU implements (denormal-flushing inputs/output,
+    3 guard/round/sticky bits, round-to-nearest-even). Every SFPU float
+    mul/add/mad on Blackhole rounds through this, so tt-sim must too (a plain
+    double ``a*b+c`` diverges in the low mantissa bits and compounds through
+    e.g. recip's Newton refinement).
+    """
+
+    def unpack(v):
+        e = (v >> 23) & 255
+        m = (v & 0x7FFFFF) ^ 0x800000
+        if e == 0:  # flush denormals
+            m = 0
+        return e, m
+
+    x_e, x_m = unpack(x)
+    y_e, y_m = unpack(y)
+    z_e, z_m = unpack(z)
+    z_sign = z & 0x80000000
+
+    p_sign = (x ^ y) & 0x80000000
+    p_m = x_m * y_m
+    p_e = x_e + y_e - 23 - 127
+
+    p_m = (p_m << 3) & _M64
+    z_m = (z_m << 3) & _M32
+    p_m = (p_m >> 23) | (1 if (p_m & 0x7FFFFF) else 0)
+    p_e += 23
+
+    if x_e == 255 or y_e == 255 or p_e >= 255 or z_e == 255:
+        if (
+            (x_e == 255 and (x_m != 0x800000 or y_m == 0))
+            or (y_e == 255 and (y_m != 0x800000 or x_m == 0))
+            or (z_e == 255 and z_m != 0x4000000)
+            or (z_e == 255 and (x_e == 255 or y_e == 255) and z_sign != p_sign)
+        ):
+            return 0x7FC00000  # NaN
+        if z_e == 255:
+            return z  # Inf
+        return p_sign | 0x7F800000  # Inf
+
+    if p_m == 0 or p_e < 0:
+        return z if z_m else (z_sign & p_sign)
+
+    def semi_sticky_shift(var, amount, mask):
+        if amount >= mask.bit_length():
+            return 0
+        orig = var
+        v = var >> amount
+        if v:
+            v |= 1 if (((v << amount) & mask) != orig) else 0
+        return v
+
+    r_e = p_e if p_e > z_e else z_e
+    if p_e < r_e:
+        p_m = semi_sticky_shift(p_m, r_e - p_e, _M64)
+    if z_e < r_e:
+        z_m = semi_sticky_shift(z_m, r_e - z_e, _M32)
+    r_sign = p_sign if p_m >= z_m else z_sign
+    if z_sign != r_sign:
+        z_m = (~z_m) & _M32
+    if p_sign != r_sign:
+        p_m = (~p_m) & _M64
+    r_m = (z_m + p_m + (1 if p_sign != z_sign else 0)) & _M32
+
+    if r_m == 0:
+        return z_sign & p_sign
+
+    n = 5 - (32 - r_m.bit_length())  # 5 - clz(r_m)
+    r_e += n
+    if r_e >= 255:
+        return r_sign | 0x7F800000  # Inf
+    if r_e <= 0:  # denorm or zero
+        n += 1
+        r_e = 0
+    if n <= 0:
+        r_m = (r_m << (-n)) & _M32
+    else:
+        r_m = (r_m >> n) | (1 if (r_m & (n | 1)) else 0)
+
+    r = ((r_e << 23) + ((r_m >> 3) & 0x7FFFFF)) & _M32
+    r += 1 if (((r_m & 7) + (r & 1)) > 4) else 0  # round to nearest even
+    if not (r >> 23):  # flush denormals (post-round, keep sign)
+        r = 0
+    return (r_sign | r) & _M32
+
 
 class VectorUnit(TensixBackendUnit):
     """
@@ -199,7 +292,7 @@ class VectorUnit(TensixBackendUnit):
                 self.unitDelayKind ^= self.unitDelayKind
 
     def __init__(self, backend):
-        self.lregs = [LReg() for i in range(17)]
+        self.lregs = [LReg(blackhole=backend.blackhole) for i in range(17)]
         self.lregs[8].setReadOnly(0.8373)
         self.lregs[9].setReadOnly(0)
         self.lregs[10].setReadOnly(1.0)
@@ -721,8 +814,16 @@ class VectorUnit(TensixBackendUnit):
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
-                    c = self._as_fp32(self.lregs[vc][lane])
-                    d = conv_to_float(self.BF16toFP32(imm16)) + c
+                    if self.backend.blackhole:
+                        # ttsim SFPADDI: fma(imm<<16, 1.0, dst) = imm + dst.
+                        d = fma_model_bh(
+                            imm16 << 16,
+                            0x3F800000,
+                            self._as_fp32_bits(self.lregs[vc][lane]),
+                        )
+                    else:
+                        c = self._as_fp32(self.lregs[vc][lane])
+                        d = conv_to_float(self.BF16toFP32(imm16)) + c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
@@ -742,8 +843,14 @@ class VectorUnit(TensixBackendUnit):
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
-                    c = self._as_fp32(self.lregs[vc][lane])
-                    d = conv_to_float(self.BF16toFP32(imm16)) * c
+                    if self.backend.blackhole:
+                        # ttsim SFPMULI: fma(imm<<16, dst, 0) = imm * dst.
+                        d = fma_model_bh(
+                            imm16 << 16, self._as_fp32_bits(self.lregs[vc][lane]), 0
+                        )
+                    else:
+                        c = self._as_fp32(self.lregs[vc][lane])
+                        d = conv_to_float(self.BF16toFP32(imm16)) * c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
@@ -768,6 +875,15 @@ class VectorUnit(TensixBackendUnit):
             return value
         return conv_to_float(value & 0xFFFFFFFF)
 
+    @staticmethod
+    def _as_fp32_bits(value):
+        """The FP32 bit-pattern (uint32) of an LReg lane, for the bit-exact
+        Blackhole float ALU (``fma_model_bh``). Floats are packed to FP32;
+        raw int patterns pass through masked."""
+        if isinstance(value, float):
+            return conv_to_uint32(value)
+        return value & 0xFFFFFFFF
+
     def perform_mad(self, va, vb, vc, vd, mod1):
         if self.getDiagnosticSettings().reportSFPUCalculations():
             print(f"SFPU: lreg[{vd}] = lreg[{va}] * lreg[{vb}] + lreg[{vc}]")
@@ -779,10 +895,24 @@ class VectorUnit(TensixBackendUnit):
                         if mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VA
                         else va
                     )
-                    a = self._as_fp32(self.lregs[va][lane])
-                    b = self._as_fp32(self.lregs[vb][lane])
-                    c = self._as_fp32(self.lregs[vc][lane])
-                    d = a * b + c
+                    if self.backend.blackhole:
+                        # Bit-exact hardware FMA. mod1 bit0 negates the multiply
+                        # operand a, bit1 negates the addend c (SFPMAD; also gives
+                        # SFPADD its -1.0 constant and is unused by SFPMUL where
+                        # bit1 is never set). Result stored as an FP32 bit pattern.
+                        a_bits = self._as_fp32_bits(self.lregs[va][lane])
+                        b_bits = self._as_fp32_bits(self.lregs[vb][lane])
+                        c_bits = self._as_fp32_bits(self.lregs[vc][lane])
+                        if mod1 & 1:
+                            a_bits ^= 0x80000000
+                        if mod1 & 2:
+                            c_bits ^= 0x80000000
+                        d = fma_model_bh(a_bits, b_bits, c_bits)
+                    else:
+                        a = self._as_fp32(self.lregs[va][lane])
+                        b = self._as_fp32(self.lregs[vb][lane])
+                        c = self._as_fp32(self.lregs[vc][lane])
+                        d = a * b + c
                     if (mod1 & VectorUnit.SFPMAD_MOD1_INDIRECT_VD) and vd != 16:
                         vd = self.lregs[7][lane] & 15
                     else:
