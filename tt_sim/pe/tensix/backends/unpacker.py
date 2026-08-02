@@ -30,6 +30,7 @@ class UnPackerUnit(TensixBackendUnit):
         self.srcRow = [0] * 3
         self.blocked = False
         self.repeat_instruction = None
+        self.pending_unpack = None
         self.setRegBase = 0
         self.setRegAcc = 0
         super().__init__(backend, UnPackerUnit.OPCODE_TO_HANDLER, "Unpacker")
@@ -942,26 +943,33 @@ class UnPackerUnit(TensixBackendUnit):
                 raise NotImplementedError()
 
     def handle_regular(self, instruction_info, issue_thread, instr_args):
-        if self.unpacker_id == 0:
-            if (
-                self.backend.getSrcA(self.srcBank).getAllowedClient()
-                != SrcRegister.SrcClient.Unpackers
-            ):
-                self.blocked = True
-                self.repeat_instruction = (instruction_info, issue_thread)
-                return
-        elif self.unpacker_id == 1:
-            if (
-                self.backend.getSrcB(self.srcBank).getAllowedClient()
-                != SrcRegister.SrcClient.Unpackers
-            ):
-                self.blocked = True
-                self.repeat_instruction = (instruction_info, issue_thread)
-                return
+        # An UNPACR reads all of its configuration -- state ID, context
+        # selection, input/output addresses, formats -- before it starts moving
+        # datums, and only then waits for the Src bank it writes into. That
+        # order is load-bearing, not incidental: the issuing thread carries on
+        # while the unpack is in flight, and the LLK's matmul unpack flips
+        # UNPACK_MISC_CFG_CfgContextOffset (and bumps the SEC0 base address via
+        # the MOP) immediately after issuing its UNPACRs. Reading the
+        # configuration afresh when a stalled unpack finally runs would pick up
+        # the *next* matmul's context and base address, so latch it here and
+        # reuse it for as long as the unpack is blocked.
+        if self.pending_unpack is None:
+            self.pending_unpack = self.read_unpack_state(issue_thread, instr_args)
+
+        src = self.backend.getSrcA if self.unpacker_id == 0 else self.backend.getSrcB
+        if src(self.srcBank).getAllowedClient() != SrcRegister.SrcClient.Unpackers:
+            self.blocked = True
+            self.repeat_instruction = (instruction_info, issue_thread)
+            return
 
         self.blocked = False
         self.repeat_instruction = None
+        state = self.pending_unpack
+        self.pending_unpack = None
+        self.perform_unpack_state(issue_thread, state)
 
+    def read_unpack_state(self, issue_thread, instr_args):
+        """Read everything an UNPACR needs, before it waits on its Src bank."""
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
         )
@@ -1036,32 +1044,71 @@ class UnPackerUnit(TensixBackendUnit):
             colShift,
         )
 
+        return {
+            "stateID": stateID,
+            "whichContext": whichContext,
+            "whichADC": whichADC,
+            "multiContextMode": multiContextMode,
+            "useContextCounter": useContextCounter,
+            "allDatumsAreZero": allDatumsAreZero,
+            "flipSrc": flipSrc,
+            "ch0YInc": ch0YInc,
+            "ch0ZInc": ch0ZInc,
+            "ch1YInc": ch1YInc,
+            "ch1ZInc": ch1ZInc,
+            "inAddr_Datums": inAddr_Datums,
+            "datumSizeBytes": datumSizeBytes,
+            "inputNumDatums": inputNumDatums,
+            "rowStride": rowStride,
+            "inDataFormat": inDataFormat,
+            "outAddr": outAddr,
+            "outDataFormat": outDataFormat,
+            "unpackToDst": unpackToDst,
+            "transpose": transpose,
+            "upsampleZeroes": upsampleZeroes,
+            "upsampleInterleave": upsampleInterleave,
+            "colShift": colShift,
+        }
+
+    def perform_unpack_state(self, issue_thread, state):
+        """Move the datums, using the configuration latched at decode."""
         # Main unpack loop
         self.perform_unpack(
-            stateID,
+            state["stateID"],
             issue_thread,
-            inputNumDatums,
-            inAddr_Datums,
-            outAddr,
-            datumSizeBytes,
-            rowStride,
-            upsampleZeroes,
-            upsampleInterleave,
-            colShift,
-            inDataFormat,
-            outDataFormat,
-            unpackToDst,
-            transpose,
-            allDatumsAreZero,
+            state["inputNumDatums"],
+            state["inAddr_Datums"],
+            state["outAddr"],
+            state["datumSizeBytes"],
+            state["rowStride"],
+            state["upsampleZeroes"],
+            state["upsampleInterleave"],
+            state["colShift"],
+            state["inDataFormat"],
+            state["outDataFormat"],
+            state["unpackToDst"],
+            state["transpose"],
+            state["allDatumsAreZero"],
         )
 
         # Increment the counter if applicable
         self.increment_counter(
-            stateID, issue_thread, whichContext, multiContextMode, useContextCounter
+            state["stateID"],
+            issue_thread,
+            state["whichContext"],
+            state["multiContextMode"],
+            state["useContextCounter"],
         )
 
         # Update ADCs
-        self.update_ADC(issue_thread, whichADC, ch0YInc, ch0ZInc, ch1YInc, ch1ZInc)
+        self.update_ADC(
+            issue_thread,
+            state["whichADC"],
+            state["ch0YInc"],
+            state["ch0ZInc"],
+            state["ch1YInc"],
+            state["ch1ZInc"],
+        )
 
         # Flip src banks
-        self.flip_src_banks(flipSrc, issue_thread)
+        self.flip_src_banks(state["flipSrc"], issue_thread)

@@ -174,14 +174,14 @@ class RV_I_ISA(RV_ISA):
             )
             return True
         elif type_val == 0x4 or type_val == 0x6:
-            # blt or blu
+            # blt (funct3 0x4, signed) or bltu (funct3 0x6, unsigned)
             instr_str = None
-            if type_val == 0x6:
+            if type_val == 0x4:
                 rs1_val = conv_to_int32(register_file[rs1].read())
                 rs2_val = conv_to_int32(register_file[rs2].read())
-                instr_str = "blu"
-            else:
                 instr_str = "blt"
+            else:
+                instr_str = "bltu"
 
             info_msg = None
             if rs1_val < rs2_val:
@@ -197,14 +197,14 @@ class RV_I_ISA(RV_ISA):
             )
             return True
         elif type_val == 0x5 or type_val == 0x7:
-            # bge or bgeu
+            # bge (funct3 0x5, signed) or bgeu (funct3 0x7, unsigned)
             instr_str = None
-            if type_val == 0x7:
+            if type_val == 0x5:
                 rs1_val = conv_to_int32(register_file[rs1].read())
                 rs2_val = conv_to_int32(register_file[rs2].read())
-                instr_str = "bgeu"
-            else:
                 instr_str = "bge"
+            else:
+                instr_str = "bgeu"
 
             info_msg = None
             if rs1_val >= rs2_val:
@@ -441,17 +441,11 @@ class RV_I_ISA(RV_ISA):
             elif type_val == 0x5:
                 # srli or srai
                 arithmetic_variant = RV_ISA.get_int(instr, 30, 30) == 1
+                result = rs1_val >> bit_pos
                 if arithmetic_variant:
-                    msb = (rs1 >> 31) & 0x1
-                    mask = (1 << bit_pos) - 1
-                    result = rs1_val >> bit_pos
-                    if msb:
-                        result = result | (~0 << bit_pos)  # Set upper bits to 1
-                    else:
-                        result = result & mask  # Clear upper bits
+                    result = RV_I_ISA.sign_extend_shift(rs1_val, result, bit_pos)
                     snoop_str = "srai"
                 else:
-                    result = rs1_val >> bit_pos
                     snoop_str = "srli"
                 info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} >> {hex(bit_pos)}"
             else:
@@ -539,17 +533,11 @@ class RV_I_ISA(RV_ISA):
             # srl or sra
             arithmetic_variant = RV_ISA.get_int(instr, 30, 30) == 1
             shift_bits = rs2_val & 0x1F  # Least significant 5 bits for RV32I
+            result = rs1_val >> shift_bits
             if arithmetic_variant:
-                msb = (rs1 >> 31) & 0x1
-                mask = (1 << shift_bits) - 1
-                result = rs1_val >> shift_bits
-                if msb:
-                    result = result | (~0 << shift_bits)  # Set upper bits to 1
-                else:
-                    result = result & mask  # Clear upper bits
+                result = RV_I_ISA.sign_extend_shift(rs1_val, result, shift_bits)
                 snoop_str = "sra"
             else:
-                result = rs1_val >> shift_bits
                 snoop_str = "srl"
             info_msg = (
                 f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} >> {hex(shift_bits)}"
@@ -613,6 +601,19 @@ class RV_I_ISA(RV_ISA):
             return value | (~0 << bit_width)  # Set upper bits to 1
         else:
             return value & mask  # Clear upper bits
+
+    @classmethod
+    def sign_extend_shift(cls, operand, shifted, shift_bits):
+        """Fill in the bits an arithmetic right shift vacates.
+
+        ``shifted`` is ``operand >> shift_bits`` over the unsigned 32-bit
+        operand, so Python has already shifted zeroes in at the top. sra/srai
+        replicate the operand's sign bit instead, so set the top
+        ``shift_bits`` bits when the operand is negative.
+        """
+        if not (operand >> 31) & 1:
+            return shifted
+        return (shifted | (0xFFFFFFFF << (32 - shift_bits))) & 0xFFFFFFFF
 
     @classmethod
     def zero_extend(cls, value, bit_width):
