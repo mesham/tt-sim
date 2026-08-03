@@ -4,6 +4,7 @@ from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import DataFormatConversions
+from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_float, conv_to_uint32
 
@@ -47,6 +48,44 @@ class MatrixUnit(TensixBackendUnit):
         self.srcABank = 0
         self.srcBBank = 0
         super().__init__(backend, MatrixUnit.OPCODE_TO_HANDLER, "Matrix")
+        # Phase 5 of docs/plans/event-driven-pump.md: the matrix unit is the
+        # first (and so far only) consumer of the cycle-cost tables. ``None``
+        # unless TT_SIM_COST_MODEL is set, in which case every op retires in
+        # the tick it was issued exactly as before.
+        self.cost_model = unit_cost_model(
+            "MATH", "blackhole" if backend.blackhole else "wormhole"
+        )
+
+    def instruction_occupancy(self, instruction_name, issue_thread):
+        """Cycles this op occupies the FPU, from ``tensix_instruction_costs.yaml``.
+
+        Only reached when ``TT_SIM_COST_MODEL`` is set (:attr:`cost_model` is
+        ``None`` otherwise). Two paths:
+
+        * the ops the table marks ``scales_with: fidelity_phases`` (``MVMUL``,
+          ``DOTPV``, ``GAPOOL``, ``ELWMUL``) are costed as a function of the
+          fidelity phase this instruction runs at — the whole point of Phase 5
+          for this unit, and the one cost in the MATH table that a flat number
+          cannot express. See
+          :meth:`~tt_sim.perf.model.UnitCostModel.fidelity_occupancy`;
+        * everything else takes the table's occupancy, which for this unit is
+          ``1 / throughput_ipc`` (``isa_doc_derived``).
+
+        The phase is read *before* the handler runs, because ``ADDR_MOD`` may
+        advance ``RWC.FidelityPhase`` on the way out and the cost belongs to
+        the phase the instruction actually executed at.
+        """
+        model = self.cost_model
+        if model is None:
+            return None
+        if model.scales_with_fidelity(instruction_name):
+            phase = self.determine_fidelity_phase(
+                issue_thread, self.backend.getRWC(issue_thread)
+            )
+            cycles = model.fidelity_occupancy(phase)
+            if cycles is not None:
+                return cycles
+        return model.occupancy(instruction_name)
 
     def getSrcA(self):
         return self.backend.getSrcA(self.srcABank)

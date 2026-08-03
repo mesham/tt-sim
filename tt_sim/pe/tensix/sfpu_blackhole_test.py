@@ -37,7 +37,7 @@ def test_sfpgt_sets_lane_flag_when_vd_gt_vc():
     vu = _vector_unit()
     vu.lregs[0][0], vu.lregs[1][0] = 3.0, 2.0  # 3 > 2 -> True
     vu.lregs[0][1], vu.lregs[1][1] = 1.0, 5.0  # 1 > 5 -> False
-    vu.handle_sfpgt(None, 0, _args(lreg_dest=0, lreg_c=1))
+    vu.handle_sfpgt(None, 0, _args(instr_mod1=1, lreg_dest=0, lreg_c=1))
     assert vu.laneFlags[0] is True
     assert vu.laneFlags[1] is False
 
@@ -46,9 +46,55 @@ def test_sfple_sets_lane_flag_when_vd_le_vc():
     vu = _vector_unit()
     vu.lregs[0][0], vu.lregs[1][0] = 2.0, 2.0  # 2 <= 2 -> True
     vu.lregs[0][1], vu.lregs[1][1] = 3.0, 2.0  # 3 <= 2 -> False
-    vu.handle_sfple(None, 0, _args(lreg_dest=0, lreg_c=1))
+    vu.handle_sfple(None, 0, _args(instr_mod1=1, lreg_dest=0, lreg_c=1))
     assert vu.laneFlags[0] is True
     assert vu.laneFlags[1] is False
+
+
+def test_sfpgt_mod1_8_writes_mask_into_vd():
+    # instr_mod1 == 8 writes an all-ones / all-zero mask into VD and leaves the
+    # lane flags alone. This is the form every stock Blackhole exp_tile emits
+    # (masking the integer part before SFPSETEXP).
+    vu = _vector_unit()
+    vu.lregs[0][0], vu.lregs[1][0] = 127.0, 0.0  # 127 > 0 -> all ones
+    vu.lregs[0][1], vu.lregs[1][1] = -1.0, 0.0  # -1 > 0 -> zero
+    vu.laneFlags[0] = vu.laneFlags[1] = False
+    vu.handle_sfpgt(None, 0, _args(instr_mod1=8, lreg_dest=0, lreg_c=1))
+    assert vu.lregs[0][0] == 0xFFFFFFFF
+    assert vu.lregs[0][1] == 0
+    assert vu.laneFlags[0] is False
+    assert vu.laneFlags[1] is False
+
+
+def test_sfple_mod1_8_writes_mask_into_vd():
+    vu = _vector_unit()
+    vu.lregs[0][0], vu.lregs[1][0] = 2.0, 2.0  # 2 <= 2 -> all ones
+    vu.lregs[0][1], vu.lregs[1][1] = 3.0, 2.0  # 3 <= 2 -> zero
+    vu.handle_sfple(None, 0, _args(instr_mod1=8, lreg_dest=0, lreg_c=1))
+    assert vu.lregs[0][0] == 0xFFFFFFFF
+    assert vu.lregs[0][1] == 0
+
+
+def test_sfpgt_orders_lanes_as_sign_magnitude():
+    # Sign-magnitude total order, not IEEE compare: -0.0 sorts below +0.0 and
+    # a more negative magnitude sorts lower (ttsim's sign_mag32_total_order).
+    vu = _vector_unit()
+    vu.lregs[0][0], vu.lregs[1][0] = 0.0, -0.0  # +0 > -0 -> True
+    vu.lregs[0][1], vu.lregs[1][1] = -2.0, -5.0  # -2 > -5 -> True
+    vu.lregs[0][2], vu.lregs[1][2] = -5.0, -2.0  # -5 > -2 -> False
+    vu.handle_sfpgt(None, 0, _args(instr_mod1=8, lreg_dest=0, lreg_c=1))
+    assert vu.lregs[0][0] == 0xFFFFFFFF
+    assert vu.lregs[0][1] == 0xFFFFFFFF
+    assert vu.lregs[0][2] == 0
+
+
+def test_sfpgt_rejects_unmodelled_modifier():
+    vu = _vector_unit()
+    try:
+        vu.handle_sfpgt(None, 0, _args(instr_mod1=0, lreg_dest=0, lreg_c=1))
+    except NotImplementedError:
+        return
+    raise AssertionError("SFPGT with instr_mod1=0 should raise")
 
 
 def test_sfpmul24_low_23_bit_product():

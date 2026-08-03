@@ -1203,7 +1203,9 @@ array, so the gather can be a slice — but it duplicates the bit
 permutations that live in `util.py`, so it wants an exhaustive
 equivalence test (the Src word is only 19 bits) rather than a copied
 expression. It was left out of this pass deliberately: it is a different
-target from the one the ranking above named.
+target from the one the ranking above named. (It has since been done — see
+"[What landed: the Tensix operand gather](#what-landed-the-tensix-operand-gather)"
+at the end of this document.)
 
 Revised ranking after this change: item 1 (the RV32IM interpreter) is
 now the largest consumer on *every* workload including `six`, item 2 is
@@ -1378,3 +1380,521 @@ time python3 -m driver.blackhole.server.four_replay_test
 # swap them into the same tree, alternate variants, take min over rounds.
 # Do not compare across sessions — the rest of the tree moves.
 ```
+
+# What landed: target 6, an event-driven cycle pump (phase 1)
+
+**Measured 2026-08-02**, same machine as the appendix above (12th Gen Core
+i7-12700H, CPython 3.12.13, `TT_SIM_THREADED` unset). Design and the remaining
+phases: [`docs/plans/event-driven-pump.md`](../../../docs/plans/event-driven-pump.md).
+
+This is ranked target **6** ("the clock pump itself"), which the appendix
+explicitly said was *not* worth touching for its own sake — 0.3–1.5 % of wall
+clock — but was a ceiling that degrades linearly with tile count. Both halves
+of that judgement held up: the pump was not a bottleneck, and removing the
+ceiling is nonetheless worth 13–32× on the floor and 1.05–1.45× on real
+workloads. Target **4** (`NUI.clock_tick` when idle) is folded in here rather
+than fixed separately, as the appendix suggested.
+
+## What changed
+
+The pump stops ticking a tile that has nothing to do. `clock_tick(cycle_num)`
+is untouched everywhere, and so is tick *order* — the only change is **who
+gets ticked and when**.
+
+- `Clockable` gains an optional `is_clock_idle()`, defaulting to `False`
+  (i.e. "not idle"), so a component that has not opted in keeps its tile awake
+  forever. Every override is the negation of a guard already present in that
+  component's own `clock_tick`.
+- `TileClock` (a `Clock` subclass, so `MultiTileClock.run` is unchanged) skips
+  its whole component list while dormant. It falls asleep when the tile's
+  `clock_quiescent()` probe passes, evaluated *after* the tick; it wakes on
+  the three things that can act on a dormant tile from outside — `NUI.transmit`,
+  a host read/write through `TT_Device`, and a reset.
+- Fifteen components opted in: the NIUs, the baby cores, TDMA, the Tensix
+  backend units (base predicate plus five that carry extra state), and the
+  three frontend units. `matrix.py` / `vector.py` / `packer.py` / `misc.py`
+  needed nothing — they do not override `clock_tick`, so the base predicate is
+  complete for them.
+- Independently, `NUI.clock_tick` early-outs when both queues are empty
+  (target 4): **511 ns → 162 ns**, and it still matters after the tile gate,
+  because a *live* Tensix tile's two NIUs are idle on most cycles.
+
+## Result: the idle floor
+
+A `driver/blackhole` device (8 DRAM tiles + N Tensix tiles) with every baby
+core held in soft reset — the same benchmark as "The idle-pump floor, and how
+it scales" above. Best of 4 interleaved rounds over two **frozen tree
+snapshots**, alternating which variant runs first each round (see "Method
+note" below — this matters).
+
+| Tensix tiles | clockables | base cycles/s | after cycles/s | factor | base µs/cyc | after µs/cyc |
+|---|---|---|---|---|---|---|
+| 1 | 44 | 43,371 | **575,749** | **13.3×** | 23.06 | 1.74 |
+| 2 | 72 | 30,933 | **529,901** | **17.1×** | 32.33 | 1.89 |
+| 4 | 128 | 18,304 | **427,742** | **23.4×** | 54.63 | 2.34 |
+| 8 | 240 | 10,413 | **335,141** | **32.2×** | 96.03 | 2.98 |
+
+(The base column is faster than the original appendix table because targets 1
+and 3 landed in between; 0.40 µs per component-tick now, not 0.94.)
+
+**The scaling shape is the result, more than the factor.** The floor was dead
+linear in *component* count. It is now flat at **0.19 µs per tile-clock** —
+9 tile-clocks cost 1.74 µs/cycle, 16 cost 2.98 µs/cycle — i.e. linear in
+*tiles* and independent of what is on them. A realistic 8-Tensix device now
+idles at 335 k cycles/s where it used to idle at 10 k, which is above the
+~57 k cycles/s a one-minute 640³ matmul would need rather than an order of
+magnitude below it.
+
+## Result: real workloads
+
+Blackhole offline replay guards, pump-only wall clock. Six interleaved rounds
+over the frozen snapshots with alternating order; both min-of-rounds and
+median-of-rounds are given because the noise floor on this machine is ±15 %
+and the two statistics disagree by more than the effect on `nine`.
+
+| workload | µs/cycle (after) | base | after | min-factor | median-factor |
+|---|---|---|---|---|---|
+| `two` | 60 | 0.59 s | **0.41 s** | **1.45×** | 1.29× |
+| `reduce` | 88 | 0.98 s | **0.78 s** | **1.26×** | 1.31× |
+| `four` | 80 | 8.58 s | **6.76 s** | **1.27×** | 1.16× |
+| `nine` (2 tiles) | 150 | 1.81 s | **1.50 s** | 1.20× | 1.07× |
+| `sfpumath` | 140 | 2.87 s | **2.62 s** | 1.09× | 1.15× |
+| `six` (matmul) | 254 | 7.31 s | **7.00 s** | 1.04× | 1.05× |
+
+In cycles/s: `two` 13,898 → 20,197; `reduce` 10,387 → 13,077; `four` 12,513 →
+15,888; `nine` 6,364 → 7,662; `sfpumath` 6,734 → 7,352; `six` 3,760 → 3,926.
+
+**The spread across workloads is Amdahl, not variance in the saving.** The
+saving is a constant ~13 µs of pump overhead per simulated cycle, and it
+divides into whatever that workload's own cycle costs. The accounting closes:
+
+```
+  16 DRAM-tile NIU ticks       16 x 511 ns  =  8.2 us   (tiles now dormant)
+   8 DRAM tile-clock frames     8 x ~190 ns =  1.5 us
+   2 live-tile NIU early-outs   2 x 349 ns  =  0.7 us
+  ------------------------------------------------------
+                                              ~10.4 us modelled
+                                               ~13 us measured (four)
+```
+
+Predicted factors from that alone: `two` 1.28×, `sfpumath` 1.10×, `six` 1.05×
+— which is what the table says. `six` gains least for the same reason it
+gained least from target 1: its cycle is 254 µs of matmul, so 13 µs is 5 %.
+
+Where the dormancy actually happens, instrumented over a whole run
+(`TileClock.dormant_cycles` / total tile-cycles):
+
+| workload | DRAM tiles dormant | Tensix tiles dormant |
+|---|---|---|
+| `two` | 65,583 / 65,600 = **100.0 %** | 0 / 8,200 = 0.0 % |
+| `four` | 859,165 / 859,200 = **100.0 %** | 0 / 107,400 = 0.0 % |
+| `six` | 219,656 / 220,000 = **99.8 %** | 0 / 27,500 = 0.0 % |
+| `nine` | 91,965 / 92,000 = **100.0 %** | 99 / 23,000 = 0.4 % |
+
+That table is the honest limit of phase 1: **every DRAM tile sleeps through
+essentially the entire run, and no Tensix tile ever sleeps.** BRISC spins in
+the firmware loop from launch to teardown, so the tile is legitimately busy by
+the predicate. Getting the Tensix side needs per-*component* gating inside a
+live tile (phase 3 of the plan), which is a strictly larger correctness claim
+because it has to be right about components that observe each other's state
+mid-cycle.
+
+## Bit-identity
+
+The pump determines execution *order*, so a bug here surfaces as subtly wrong
+numbers rather than a crash. Gates, all on the final tree:
+
+- `driver.wormhole.server.offline_replay_test` — **126/126 host READs
+  reproduced bit-for-bit**, unchanged.
+- All **17** Blackhole replay guards pass; `six_replay_test` still reports
+  **PCC = 0.9982**, to the digit. Any movement in that number would mean
+  execution order changed.
+- `pytest tt_sim driver` — 236 passed (including a new
+  `tt_sim/device/clock_test.py`: dormancy engages, the always-list and
+  `on_tick` still see every cycle, and each of the three wake stimuli works).
+- `examples_replay_test` — 11 passed. `ruff` clean.
+
+The argument behind the gates, in one line each: a skipped tick is only ever
+skipped when every component on the tile has said its own `clock_tick` guard
+would fail; the decision is made *after* the tick, so a component owing
+exactly one more tick gets it; and within an awake tile nothing changes at all.
+
+## Method note: interleaving is not enough on a shared machine
+
+The first sweep of this change was interleaved base-then-after per workload,
+per round — the discipline the rest of this document uses — and it reported
+`four` at 1.30× and `two` at 1.68×. Both were inflated. Two confounds that
+interleaving alone does not remove:
+
+1. **The tree moves.** Another agent was editing `tensix/backends/matrix.py`
+   and `tensix/registers.py` during the sweep. Only the changed files were
+   being swapped, so the *shared* code differed between early and late runs.
+2. **Order within a round is fixed.** With `base` always first and `after`
+   always second, any monotone drift — the other agent's code getting faster,
+   the machine getting quieter — lands entirely on `after`.
+
+The numbers above come from **two frozen full-tree snapshots** (`tt_sim/` +
+`driver/` copied wholesale, with only the 13 changed files reverted in one of
+them) and **alternating the order every round**. Under that protocol `four`
+came back at 1.16–1.27× and `two` at 1.29–1.45×. Anything measured on this
+machine at under ~1.3× needs both.
+
+`six` is the cautionary case: a first six-round interleaved-but-unfrozen A/B
+gave min-ratio 1.027 and median-ratio 0.990 — i.e. "faster and slower" — with
+base ranging 7.2–9.3 s on identical code. The frozen protocol resolves it to a
+consistent 1.04–1.05×, which is exactly what the per-cycle accounting predicts.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+# idle floor: build a Blackhole device, materialise N Tensix tiles, run it
+# with every core in soft reset and time MultiTileClock.run.
+# real workloads: wrap MultiTileClock.run for pump-only time, e.g.
+time python3 -m driver.blackhole.server.four_replay_test
+
+# dormancy share: read TileClock.dormant_cycles off every tile after a run
+python3 -c "
+from driver.blackhole.server.bh_device import make_device
+d = make_device().tt_device
+d.run(1000)
+print([(c, t.clock.dormant_cycles) for c, t in d.tile_directory.items()])"
+```
+
+Do **not** A/B across sessions, and on a shared machine do not A/B without
+freezing both trees and alternating the order — see the method note above.
+
+# What landed: the Tensix operand gather
+
+**Measured 2026-08-02**, same machine as the appendix (12th Gen Core i7-12700H,
+CPython 3.12.13, `TT_SIM_THREADED` unset). This is the follow-up named in "The
+new shape of an MVMUL, and the next target" above: with the FPU datapath
+batched, the operand gather was the larger half of an MVMUL.
+
+Two other agents were working in the tree, so every number is an **interleaved
+A/B between two frozen git worktrees** — `HEAD` and `HEAD` plus this change
+only — alternating base/after per workload and reported as the **minimum of 5
+rounds**. All correctness gates were run in the frozen worktree too, not in the
+shared tree (a run in the shared tree failed 11 examples on someone else's
+half-saved edit, which is exactly the trap this method exists to avoid).
+
+## What changed
+
+`perform_mvmul_exact` used to read its operands one datum at a time: ~384
+scalar `SrcRegister.__getitem__` calls, ~1,150 `DataFormatConversions` frames
+(`BF16InSrcToFP32` → `BF16InSrcToBF16` → `TF32InSrcToTF32` per lane), and
+132 `getDst16b` + 128 `setDst16b`/`FP32ToDstFormatBF16` pairs, per instruction.
+It now gathers a rectangle at a time:
+
+- **`SrcRegister.readRows(row, n)`** returns the `n x 16` block as int64 (a
+  slice of the numpy array it already stored), and **`DstRegister`** gained
+  `getDst16bRows` / `setDst16bRows` / `getDst32bRows` / `setDst32bRows`, the
+  per-datum accessors applied to whole rows — same row adjustment, same zero
+  flags, same 32-bit hi/lo split.
+- **The conversions are not reimplemented.** They are masks, shifts and ors, so
+  handing the *same* classmethod an int64 array converts the whole block. The
+  one exception was `FP32ToBF16`, whose denormal flush was an `if exp == 0`;
+  it is now `man * (exp != 0)`, which is the same value for a scalar.
+
+So there is no second copy of the Src/Dst bit permutations to keep in step —
+the batched path calls the documented ISA port itself.
+
+## Result
+
+Whole-process wall clock, min of 5 interleaved rounds:
+
+| workload | MVMUL/GAPOOLs | base | after | factor |
+|---|---|---|---|---|
+| `six` (128³ bf16 matmul) | 4,096 | 12.51 s | **7.81 s** | **1.60×** |
+| `matmulblock` | 1,536 | 5.30 s | **4.05 s** | **1.31×** |
+| `matmulidx` | 384 | 2.51 s | **2.24 s** | **1.12×** |
+| `reduce` (GAPOOL) | 36 | 1.78 s | 1.68 s | 1.06× |
+| `four`, `nine`, `two`, `sfpumath` | **0** | — | — | 0.93–1.06×, no direction |
+
+The last row is the control, and it is a *verified* zero rather than an assumed
+one: a wrapper counting `perform_mvmul_exact` calls reports exactly 0 for those
+four workloads, so any difference there is noise (`nine`'s 0.93× included).
+
+Per instruction, timed in-run by wrapping `perform_mvmul_exact` in both trees:
+
+| workload | base µs/MVMUL | after µs/MVMUL | share of run, base → after |
+|---|---|---|---|
+| `six` | 1,829 | **753** | 57.6 % → 36.4 % |
+| `matmulidx` | 1,624 | **637** | 33.7 % → 17.4 % |
+| `matmulblock` | 1,584 | **662** | 53.7 % → 33.0 % |
+| `reduce` (4 rows, not 8) | 1,106 | **634** | 3.3 % → 1.9 % |
+
+And the gather itself, isolated (min of 7 × 300 iterations; one MVMUL = a 16×16
+SrcA block, an 8×16 SrcB block and an 8×16 Dst rectangle):
+
+| | base | after | factor |
+|---|---|---|---|
+| operand gather (SrcA + SrcB + Dst read) | 666 µs | **56.5 µs** | 11.8× |
+| result store (convert + 128 `setDst16b`) | 222 µs | **28.1 µs** | 7.9× |
+| together | 889 µs | **85 µs** | **10.5×** |
+
+Where the remaining 85 µs goes: SrcA convert 17.1, SrcB transpose + convert
+14.4, Dst read + convert 20.6, result convert 19.7, store 5.7. That is ~35 numpy
+calls at the 1–3 µs/op floor the earlier section measured, so this is close to
+done without a JIT — and the datapath is once again the whole of what is left
+(~660 µs of the 753).
+
+One numpy lesson, and it is the same one as last time in a new disguise:
+**convert the transposed SrcB block through `np.ascontiguousarray`**. A ufunc
+over a transposed view returns an F-ordered result, and every downstream op then
+pays: `_fpu_group_sums_batch` is 155 µs on a contiguous SrcB operand and 180 µs
+on the view-derived one, while the copy itself is free (15.5 vs 15.6 µs).
+
+## Bit-identity
+
+Required, not approximated — this feeds the differential against the vendor
+simulator.
+
+- `tt_sim/pe/tensix/conversion_batch_test.py` (new) proves the array form of
+  every conversion the batched path can reach equals the scalar form **over the
+  whole input space**, not on a sample: all 2¹⁹ Src words for the six
+  `*InSrcTo*` conversions, all 2¹⁶ Dst16b words for the four Dst ones, and for
+  the FP32-width ones every equivalence class (all 2¹⁶ sign/exponent/high-
+  mantissa combinations × five low halves, plus 200 k random words). 15 tests,
+  6.9 s. `registers_test.py` gains six tests pinning each block accessor against
+  the scalar accessor it replaces, including flag-cleared rows and both
+  Blackhole row-remap gates.
+- All **17** Blackhole replay guards pass, `driver.wormhole.server.offline_replay_test`
+  reproduces **126/126** host READs bit-for-bit, `examples_replay_test` 11
+  passed, and `pytest tt_sim driver` is **228 passed** (207 + 21 new).
+- The live differential against the vendor simulator passes on **both**
+  architectures: `./optests/diff.sh matmulidx` and the same under
+  `TT_SIM_ARCH=wormhole`, 2,560 elements each, PASS.
+- `six` still reports `PCC(golden, device) = 0.9982`, unchanged to the last
+  digit.
+
+## What did not pay off
+
+- **A 2¹⁹-entry lookup table per conversion.** It is the fastest option —
+  `LUT[block]` is 3.5 µs against 16.1 µs for the ufunc chain — but it is 4.2 MB
+  per conversion (two are live), it saves ~25 µs of a 753 µs MVMUL (3 %), and it
+  replaces a call to the documented ISA port with a table. Not taken.
+- **Hand-fusing the conversion expressions**, e.g. `BF16InSrcToFP32` as one
+  shifted mask instead of nine ufunc calls. Worth ~5 µs of 85, and it is exactly
+  the correspondence with the ISA pseudocode that makes these functions
+  reviewable. Not taken.
+- **Batching the element-wise FP path** (`elementwise_fp_other`, the
+  ELWADD/ELWSUB/ELWMUL operand gather). Measured first: it is called 4,096 times
+  in `four_fp` for 0.04 s of a 1.53 s run (2.6 %), 512 times in `reduce`, and
+  **zero** times in the other 15 guards. It also computes in Python floats
+  through caller-supplied closures, so vectorising it risks float64/float32
+  rounding differences for ~1 % of one workload. Not taken; re-measure if an
+  element-wise-heavy kernel ever shows up.
+
+## The next target inside the matmul
+
+With the gather at 85 µs, `six` is ~36 % `perform_mvmul_exact` and essentially
+all of that is `_fpu_group_sums_batch` / `_fpu_accumulate_batch` again — now at
+~660 µs/MVMUL of numpy at the 1–3 µs/op overhead floor. That is the JIT
+argument's proper baseline, and it should be re-argued against it rather than
+against the pre-batch scalar code. The next non-JIT item visible in `six`'s
+profile is the **unpacker**, which still writes Src one datum at a time
+(131,072 `BF16ToSrcBF16` + `SrcRegister.__setitem__` calls per run) — the same
+shape of change as this one, in `backends/unpacker.py`.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+# per-workload A/B: two frozen worktrees, alternating, min of N rounds
+git worktree add --detach /tmp/gb_base HEAD    # and /tmp/gb_after + your diff
+time python3 -m driver.blackhole.server.six_replay_test
+
+# per-MVMUL cost: wrap MatrixUnit.perform_mvmul_exact with perf_counter and
+# run any guard; it also tells you whether a workload uses the path at all.
+```
+
+# What landed: the unpacker's Src/Dst writes
+
+**Measured 2026-08-02**, same machine as the appendix (12th Gen Core i7-12700H,
+CPython 3.12.13, `TT_SIM_THREADED` unset). This is the target named at the end
+of the operand-gather section: with the MVMUL read side batched, the unpacker
+was the largest remaining non-JIT hotspot, moving **131,072 datums one at a
+time** per `six` run.
+
+Other agents were active in the tree throughout (one of them mid-save in
+`device/clock.py`, which produced a spurious `AttributeError` in an early
+measurement), so every number below comes from an **interleaved A/B between two
+frozen git worktrees** — `HEAD` and `HEAD` plus this change only — alternating
+which variant runs first each round. All correctness gates were run in the
+frozen worktree too.
+
+## Measure first: what the loop actually sees
+
+Before touching anything, `perform_unpack` was wrapped with a counter recording
+its parameter combination, over all 17 Blackhole guards and the 11 Wormhole
+example replays. Only nine combinations occur:
+
+| in -> out | destination | where | datums |
+|---|---|---|---|
+| BF16 -> BF16 | SrcA + SrcB | `six`, `matmulblock`, `matmulidx`, `reduce` | 131,072 in `six` alone |
+| INT8 -> INT8 | SrcA + SrcB | `four`, `nine` | 8,192 each |
+| FP32 -> BF16 | SrcA + SrcB | `four_fp` | 8,192 |
+| FP32 -> TF32 | SrcA | `sfpumath` | 3,072 |
+| INT32 -> INT32 | Dst | `five`, `loopback`, `optest` | 8,192 / 4,096 / 6,144 |
+| FP32 -> FP32 | Dst | `five_fp` | 8,192 |
+| INT32 / FP32, `ZeroWrite2` | SrcA | WH `nine`, `sfpumath` | 16 per call |
+| BF16 -> BF16, haloize | SrcA | `reduce`, `reduceneg` | 1,024 of 5,440 |
+| *(none)* | — | `two`, `three`, `eight` | **0 calls** |
+
+Three facts fell out of that census and shaped the change:
+
+1. **The loop is already a clean rectangle.** The awkward modes the ISA doc
+   describes — `rowStride`, `upsampleZeroes`, `upsampleInterleave` — are
+   *passed to* `perform_unpack` and never read: the input walk is
+   `inAddr_Datums += datumSizeBytes`, flat. So there was no discontiguity to
+   work around, and the batched path is exactly as (in)complete as the scalar
+   one it replaces. Nothing was skipped by batching that the scalar loop
+   handled.
+2. **Every observed call has `colShift == 0` and `numRows <= 64`**, and the
+   only transpose is `reduce`'s 4 calls.
+3. **`two`, `three` and `eight` never enter the function at all** — the
+   verified control group, not an assumed one.
+
+## What changed
+
+`_unpack_block` in `backends/unpacker.py` does what the datum loop did, a
+rectangle at a time, and returns False for the cases it cannot:
+
+- **One L1 read.** `AddressableMemory.read(addr, numRows * 16 * size)` and
+  `np.frombuffer` with a `uint8`/`uint16`/`uint32` view. Datums are
+  little-endian and so is the host, so the view is the same value per datum as
+  `conv_to_uint32` of its bytes.
+- **One conversion.** `formatConversion` is the *same* method, handed an int64
+  array instead of an int — the technique the operand gather established. Two
+  branches inside it had to become arithmetic to survive a block, and both are
+  the same value for a scalar: INT8's `if raw_datum: raw_datum |= 16 << 10`
+  became `raw_datum | (16 << 10) * (raw_datum != 0)`, and the FP32 -> BF16
+  denormal flush turned out to be exactly `DataFormatConversions.FP32ToBF16`,
+  which the gather had already made branch-free. No conversion is
+  reimplemented.
+- **One indexed write.** `SrcRegister.writeDatums(rows, columns, values)` is
+  the new write counterpart to `readRows` — literally `self.data[rows, cols] =
+  values`, with the scalar setter's indexing rules (a negative column wraps, an
+  out-of-range row raises). Dst reuses the gather's `setDst16bRows` /
+  `setDst32bRows`.
+
+The destination index arithmetic is transcribed from the scalar loop rather
+than re-derived: `rows` is the `row` loop variable as an array, `cols` is
+`np.arange(16) - colShift`, and haloize is the same two assignments done at
+once (`outRows, outCols = (outRows & ~0xF) | outCols, outRows & 0xF` — the
+tuple's right-hand side evaluates first, which is what the scalar version's
+`rowLowBits` temporary is for). Because they are index arrays rather than
+slices, the **column shift and the haloize transpose came along for free**;
+there was no reason to leave them on the scalar path.
+
+### Deliberately left scalar
+
+- **Datum widths that are not 1, 2 or 4 bytes** — the BFP formats with their
+  shared exponents. `DATA_FORMAT_TO_BITS` gives BFP4/BFP2 a size of *zero*
+  bytes, so the scalar loop does not handle them either; declining keeps the
+  two paths equally (in)correct rather than inventing behaviour.
+- **`FP32 -> FP16` out.** `FP32ToFP16` saturates and flushes with an `if/elif`.
+  Zero guards reach it, and handing it a block raises rather than silently
+  taking one arm — pinned by a test, so it cannot quietly start "working".
+- **Row counts large enough for the destination row map to alias** (`> 64` into
+  a Src bank, `> 16` into Dst under `SetOvrdWithAddr`). An indexed assignment
+  would then depend on numpy's ordering where the scalar loop's last-write-wins
+  is explicit. No guard reaches it; the check is 4 lines.
+
+## Result
+
+Per-`UNPACR` cost, timed in-run by wrapping `perform_unpack` in both frozen
+worktrees, min of 5 alternating rounds:
+
+| workload | UNPACRs | datums | base | after | factor | share of base run |
+|---|---|---|---|---|---|---|
+| `six` | 128 | 131,072 | 0.908 s | **0.021 s** | **43x** | 10.9 % -> 0.3 % |
+| `matmulblock` | 36 | 36,864 | 0.285 s | **0.005 s** | **57x** | 8.4 % -> 0.2 % |
+| `five` | 32 | 8,192 | 0.072 s | **0.004 s** | 18x | 4.6 % |
+| `four` | 32 | 8,192 | 0.085 s | **0.005 s** | 17x | 0.9 % |
+| `four_fp` | 32 | 8,192 | 0.052 s | **0.005 s** | 10x | 4.2 % |
+| `sfpumath` | 12 | 3,072 | 0.021 s | **0.002 s** | 10x | 0.7 % |
+| `reduce` | 40 | 5,440 | 0.044 s | **0.005 s** | 9x | 4.5 % |
+
+Per datum that is **6.9 us -> 0.16 us** on `six`'s 1024-datum unpacks. After the
+change the cost is nearly flat in the datum count (112–165 us per call whatever
+the size), i.e. it is numpy's per-call overhead — about 20 array ops — and no
+longer the data.
+
+Whole-process wall clock and CPU time, min and median of 9 interleaved
+alternating rounds:
+
+| workload | wall base | wall after | min ratio | median ratio | CPU min ratio |
+|---|---|---|---|---|---|
+| `six` | 9.20 s | **8.07 s** | **1.14x** | 1.09x | 1.12x |
+| `matmulblock` | 4.12 s | 3.98 s | 1.04x | 1.12x | 1.02x |
+| `four_fp` | 2.11 s | 2.09 s | 1.01x | 1.04x | 0.96x |
+| `four`, `reduce`, `five` | — | — | 0.94–1.00x | 1.01–1.02x | 0.96–1.04x |
+| `two`, `eight` (**0 unpacks**) | — | — | 1.06–1.08x | 1.01–1.05x | 1.02–1.05x |
+
+The control row is the honest reading of the rest of the table: on this machine,
+under this much contention, whole-run A/B noise is about **±6 %** even frozen
+and alternated. Only `six` clears it, and it clears it in all four statistics at
+the value the per-call measurement predicts (-0.89 s on an 8–9 s run). Everything
+else is a real but sub-noise 1–5 %, which is exactly what the share column
+above says it should be. The per-call table, not the whole-run table, is the
+measurement of this change.
+
+## Bit-identity
+
+Required, not approximated.
+
+- `tt_sim/pe/tensix/conversion_batch_test.py` gains the unpack direction: the
+  four to-Src conversions over their whole input space (2^19 for
+  `TF32ToSrcTF32` / `TF32ToSrcFormatTF32`, 2^16 for `BF16ToSrcBF16` /
+  `FP16ToSrcFP16`), **and `UnPackerUnit.formatConversion` itself end to end** —
+  every (in, out, `unpackToDst`) triple `_unpack_block` accepts, array against
+  scalar, over the whole 8- or 16-bit datum space or every equivalence class of
+  the 32-bit one. That is the test that actually covers the two branch
+  removals. 45 tests, 11 s.
+- `registers_test.py` gains `writeDatums` against the scalar setter over the
+  four index maps the unpacker builds (rectangle, wrapped SrcB rows, shifted
+  column, haloize transpose).
+- `pytest tt_sim driver` is **267 passed** (236 + 31), all **17** Blackhole
+  replay guards pass, `driver.wormhole.server.offline_replay_test` reproduces
+  **126/126** host READs bit-for-bit, `examples_replay_test` 11 passed.
+- `six` still reports `PCC(golden, device) = 0.9982`, unchanged to the last
+  digit.
+- The live differential against the vendor simulator passes on **both**
+  architectures: `./optests/diff.sh matmulidx` and the same under
+  `TT_SIM_ARCH=wormhole`, 2,560 elements each, PASS.
+
+## What did not pay off, and what is next
+
+- **Batching the Src *clear* loops** (`handle_set_src_to_zero` and Blackhole's
+  `_handle_unpacr_nop_blackhole`, each a 64x16 scalar write). Measured before
+  writing anything: 0.041 s of `sfpumath`'s 3.1 s run and 0.006 s of `reduce`'s,
+  **zero** in every other guard — and most of even that is the blocked-and-retry
+  early return, not the clear itself. Not taken.
+- **A separate fast path for the common rectangle** (contiguous rows, no column
+  shift, no transpose) as a slice assignment instead of a 2-D indexed one. It
+  is worth a few microseconds of a 150 us call and it would mean two
+  destination-index derivations to keep in step with the ISA pseudocode instead
+  of one. Not taken.
+- **The remaining ~150 us per UNPACR is now per-call numpy overhead**, not the
+  datums, so the next win in this file would have to come from doing fewer,
+  larger unpacks — which the hardware model does not permit. With the unpacker
+  at 0.3 % of `six`, the matmul datapath (`_fpu_group_sums_batch` /
+  `_fpu_accumulate_batch`, ~660 us of a 753 us MVMUL) is once again the whole
+  of what is left.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+# which formats a guard actually unpacks, and whether it unpacks at all:
+# wrap UnPackerUnit.perform_unpack and count its arguments.
+# per-UNPACR cost: wrap the same method with perf_counter.
+git worktree add --detach /tmp/ub_base HEAD   # and /tmp/ub_after + your diff
+time python3 -m driver.blackhole.server.six_replay_test
+```
+
+Freeze both trees, alternate the order, and read the control workloads before
+believing any whole-run ratio under ~1.1x — see the method note in the
+event-driven-pump section, which this change's numbers confirm again.

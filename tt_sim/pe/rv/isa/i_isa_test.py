@@ -88,6 +88,54 @@ def _shift(instr, rs1v, rs2v=0):
     return rf.r[RD].v
 
 
+class _StoreMem:
+    """Instruction fetch plus a byte-addressed store log."""
+
+    def __init__(self, instr):
+        self.instr = instr
+        self.written = None
+
+    def read(self, addr, size):
+        return conv_to_bytes(self.instr)
+
+    def write(self, addr, data):
+        self.written = (addr, bytes(data))
+
+
+def _s(funct3, offset):
+    """Encode an S-type store."""
+    return (
+        (((offset >> 5) & 0x7F) << 25)
+        | (RS2 << 20)
+        | (RS1 << 15)
+        | (funct3 << 12)
+        | ((offset & 0x1F) << 7)
+        | 0x23
+    )
+
+
+def _store(funct3, value, base=0x1000, offset=4):
+    rf = _RF()
+    rf.r[RS1].v = base
+    rf.r[RS2].v = value & M
+    mem = _StoreMem(_s(funct3, offset))
+    assert RV_I_ISA.run(rf, mem, False) is True
+    return mem.written
+
+
+def test_stores_write_their_full_width():
+    """`sh` must write two bytes, not one.
+
+    A single-byte `sh` is invisible to anything that only stores words, but it
+    silently drops the upper half of every 16-bit store: a data-movement kernel
+    filling an L1 tile with bfloat16 constants (``ptr[i] = 0x3F80``) ends up
+    with 0x0080 in every element.
+    """
+    assert _store(0x0, 0x3F80) == (0x1004, b"\x80")
+    assert _store(0x1, 0x3F80) == (0x1004, b"\x80\x3f")
+    assert _store(0x2, 0xDEADBEEF) == (0x1004, b"\xef\xbe\xad\xde")
+
+
 def test_blt_is_signed():
     assert _taken(0x4, -3, 2)
     assert not _taken(0x4, 2, -3)

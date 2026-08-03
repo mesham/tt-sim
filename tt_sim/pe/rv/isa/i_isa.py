@@ -346,8 +346,12 @@ class RV_I_ISA(RV_ISA):
                     f"sh {cls.get_reg_name(rs2)}, {hex(offset)}({cls.get_reg_name(rs1)})",
                     f"mem[{hex(tgt_mem_address)}] = {cls.get_reg_name(rs2)}",
                 )
+            # rs2_val is the register's 4 little-endian bytes, so the low
+            # halfword is [0:2]. Slicing [0:1] wrote a single byte (conv_to_bytes
+            # passes a bytes value through verbatim, width is ignored), leaving
+            # the upper byte of every `sh` at its previous value.
             ret_val = memory_space.write(
-                tgt_mem_address, conv_to_bytes(rs2_val[0:1], 2)
+                tgt_mem_address, conv_to_bytes(rs2_val[0:2], 2)
             )
         elif type_val == 0x2:
             # sw

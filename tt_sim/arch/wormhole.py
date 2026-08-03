@@ -46,6 +46,12 @@ WORMHOLE_PROFILE = ArchProfile(
         ((5, 8), (5, 3)),  # channel 4
         ((5, 5), (5, 7)),  # channel 5
     ),
+    # Each DRAM channel is a flat 2 GiB: soc_descriptor.yaml `dram_bank_size` =
+    # 2147483648, matching ttsim config.h DRAM_CHANNEL_SIZE (TT_ARCH_VERSION 0).
+    # 6 channels = 12 GiB. tt-metal banks each channel as two 1 GiB views
+    # (`dram_view_size` = 1073741824 at address_offset 0 and 1 GiB), so the
+    # second view is just the top half of this one range.
+    dram_channel_size=0x8000_0000,
     # Default: a single Tensix at the historical (18, 18) coord every single-tile
     # example bakes in.
     tensix_unified_coords=((18, 18),),

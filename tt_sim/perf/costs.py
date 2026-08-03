@@ -9,11 +9,14 @@ Two YAML files, one schema, one loader:
 * ``tt_sim/perf/unit_costs.yaml`` -- the NoC, DRAM, baby RISC-V cores, Mover
   and L1.
 
-**Nothing consumes this yet, deliberately.** ROADMAP section I's cost tables
-need instructions to have a *duration*, which needs the integer-cycle event
-queue of ``docs/plans/event-driven-pump.md`` Phase 5. Landing the data first
-means the schema and the provenance discipline can be reviewed on their own,
-and means no timing behaviour changes when they land.
+**Consumed through :mod:`tt_sim.perf.model`, and only when asked.** The tables
+landed ahead of any consumer so the schema and the provenance discipline could
+be reviewed on their own; Phase 5 of ``docs/plans/event-driven-pump.md`` then
+wired the first unit — the Tensix matrix unit — to them, behind
+``TT_SIM_COST_MODEL``. The judgement calls a consumer has to make (an
+untabulated opcode costs nothing; a bound is not an equals sign) are made once,
+in :mod:`tt_sim.perf.model`, and a test in ``costs_test.py`` pins the exact set
+of modules that reach the tables at all.
 
 The one property that matters more than any number in these files is that a
 reader can tell a sourced constant from a placeholder at a glance. tt-sim is a

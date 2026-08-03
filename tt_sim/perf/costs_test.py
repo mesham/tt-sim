@@ -14,9 +14,11 @@ Three things are pinned here, in decreasing order of how much they matter:
 2. **The loader returns what the file says.** Spot checks against the ISA docs'
    own tables, plus the arch-resolution rules (overrides deep-merge, one-arch
    instructions are dropped for the other arch).
-3. **Nothing consumes it.** The tables are dead data by design until Phase 5 of
-   ``docs/plans/event-driven-pump.md``; a test asserts no module outside this
-   package imports them, so wiring them in has to be a deliberate act.
+3. **Who consumes it.** A test pins the exact set of modules outside this
+   package that name the tables — one unit so far, the Tensix matrix unit
+   (Phase 5 of ``docs/plans/event-driven-pump.md``) — so wiring a cost into
+   the execution path has to be a deliberate act rather than a drive-by
+   import.
 """
 
 import pathlib
@@ -486,15 +488,32 @@ def test_unsourced_lists_exactly_the_entries_without_numbers_we_expect():
 
 
 # ---------------------------------------------------------------------------
-# 6. No behaviour change: nothing consumes the tables yet.
+# 6. Who consumes the tables, and nobody else.
 # ---------------------------------------------------------------------------
 
+#: Every module outside ``tt_sim/perf/`` that may name the cost tables. This
+#: list started empty — the tables were dead data by design until Phase 5 of
+#: ``docs/plans/event-driven-pump.md`` — and it grows one unit at a time,
+#: deliberately. The matrix unit was the first, and everything it needed lives
+#: in ``tt_sim/perf/model.py``, so a second unit should add itself here rather
+#: than grow its own reading of the YAML.
+EXPECTED_CONSUMERS = {
+    # The FPU: MVMUL and friends charged the table's occupancy, fidelity-phase
+    # aware. See MatrixUnit.instruction_occupancy.
+    "tt_sim/pe/tensix/backends/matrix.py",
+    # Only mentions the model in prose: the ``cost_model`` attribute and the
+    # ``instruction_occupancy`` hook every unit inherits.
+    "tt_sim/pe/tensix/backends/backend_base.py",
+    "tt_sim/pe/tensix/matrix_cost_model_test.py",
+}
 
-def test_nothing_outside_this_package_imports_the_cost_tables():
-    """The tables are dead data until Phase 5 of the event-driven pump plan.
-    Wiring them into the execution path must be a deliberate change that trips
-    this test, not a drive-by import."""
-    offenders = []
+
+def test_the_cost_tables_have_exactly_the_consumers_we_expect():
+    """Reading a cost into the execution path must be a deliberate change that
+    trips this test, not a drive-by import. Timing is validated here by
+    byte-identical replay and a pinned matmul PCC, so a new consumer is a
+    change to the thing those guards measure and should be reviewed as one."""
+    consumers = set()
     for path in sorted(_REPO_ROOT.rglob("*.py")):
         if "tt_sim/perf/" in path.as_posix():
             continue
@@ -502,8 +521,18 @@ def test_nothing_outside_this_package_imports_the_cost_tables():
             continue
         text = path.read_text(errors="ignore")
         if "tt_sim.perf" in text or "tensix_instruction_costs" in text:
-            offenders.append(path.relative_to(_REPO_ROOT).as_posix())
-    assert not offenders, f"cost tables are consumed by: {offenders}"
+            consumers.add(path.relative_to(_REPO_ROOT).as_posix())
+    assert consumers == EXPECTED_CONSUMERS
+
+
+def test_the_consumers_only_reach_the_tables_through_the_model():
+    """``tt_sim/perf/model.py`` is where the three judgement calls live (no
+    entry means no opinion, a bound is not an equals sign, derived is not
+    measured). A unit that loaded ``load_costs`` itself would be making them
+    again, differently."""
+    for relative in EXPECTED_CONSUMERS:
+        text = (_REPO_ROOT / relative).read_text()
+        assert "tt_sim.perf.costs" not in text, relative
 
 
 def test_raw_tables_exposes_the_unresolved_yaml():

@@ -221,6 +221,7 @@ All are read from the environment and work in this tt-metal-driven flow.
 | `TT_SIM_CYCLES_PER_POLL=N` | sim cycles to run after each wire message (default 100) |
 | `TT_SIM_MOCK_TENSIX=1` | skip building the Wormhole; every core is a NullCore (fast, for wire-level debugging only) |
 | `TT_SIM_PUMP_STRIDE=0` | disable the pump's time-skipping (on by default) — see below |
+| `TT_SIM_COST_MODEL=1` | charge each op the cycle cost the ISA-doc tables give it (off by default) — see below |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS=1` | accept NoC transfers whose source and destination addresses are not congruent, which hardware treats as undefined behaviour |
 
 `TT_SIM_PUMP_STRIDE=0` turns off the event-driven pump's ability to jump
@@ -230,6 +231,20 @@ as it did before. `run(N)` advances exactly N cycles either way and
 window — so this is a debugging switch: if a result differs with it set, the
 difference is a pump bug and worth reporting. See
 [`docs/plans/event-driven-pump.md`](plans/event-driven-pump.md).
+
+`TT_SIM_COST_MODEL=1` (truthy = `1/true/yes/on`) turns on the per-unit
+cycle-cost model: instead of every op retiring in the tick it was issued, a unit
+is occupied for the number of cycles
+[`tensix_instruction_costs.yaml`](../tt_sim/pe/tensix/tensix_instruction_costs.yaml)
+gives its opcode, which back-pressures the thread that issued it. Only the
+Tensix **matrix unit (FPU)** is wired up so far, so today the switch changes
+nothing on any in-tree workload — every matrix op the ISA docs cost is a
+one-cycle occupancy, including `MVMUL` at all four fidelity phases (the fidelity
+multiplier is carried by the instruction *count*, not by a longer instruction).
+An opcode the tables do not cost is charged nothing rather than a made-up
+constant, and a cost the docs wrote as `≥ N` is charged at N, so a modelled
+cycle count is a floor. See [`docs/plans/cost-model.md`](plans/cost-model.md)
+and [`docs/plans/event-driven-pump.md`](plans/event-driven-pump.md) Phase 5.
 
 `TT_SIM_LOG_PROTOCOL` is the first tool to reach for on a hang — it shows which
 core/address the host is polling. `TT_SIM_RECORD` additionally captures the

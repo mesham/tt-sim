@@ -80,6 +80,11 @@ class TensixBackendUnit(Clockable, ABC):
         # this is read once per unit per cycle on the hot path. See
         # ``occupy_for``.
         self.busy_until = None
+        # A ``tt_sim.perf.model.UnitCostModel`` once a unit opts into the
+        # cycle-cost tables *and* ``TT_SIM_COST_MODEL`` is set; ``None``
+        # otherwise, which is the default and keeps every existing cycle count
+        # byte-identical. See ``instruction_occupancy``.
+        self.cost_model = None
 
     def issueInstruction(self, instruction, from_thread):
         # The default issuing of instructions here, which applies to most
@@ -144,6 +149,22 @@ class TensixBackendUnit(Clockable, ABC):
         if cycles > 1:
             self.busy_until = cycle_num + cycles
 
+    def instruction_occupancy(self, instruction_name, issue_thread):
+        """Cycles ``instruction_name`` occupies this unit, or ``None``.
+
+        Only consulted when :attr:`cost_model` is set, and only overridden by
+        units that have been wired to the cycle-cost tables (Phase 5 of
+        ``docs/plans/event-driven-pump.md``); the matrix unit is the first.
+        ``None`` means "no opinion" and leaves the same-cycle retire alone,
+        which is deliberately what an untabulated opcode gets — see
+        ``tt_sim/perf/model.py`` for why that choice is made once, there.
+
+        Called *before* the handler runs, because occupancy is a property of
+        issue and because a handler may advance the state the cost depends on
+        (the matrix unit's ``ADDR_MOD`` step moves the fidelity phase on).
+        """
+        return None
+
     def next_wake_cycle(self, cycle_num):
         # Identical to Clockable's default; spelled out because this is the
         # unit the cost tables attach to and the derivation should be readable
@@ -171,6 +192,11 @@ class TensixBackendUnit(Clockable, ABC):
                     instr_args = instruction_info["instr_args"]
                 else:
                     instr_args = None
+                occupancy = (
+                    self.instruction_occupancy(instruction_name, issue_thread)
+                    if self.cost_model is not None
+                    else None
+                )
                 getattr(self, self.opcode_to_method_map[instruction_name])(
                     instruction_info, issue_thread, instr_args
                 )
@@ -185,6 +211,12 @@ class TensixBackendUnit(Clockable, ABC):
                             thread_id=issue_thread,
                         )
                     )
+                if occupancy is not None:
+                    self.occupy_for(cycle_num, occupancy)
+                    if self.busy_until is not None:
+                        # Occupied past this cycle: whatever else is queued
+                        # waits for the deadline rather than retiring now.
+                        return
             else:
                 raise NotImplementedError(
                     f"{self.unit_name} unit can not handle instruction '{instruction_info['name']}'"

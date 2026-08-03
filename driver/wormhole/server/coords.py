@@ -12,9 +12,9 @@ How the pairing works:
   to the wire: ``dram[channel][worker_endpoint[0]]`` is the physical NoC
   coord; ``Wormhole.DRAM_CHANNEL_UNIFIED_COORDS[channel]`` is the
   ``DRAMTile`` that backs it. The two sub-endpoints serving the same
-  controller alias to the same ``DRAMTile`` — the 1 GB ``address_offset``
-  baked into the buffer address by the tt-metal allocator selects
-  ``ddr_bank_0`` vs ``ddr_bank_1`` inside that tile.
+  controller alias to the same ``DRAMTile``, whose 2 GB channel is one flat
+  address space — the 1 GB ``address_offset`` the tt-metal allocator bakes
+  into the buffer address just picks the half.
 
 - **Tensix.** Every ``functional_workers[i]`` entry maps to a unified coord
   in the 8×10 worker band ``(18-25, 16-25)`` (DRAM occupies ``(16-17, 16-18)``

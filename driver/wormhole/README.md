@@ -126,12 +126,16 @@ asserts every host READ reply reproduces bit-for-bit — the Wormhole analogue o
 Blackhole's `server/*_replay_test.py`. Recapture the traces after a tt-metal
 bump with [`tests/capture_traces.sh`](tests/capture_traces.sh).
 
-One guard is not an example: [`server/sfpumath_replay_test.py`](server/sfpumath_replay_test.py)
-replays `optests/sfpumath` and checks the **values** against a frozen
-ttsim-Wormhole dump (`traces/sfpumath.expected`), so the SFPU's FP32 math stays
-bit-exact with the vendor reference without an oracle in the loop. Recapture it
-with `TT_SIM_ARCH=wormhole TT_SIM_RECORD=driver/wormhole/server/traces/sfpumath.trace
-./optests/diff.sh sfpumath` (and refresh `.expected` from that run's oracle
+Some guards are not examples but `optests/` programs, replayed the same way and
+checked on **values** against a frozen ttsim-Wormhole dump
+(`traces/<name>.expected`) so the vendor reference stays pinned with no oracle
+in the loop: [`server/sfpumath_replay_test.py`](server/sfpumath_replay_test.py)
+(FP32 SFPU: recip / tanh / sigmoid) and
+[`server/softplus_replay_test.py`](server/softplus_replay_test.py) (upstream's
+`sfpu_eltwise_chain` — exp → SFPU add → log on a bfloat16 Dst, with the ones
+tile built on-device by 16-bit BRISC stores). Recapture either with
+`TT_SIM_ARCH=wormhole TT_SIM_RECORD=driver/wormhole/server/traces/<name>.trace
+./optests/diff.sh <name>` (and refresh `.expected` from that run's oracle
 output) — never to make the test pass, only when the trace itself is stale.
 
 ## The examples

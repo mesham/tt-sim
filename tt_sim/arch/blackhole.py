@@ -99,6 +99,13 @@ BLACKHOLE_PROFILE = ArchProfile(
         (9, 4),
         (9, 7),
     ),
+    # DRAM per channel: soc_descriptor.yaml `dram_bank_size` / `dram_view_size`
+    # = 4,278,190,080 = 0xFF00_0000, one view per channel; 8 channels = 31.9
+    # GiB. The physical channel is 4 GiB (ttsim config.h DRAM_CHANNEL_SIZE,
+    # TT_ARCH_VERSION 1) but the top 16 MiB of a tile's NoC address space is the
+    # register aperture, which is why the descriptor stops at 0xFF00_0000 — and
+    # why a top-down allocation tops out at 0xFEFF_FC00, inside this range.
+    dram_channel_size=0xFF00_0000,
     # First functional worker: physical (1, 2).
     tensix_unified_coords=((1, 2),),
     # Blackhole holds the destination coord in the dedicated HI register.

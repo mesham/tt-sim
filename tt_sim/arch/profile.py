@@ -71,6 +71,21 @@ class ArchProfile:
     #: normalises Blackhole addresses to the Wormhole-canonical layout.
     noc_blackhole_cmd_buf_layout: bool
 
+    #: Bytes of DRAM one channel exposes to the NoC, i.e. the flat address space
+    #: one ``DRAMTile`` answers for. This is the SoC descriptor's
+    #: ``dram_bank_size``: 0x8000_0000 (2 GiB) x 6 channels = 12 GiB on
+    #: Wormhole, 0xFF00_0000 x 8 = 31.9 GiB on Blackhole. Wormhole's matches the
+    #: physical channel (``DRAM_CHANNEL_SIZE`` in the vendor reference
+    #: simulator's ``src/config.h``); Blackhole's physical channel is
+    #: 0x1_0000_0000 (4 GiB) but the top 16 MiB of a tile's NoC address space is
+    #: the register aperture (the NIU block at 0xFFB20000 lives there), so the
+    #: descriptor stops short of it and so do we — leaving a stray register
+    #: access to a DRAM tile unmapped and loud rather than silently landing in
+    #: data. tt-metal's ``dram_view_size`` banking (two 1 GiB views per Wormhole
+    #: channel, one view per Blackhole channel) is an offset *inside* this
+    #: range. Backed sparsely — see ``SparseAddressableMemory``.
+    dram_channel_size: int
+
     #: RISC-V ISA extensions every baby core implements beyond RV32IM + the
     #: ``.ttinsn`` custom op, as lower-case names (mapped to ISA classes in
     #: ``BabyRISCV``). Wormhole baby cores are RV32IM-only, so this is empty;

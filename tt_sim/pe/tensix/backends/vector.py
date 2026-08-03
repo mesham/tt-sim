@@ -264,6 +264,10 @@ class VectorUnit(TensixBackendUnit):
     MOD1_BITWISE_XOR = 6
     MOD1_IMM16_IS_LANE_MASK = 8
 
+    # Blackhole SFPGT / SFPLE ``instr_mod1``: where the comparison result goes.
+    SFPCMP_MOD1_SET_LANE_FLAGS = 1
+    SFPCMP_MOD1_SET_VD = 8
+
     SFPLOADI_MOD0_FLOATB = 0  # Immediate is BF16
     SFPLOADI_MOD0_FLOATA = 1  # Immediate is FP16 (ish)
     SFPLOADI_MOD0_USHORT = 2  # Immediate is UINT16
@@ -1612,33 +1616,71 @@ class VectorUnit(TensixBackendUnit):
                             case VectorUnit.SFPSETCC_MOD1_LREG_EQ0:
                                 self.laneFlags[lane] = c == 0
 
-    def _set_lane_flags_cmp(self, vd, vc, compare):
+    @staticmethod
+    def _sign_mag_total_order(value):
+        """Map a lane's 32-bit sign-magnitude pattern onto a monotonic int32.
+
+        The Blackhole comparisons order lanes as sign-magnitude integers rather
+        than as IEEE floats: a negative pattern is flipped (``x ^ 0x7fffffff``)
+        so that ordinary integer ``<``/``>`` reproduces the hardware's ordering,
+        including ``-0 < +0``. Mirrors ttsim's ``sign_mag32_total_order``.
+        """
+        value &= 0xFFFFFFFF
+        if value & 0x80000000:
+            value ^= 0x7FFFFFFF
+        return conv_to_int32(value)
+
+    def _compare_lanes(self, name, mod1, vd, vc, compare):
         """Shared body of the Blackhole SFPGT / SFPLE comparisons.
 
-        Per BlackholeA0/.../VectorUnit.md these set ``LaneFlags[Lane]`` from a
-        comparison of ``LReg[lreg_dest]`` (VD) against ``LReg[lreg_c]`` (VC),
-        under FP32 ordering. Only the FP32-mode flag update is modelled (the
-        sign-magnitude-integer mode's extra ``VD = ... ? -(2^31-1) : +0`` write
-        is not yet emitted by any path we run).
+        Per BlackholeA0/.../VectorUnit.md, ``instr_mod1`` picks where the result
+        of comparing ``LReg[lreg_dest]`` (VD) against ``LReg[lreg_c]`` (VC)
+        lands: mod1 1 updates ``LaneFlags``, mod1 8 writes an all-ones / all-zero
+        mask into VD (leaving LaneFlags alone). The mask form is what every stock
+        Blackhole ``exp_tile`` emits — it masks the integer part before SFPSETEXP
+        instead of clamping with an SFPSWAP — so dropping it silently produced a
+        garbage exponent. Any other modifier is undefined; ttsim rejects it, and
+        so do we rather than guess.
         """
+        if mod1 not in (
+            VectorUnit.SFPCMP_MOD1_SET_LANE_FLAGS,
+            VectorUnit.SFPCMP_MOD1_SET_VD,
+        ):
+            raise NotImplementedError(
+                f"{name} with instr_mod1={mod1} is not modelled (want 1 or 8)"
+            )
+        set_vd = mod1 == VectorUnit.SFPCMP_MOD1_SET_VD
         for lane in range(32):
             if vd < 12 or self.laneConfigValue(lane, VectorUnit.DISABLE_BACKDOOR_LOAD):
                 if self.isLaneEnabled(lane):
-                    self.laneFlags[lane] = compare(
-                        self._as_fp32(self.lregs[vd][lane]),
-                        self._as_fp32(self.lregs[vc][lane]),
+                    result = compare(
+                        self._sign_mag_total_order(self.lregs[vd][lane]),
+                        self._sign_mag_total_order(self.lregs[vc][lane]),
                     )
+                    if set_vd:
+                        if vd < 8 or vd == 16:
+                            self.lregs[vd][lane] = 0xFFFFFFFF if result else 0
+                    else:
+                        self.laneFlags[lane] = result
 
     def handle_sfpgt(self, instruction_info, issue_thread, instr_args):
-        # Blackhole SFPGT: LaneFlags[Lane] = (VD > VC).
-        self._set_lane_flags_cmp(
-            instr_args["lreg_dest"], instr_args["lreg_c"], lambda d, c: d > c
+        # Blackhole SFPGT: (VD > VC) into LaneFlags (mod1 1) or VD (mod1 8).
+        self._compare_lanes(
+            "SFPGT",
+            instr_args["instr_mod1"],
+            instr_args["lreg_dest"],
+            instr_args["lreg_c"],
+            lambda d, c: d > c,
         )
 
     def handle_sfple(self, instruction_info, issue_thread, instr_args):
-        # Blackhole SFPLE: LaneFlags[Lane] = (VD <= VC).
-        self._set_lane_flags_cmp(
-            instr_args["lreg_dest"], instr_args["lreg_c"], lambda d, c: d <= c
+        # Blackhole SFPLE: (VD <= VC) into LaneFlags (mod1 1) or VD (mod1 8).
+        self._compare_lanes(
+            "SFPLE",
+            instr_args["instr_mod1"],
+            instr_args["lreg_dest"],
+            instr_args["lreg_c"],
+            lambda d, c: d <= c,
         )
 
     def handle_sfpmul24(self, instruction_info, issue_thread, instr_args):
@@ -1903,6 +1945,22 @@ class VectorUnit(TensixBackendUnit):
             return extract_bits(instruction_info["raw_instruction"], 3, 13)
         return instr_args["sfpu_addr_mode"]
 
+    @staticmethod
+    def _read_dest_reg_addr(instr_args):
+        # SFPLOAD/SFPSTORE ``dest_reg_addr`` is the ISA's ``imm10`` — bits 9:0,
+        # on *both* architectures. The shared instruction table only carries
+        # each field's start bit and infers its width from the next field's, so
+        # ``dest_reg_addr`` (start 0) is decoded as bits 13:0, swallowing the
+        # three reserved bits 12:10 and, on Blackhole, bit 13 — which there
+        # belongs to the 3-bit ``sfpu_addr_mode`` (15:13, see
+        # ``_read_sfpu_addr_mode``). A Blackhole SFPU addr_mode of 4..7 therefore
+        # leaked 0x2000 into the Dst row address, putting every stock bfloat16-Dst
+        # ``init_sfpu`` kernel thousands of rows past the end of Dst. Wormhole's
+        # addr_mode is 15:14, so nothing ever set those bits there. Mask to the
+        # documented width (ttsim's ``tensix_isa.json`` says ``"9:0"`` for both
+        # arches).
+        return instr_args["dest_reg_addr"] & 0x3FF
+
     def get_dst_address(self, issue_thread, mod0, imm10):
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
@@ -1953,7 +2011,7 @@ class VectorUnit(TensixBackendUnit):
         return addr, mod0
 
     def handle_sfpstore(self, instruction_info, issue_thread, instr_args):
-        imm10 = instr_args["dest_reg_addr"]
+        imm10 = self._read_dest_reg_addr(instr_args)
         addrmod = self._read_sfpu_addr_mode(instruction_info, instr_args)
         mod0 = instr_args["instr_mod0"]
         vd = instr_args["lreg_ind"]
@@ -2045,7 +2103,7 @@ class VectorUnit(TensixBackendUnit):
         self.backend.getRWC(issue_thread).applyPartialAddrMod(issue_thread, addrmod)
 
     def handle_sfpload(self, instruction_info, issue_thread, instr_args):
-        imm10 = instr_args["dest_reg_addr"]
+        imm10 = self._read_dest_reg_addr(instr_args)
         addrmod = self._read_sfpu_addr_mode(instruction_info, instr_args)
         mod0 = instr_args["instr_mod0"]
         vd = instr_args["lreg_ind"]

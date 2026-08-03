@@ -143,6 +143,25 @@ units:
       cycles_per_tile: { LoFi: 16, HiFi2: 32, HiFi3: 48, HiFi4: 64 }
       phases: { LoFi: 1, HiFi2: 2, HiFi3: 3, HiFi4: 4 }
       mul_adds_per_cycle_lofi: 4096
+      # Needed to turn the per-tile figure above into the per-instruction one
+      # the simulator charges. Kept here rather than in code because it is a
+      # sourced number like the others -- see tt_sim/perf/model.py's
+      # UnitCostModel.fidelity_occupancy, the first consumer of this block.
+      mvmuls_per_tile:
+        count: 16
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#mvmul
+        derivation: >
+          One MVMUL multiplies eight rows of SrcB by a 16x16 block of SrcA into
+          eight rows of Dst. A 32x32 by 32x32 tile matmul is four 16x16 output
+          faces, each accumulating over two K faces, and each 16x16 face takes
+          two MVMULs at eight rows apiece: 4 * 2 * 2 = 16 instructions per
+          fidelity phase. Cross-checks against the vendor numbers above --
+          8*16*16 = 2048 multiply-accumulates is 4096 muladds, exactly the
+          quoted per-cycle rate, so 16 MVMULs is 16 cycles, which is
+          cycles_per_tile at LoFi -- and against tt-sim's own six replay
+          (a 128^3 bf16 matmul), which issues 1024 MVMULs per fidelity phase
+          for 64 tile matmuls.
       provenance: vendor_source
       source: tm_gemm_flops#L101
       note: >

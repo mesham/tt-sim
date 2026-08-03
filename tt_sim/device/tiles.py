@@ -11,7 +11,7 @@ assemble these into a netlist. See ``docs/plans/blackhole-support.md``.
 from tt_sim.device.tt_device import (
     TTDeviceTile,
 )
-from tt_sim.memory.memory import DRAM, TensixMemory, TileMemory
+from tt_sim.memory.memory import DRAM, SparseDRAM, TensixMemory, TileMemory
 from tt_sim.memory.memory_map import AddressRange, MemoryMap
 from tt_sim.misc.mailbox import Mailbox
 from tt_sim.misc.tile_ctrl import TensixTileControl
@@ -42,13 +42,18 @@ class DRAMTile(TTDeviceTile):
     ):
         dram_tile_mem_map = MemoryMap()
 
-        self.ddr_bank_0 = DRAM(10 * 1024 * 1024)
-        ddr_range = AddressRange(0x0, self.ddr_bank_0.getSize())
-        dram_tile_mem_map[ddr_range] = self.ddr_bank_0
-
-        self.ddr_bank_1 = DRAM(10 * 1024 * 1024)
-        ddr_range = AddressRange(0x0_4000_0000, self.ddr_bank_1.getSize())
-        dram_tile_mem_map[ddr_range] = self.ddr_bank_1
+        # One flat range covering the whole channel (2 GiB Wormhole /
+        # 0xFF00_0000 Blackhole, from the profile). tt-metal banks the channel
+        # into views — Wormhole's two 1 GiB views put the second one at
+        # 0x4000_0000 — but those are offsets *within* this space, not separate
+        # memories, so registering the channel whole is both simpler and what
+        # the hardware does. Modelling less than the channel leaves holes: a
+        # top-down allocation (``DeviceLocalBufferConfig{.bottom_up = false}``)
+        # starts at the very top of the bank and used to land outside every
+        # registered range. Sparse because 6 x 2 GiB / 8 x ~4 GiB cannot be
+        # allocated up front; untouched chunks read as zeros.
+        self.ddr = SparseDRAM(profile.dram_channel_size)
+        dram_tile_mem_map[AddressRange(0x0, self.ddr.getSize())] = self.ddr
 
         self.dram_memory = TileMemory(dram_tile_mem_map, safe, snoop_addresses)
 

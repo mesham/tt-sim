@@ -228,7 +228,105 @@ class AddressableMemory(MemMapable):
         return self.size
 
 
+class SparseAddressableMemory(MemMapable):
+    """An :class:`AddressableMemory` whose backing store is allocated on demand.
+
+    Same read/write contract, but the space is cut into fixed-size chunks and a
+    chunk's ``np.zeros`` is only materialised the first time it is *written*;
+    reads of an untouched chunk return zeros. That is the same power-on contract
+    ``AddressableMemory`` documents (and the same reason it uses ``np.zeros``
+    rather than ``np.empty``) — just paid for lazily.
+
+    This exists because a DRAM channel is honestly large: 2 GiB on Wormhole and
+    4 GiB on Blackhole, times 6 / 8 channels, so a flat array per channel would
+    ask for 12 / 32 GiB at device construction. The vendor reference simulator
+    solves it the same way, with a lazily-faulted anonymous ``mmap`` per channel
+    (ttsim ``src/sim.cpp``); Python has no equivalent, so chunk it explicitly.
+    """
+
+    #: 2 MiB, matching the huge page ttsim ``madvise``s its DRAM mapping to.
+    CHUNK_SIZE = 2 * 1024 * 1024
+
+    def __init__(self, size, alignment=None, chunk_size=None):
+        self.size = size
+        self.alignment = alignment
+        self.chunk_size = self.CHUNK_SIZE if chunk_size is None else chunk_size
+        self.chunks: dict[int, np.ndarray] = {}
+
+    def _check_range(self, addr, size):
+        if addr > self.size:
+            raise IndexError(
+                f"Start address '{addr}' overflows memory size '{self.size}'"
+            )
+        if addr + size > self.size:
+            raise IndexError(
+                f"End address '{addr + size}' overflows memory size '{self.size}'"
+            )
+
+    def read(self, addr, size):
+        self._check_range(addr, size)
+        if size <= 0:
+            return b""
+        index, offset = divmod(addr, self.chunk_size)
+        if offset + size <= self.chunk_size:
+            # Common case: the access sits inside one chunk.
+            chunk = self.chunks.get(index)
+            if chunk is None:
+                return bytes(size)
+            return chunk[offset : offset + size].tobytes()
+        out = bytearray(size)
+        pos = 0
+        while pos < size:
+            take = min(self.chunk_size - offset, size - pos)
+            chunk = self.chunks.get(index)
+            if chunk is not None:
+                out[pos : pos + take] = chunk[offset : offset + take].tobytes()
+            pos += take
+            index += 1
+            offset = 0
+        return bytes(out)
+
+    def write(self, addr, value, size=None):
+        assert isinstance(value, bytes)
+
+        if size is None:
+            size = len(value)
+
+        self._check_range(addr, size)
+
+        if self.alignment is not None and addr % self.alignment != 0:
+            raise IndexError(
+                f"Start address must be aligned to '{self.alignment}' whereas '{addr}' is not"
+            )
+
+        if size <= 0:
+            return
+        byte_buffer = np.frombuffer(value, dtype=np.uint8)[:size]
+        index, offset = divmod(addr, self.chunk_size)
+        pos = 0
+        while pos < size:
+            take = min(self.chunk_size - offset, size - pos)
+            chunk = self.chunks.get(index)
+            if chunk is None:
+                chunk = np.zeros(self.chunk_size, dtype=np.uint8)
+                self.chunks[index] = chunk
+            chunk[offset : offset + take] = byte_buffer[pos : pos + take]
+            pos += take
+            index += 1
+            offset = 0
+
+    def getSize(self):
+        return self.size
+
+
 class DRAM(AddressableMemory):
+    def __init__(self, size):
+        super().__init__(size, None)
+
+
+class SparseDRAM(SparseAddressableMemory):
+    """A DRAM channel: too large to allocate eagerly, so chunked on demand."""
+
     def __init__(self, size):
         super().__init__(size, None)
 
