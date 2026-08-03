@@ -16,27 +16,32 @@ values. The golden is therefore **computed here** rather than frozen from a
 dump; ttsim-Blackhole reproduces the ramp exactly on all three ops
 (``./optests/diff.sh untilize``).
 
-Only **op0** is checked today. The two row-major ops are live differential
-failures against ttsim on this architecture, for two unrelated reasons, and
-freezing their current values would only pin bugs in place:
-
-* op1 ``untilize_block`` is the deprecated *unpack*-based untilize, so its
-  row-major-ness comes from the unpacker, not the packer; tt-sim models neither
-  architecture's unpacker untilize mode and returns the same wrong tile on both.
-* op2 ``pack_untilize_dest`` lowers to a completely different instruction
-  sequence on Blackhole than on Wormhole: one packer interface pair in
-  ``DST_ACCESS_STRIDED_MODE`` (PACR's Blackhole-only ``dst_access_mode``, with
-  ``DEST_ACCESS_CFG`` swizzle/remap), where the second half of each PACR's
-  datums comes from Dst row ``base + 16`` rather than ``base + 1``. tt-sim's
-  PACR decode has no ``dst_access_mode`` field, so it reads the rows
-  contiguously. Wormhole's four-packer form of the same op *is* checked, in
-  ``driver/wormhole/server/untilize_replay_test.py``.
-
-op0 is not busywork here: it is the control that pins the shared packer address
-generator -- the AddrMod Ydst/Zdst output-counter advance and the output byte
-address carrying forward across a tile's PACRs, both of which this architecture
-now takes the same path through as Wormhole. When either gap above closes, move
+op0 and op1 are checked. op2 is still a live differential failure against ttsim
+on this architecture, for a reason of its own, and freezing its current value
+would only pin a bug in place: ``pack_untilize_dest`` lowers to a completely
+different instruction sequence on Blackhole than on Wormhole -- one packer
+interface pair in ``DST_ACCESS_STRIDED_MODE`` (PACR's Blackhole-only
+``dst_access_mode``, with ``DEST_ACCESS_CFG`` swizzle/remap), where the second
+half of each PACR's datums comes from Dst row ``base + 16`` rather than
+``base + 1``. tt-sim's PACR decode has no ``dst_access_mode`` field, so it reads
+the rows contiguously and 992 of the 1024 datums land wrong. Wormhole's
+four-packer form of the same op *is* checked, in
+``driver/wormhole/server/untilize_replay_test.py``. When that gap closes, move
 the op into ``CHECKED_OPS``.
+
+op1 is the unpack-side untilize, and it is the reason this guard grew: its
+row-major-ness comes from the *unpacker*'s output address generator rather than
+the packer. ``llk_unpack_untilize`` widens the tile descriptor's ``YDim`` to 16
+so channel 0's Z stride is a whole face, and steps ADC channel 1's Y once per
+UNPACR against a 16-datum ``Ystride`` -- so each 16-datum face row lands at its
+own SrcA row and the four faces interleave into output rows. Reading the
+descriptor a word at a time and carrying that start row through the
+``SRCA_SET_SetOvrdWithAddr`` path is what this op checks.
+
+op0 is not busywork either: it is the control that pins the shared packer
+address generator -- the AddrMod Ydst/Zdst output-counter advance and the output
+byte address carrying forward across a tile's PACRs, both of which this
+architecture now takes the same path through as Wormhole.
 
 Run:  python3 -m driver.blackhole.server.untilize_replay_test
 """
@@ -74,8 +79,8 @@ DATA_SIZE = NUM_OPS * TILE_ELEMS
 OP_NAMES = ["pack_tile (tiled control)", "untilize_block", "pack_untilize_dest"]
 # op -> is the output tiled (rather than row-major)?
 OP_IS_TILED = [True, False, False]
-# See the module docstring for why op1 and op2 are not checked here.
-CHECKED_OPS = [0]
+# See the module docstring for why op2 is not checked here.
+CHECKED_OPS = [0, 1]
 
 
 def _ramp_bits(j):
@@ -184,8 +189,9 @@ def main():
     print(
         f"blackhole untilize_replay test OK ({n_msgs} messages; all "
         f"{len(CHECKED_OPS) * TILE_ELEMS} bfloat16 results across "
-        f"{len(CHECKED_OPS)} op ({checked}) match the computed golden; the two "
-        f"row-major ops are unmodelled, see this file's docstring)"
+        f"{len(CHECKED_OPS)} ops ({checked}) match the computed golden; "
+        f"pack_untilize_dest not checked -- DST_ACCESS_STRIDED_MODE is "
+        f"unmodelled, see this file's docstring)"
     )
     return 0
 

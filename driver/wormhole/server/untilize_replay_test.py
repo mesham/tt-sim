@@ -14,30 +14,36 @@ output CB:
 * op1  ``untilize_block``       -- CB -> CB row-major untilize (unpack-side)
 * op2  ``pack_untilize_dest``   -- DST -> CB row-major untilize (pack-side)
 
-op2 is the one this guard exists for. A row-major untilize interleaves the
-tile's four 16x16 faces into output *rows*: on Wormhole all four packers run at
-once, each owning eight output rows, and the sixteen PACRs that pack the tile
-must (a) advance the pack Y/Z input counters rather than overwrite them, (b)
-advance the *output* counter off the AddrMod's Ydst/Zdst fields rather than
-Ysrc/Zsrc, and (c) carry the output byte address forward so each PACR appends
-after the last. Getting any of those wrong collapses the tile onto its first
-output row -- the signature the tt-xftn compiler team reported. op0 is the
-built-in control: it packs each face at Y = 0, where set == accumulate, so it
-must stay correct either way.
+A row-major untilize interleaves the tile's four 16x16 faces into output *rows*.
+ops 1 and 2 reach that through opposite ends of the pipe, and this guard covers
+both:
+
+* op2, pack-side. All four packers run at once, each owning eight output rows,
+  and the sixteen PACRs that pack the tile must (a) advance the pack Y/Z input
+  counters rather than overwrite them, (b) advance the *output* counter off the
+  AddrMod's Ydst/Zdst fields rather than Ysrc/Zsrc, and (c) carry the output
+  byte address forward so each PACR appends after the last. Getting any of those
+  wrong collapses the tile onto its first output row -- the signature the
+  tt-xftn compiler team reported.
+* op1, unpack-side. ``llk_unpack_untilize`` leaves the *input* walk contiguous
+  and works the unpacker's output address generator instead: it widens the tile
+  descriptor's ``YDim`` to 16 so ADC channel 0's Z stride is a whole face, and
+  steps channel 1's Y once per UNPACR against a 16-datum ``Ystride``, so each
+  16-datum face row lands at its own SrcA row. That start row has to survive the
+  ``SRCA_SET_SetOvrdWithAddr`` path; dropping it put all sixteen UNPACRs on SrcA
+  row 0. Nothing about ``Tileize_mode``/``RowStride`` is involved.
+
+op0 is the built-in control: it packs each face at Y = 0, where set ==
+accumulate, so it must stay correct either way, which isolates a fault to the
+untilize rather than the matmul, the intermediate CB or copy_tile.
 
 The matmul's second operand is the identity tile, so C = A and every stage is a
 lossless permutation of an input chosen to be 1024 distinct bfloat16-exact
 values. The golden is therefore **computed here** rather than frozen from a
 dump, and it was checked against ttsim-Wormhole's own dump before being written
 down (``TT_SIM_ARCH=wormhole ./optests/diff.sh untilize``: ttsim reproduces the
-ramp exactly on all three ops).
-
-op1 is deliberately **not** checked: ``untilize_block`` is the deprecated
-unpack-based untilize, so its row-major-ness comes from the unpacker rather
-than the packer, and tt-sim does not yet model that unpacker mode -- on both
-architectures it returns the same wrong tile. It stays in the trace (and in the
-op test, where it is a live differential failure against ttsim) so that
-whoever closes the unpacker gap can simply move it into ``CHECKED_OPS``.
+ramp exactly on all three ops, and tt-sim now matches it on all three too, so
+every op is checked here).
 
 Run:  python3 -m driver.wormhole.server.untilize_replay_test
       (or under pytest, as ``test_untilize_replay``)
@@ -76,8 +82,7 @@ DATA_SIZE = NUM_OPS * TILE_ELEMS
 OP_NAMES = ["pack_tile (tiled control)", "untilize_block", "pack_untilize_dest"]
 # op -> is the output tiled (rather than row-major)?
 OP_IS_TILED = [True, False, False]
-# op1 is the unpack-based untilize; see the module docstring.
-CHECKED_OPS = [0, 2]
+CHECKED_OPS = [0, 1, 2]
 
 
 def _ramp_bits(j):
@@ -188,8 +193,7 @@ def main():
     print(
         f"wormhole untilize_replay test OK ({n_msgs} messages; all "
         f"{len(CHECKED_OPS) * TILE_ELEMS} bfloat16 results across "
-        f"{len(CHECKED_OPS)} ops ({checked}) match the computed golden; "
-        f"untilize_block not checked -- unpack-side untilize is unmodelled)"
+        f"{len(CHECKED_OPS)} ops ({checked}) match the computed golden)"
     )
     return 0
 

@@ -158,15 +158,23 @@ class TensixBackend:
             val = self.getConfigUnit().get_config_entry(state_id, addr_idx)
             return TensixConfigurationConstants.parse_raw_config_value(val, key)
         else:
-            results = []
-            for word in range(words):
-                val = self.getConfigUnit().get_config_entry(
-                    state_id, addr_idx + (word * 4)
+            # A multi-word register occupies *consecutive* config words: the
+            # config array is indexed in 32-bit words, so word n of the register
+            # named by ``key`` is at ``addr_idx + n``, not ``addr_idx + 4 * n``.
+            # The only such register is the unpacker's tile descriptor, whose
+            # fields the ISA docs place at bits 16-31 (XDim), 32-39 (YDim),
+            # 48-55 (ZDim) and 64-71 (WDim) of one contiguous bit string -- i.e.
+            # words 0, 1, 1 and 2. Striding by four read THCON_SEC0_REG1 / REG2 /
+            # REG3 in place of descriptor words 1 / 2 / 3, which happened to hold
+            # the right ZDim and a YDim of 0 (read as 1) for an ordinary tile,
+            # and so went unnoticed until ``llk_unpack_untilize`` set YDim to 16.
+            return [
+                TensixConfigurationConstants.parse_raw_config_value(
+                    self.getConfigUnit().get_config_entry(state_id, addr_idx + word),
+                    key,
                 )
-                results.append(
-                    TensixConfigurationConstants.parse_raw_config_value(val, key)
-                )
-            return results
+                for word in range(words)
+            ]
 
     def hasInflightInstructionsFromThread(self, from_thread):
         for unit in self.backend_units.values():

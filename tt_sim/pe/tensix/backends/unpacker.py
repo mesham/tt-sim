@@ -749,6 +749,7 @@ class UnPackerUnit(TensixBackendUnit):
         upsampleZeroes,
         upsampleInterleave,
         colShift,
+        outAddr,
     ):
         """Reject the UNPACR modes whose datum walk this unpacker does not model.
 
@@ -762,6 +763,23 @@ class UnPackerUnit(TensixBackendUnit):
         is left here is the sub-byte datum the strided walk cannot address, and
         the two "shift the datums about" modes the walk still knows nothing of.
         """
+        if outAddr & 15:
+            # The doc's output loop derives both coordinates from one running
+            # counter -- ``Row = OutAddr / 16; Col = OutAddr & 15`` -- and marks
+            # a start address that is not a whole row UnsupportedFunctionality
+            # ("no known usage, confidence in specification is weak"); the
+            # reference simulator refuses it too. The walk below splits the
+            # counter into a row index and a column of 16, which is exact only
+            # while the low nibble is zero, so refuse rather than silently drop
+            # the column offset (and the row carry it would produce).
+            raise NotImplementedError(
+                f"Unpacker {self.unpacker_id}: an output address of {outAddr} "
+                f"datums does not start on a 16-datum row boundary "
+                f"(OutAddr & 15 == {outAddr & 15}). UNPACR_Regular.md marks a "
+                f"misaligned OutAddr UnsupportedFunctionality; only whole-row "
+                f"output addresses are modelled."
+            )
+
         if discontiguousInputRows and datumSizeBytes < 1:
             # The doc calls this UndefinedBehavior outright ("BFP2(a) has no
             # valid Throttle_mode with tileize; BFP4(a) addressing is
@@ -913,10 +931,30 @@ class UnPackerUnit(TensixBackendUnit):
                 else:
                     # Always srcA
                     if not unpackToDst:
+                        # ``Row`` is ``OutAddr / 16`` (less the four-row skew),
+                        # and OutAddr advances one per datum from the *initial*
+                        # output address -- so the row this UNPACR starts at is
+                        # part of the row index whichever way the doc's two
+                        # branches then adjust it. Dropping ``start_row`` on the
+                        # SetOvrdWithAddr branch (which every current LLK takes)
+                        # collapsed every UNPACR of an unpack-side untilize onto
+                        # SrcA row 0: llk_unpack_untilize steps the *output*
+                        # address generator, bumping ADC channel 1's Y by one per
+                        # UNPACR against a 16-datum Ystride, and that Y is the
+                        # only thing that says which SrcA row a face row lands in.
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
                         ):
-                            assert outRow < 64
+                            # SrcA is 64 rows and the row index is six bits, so
+                            # a row past the end wraps to the start. Blackhole's
+                            # UNPACR_Regular.md says so outright ("Row &= 63;
+                            # allowed for BH fast tilize"); Wormhole's calls it
+                            # UndefinedBehavior, but its own LLK relies on the
+                            # wrap -- the SrcA clear ahead of the int32/fp32
+                            # SFPU kernels (examples five, five-fp, loopback)
+                            # reaches this with ADC channel 1's Z accumulated to
+                            # exactly 64 rows, i.e. row 64 == row 0.
+                            outRow = (outRow + start_row) & 0x3F
                         else:
                             assert outRow < 16
                             outRow += self.srcRow[issue_thread] + start_row
@@ -1026,7 +1064,12 @@ class UnPackerUnit(TensixBackendUnit):
         elif self.backend.getThreadConfigValue(
             issue_thread, "SRCA_SET_SetOvrdWithAddr"
         ):
-            assert numRows <= 64  # the scalar loop's per-datum `outRow < 64`
+            # Same as the scalar loop: the row this UNPACR's output address
+            # starts at, wrapped within the 64-row bank. Consecutive rows stay
+            # distinct under the wrap as long as there are at most 64 of them,
+            # so the indexed assignment below cannot alias.
+            assert numRows <= 64
+            rows = (rows + start_row) & 0x3F
         else:
             assert numRows <= 16  # ... and its `outRow < 16`
             rows = rows + self.srcRow[issue_thread] + start_row
@@ -1357,6 +1400,7 @@ class UnPackerUnit(TensixBackendUnit):
             upsampleZeroes,
             upsampleInterleave,
             colShift,
+            outAddr,
         )
 
         return {
