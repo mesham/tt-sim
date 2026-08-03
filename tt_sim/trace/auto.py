@@ -1,9 +1,11 @@
 """Environment-driven auto-setup for tracing.
 
-Called from `Wormhole.__init__` and `Blackhole.__init__` so any driver
+Called from `TT_Device.__init__` (and `_begin_construction`) so any driver
 script that constructs a device picks up trace env vars automatically —
-no per-example wiring. A new architecture must call it too, or its
-devices silently ignore every var below.
+no per-example wiring, and no per-architecture wiring either. It used to be
+called from `Wormhole.__init__` only, which is why Blackhole devices silently
+ignored every var below; `tt_sim/device/parity_test.py` guards against that
+returning.
 
 Supported env vars (all optional, all default-off):
 

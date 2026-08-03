@@ -65,9 +65,16 @@ def main():
     device.write(dram, 0x100, payload, len(payload))
 
     noc_read(device, tensix, dram, src_off=0x100, dst_off=0x200, size=len(payload))
-    device.run(30)  # pump the clock so the request and its response propagate
-
+    # Pump until the request and its response have propagated. A round trip is
+    # two cycles with the NoC per-hop latency model off and a few hundred with
+    # it on (``TT_SIM_COST_MODEL``), so waiting on the data rather than on a
+    # fixed cycle count keeps this a routing check instead of a timing pin.
     got = device.read(tensix, 0x200, len(payload))
+    for _ in range(2000):
+        if got == payload:
+            break
+        device.run(1)
+        got = device.read(tensix, 0x200, len(payload))
     device.shutdown()
 
     assert got == payload, (

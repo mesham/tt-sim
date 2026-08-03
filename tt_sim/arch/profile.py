@@ -145,6 +145,7 @@ class ArchProfile:
     def noc_kwargs(self) -> dict:
         """The per-arch NoC parameters a tile passes to each ``NUI`` it builds."""
         return {
+            "arch": self.name,
             "noc_grid_x": self.noc_grid_x,
             "noc_grid_y": self.noc_grid_y,
             "noc_max_burst_size": self.noc_max_burst_size,

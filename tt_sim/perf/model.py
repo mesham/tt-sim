@@ -426,3 +426,124 @@ def riscv_cost_model(arch):
     if arch not in _RISCV_MODELS:
         _RISCV_MODELS[arch] = RiscvCostModel(load_costs(arch).sections, arch)
     return _RISCV_MODELS[arch]
+
+
+# ---------------------------------------------------------------------------
+# The NoC.
+# ---------------------------------------------------------------------------
+#
+# A third shape again, and the simplest of the three: not a per-opcode table
+# and not a scoreboard, but *distance x a constant*. The ISA docs publish a
+# clean three-term per-hop model -- ~5 cycles NIU to router, 9 cycles router to
+# router, ~5 cycles router back to NIU -- and ``unit_costs.yaml``'s own note on
+# the section says what a consumer should do with it almost verbatim:
+#
+#   "NoC requests gain per-hop latency by scheduling the destination's request
+#    event at c + hops * latency instead of c + 1"
+#
+# So the whole model is ``endpoint_cycles + per_hop_cycles * hops``, and the
+# only interesting question is what ``hops`` is. That is a *topology* property
+# rather than a cost-table one, so it lives with the NoC
+# (``tt_sim.network.tt_noc.noc_hop_count``) and this class never sees a
+# coordinate.
+#
+# What is deliberately absent is congestion. The docs say it "can negatively
+# impact latency" and give no number; ``noc.congestion`` in the table is
+# ``provenance: unknown`` for that reason, so this model charges a packet the
+# same flight time whether the link is empty or saturated. That is the honest
+# under-charge -- the same direction as every other bound in these files.
+
+
+class NocCostModel:
+    """Flight time of one NoC packet, in cycles, as a function of hop count.
+
+    Two terms, both from ``unit_costs.yaml``'s ``noc.hops`` block:
+
+    * :attr:`endpoint_cycles` -- the fixed NIU->router + router->NIU cost paid
+      once per packet however far it travels (~5 + ~5). Both ends are
+      ``bound: approximate``, so a modelled flight time is approximate too and
+      :attr:`is_exact` says so.
+    * :attr:`per_hop_cycles` -- 9 cycles per router-to-router hop, the one
+      unqualified integer in the block, restated independently by the L1 page
+      ("the latency of each hop is at least 9 cycles").
+
+    Identical on both architectures: Blackhole's NoC page changes the flit
+    width (256 -> 512 bits) and nothing else, which the table records in its
+    ``arch_overrides``. The arch difference that *does* reach a hop count is
+    the torus size, and that comes from the profile rather than from here.
+
+    A term the tables do not source is charged nothing, per this module's first
+    policy, so a hypothetical table with no ``router_to_router`` entry yields a
+    flat per-packet cost rather than a fabricated distance term.
+    """
+
+    def __init__(self, sections, arch):
+        self.arch = arch
+        hops = (sections.get("noc") or {}).get("hops") or {}
+        self._bounds = {}
+        niu_to_router = self._hop_term(hops, "niu_to_router")
+        router_to_niu = self._hop_term(hops, "router_to_niu")
+        self.per_hop_cycles = self._hop_term(hops, "router_to_router")
+        #: Cycles every packet pays regardless of distance, or ``None``.
+        self.endpoint_cycles = _sum_or_none(niu_to_router, router_to_niu)
+        #: The docs describe congestion qualitatively and quantify nothing, so
+        #: a packet's flight time here does not depend on link occupancy. Kept
+        #: as an attribute so a report can name the gap rather than imply it
+        #: was modelled. See ``noc.congestion`` (``provenance: unknown``).
+        self.congestion_modelled = False
+
+    def _hop_term(self, hops, name):
+        entry = hops.get(name) or {}
+        cycles = _sourced_cycles(entry.get("latency"), entry.get("provenance"))
+        if cycles is not None:
+            cost = CycleCost.parse(entry.get("latency"))
+            self._bounds[name] = cost.bound
+        return cycles
+
+    @property
+    def is_exact(self):
+        """False while any term came from a ``~``, ``>=`` or range.
+
+        Both endpoint terms are written "~5 cycles", so this is False for the
+        shipped table: a modelled flight time is an approximation of a
+        published approximation, and a report should not print it as though it
+        were counted.
+        """
+        return not (INEXACT_BOUNDS & set(self._bounds.values()))
+
+    def flight_cycles(self, hops):
+        """Cycles between a packet leaving one NIU and arriving at another.
+
+        ``hops`` is the number of router-to-router hops, which is 0 for two
+        endpoints on the same tile — that packet still pays
+        :attr:`endpoint_cycles`, because it still goes NIU -> router -> NIU.
+        Returns ``None`` when the tables sourced nothing at all, which leaves
+        the caller's existing same-cycle-plus-one delivery untouched.
+        """
+        total = self.endpoint_cycles
+        if self.per_hop_cycles is not None and hops:
+            total = (0 if total is None else total) + self.per_hop_cycles * hops
+        return total
+
+
+def _sum_or_none(*values):
+    present = [v for v in values if v is not None]
+    return sum(present) if present else None
+
+
+_NOC_MODELS = {}
+
+
+def noc_cost_model(arch):
+    """The :class:`NocCostModel` for ``arch``, cached, or ``None`` when off.
+
+    Same contract as :func:`unit_cost_model` and :func:`riscv_cost_model`: an
+    ``NUI`` built without an architecture, or any run without
+    ``TT_SIM_COST_MODEL``, stores one ``None`` and the NoC keeps delivering a
+    packet on the cycle after it was sent.
+    """
+    if arch is None or not cost_model_enabled():
+        return None
+    if arch not in _NOC_MODELS:
+        _NOC_MODELS[arch] = NocCostModel(load_costs(arch).sections, arch)
+    return _NOC_MODELS[arch]

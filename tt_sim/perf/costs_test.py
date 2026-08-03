@@ -528,6 +528,13 @@ EXPECTED_CONSUMERS = {
     # appear here; they reach the model only through ``tt_sim/pe/rv/cost.py``,
     # which is the single point where the RV side names the tables at all.
     "tt_sim/pe/rv/cost.py",
+    # The NoC, and the first consumer that is not a *unit* at all: the cost is
+    # a function of the distance between two endpoints, so ``NUI`` reads the
+    # ``noc.hops`` block and spends it as flight time on a packet rather than
+    # as occupancy on anything. Hop counting is topology and stays here, in
+    # ``noc_hop_count``; the table only supplies the two constants.
+    "tt_sim/network/tt_noc.py",
+    "tt_sim/network/noc_cost_model_test.py",
 }
 
 #: The Tensix backend units that are *not* wired to the tables, and why. Kept

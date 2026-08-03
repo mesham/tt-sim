@@ -9,6 +9,7 @@ from tt_sim.network.alignment import (
     congruence_for_read,
 )
 from tt_sim.network.noc_coords import WormholeNocCoords
+from tt_sim.perf.model import noc_cost_model
 from tt_sim.trace import EventCategory, NoCEvent, get_bus
 from tt_sim.util.bits import clear_bit, extract_bits, replace_bits
 from tt_sim.util.conversion import (
@@ -48,6 +49,51 @@ class NoCOverlay(MemMapable):
         return 0x3FFFF
 
 
+def noc_hop_count(src, dst, grid_x, grid_y):
+    """Router-to-router hops from ``src`` to ``dst``, **in one NoC's own space**.
+
+    Each NoC is a torus: every row is a ring and every column is a ring, and a
+    packet only ever travels in the increasing direction of that NoC's own
+    coordinates, wrapping past the edge rather than turning round. So the hop
+    count on each axis is the *forward* distance modulo the grid dimension, and
+    the total is their sum (dimension-ordered routing, X then Y — the order
+    does not change the count).
+
+    Two consequences worth stating, because both are easy to get wrong and
+    there are tests for each:
+
+    * **It is not symmetric.** ``hops(a, b) + hops(b, a)`` is ``grid_x`` on any
+      axis where the two differ, not ``2 * |dx|`` — a request and its response
+      travel different distances on the same NoC, and a round trip between two
+      tiles differing on both axes always costs exactly ``grid_x + grid_y``
+      hops however close together they are.
+    * **NoC 1 is the same formula in a different space.** NoC 1's origin is the
+      opposite corner, so an ``NUI`` on NoC 1 holds the mirrored coord
+      ``(grid_x-1-x, grid_y-1-y)`` in :attr:`NUI.x_coord` / :attr:`NUI.y_coord`.
+      Mirroring both endpoints negates ``dx`` and ``dy``, which is exactly the
+      reversal of routing direction that distinguishes the two NoCs — so
+      feeding this function each endpoint's *per-NoC* coord gives NoC 1's
+      (opposite) hop count with no special case, and
+      ``hops_noc1(a, b) == hops_noc0(b, a)``.
+
+    Callers must pass coords in the same space, which on this NoC means
+    ``NUI.x_coord`` / ``NUI.y_coord`` (per-NoC) and **never** ``id_pair``
+    (canonical NoC 0 on both NoCs).
+    """
+    return (dst[0] - src[0]) % grid_x + (dst[1] - src[1]) % grid_y
+
+
+def _endpoint_noc_coord(endpoint):
+    """An endpoint's coordinate in the coordinate space of its own NoC.
+
+    A :class:`NUI` knows its own per-NoC coord; a :class:`NullEndpoint` only
+    knows the key it was looked up under, which is already in this NoC's space
+    because it came straight out of the initiator's command registers.
+    """
+    coord = getattr(endpoint, "coord", None)
+    return coord if coord is not None else (endpoint.x_coord, endpoint.y_coord)
+
+
 class NullEndpoint:
     """Stand-in for an unregistered NoC destination.
 
@@ -63,10 +109,19 @@ class NullEndpoint:
     def __init__(self, coord):
         self.coord = coord
 
-    def transmit(self, request):
+    def transmit(self, request, delay=None):
         # Responses go back to the endpoint that issued the request, never via
-        # a coordinate lookup — see ``NUI.send_response``.
+        # a coordinate lookup — see ``NUI.send_response``. The return flight is
+        # timed by the requester (which owns the latency model and the grid
+        # dims) from this endpoint's coord, so a null-routed transaction costs
+        # the same as a real one at the same distance.
         source = request.reply_to
+        back = source.flight_cycles_from(self.coord)
+        if back is not None:
+            # This endpoint has no clock, so it cannot hold the request for its
+            # outbound flight the way a real NIU does. Both legs are charged to
+            # the response instead: the same total time, without a queue.
+            back += delay or 0
         if request.action == NUI.NoCDataRequest.DataRequestAction.READ:
             response = NUI.NoCDataRequest(
                 None,
@@ -76,7 +131,7 @@ class NullEndpoint:
                 request.request_id,
                 bytes(request.data_length_bytes),
             )
-            source.transmit(response)
+            source.transmit(response, back)
         elif request.action == NUI.NoCDataRequest.DataRequestAction.WRITE:
             if request.noc_cmd_resp_marked:
                 response = NUI.NoCDataRequest(
@@ -86,7 +141,7 @@ class NullEndpoint:
                     self.coord,
                     request.request_id,
                 )
-                source.transmit(response)
+                source.transmit(response, back)
         elif request.action == NUI.NoCDataRequest.DataRequestAction.ATOMIC:
             if request.noc_cmd_resp_marked:
                 response = NUI.NoCDataRequest(
@@ -97,7 +152,7 @@ class NullEndpoint:
                     request.request_id,
                     data=bytes(request.data_length_bytes),
                 )
-                source.transmit(response)
+                source.transmit(response, back)
 
 
 # Maximum NoC packet payload per Wormhole's
@@ -265,7 +320,7 @@ class NUI(MemMapable, Clockable):
                 self.nui.add_outstanding_noc_request(
                     noc_packet_transaction_id, self.ret_addr_low + chunk_offset
                 )
-                destination.transmit(read_req)
+                self.nui.send_to(destination, read_req)
 
             self.nui.nui_counters.increment(
                 NUI.NUICounters.CounterNames.NIU_MST_RD_REQ_SENT, num_chunks
@@ -331,7 +386,7 @@ class NUI(MemMapable, Clockable):
             self.nui.add_outstanding_noc_request(
                 noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
             )
-            destination.transmit(write_req)
+            self.nui.send_to(destination, write_req)
 
             if self.nui.snoop:
                 print(
@@ -414,7 +469,7 @@ class NUI(MemMapable, Clockable):
                 self.nui.add_outstanding_noc_request(
                     noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
                 )
-                destination.transmit(write_req)
+                self.nui.send_to(destination, write_req)
 
             if noc_cmd_resp_marked:
                 self.nui.nui_counters.increment(
@@ -571,7 +626,7 @@ class NUI(MemMapable, Clockable):
                     noc_packet_transaction_id,
                     (noc_cmd_wr_inline, noc_cmd_resp_marked),
                 )
-                destination.transmit(write_req)
+                self.nui.send_to(destination, write_req)
 
             if self.nui.snoop:
                 print(
@@ -630,7 +685,7 @@ class NUI(MemMapable, Clockable):
             )
             if noc_cmd_resp_marked:
                 self.nui.add_outstanding_noc_request(noc_packet_transaction_id, None)
-            destination.transmit(atomic_req)
+            self.nui.send_to(destination, atomic_req)
 
             if self.nui.snoop:
                 print(
@@ -778,6 +833,7 @@ class NUI(MemMapable, Clockable):
         noc_blackhole_cmd_buf_layout=False,
         noc_dram_read_congruence=32,
         tile_kind="T",
+        arch=None,
     ):
         """``x_coord`` / ``y_coord`` are the tile's canonical SoC-physical
         NoC 0 coord. The NUI's ``id_pair`` is that canonical coord on BOTH
@@ -796,6 +852,11 @@ class NUI(MemMapable, Clockable):
         ``noc_grid_x`` / ``noc_grid_y`` / ``noc_max_burst_size`` come from the
         architecture profile; each falls back to the Wormhole default when not
         supplied. See ``docs/plans/blackhole-support.md``.
+
+        ``arch`` is the profile's name, and its only use is to look up the
+        per-hop latency table. Left ``None`` by a directly-constructed NUI
+        (unit tests, ``driver/simple``), which therefore never opts into the
+        cost model however the environment is set.
         """
         assert noc_number == 0 or noc_number == 1
         self.noc_number = noc_number
@@ -838,6 +899,16 @@ class NUI(MemMapable, Clockable):
         # between a request and it being handled (can increase)
         self.noc_requests_to_handle = []
         self.noc_new_requests_to_handle = []
+        # Per-hop flight time, or None (the default, and the only state with
+        # TT_SIM_COST_MODEL unset) meaning "deliver on the next cycle" — the
+        # two-list swap below. See ``send_to`` and ``docs/plans/cost-model.md``.
+        self.noc_latency = noc_cost_model(arch)
+        #: ``{arrival_cycle: [packet, ...]}`` for packets still in flight.
+        #: Always empty without a latency model.
+        self.delayed_arrivals = {}
+        #: Earliest key of :attr:`delayed_arrivals`, cached so the pump's
+        #: per-tile wake probe is one attribute read rather than a ``min``.
+        self.next_arrival = None
         # Guards cross-thread appends to noc_new_requests_to_handle from
         # source tiles' transmit() calls and the owning tile's per-cycle
         # swap in clock_tick(). The destination then drains
@@ -866,9 +937,34 @@ class NUI(MemMapable, Clockable):
         """No requests in flight, so ``clock_tick`` would only swap two empty
         lists. See ``docs/plans/event-driven-pump.md``; the only way this
         becomes False again is ``transmit()``, which wakes the owning tile."""
-        return not (self.noc_requests_to_handle or self.noc_new_requests_to_handle)
+        return not (
+            self.noc_requests_to_handle
+            or self.noc_new_requests_to_handle
+            or self.delayed_arrivals
+        )
+
+    def next_wake_cycle(self, cycle_num):
+        """When this NIU next has something to do.
+
+        The default derivation (``busy_until`` / :meth:`is_clock_idle`) would
+        answer "next cycle" for a NIU whose only work is a packet that is still
+        forty cycles from arriving, which keeps the whole tile awake for the
+        flight. Naming the arrival cycle instead lets a DRAM tile sleep through
+        it, and is what makes the latency model a *stride* rather than a spin.
+        Identical to the default whenever nothing is in flight, which is every
+        run with the cost model off.
+        """
+        if self.noc_requests_to_handle or self.noc_new_requests_to_handle:
+            return cycle_num + 1
+        arrival = self.next_arrival
+        if arrival is None:
+            return None
+        return arrival if arrival > cycle_num else cycle_num + 1
 
     def clock_tick(self, cycle_num):
+        arrival = self.next_arrival
+        if arrival is not None and arrival <= cycle_num:
+            self._land_arrived_packets(cycle_num)
         if not (self.noc_requests_to_handle or self.noc_new_requests_to_handle):
             # Nothing queued and nothing arriving: the drain loop below has no
             # work and the swap would exchange one empty list for another.
@@ -1149,12 +1245,113 @@ class NUI(MemMapable, Clockable):
             )
         )
 
-    def transmit(self, data_request):
+    def transmit(self, data_request, delay=None):
+        """Accept a packet addressed to this NIU, arriving ``delay`` cycles hence.
+
+        ``delay=None`` (and any delay of one cycle or less) keeps the original
+        behaviour exactly: the packet lands in the arrivals list, the two-list
+        swap in :meth:`clock_tick` hands it to the drain loop, and it is
+        serviced on the next cycle. A longer delay parks it in
+        :attr:`delayed_arrivals` until its cycle comes round.
+
+        The delay is computed by the *sender* (:meth:`send_to`), because the
+        sender is the endpoint that knows both its own per-NoC coord and the
+        latency model. A NIU built without an architecture has no model and
+        every caller passes ``None``, so the whole path collapses back to the
+        original two lines.
+        """
+        if delay is not None and delay > 1:
+            cycle = self._current_cycle()
+            if cycle is not None:
+                arrival = cycle + delay
+                with self._inbox_lock:
+                    self.delayed_arrivals.setdefault(arrival, []).append(data_request)
+                    if self.next_arrival is None or arrival < self.next_arrival:
+                        self.next_arrival = arrival
+                owner = self.clock_owner
+                if owner is not None:
+                    owner.awake = True
+                return
         with self._inbox_lock:
             self.noc_new_requests_to_handle.append(data_request)
         owner = self.clock_owner
         if owner is not None:
             owner.awake = True
+
+    def _current_cycle(self):
+        """The cycle being simulated, or ``None`` for an unclocked NIU.
+
+        A packet's arrival cycle has to be absolute, and the only component
+        that knows the absolute cycle at ``transmit`` time — which happens
+        inside some *other* tile's tick — is the pump. ``None`` (a NIU with no
+        owning tile clock: the unit tests and ``driver/simple``) means the
+        flight cannot be timed, so the packet is delivered on the next cycle
+        as it always was.
+        """
+        owner = self.clock_owner
+        return None if owner is None else owner.current_cycle
+
+    def _land_arrived_packets(self, cycle_num):
+        """Move every packet whose flight ended by ``cycle_num`` into the drain.
+
+        Called from the top of :meth:`clock_tick`, so an arriving packet is
+        serviced on its arrival cycle rather than the one after it — which is
+        what makes a one-cycle delay identical to the un-modelled path and a
+        delay of N cost exactly N.
+        """
+        with self._inbox_lock:
+            due = [c for c in self.delayed_arrivals if c <= cycle_num]
+            for c in sorted(due):
+                self.noc_requests_to_handle.extend(self.delayed_arrivals.pop(c))
+            self.next_arrival = min(self.delayed_arrivals, default=None)
+
+    def send_to(self, destination, packet):
+        """Send ``packet`` from this NIU to ``destination``, timing the flight.
+
+        The one place a NoC packet's latency is decided, for requests and
+        responses alike. Both endpoints' coords are read in *this NoC's own
+        space* (:attr:`x_coord` / :attr:`y_coord`, mirrored on NoC 1), never
+        from the packet, so this cannot reintroduce the cross-NoC coordinate
+        confusion :meth:`send_response` exists to prevent.
+        """
+        model = self.noc_latency
+        if model is None:
+            destination.transmit(packet)
+        else:
+            destination.transmit(packet, self.flight_cycles_to(destination))
+
+    def flight_cycles_to(self, destination):
+        """Modelled cycles for a packet from here to ``destination``, or ``None``."""
+        model = self.noc_latency
+        if model is None:
+            return None
+        return model.flight_cycles(
+            noc_hop_count(
+                (self.x_coord, self.y_coord),
+                _endpoint_noc_coord(destination),
+                self.noc_grid_x,
+                self.noc_grid_y,
+            )
+        )
+
+    def flight_cycles_from(self, coord):
+        """Modelled cycles for a packet from ``coord`` to here, or ``None``.
+
+        The mirror image of :meth:`flight_cycles_to`, and not the same number:
+        hops are directional (see :func:`noc_hop_count`). Used by
+        :class:`NullEndpoint`, which has no latency model of its own.
+        """
+        model = self.noc_latency
+        if model is None:
+            return None
+        return model.flight_cycles(
+            noc_hop_count(
+                coord,
+                (self.x_coord, self.y_coord),
+                self.noc_grid_x,
+                self.noc_grid_y,
+            )
+        )
 
     def send_response(self, noc_request, response):
         """Return a response to whoever issued ``noc_request``.
@@ -1178,16 +1375,17 @@ class NUI(MemMapable, Clockable):
         the kernel in that NoC's own space; only the response direction had a
         space to get wrong, and it no longer carries one.
 
-        (A per-hop latency model belongs here as much as in
-        ``resolve_destination``: delay the ``transmit`` rather than
-        reintroducing a lookup.)
+        The per-hop latency model landed here exactly as that suggests: the
+        return flight is timed by :meth:`send_to`, which delays the
+        ``transmit`` and reads both coords off the endpoint objects. No lookup
+        was reintroduced.
         """
         assert noc_request.reply_to is not None, (
             f"NoC{self.noc_number} request {noc_request.request_id} from "
             f"{noc_request.source_coord} needs a response but carries no "
             f"reply_to endpoint"
         )
-        noc_request.reply_to.transmit(response)
+        self.send_to(noc_request.reply_to, response)
 
     def set_noc_directory(self, noc_directory):
         self.noc_directory = noc_directory

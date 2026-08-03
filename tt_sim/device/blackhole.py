@@ -7,6 +7,13 @@ tile-coordinate band, since Blackhole addresses tiles by their physical NoC 0
 coordinate (a 17x12 grid) rather than Wormhole's 16-25 "unified" band. All the
 per-arch numbers (grid, L1 size, NoC burst) flow in through ``BLACKHOLE_PROFILE``.
 
+Everything that is not a per-arch hardware fact — tracing, the progress
+watchdog, diagnostics fan-out, clock/reset and NoC-directory registration —
+belongs to ``TT_Device`` and arrives here by inheritance. Do not wire a
+device-level facility in this constructor: doing that is what left Blackhole
+without ``TT_SIM_TRACE_*`` and without ``[DEADLOCK]`` reports. See
+``tt_sim/device/parity_test.py``.
+
 Known not-yet-modelled for Blackhole (see ``docs/plans/blackhole-support.md``):
 the doubled baby-core local memories and 2-core eth tiles (Phase 6, only matter
 once kernels run), the NoC 64-bit address encoding and combined coordinate
@@ -16,8 +23,7 @@ construct the device and move data DRAM<->Tensix over the NoC.
 
 from tt_sim.arch import BLACKHOLE_PROFILE
 from tt_sim.device.tiles import DRAMTile, TensixTile
-from tt_sim.device.tt_device import DeviceTileDiagnostics, TT_Device
-from tt_sim.trace import enable_from_env
+from tt_sim.device.tt_device import TT_Device
 
 
 class _BlackholeTileCoords:
@@ -42,78 +48,22 @@ class BlackholeDRAMTile(_BlackholeTileCoords, DRAMTile):
 
 
 class Blackhole(TT_Device):
+    # Blackhole addresses tiles by their physical NoC 0 coord, so the tile
+    # coord and the NUI's physical coord are the same — ``TT_Device``'s
+    # identity ``_tensix_physical_coord`` is already right.
+    tensix_tile_class = BlackholeTensixTile
+    dram_tile_class = BlackholeDRAMTile
+
     def __init__(self, diagnostics=None, tensix_coords=None):
-        # Per-core RISC-V / NoC / coprocessor diagnostic flags, wired into each
-        # tile so TT_SIM_DIAG_* env vars work on Blackhole as on Wormhole.
-        self.diagnostics = diagnostics or DeviceTileDiagnostics()
-        self.profile = BLACKHOLE_PROFILE
-        if tensix_coords is None:
-            tensix_coords = self.profile.tensix_unified_coords
-        # Opt-in structured tracing, exactly as Wormhole does it: enable the
-        # bus before any tile is built so no device-construction event is
-        # missed, then call again below with the device once the tiles exist
-        # (the state-dump writer needs a device to poll). Without this every
-        # TT_SIM_TRACE_* var is silently ignored on Blackhole.
-        enable_from_env()
-
-        dram_tiles = []
-        noc1_coords = self.profile.dram_channel_physical_noc1_coords or (
-            (None,) * len(self.profile.dram_channel_unified_coords)
+        # Shared pre-tile setup (profile, diagnostics, tracing bus) — see
+        # ``TT_Device``. Must come first: tile construction reads the profile.
+        tensix_coords = self._begin_construction(
+            BLACKHOLE_PROFILE, diagnostics, tensix_coords
         )
-        for unified, physicals, noc1_coord in zip(
-            self.profile.dram_channel_unified_coords,
-            self.profile.dram_channel_physical_noc0_coords,
-            noc1_coords,
-        ):
-            primary = physicals[0]
-            aliases = physicals[1:]
-            dram_tiles.append(
-                BlackholeDRAMTile(
-                    unified[0],
-                    unified[1],
-                    primary[0],
-                    primary[1],
-                    aliases,
-                    profile=self.profile,
-                    noc1_endpoint_coord=noc1_coord,
-                )
-            )
-
+        dram_tiles = self._build_dram_tiles()
         tensix_tiles = [self._build_tensix_tile(coord) for coord in tensix_coords]
 
+        # No eth tiles: Blackhole's are 2-core and not yet modelled (Phase 6 of
+        # ``docs/plans/blackhole-support.md``). The only genuine device-level
+        # asymmetry with Wormhole.
         super().__init__(None, dram_tiles, tensix_tiles, profile=self.profile)
-
-        # Second call wires the state-dump writer now that we have tiles.
-        enable_from_env(device=self)
-
-    def _build_tensix_tile(self, coord):
-        # Blackhole addresses tiles by physical NoC 0 coord, so the tile coord
-        # and the NUI's physical coord are the same.
-        x, y = coord
-        d = self.diagnostics
-        return BlackholeTensixTile(
-            x,
-            y,
-            x,
-            y,
-            d.reportBRISC(),
-            d.reportNCRISC(),
-            d.reportTRISC0(),
-            d.reportTRISC1(),
-            d.reportTRISC2(),
-            d.reportNoC0(),
-            d.reportNoC1(),
-            d.getTensixCoprocessorDiagnostics(),
-            profile=self.profile,
-        )
-
-    def add_tensix_tile(self, coord):
-        """Construct and register a Tensix tile at ``coord`` after __init__.
-
-        The wire-bridge ``Device`` wrapper calls this to lazily materialise a
-        worker on first access. Mirrors ``Wormhole.add_tensix_tile`` without the
-        deadlock detector (not wired for Blackhole yet).
-        """
-        tile = self._build_tensix_tile(coord)
-        self.register_tensix_tile(tile)
-        return tile

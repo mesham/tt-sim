@@ -108,7 +108,16 @@ class DRAMTile(TTDeviceTile):
             or n1.noc_new_requests_to_handle
         ):
             return cycle_num + 1
-        return None
+        # A packet still in flight under the NoC latency model (§I) names the
+        # cycle it lands on, so the tile sleeps through the flight instead of
+        # spinning. Both are None without TT_SIM_COST_MODEL, which is two
+        # attribute reads and the same ``return None`` as before.
+        a0 = n0.next_arrival
+        a1 = n1.next_arrival
+        if a0 is None and a1 is None:
+            return None
+        soonest = a1 if a0 is None else (a0 if a1 is None else min(a0, a1))
+        return soonest if soonest > cycle_num else cycle_num + 1
 
     def get_resets(self):
         return []

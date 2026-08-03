@@ -86,6 +86,28 @@ def _set_coord(initiator, which, coord):
         setattr(initiator, f"{which}_addr_hi", (y << 6) | x)
 
 
+def _run_until_settled(device, nui, budget=4000):
+    """Pump until every request ``nui`` issued has been answered.
+
+    Deliberately not a fixed cycle count. A NoC round trip costs two cycles
+    with the per-hop latency model off and a few hundred with it on
+    (``TT_SIM_COST_MODEL``, see ``tt_sim/network/noc_cost_model_test.py``), so
+    a hardcoded budget makes this test a *timing pin* on a routing property
+    that has nothing to do with timing. Waiting on the outstanding-request
+    FIFOs instead is what the test actually means, and it fails the same way
+    (a response delivered to the wrong tile never drains this one) rather than
+    silently reading L1 too early.
+    """
+    for _ in range(budget):
+        if all(not fifo for fifo in nui.outstanding_noc_requests.values()):
+            return
+        device.run(1)
+    raise AssertionError(
+        f"NUI {nui.id_pair} still awaiting {nui.outstanding_noc_requests} "
+        f"after {budget} cycles"
+    )
+
+
 def _noc1_dram_roundtrip(device, tile, dram, dram_address, payload):
     """Write ``payload`` to DRAM over NoC 1 and read it back, both marked.
 
@@ -105,7 +127,7 @@ def _noc1_dram_roundtrip(device, tile, dram, dram_address, payload):
     initiator.ctrl = 2 | (1 << 4)  # mode 2 = write, resp marked
     initiator.cmd_ctrl = 1
     initiator.initiate()
-    device.run(16)
+    _run_until_settled(device, tile.noc1_router)
 
     _set_coord(initiator, "target", dram_coord)
     initiator.target_addr_low = dram_address
@@ -114,7 +136,7 @@ def _noc1_dram_roundtrip(device, tile, dram, dram_address, payload):
     initiator.ctrl = 0  # mode 0 = read
     initiator.cmd_ctrl = 1
     initiator.initiate()
-    device.run(16)
+    _run_until_settled(device, tile.noc1_router)
 
     return bytes(device.read(unified, _L1_DST, len(payload)))
 
@@ -229,7 +251,7 @@ def test_a_request_needing_a_response_must_name_its_requester():
     )
     tile.noc1_router.transmit(request)
     with pytest.raises(AssertionError, match="reply_to"):
-        device.run(4)
+        device.run(4)  # arrives next cycle: an inbound transmit is never delayed
 
 
 #: The (device builder, DRAM channel) pairs the routing test is run over.

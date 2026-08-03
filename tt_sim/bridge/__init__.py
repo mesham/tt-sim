@@ -21,7 +21,7 @@ from tt_sim.bridge.device import (
     diagnostics_from_env,
     enabled_diagnostic_names,
 )
-from tt_sim.bridge.fabric import Fabric
+from tt_sim.bridge.fabric import Fabric, install_worker_guards
 from tt_sim.bridge.trace import TraceWriter, parse_trace_line
 from tt_sim.bridge.transport import Transport
 
@@ -36,5 +36,6 @@ __all__ = [
     "Transport",
     "diagnostics_from_env",
     "enabled_diagnostic_names",
+    "install_worker_guards",
     "parse_trace_line",
 ]

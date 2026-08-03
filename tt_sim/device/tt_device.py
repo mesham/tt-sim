@@ -1,9 +1,11 @@
 from abc import ABC
 
 from tt_sim.device.clock import MultiTileClock, TileClock
+from tt_sim.device.deadlock import DeadlockDetector, deadlock_config_from_env
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
+from tt_sim.trace import enable_from_env
 from tt_sim.util.bits import clear_bit, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
@@ -12,6 +14,114 @@ from tt_sim.util.conversion import (
 
 
 class TT_Device(Device):
+    """Base device: the netlist assembly and every arch-agnostic facility.
+
+    **Everything that is not a per-arch hardware fact belongs here, not in a
+    concrete device's ``__init__``.** Wiring a device-level facility (tracing,
+    the progress watchdog, diagnostics fan-out, clock/reset registration) in
+    one architecture's constructor and not the other's has silently broken
+    Blackhole twice: ``TT_SIM_TRACE_*`` was ignored outright, and a wedged
+    kernel produced no ``[DEADLOCK]`` report. So the construction sequence is
+    fixed here and the architectures fill in only the parts that genuinely
+    differ:
+
+    1. :meth:`_begin_construction` — profile, diagnostics, tracing bus, the
+       default Tensix coord list. Called first, before any tile exists.
+    2. The subclass builds its tiles, using :meth:`_build_dram_tiles` /
+       :meth:`_build_tensix_tile` (arch hooks: ``dram_tile_class``,
+       ``tensix_tile_class``, :meth:`_tensix_physical_coord`).
+    3. ``TT_Device.__init__`` — directories, NoCs, clocks, resets, then the
+       watchdog and the second tracing pass.
+
+    ``tt_sim/device/parity_test.py`` fails if an architecture starts doing any
+    of this itself.
+    """
+
+    #: Concrete tile classes this architecture instantiates. Set by the arch
+    #: subclass — importing them here would be circular, since ``tiles.py``
+    #: imports this module.
+    tensix_tile_class = None
+    dram_tile_class = None
+
+    def _begin_construction(self, profile, diagnostics, tensix_coords=None):
+        """Pre-tile setup shared by every architecture's ``__init__``.
+
+        Must be the first statement of a concrete device's ``__init__``:
+        tile construction reads ``self.profile`` and ``self.diagnostics``, and
+        the tracing bus has to be live before the first tile publishes a
+        construction event. Returns the Tensix coord list to instantiate.
+        """
+        self.profile = profile
+        # Saved so ``_build_tensix_tile`` can construct lazily-materialised
+        # tiles with the same diagnostic flags as the originals.
+        self.diagnostics = (
+            DeviceTileDiagnostics() if diagnostics is None else diagnostics
+        )
+        # Opt-in structured tracing: if TT_SIM_TRACE*=<...> is set in the
+        # environment, the bus is enabled and writers are registered before any
+        # device-construction event is missed. The state-dump writer needs a
+        # device reference, so ``__init__`` calls ``enable_from_env`` again
+        # once the tiles exist.
+        enable_from_env()
+        if tensix_coords is None:
+            tensix_coords = profile.tensix_unified_coords
+        return tensix_coords
+
+    def _tensix_physical_coord(self, coord):
+        """Map a tile-directory coord to its SoC-physical NoC 0 coord.
+
+        Identity by default — Blackhole keys tiles by physical coord. Wormhole
+        overrides, since its tile coords are the "unified" band.
+        """
+        return coord
+
+    def _build_tensix_tile(self, coord):
+        """Construct one Tensix tile, with this device's diagnostic flags."""
+        d = self.diagnostics
+        return self.tensix_tile_class(
+            coord[0],
+            coord[1],
+            *self._tensix_physical_coord(coord),
+            d.reportBRISC(),
+            d.reportNCRISC(),
+            d.reportTRISC0(),
+            d.reportTRISC1(),
+            d.reportTRISC2(),
+            d.reportNoC0(),
+            d.reportNoC1(),
+            d.getTensixCoprocessorDiagnostics(),
+            profile=self.profile,
+        )
+
+    def _build_dram_tiles(self):
+        """Construct one DRAM tile per channel described by the profile."""
+        profile = self.profile
+        # A channel whose NoC 1 worker endpoint is a different SoC-physical
+        # coord than its NoC 0 one (Blackhole) names it; ``None`` mirrors the
+        # NoC 0 coord (Wormhole).
+        noc1_coords = profile.dram_channel_physical_noc1_coords or (
+            (None,) * len(profile.dram_channel_unified_coords)
+        )
+        tiles = []
+        for unified, physicals, noc1_coord in zip(
+            profile.dram_channel_unified_coords,
+            profile.dram_channel_physical_noc0_coords,
+            noc1_coords,
+        ):
+            primary = physicals[0]
+            tiles.append(
+                self.dram_tile_class(
+                    unified[0],
+                    unified[1],
+                    primary[0],
+                    primary[1],
+                    physicals[1:],
+                    profile=profile,
+                    noc1_endpoint_coord=noc1_coord,
+                )
+            )
+        return tiles
+
     def __init__(
         self, device_memory, dram_tiles, tensix_tiles, eth_tiles=(), *, profile
     ):
@@ -40,6 +150,24 @@ class TT_Device(Device):
             self._register_tile_internals(tile)
 
         super().__init__(device_memory, self.clocks, self.resets)
+
+        # Progress watchdog. Wired here rather than per-architecture: it was
+        # Wormhole-only for a long time, which meant a wedged Blackhole kernel
+        # hung silently with no ``[DEADLOCK]`` diagnostic at all.
+        enabled, threshold = deadlock_config_from_env()
+        self.deadlock_detector = DeadlockDetector(
+            threshold,
+            enabled,
+            self.tensix_tiles,
+            self.dram_tiles,
+        )
+        # Left unwired when disabled, so TT_SIM_DEADLOCK=0 costs literally
+        # nothing per cycle rather than a call that returns immediately.
+        if enabled:
+            self.clocks[0].on_tick = self.deadlock_detector.tick
+        # Second tracing pass: wires the state-dump writer, which needs the
+        # (now fully assembled) device to poll.
+        enable_from_env(device=self)
 
     def _register_tile_internals(self, tile):
         """Insert a tile into the directory, NoCs, clocks, and resets.
@@ -148,12 +276,29 @@ class TT_Device(Device):
         """Register a TensixTile constructed after device __init__.
 
         Mirrors what ``__init__`` does for one tile: stitches the tile into
-        the directory, both NoC directories, and the central Clock / Reset
-        aggregators. Subclasses (e.g. ``Wormhole.add_tensix_tile``) layer a
+        the directory, both NoC directories, the central Clock / Reset
+        aggregators and the progress watchdog. ``add_tensix_tile`` layers a
         coord-based constructor on top.
         """
         self.tensix_tiles.append(tile)
         self._register_tile_internals(tile)
+        # The watchdog has to learn about the tile too, or a stall on a
+        # lazily-materialised worker is invisible to it.
+        self.deadlock_detector.add_tensix_tile(tile)
+
+    def add_tensix_tile(self, coord):
+        """Construct and register a Tensix tile at ``coord`` after __init__.
+
+        Used by the wire bridge for lazy multi-Tensix materialisation: when
+        tt-metal addresses a worker the simulator hasn't built yet, this stands
+        up the matching Tensix tile and wires it into the directory, NoC
+        topology, clock/reset aggregators and deadlock detector. Returns the
+        new tile. Arch-agnostic — the per-arch part is
+        :meth:`_tensix_physical_coord` / ``tensix_tile_class``.
+        """
+        tile = self._build_tensix_tile(coord)
+        self.register_tensix_tile(tile)
+        return tile
 
     def reset(self, reset_number=0):
         """Reset every registered component, waking every tile.

@@ -10,16 +10,14 @@ classes live in ``tt_sim/device/tt_device.py``. See
 """
 
 from tt_sim.arch import WORMHOLE_PROFILE
-from tt_sim.device.deadlock import DeadlockDetector, deadlock_config_from_env
 from tt_sim.device.tiles import DRAMTile, EthTile, TensixTile
-from tt_sim.device.tt_device import (
-    DeviceTileDiagnostics,
-    TT_Device,
-)
-from tt_sim.trace import enable_from_env
+from tt_sim.device.tt_device import TT_Device
 
 
 class Wormhole(TT_Device):
+    tensix_tile_class = TensixTile
+    dram_tile_class = DRAMTile
+
     # The Wormhole hardware constants now live in ``WORMHOLE_PROFILE``. These
     # class attributes are compatibility aliases for external callers that still
     # reference them by their historical names (e.g. the wire bridge's
@@ -102,42 +100,12 @@ class Wormhole(TT_Device):
         )
 
     def __init__(self, diagnostics=None, tensix_coords=None):
-        # Set before any tile is built: ``_build_tensix_tile`` reads
-        # ``self.profile.tensix_l1_size``, and ``TT_Device.__init__`` (called
-        # below) reads the profile for NoC-1 mirroring.
-        self.profile = WORMHOLE_PROFILE
-        if diagnostics is None:
-            # All off by default if no diagnostics provided
-            diagnostics = DeviceTileDiagnostics()
-        # Saved so ``add_tensix_tile`` can construct lazily-materialised tiles
-        # with the same diagnostic flags as the originals.
-        self.diagnostics = diagnostics
-        if tensix_coords is None:
-            tensix_coords = self.profile.tensix_unified_coords
-        # Opt-in structured tracing: if TT_SIM_TRACE*=<...> is set in the
-        # environment, the bus is enabled and writers are registered
-        # before any device-construction events are missed. The
-        # state-dump writer specifically needs a device reference,
-        # so we call enable_from_env again at the bottom of __init__
-        # after tiles are constructed.
-        enable_from_env()
-        dram_tiles = []
-        for unified, physicals in zip(
-            self.profile.dram_channel_unified_coords,
-            self.profile.dram_channel_physical_noc0_coords,
-        ):
-            primary = physicals[0]
-            aliases = physicals[1:]
-            dram_tiles.append(
-                DRAMTile(
-                    unified[0],
-                    unified[1],
-                    primary[0],
-                    primary[1],
-                    aliases,
-                    profile=self.profile,
-                )
-            )
+        # Shared pre-tile setup (profile, diagnostics, tracing bus) — see
+        # ``TT_Device``. Must come first: tile construction reads the profile.
+        tensix_coords = self._begin_construction(
+            WORMHOLE_PROFILE, diagnostics, tensix_coords
+        )
+        dram_tiles = self._build_dram_tiles()
         eth_tiles = []
         for physical in Wormhole.all_eth_physical_coords():
             unified = Wormhole.eth_unified_coord_from_physical(physical)
@@ -158,49 +126,7 @@ class Wormhole(TT_Device):
             None, dram_tiles, tensix_tiles, eth_tiles=eth_tiles, profile=self.profile
         )
 
-        enabled, threshold = deadlock_config_from_env()
-        self.deadlock_detector = DeadlockDetector(
-            threshold,
-            enabled,
-            tensix_tiles,
-            dram_tiles,
-        )
-        # Left unwired when disabled, so TT_SIM_DEADLOCK=0 costs literally
-        # nothing per cycle rather than a call that returns immediately.
-        if enabled:
-            self.clocks[0].on_tick = self.deadlock_detector.tick
-        # Second call wires the state-dump writer now that we have tiles.
-        enable_from_env(device=self)
-
-    def _build_tensix_tile(self, coord):
-        x, y = coord
-        physical_x, physical_y = Wormhole.physical_noc0_coord_from_unified_worker(coord)
-        return TensixTile(
-            x,
-            y,
-            physical_x,
-            physical_y,
-            self.diagnostics.reportBRISC(),
-            self.diagnostics.reportNCRISC(),
-            self.diagnostics.reportTRISC0(),
-            self.diagnostics.reportTRISC1(),
-            self.diagnostics.reportTRISC2(),
-            self.diagnostics.reportNoC0(),
-            self.diagnostics.reportNoC1(),
-            self.diagnostics.getTensixCoprocessorDiagnostics(),
-            profile=self.profile,
-        )
-
-    def add_tensix_tile(self, coord):
-        """Construct and register a TensixTile at the given unified coord.
-
-        Used by the wire bridge for lazy multi-Tensix materialisation: when
-        tt-metal addresses a worker the simulator hasn't built yet, this
-        method stands up the matching ``TensixTile`` and wires it into the
-        directory, NoC topology, clock/reset aggregators, and deadlock
-        detector. Returns the new tile.
-        """
-        tile = self._build_tensix_tile(coord)
-        self.register_tensix_tile(tile)
-        self.deadlock_detector.add_tensix_tile(tile)
-        return tile
+    def _tensix_physical_coord(self, coord):
+        # Wormhole tile coords are the unified band, so the NUI's SoC-physical
+        # NoC 0 coord has to be derived.
+        return Wormhole.physical_noc0_coord_from_unified_worker(coord)

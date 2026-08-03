@@ -72,22 +72,28 @@ class MiscellaneousUnit(TensixBackendUnit):
         pass
 
     def handle_addrcrzw(self, instruction_info, issue_thread, instr_args):
+        # "CR" is carriage-return: the instruction *adds* its operand to the
+        # carriage-return register and then snaps the counter to it (see
+        # ADDRCRZW.md's `ADC_.Channel[0].Z_Cr += Z0Inc, ... .Z = ... .Z_Cr`).
+        # Assigning instead of adding pinned the carriage return at its first
+        # value, so a loop that walks rows by repeating ADDRCRZW never got past
+        # row one. Same shape as ADDRCRXY below.
         def apply_to(adc_channel, enables, Z0Inc, W0Inc, Z1Inc, W1Inc):
             if get_nth_bit(enables, 0):
-                adc_channel.Channel[0].Z_Cr = Z0Inc
-                adc_channel.Channel[0].Z = Z0Inc
+                adc_channel.Channel[0].Z_Cr += Z0Inc
+                adc_channel.Channel[0].Z = adc_channel.Channel[0].Z_Cr
 
             if get_nth_bit(enables, 1):
-                adc_channel.Channel[0].W_Cr = W0Inc
-                adc_channel.Channel[0].W = W0Inc
+                adc_channel.Channel[0].W_Cr += W0Inc
+                adc_channel.Channel[0].W = adc_channel.Channel[0].W_Cr
 
             if get_nth_bit(enables, 2):
-                adc_channel.Channel[1].Z_Cr = Z1Inc
-                adc_channel.Channel[1].Z = Z1Inc
+                adc_channel.Channel[1].Z_Cr += Z1Inc
+                adc_channel.Channel[1].Z = adc_channel.Channel[1].Z_Cr
 
             if get_nth_bit(enables, 3):
-                adc_channel.Channel[1].W_Cr = W1Inc
-                adc_channel.Channel[1].W = W1Inc
+                adc_channel.Channel[1].W_Cr += W1Inc
+                adc_channel.Channel[1].W = adc_channel.Channel[1].W_Cr
 
         Z0Inc = instr_args["Ch0_X"]
         W0Inc = instr_args["Ch0_Y"]
@@ -127,22 +133,28 @@ class MiscellaneousUnit(TensixBackendUnit):
             )
 
     def handle_addrcrxy(self, instruction_info, issue_thread, instr_args):
+        # Accumulates into the carriage-return register, per ADDRCRXY.md:
+        # `ADC_.Channel[0].Y_Cr += Y0Inc, ADC_.Channel[0].Y = ADC_.Channel[0].Y_Cr`.
+        # `pack_untilize_dest` walks the 8 output rows each packer owns by
+        # issuing one ADDRCRXY(Y0Inc=1) per row ("Read new row in the tile" in
+        # llk_pack_untilize.h); assigning rather than adding left Y_Cr stuck at
+        # 1 from the second row on, so every later row re-read the same Dst row.
         def apply_to(adc_channel, enables, X0Inc, Y0Inc, X1Inc, Y1Inc):
             if get_nth_bit(enables, 0):
-                adc_channel.Channel[0].X_Cr = X0Inc
-                adc_channel.Channel[0].X = X0Inc
+                adc_channel.Channel[0].X_Cr += X0Inc
+                adc_channel.Channel[0].X = adc_channel.Channel[0].X_Cr
 
             if get_nth_bit(enables, 1):
-                adc_channel.Channel[0].Y_Cr = Y0Inc
-                adc_channel.Channel[0].Y = Y0Inc
+                adc_channel.Channel[0].Y_Cr += Y0Inc
+                adc_channel.Channel[0].Y = adc_channel.Channel[0].Y_Cr
 
             if get_nth_bit(enables, 2):
-                adc_channel.Channel[1].X_Cr = X1Inc
-                adc_channel.Channel[1].X = X1Inc
+                adc_channel.Channel[1].X_Cr += X1Inc
+                adc_channel.Channel[1].X = adc_channel.Channel[1].X_Cr
 
             if get_nth_bit(enables, 3):
-                adc_channel.Channel[1].Y_Cr = Y1Inc
-                adc_channel.Channel[1].Y = Y1Inc
+                adc_channel.Channel[1].Y_Cr += Y1Inc
+                adc_channel.Channel[1].Y = adc_channel.Channel[1].Y_Cr
 
         X0Inc = instr_args["Ch0_X"]
         Y0Inc = instr_args["Ch0_Y"]

@@ -18,8 +18,8 @@ LAUNCH_ENABLES_OFFSET = 0xE8
 
 
 def blackhole_factory(diagnostics):
-    # Blackhole does not model per-core diagnostics yet; accepted for
-    # factory-signature parity with the Wormhole path.
+    # ``None`` means "all off" — Blackhole fans the flags out to every tile
+    # exactly as Wormhole does, so TT_SIM_DIAG_* works on both.
     return Blackhole(diagnostics)
 
 

@@ -21,6 +21,8 @@ from tt_sim.bridge import (
     TraceWriter,
     Transport,
     diagnostics_from_env,
+    enabled_diagnostic_names,
+    install_worker_guards,
 )
 
 from .bh_device import make_device
@@ -81,17 +83,28 @@ def main(argv=None):
     device = None
     if not args.mock_tensix:
         tensix_pool = _parse_tensix_pool(os.environ)
+        diagnostics = diagnostics_from_env()
         device = make_device(
-            cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics_from_env()
+            cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics
         )
         for translated, tile_coord in DRAM_COORD_MAP.items():
             fabric.register(translated, DramCore(device, tile_coord))
         for physical in tensix_pool:
             device.ensure_tensix_tile(physical)
             fabric.register(physical, TensixCore(device, TENSIX_COORD_MAP[physical]))
+        # Same "worker isn't materialised" guards the Wormhole server installs:
+        # without them traffic to (or a kernel launch on) a worker outside
+        # TT_SIM_TENSIX_COORDS is silently NullCore-swallowed.
+        install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP)
+        enabled = enabled_diagnostic_names(diagnostics)
         print(
             f"[server] tt-sim Blackhole ready (tensix={tensix_pool}, "
             f"dram={list(DRAM_COORD_MAP)}, cycles_per_poll={args.cycles_per_poll})",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            f"[server] diagnostics: {', '.join(enabled) if enabled else 'none'}",
             file=sys.stderr,
             flush=True,
         )

@@ -8,15 +8,26 @@
 # ``tt_sim/arch/profile.py`` -- so this file lives next to the loader instead.
 # Both files share one schema and one loader (``tt_sim/perf/costs.py``).
 #
-# CONSUMED, so far, only by the ``riscv`` section: the baby cores' load/store
-# path reads it through tt_sim/perf/model.py -> tt_sim/pe/rv/cost.py, behind
-# TT_SIM_COST_MODEL. Note what that consumer does *not* do -- the load-latency
-# table is spent as a load-use interlock, not as occupancy, because the ISA
-# docs define it as "N - 1 independent instructions need to follow the load if
-# the latency is to be entirely hidden". The ``noc``, ``dram``, ``mover`` and
-# ``l1`` sections still have no consumer at all; the NoC hop model is the
-# ranked next one. See docs/plans/cost-model.md for the schema, the provenance
-# convention, and what calibration would take.
+# CONSUMED by two sections, both through tt_sim/perf/model.py and both behind
+# TT_SIM_COST_MODEL:
+#
+#   * ``riscv`` -> tt_sim/pe/rv/cost.py. Note what that consumer does *not* do
+#     -- the load-latency table is spent as a load-use interlock, not as
+#     occupancy, because the ISA docs define it as "N - 1 independent
+#     instructions need to follow the load if the latency is to be entirely
+#     hidden".
+#   * ``noc.hops`` -> tt_sim/network/tt_noc.py, as the flight time of a packet:
+#     ``endpoint + per_hop * hops``, with the hop count a forward distance on
+#     each NoC's own (directional, wrapping) torus. Everything else under
+#     ``noc`` -- the flit width, the link bandwidth, the L1 port count, the
+#     router buffers -- is bandwidth and contention, and is still unconsumed.
+#
+# The ``dram``, ``mover`` and ``l1`` sections have no consumer at all. DRAM
+# access latency is now the ranked next term and is ``unknown`` here rather
+# than merely unwired; with the hop model landed, ``dram.end_to_end_reference``
+# finally constrains it (see docs/plans/cost-model.md, "The NoC hop model").
+# See that file for the schema, the provenance convention, and what
+# calibration would take.
 #
 # The provenance vocabulary and the cost-value form (int, or a mapping with
 # ``cycles`` plus ``bound`` in {exact, at_least, at_most, approximate, range})
@@ -88,6 +99,16 @@ noc:
     sourced. What is *not* sourced anywhere is congestion: the docs say
     congestion "can negatively impact latency" without quantifying it, and
     neither vendor tree has an intra-chip per-hop congestion model.
+
+    CONSUMED since 2026-08-03 by tt_sim/network/tt_noc.py, exactly as written
+    above: a packet is delayed by ``2 * ~5 + 9 * hops`` before the destination
+    NIU services it. The hop count is the *forward* distance on the NoC's own
+    torus, so it is directional -- an outbound and a return trip between two
+    tiles differing on both axes always sum to noc_grid_x + noc_grid_y hops.
+    Only ``hops`` is consumed; ``flit_bits``, ``link_bandwidth_gb_per_s``,
+    ``l1_ports`` and ``router_buffering`` are the bandwidth and contention
+    half and remain unconsumed, so a packet costs the same whatever its size
+    and whatever else is on the link.
   hops:
     niu_to_router:
       latency: { cycles: 5, bound: approximate }
@@ -189,6 +210,20 @@ dram:
       path, so it is an upper bound on DRAM latency and cannot be used as the
       DRAM term without double-counting the NoC hops modelled above. It is
       recorded under ``end_to_end_reference`` rather than here for that reason.
+
+      That double-counting objection is now *quantifiable*, because the hop
+      model above has a consumer. Subtracting the modelled NoC round trip from
+      each measured end-to-end figure leaves a residual, and on Wormhole the
+      residuals agree: 36 cycles for a local L1 access (no hops), 41 for a
+      remote read and 38 for a remote write (22 hops) -- so the hop term
+      explains the whole local/remote difference to within 5 cycles, and the
+      leftover ~38 is the issuing core's own path. The same subtraction on the
+      DRAM figure leaves ~140, i.e. **roughly 100 cycles of DRAM device
+      latency on Wormhole**. Deliberately NOT recorded as a number here: it is
+      an inference from a vendor measurement minus a model, which is a
+      calibration target, not a source. Blackhole does not reproduce the same
+      consistency (residuals 68 local vs 122/123 remote), and its figures were
+      measured against tt-metal's 1.2 GHz assumption -- see ``clock``.
   end_to_end_reference:
     dram_cycles: { wormhole: 358, blackhole: 529 }
     l1_local_cycles: { wormhole: 56, blackhole: 88 }

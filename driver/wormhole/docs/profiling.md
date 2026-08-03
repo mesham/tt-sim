@@ -2132,13 +2132,17 @@ the Phase 4 stride off, an 80-worker Wormhole with a single running kernel was
 paying ~1.9 ms of watchdog per simulated cycle.
 
 (For the record, the "it stops being the dominant term once tiles are awake"
-line in the feasibility study was measured on **Blackhole**, which never wired
-the detector at all — both arms of that A/B had no watchdog. On Wormhole the
-opposite holds, and the live-workload table below quantifies it.)
+line in the feasibility study was measured on **Blackhole**, which at the time
+never wired the detector at all — both arms of that A/B had no watchdog. On
+Wormhole the opposite holds, and the live-workload table below quantifies it.
+Blackhole wires the watchdog now — it is built in `TT_Device.__init__`, so
+every architecture gets it — which both fixes the missing `[DEADLOCK]`
+diagnostic there and makes that A/B worth re-running.)
 
 ## What changed
 
-Three things, all in `deadlock.py` plus one line of `wormhole.py`:
+Three things, all in `deadlock.py` plus one line of the device base class
+(`tt_device.py`; it was `wormhole.py` when this was written):
 
 1. **Sampled, not polled.** `tick` is now one integer compare against
    `_next_sample_cycle` — 91 ns, measured — and the scan happens once per

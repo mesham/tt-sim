@@ -69,6 +69,43 @@ class PackerUnit(TensixBackendUnit):
             "PACK", "blackhole" if backend.blackhole else "wormhole"
         )
 
+    def participating_packers(self, packMask):
+        """Which packers this PACR actually drives.
+
+        On **Wormhole** the PACR field in bits 11:8 is `PackSel`, a bit mask
+        selecting up to four independent packers (0 meaning "packer 0"), each
+        with its own configuration section: packers 0/1 read `THCON_SEC0_REG1`
+        / `THCON_SEC0_REG8`, packers 2/3 read `THCON_SEC1_REG1` /
+        `THCON_SEC1_REG8` (see `getIPackerConfig`).
+
+        On **Blackhole** there is only **one** packer. The same instruction
+        bits are `read_intf_sel`, selecting which of that packer's four Dst
+        *read interfaces* are active — not which packers run. Its whole
+        configuration comes from `THCON_SEC0_REG1`; the `SEC0_REG8` /
+        `SEC1_*` sections are not packer configuration on this architecture and
+        tt-metal never writes them. Treating the mask as a packer selection
+        therefore both duplicated the pack to a bogus L1 address and consulted
+        registers that read as zero — which the `Disable_zero_compress` check
+        below, inverted in the naming, read as "zero compression enabled" and
+        refused. ttsim is explicit about this: its `TENSIX_EXECUTE_PACR` has
+        `constexpr uint32_t n_packers = 1` under `TT_ARCH_VERSION == 1` and
+        indexes only `THCON_SEC0_REG1`.
+        """
+        if self.backend.blackhole:
+            return (0,)
+        return tuple(i for i in range(4) if get_nth_bit(packMask, i)) or (0,)
+
+    def dst_read_interfaces(self, packMask):
+        """Blackhole: the Dst read interfaces `read_intf_sel` selects.
+
+        Interface `k` reads Dst row `base + k`, so the interfaces a PACR
+        selects fix both how many datums it moves (16 per interface) and which
+        rows they come from: `0b1111`/`0` walks four contiguous rows,
+        `0b0101` the even rows of a pair and `0b1010` the odd ones — which is
+        how the tilize pack MOP interleaves two Dst halves into one tile.
+        """
+        return [k for k in range(4) if get_nth_bit(packMask, k)] or [0, 1, 2, 3]
+
     def getIPackerConfig(self, i, s, one_id, two_id=0):
         if s == 2:
             match i:
@@ -99,10 +136,7 @@ class PackerUnit(TensixBackendUnit):
         self, stateID, issue_thread, flush, zeroWrite, addrMod, packMask, ovrdThreadId
     ):
         ADCsToAdvance = [False, False, False]
-        for i in range(4):
-            if not (get_nth_bit(packMask, i) or (i == 0 and packMask == 0x0)):
-                continue
-
+        for i in self.participating_packers(packMask):
             whichADC = issue_thread
             if ovrdThreadId:
                 whichADC = self.getConfigValue(
@@ -163,10 +197,7 @@ class PackerUnit(TensixBackendUnit):
                     # Dst rows (row = base + i//16); otherwise it scales by the
                     # number of selected interfaces. See ttsim TT_ARCH_VERSION==1
                     # pack path and the ISA PACR read_intf_sel field.
-                    read_intf_sel = packMask
-                    numDatums *= (
-                        4 if read_intf_sel == 0 else bin(read_intf_sel).count("1")
-                    )
+                    numDatums *= len(self.dst_read_interfaces(packMask))
                 self.packerI[i].inputNumDatums = numDatums
 
             if zeroWrite or flush:
@@ -240,17 +271,20 @@ class PackerUnit(TensixBackendUnit):
                     issue_thread, AM_KEY + "_YsrcIncr"
                 )
                 # ttsim advances the pack Y counter (ch_y = ch_y + incr) in this
-                # non-CR/non-clear branch; the previous code *set* it to incr, so
-                # Y never accumulated across the successive PACRs that pack a full
-                # multi-face tile — the Dst read row stayed put and only the first
-                # face landed correctly. `six`'s 32x32 output is the first
-                # full-tile pack to hit this (four/five pack a single face, where
-                # Y is always 0 here so set == accumulate). Guarded to Blackhole
-                # so Wormhole stays byte-identical.
-                if self.backend.blackhole:
-                    adc.Y = (adc.Y + incr) & 0x1FFF  # ADC_Y_MASK (13 bits)
-                else:
-                    adc.Y = incr
+                # non-CR/non-clear branch, on *both* architectures — the update
+                # sits outside every `#if TT_ARCH_VERSION` in its
+                # TENSIX_EXECUTE_PACR. Setting it instead of adding pinned the
+                # Dst read row across the successive PACRs that pack one
+                # multi-face tile, so only the first face landed correctly:
+                # `six`'s 32x32 output was the first full-tile pack to hit it
+                # (four/five pack a single face, where Y is always 0 here so set
+                # == accumulate) and a row-major `pack_untilize_dest`, which
+                # interleaves the four faces into output rows, landed only the
+                # first row. This was Blackhole-guarded when it was found, to
+                # keep Wormhole byte-identical; the guard is gone because ttsim
+                # does not have one and optests/untilize pins the behaviour on
+                # both arches.
+                adc.Y = (adc.Y + incr) & 0x1FFF  # ADC_Y_MASK (13 bits)
 
             if self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_ZsrcClear"):
                 adc.Z = 0
@@ -259,20 +293,17 @@ class PackerUnit(TensixBackendUnit):
                 z_incr = self.backend.getThreadConfigValue(
                     issue_thread, AM_KEY + "_ZsrcIncr"
                 )
-                # As with Y above, ttsim accumulates the pack Z (face) counter
-                # (ch_z = ch_z + incr); setting it dropped the face selection
-                # between the PACRs of a multi-face tile so every face but the
-                # first read the wrong Dst rows. Blackhole-guarded for WH
-                # byte-identity.
-                if self.backend.blackhole:
-                    adc.Z = (adc.Z + z_incr) & 0xFF  # ADC_Z_MASK (8 bits)
-                else:
-                    adc.Z = z_incr
+                # As with Y above, and equally arch-independent in ttsim:
+                # setting the pack Z (face) counter dropped the face selection
+                # between the PACRs of a multi-face tile, so every face but the
+                # first read the wrong Dst rows.
+                adc.Z = (adc.Z + z_incr) & 0xFF  # ADC_Z_MASK (8 bits)
 
     def generate_output_address(
         self, stateID, issue_thread, packMask, flush, last, addrMod, ovrdThreadId
     ):
         ADCsToAdvance = [False, False, False]
+        active = self.participating_packers(packMask)
         for i in range(4):
             # Per the ISA OutputAddressGenerator.md pseudocode:
             #   Addr = L1_Dest_addr + !Sub_l1_tile_header_size
@@ -288,7 +319,11 @@ class PackerUnit(TensixBackendUnit):
             elif get_nth_bit(packer0InitialAddr, 31):
                 addr += packer0InitialAddr
 
-            if not (get_nth_bit(packMask, i) or (i == 0 and packMask == 0x0)):
+            # Only a packer this PACR actually drives has its configuration
+            # consulted; see participating_packers. The addresses above are
+            # computed for all four because packer 0's base chains into the
+            # others' on Wormhole.
+            if i not in active:
                 continue
 
             whichADC = issue_thread
@@ -351,23 +386,27 @@ class PackerUnit(TensixBackendUnit):
                 )
             )
             if performingCompression:
-                raise NotImplementedError()
-
-            outputFormatLessThan16Bits = (
-                self.getConfigValue(
-                    stateID, self.getIPackerConfig(i, 4, 1, 8) + "Out_data_format"
+                # Pack-side zero compression is not modelled. The field is
+                # inverted (`Disable_zero_compress`), so a section that was
+                # never written reads as "compressing" -- which is why this
+                # must only ever be asked of a packer that this PACR drives
+                # (see participating_packers); tt-metal sets the bit for every
+                # packer it does configure.
+                raise NotImplementedError(
+                    f"Packer {i} requests zero compression, which is not modelled"
                 )
-                & 2
+
+            outDataFormat = self.getConfigValue(
+                stateID, self.getIPackerConfig(i, 4, 1, 8) + "Out_data_format"
             )
 
-            if outputFormatLessThan16Bits:
-                raise NotImplementedError()
-
-            self.packerI[i].outDataFormat = DataFormat(
-                self.getConfigValue(
-                    stateID, self.getIPackerConfig(i, 4, 1, 8) + "Out_data_format"
+            if outDataFormat & 2:
+                raise NotImplementedError(
+                    f"Packer {i} output data format {outDataFormat} is under 16 "
+                    "bits per datum, which is not modelled"
                 )
-            )
+
+            self.packerI[i].outDataFormat = DataFormat(outDataFormat)
             self.packerI[i].outBytes = ceil(
                 DATA_FORMAT_TO_BITS[self.packerI[i].outDataFormat] / 8
             )
@@ -392,47 +431,37 @@ class PackerUnit(TensixBackendUnit):
 
             AM_KEY = "ADDR_MOD_PACK_SEC" + str(addrMod)
 
-            if self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_YsrcClear"):
+            # Channel 1 is the *output* counter, so it advances on the AddrMod's
+            # Ydst/Zdst fields — Ysrc/Zsrc belong to channel 0 and are applied by
+            # generate_input_address. Reading the src fields here coupled the two
+            # counters: `pack_untilize_dest` programs YsrcIncr = 15 to walk Dst
+            # rows and leaves Ydst at 0, so the output address counter was being
+            # dragged 15 rows per PACR. See Packers/OutputAddressGenerator.md.
+            if self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_YdstClear"):
                 adc.Y = 0
                 adc.Y_Cr = 0
-            elif self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_YsrcCR"):
-                adc.Y_Cr += self.backend.getThreadConfigValue(
-                    issue_thread, AM_KEY + "_YsrcIncr"
-                )
+            elif self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_YdstCR"):
+                adc.Y_Cr = (
+                    adc.Y_Cr
+                    + self.backend.getThreadConfigValue(
+                        issue_thread, AM_KEY + "_YdstIncr"
+                    )
+                ) & 0x1FFF
                 adc.Y = adc.Y_Cr
             else:
                 incr = self.backend.getThreadConfigValue(
-                    issue_thread, AM_KEY + "_YsrcIncr"
+                    issue_thread, AM_KEY + "_YdstIncr"
                 )
-                # ttsim advances the pack Y counter (ch_y = ch_y + incr) in this
-                # non-CR/non-clear branch; the previous code *set* it to incr, so
-                # Y never accumulated across the successive PACRs that pack a full
-                # multi-face tile — the Dst read row stayed put and only the first
-                # face landed correctly. `six`'s 32x32 output is the first
-                # full-tile pack to hit this (four/five pack a single face, where
-                # Y is always 0 here so set == accumulate). Guarded to Blackhole
-                # so Wormhole stays byte-identical.
-                if self.backend.blackhole:
-                    adc.Y = (adc.Y + incr) & 0x1FFF  # ADC_Y_MASK (13 bits)
-                else:
-                    adc.Y = incr
+                adc.Y = (adc.Y + incr) & 0x1FFF  # ADC_Y_MASK (13 bits)
 
-            if self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_ZsrcClear"):
+            if self.backend.getThreadConfigValue(issue_thread, AM_KEY + "_ZdstClear"):
                 adc.Z = 0
                 adc.Z_Cr = 0
             else:
                 z_incr = self.backend.getThreadConfigValue(
-                    issue_thread, AM_KEY + "_ZsrcIncr"
+                    issue_thread, AM_KEY + "_ZdstIncr"
                 )
-                # As with Y above, ttsim accumulates the pack Z (face) counter
-                # (ch_z = ch_z + incr); setting it dropped the face selection
-                # between the PACRs of a multi-face tile so every face but the
-                # first read the wrong Dst rows. Blackhole-guarded for WH
-                # byte-identity.
-                if self.backend.blackhole:
-                    adc.Z = (adc.Z + z_incr) & 0xFF  # ADC_Z_MASK (8 bits)
-                else:
-                    adc.Z = z_incr
+                adc.Z = (adc.Z + z_incr) & 0xFF  # ADC_Z_MASK (8 bits)
 
     def edge_masks_for_pacr(self, stateID, packer):
         """Resolve packer ``packer``'s per-tile-row edge masks for this PACR.
@@ -499,10 +528,15 @@ class PackerUnit(TensixBackendUnit):
             stateID, issue_thread, packMask, flush, last, addrMod, ovrdThreadId
         )
 
-        for i in range(4):
-            if not (get_nth_bit(packMask, i) or (i == 0 and packMask == 0x0)):
-                continue
+        # Blackhole's single packer gathers its datums through the Dst read
+        # interfaces `read_intf_sel` picks: 16 datums per interface, interface
+        # `k` reading Dst row `base + k`. ``None`` on Wormhole, where each
+        # packer reads its rows contiguously.
+        readInterfaces = (
+            self.dst_read_interfaces(packMask) if self.backend.blackhole else None
+        )
 
+        for i in self.participating_packers(packMask):
             addr = self.packerI[i].byteAddress
 
             row_start = int(self.packerI[i].inputSourceAddr / (16))
@@ -524,6 +558,13 @@ class PackerUnit(TensixBackendUnit):
                 idx = self.packerI[i].inputSourceAddr + j
                 row = idx >> 4
                 col = idx & 0xF
+                if readInterfaces is not None:
+                    # Rebase the row on the interface supplying this 16-datum
+                    # run: `readInterfaces` is [0,1,2,3] for the all-on
+                    # selection (the contiguous walk above), [0,2] for
+                    # `0b0101` and [1,3] for `0b1010`.
+                    run = j >> 4
+                    row = row_start + readInterfaces[run % len(readInterfaces)]
 
                 masked = not get_nth_bit(edgeMasks[self.packerI[i].tpgY & 0xF], col)
                 self.packerI[i].tpgX += 1
@@ -554,16 +595,22 @@ class PackerUnit(TensixBackendUnit):
                 )
                 addr += self.packerI[i].outBytes
 
-            if self.backend.blackhole:
-                # Blackhole carries the output address forward across the PACRs
-                # that together pack one tile (ttsim's `packer_valid`): each PACR
-                # appends its datums after the previous one, so the first PACR
-                # lands at the CB page base (what the consumer reads) and later
-                # PACRs spill past it. generate_output_address only recomputes
-                # byteAddress on a new tile (datastreamNeedsNewAddr, set on
-                # last/flush), so this intra-tile advance is what the next PACR
-                # reads. Wormhole keeps its existing hold-in-place behaviour.
-                self.packerI[i].byteAddress = addr
+            # The output address carries forward across the PACRs that together
+            # pack one tile: each PACR appends its datums after the previous
+            # one, so the first PACR lands at the CB page base (what the
+            # consumer reads) and later PACRs spill past it.
+            # generate_output_address only recomputes byteAddress on a new
+            # datastream (datastreamNeedsNewAddr, set on last/flush), so this
+            # intra-tile advance is what the next PACR reads. Per
+            # Packers/OutputAddressGenerator.md the datum buffers "persist
+            # between consecutive pack instructions" and ByteAddress is
+            # incremented as they drain — on both architectures, and ttsim
+            # likewise stores packer_dst_addr back unconditionally. This was
+            # Blackhole-guarded when it was found; without it a row-major
+            # `pack_untilize_dest`, whose 16 PACRs each emit one half-row,
+            # rewrote the same 16 datums sixteen times and only one output row
+            # survived.
+            self.packerI[i].byteAddress = addr
 
     def formatConversion(self, stateID, inDataFormat, outDataFormat, raw_datum):
         match inDataFormat:

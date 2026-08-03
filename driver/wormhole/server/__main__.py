@@ -121,6 +121,7 @@ def main(argv=None):
             TensixCore,
             diagnostics_from_env,
             enabled_diagnostic_names,
+            install_worker_guards,
         )
 
         from .coords import DRAM_COORD_MAP, ETH_COORD_MAP, TENSIX_COORD_MAP
@@ -145,55 +146,12 @@ def main(argv=None):
             device.ensure_tensix_tile(physical)
             fabric.register(physical, TensixCore(device, unified))
 
-        # Surface the most common "silent zero-fill" config bug: host
-        # traffic addresses a functional_worker that wasn't pre-built via
-        # TT_SIM_TENSIX_COORDS. Without this warning the user sees
-        # mismatch output (or just zeros) with no hint that a missing
-        # coord was the cause.
-        _tensix_pool_set = set(tensix_pool)
-
-        def _warn_unmapped_worker(coord):
-            if coord in TENSIX_COORD_MAP and coord not in _tensix_pool_set:
-                print(
-                    f"[server] WARNING: wire traffic to functional worker "
-                    f"{coord[0]}-{coord[1]} (unified {TENSIX_COORD_MAP[coord]}) "
-                    f"— not in TT_SIM_TENSIX_COORDS, traffic silently "
-                    f"NullCore-swallowed. Add `{coord[0]}-{coord[1]}` to "
-                    f"TT_SIM_TENSIX_COORDS to materialise it.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-        fabric.unmapped_callback = _warn_unmapped_worker
-
-        def _error_kernel_launch_on_unmaterialised(coord):
-            # go=GO reached a coord tt-sim didn't materialise. If it's a
-            # functional worker, the program launches a kernel on a core the
-            # user didn't start — a silent NullCore swallow here would surface
-            # only as a downstream hang (the peer cores wait on NoC traffic
-            # this core never sends). Fail loudly and immediately instead.
-            if coord not in TENSIX_COORD_MAP or coord in _tensix_pool_set:
-                return
-            configured = ",".join(f"{x}-{y}" for x, y in sorted(_tensix_pool_set))
-            print(
-                f"[server] ERROR: kernel launch (go=GO) sent to functional "
-                f"worker {coord[0]}-{coord[1]} (unified {TENSIX_COORD_MAP[coord]}), "
-                f"which tt-sim did not materialise — the program runs on more "
-                f"cores than tt-sim was started with. Add `{coord[0]}-{coord[1]}` "
-                f"to TT_SIM_TENSIX_COORDS (currently: {configured}), or raise "
-                f"TT_SIM_TENSIX_CORES.",
-                file=sys.stderr,
-                flush=True,
-            )
-            # Stop the server immediately. tt-metal's UMD has no "simulator
-            # died" path — it blocks forever on its next go-message poll no
-            # matter how we close the socket — so the host still needs a Ctrl-C.
-            # But the message above prints the instant the launch is attempted
-            # (i.e. right when the hang begins), so the reason is on screen, and
-            # exiting here means we don't leave an orphaned server behind.
-            os._exit(1)
-
-        fabric.kernel_launch_callback = _error_kernel_launch_on_unmaterialised
+        # Surface the most common "silent zero-fill" config bug: host traffic
+        # (or worse, a kernel launch) addressing a functional_worker that
+        # wasn't pre-built via TT_SIM_TENSIX_COORDS. Shared with the Blackhole
+        # server so both architectures shout about it — see
+        # ``tt_sim.bridge.install_worker_guards``.
+        install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP)
 
         enabled = enabled_diagnostic_names(diagnostics)
         print(
