@@ -8,7 +8,6 @@ class TensixTileControl(MemMapable, Clockable):
         self.RISCV_DEBUG_REG_SOFT_RESET_0 = conv_to_bytes(0)
         self.RISCV_DEBUG_REG_TRISC_PC_BUF_OVERRIDE = conv_to_bytes(0)
         self.RISCV_DEBUG_REG_DBG_FEATURE_DISABLE = conv_to_bytes(0)
-        self.cycle_num = 0
         # Backing store for RISCV_DEBUG_REG_* registers without dedicated
         # semantics — clock-gating control (DEST_CG_CTRL/CG_CTRL_EN/CG_KICK at
         # 0x240+), scratch/postcode registers, etc. The functional sim does not
@@ -20,8 +19,38 @@ class TensixTileControl(MemMapable, Clockable):
         # must wake the tile whatever path the write arrived by.
         self.clock_owner = None
 
+    @property
+    def cycle_num(self):
+        """The wall clock behind ``RISCV_DEBUG_REG_WALL_CLOCK_*``, sampled lazily.
+
+        Phase 2 of ``docs/plans/event-driven-pump.md``. This used to be
+        latched by ``clock_tick`` on every cycle of every tile — the one thing
+        that still cost a dormant tile anything, and impossible to keep
+        correct once Phase 4 lets the pump skip cycles outright. It is a pure
+        function of the cycle number, so it is cheaper and strictly more
+        robust to compute it when somebody actually reads it.
+
+        The value is deliberately ``current_cycle - 1``, which reproduces the
+        latched semantics exactly: ``tile_ctrl`` was ticked *after* the tile's
+        other components, so a core reading the register during cycle ``c``
+        saw the value stored at the end of cycle ``c - 1``, and a host reading
+        it between ``run`` calls saw the last cycle executed.
+        """
+        owner = self.clock_owner
+        if owner is None:
+            return 0
+        cycle = owner.current_cycle
+        return cycle - 1 if cycle > 0 else 0
+
     def clock_tick(self, cycle_num):
-        self.cycle_num = cycle_num
+        # Nothing to latch since Phase 2 — see ``cycle_num`` above. Kept so the
+        # class stays a Clockable for drivers that register it by hand; the
+        # in-tree tiles no longer list it in ``get_clocks()``.
+        pass
+
+    def is_clock_idle(self):
+        # clock_tick is a no-op, so ticking this can never change anything.
+        return True
 
     def read(self, addr, size):
         if addr == 0x1B0:

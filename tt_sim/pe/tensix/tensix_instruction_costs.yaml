@@ -1,0 +1,1038 @@
+# Per-instruction cycle costs for the Tensix coprocessor backend units.
+#
+# This file parallels ``tensix_instructions.yaml``: the top-level keys under
+# ``units`` are the ``ex_resource`` values that file uses (MATH, SFPU, THCON,
+# SYNC, TDMA, CFG, PACK, UNPACK, XMOV, NONE), and the instruction names under
+# each unit are its instruction names. The two are meant to be read side by
+# side -- ``tensix_instructions.yaml`` says what an opcode *is*, this says what
+# it *costs*.
+#
+# NOTHING CONSUMES THIS YET. It is dead data plus a tested loader
+# (``tt_sim/perf/costs.py``); see ROADMAP.md section I "Per-unit cycle-cost
+# tables" and docs/plans/cost-model.md. Phase 5 of docs/plans/event-driven-pump.md
+# is where it becomes load-bearing.
+#
+# ---------------------------------------------------------------------------
+# PROVENANCE IS THE POINT
+# ---------------------------------------------------------------------------
+# tt-sim is a cycle-*approximate* estimator, not cycle-accurate (ROADMAP.md
+# "Positioning"). A table of plausible-looking constants with no attribution is
+# worse than no table, because it cannot be improved: nobody can tell which
+# numbers came from a document and which were made up. So every entry carries a
+# ``provenance`` from this vocabulary:
+#
+#   isa_doc          A number stated verbatim in the public Tenstorrent ISA
+#                    documentation. ``source`` is required and names the
+#                    document and section.
+#   isa_doc_derived  Arithmetic on an isa_doc number (almost always
+#                    "occupancy = 1 / throughput_ipc"). ``source`` and
+#                    ``derivation`` are required.
+#   vendor_source    Taken from vendor source code (ttsim, tt-metal, tt-llk)
+#                    rather than prose documentation. ``source`` is required.
+#   estimated        Uncalibrated. A guess, however educated. ``note`` is
+#                    required and must say what would replace it.
+#   unknown          Deliberately left without a number because no source gives
+#                    one. ``note`` is required. An entry with this provenance
+#                    carries no cycle counts at all -- that is the honest
+#                    answer, and a reader can grep for it.
+#
+# Rule: **an entry's provenance is the weakest provenance of any number in it.**
+# So an entry whose latency is documented but whose occupancy is derived reads
+# ``isa_doc_derived``. This errs towards understating what is sourced, which is
+# the safe direction.
+#
+# Where the documentation gives a throughput but not a latency, or vice versa,
+# only the documented one is recorded as ``isa_doc``. The other is either
+# derived (and marked so) or absent. Do not "complete" a row by inventing its
+# missing half.
+#
+# ---------------------------------------------------------------------------
+# FIELDS
+# ---------------------------------------------------------------------------
+# Per instruction entry:
+#
+#   latency         Cycles from issue until the result is observable. Matches
+#                   the "Latency" column of the ISA docs' per-unit tables.
+#   occupancy       Cycles the unit cannot begin another instruction. This is
+#                   the number Phase 5 of the pump plan needs: "busy until
+#                   cycle c + N".
+#   throughput_ipc  Instructions per cycle, as the ISA docs state it.
+#   scales_with     A named multiplier the cost is repeated for, e.g.
+#                   ``fidelity_phases``. Recorded rather than folded in, since
+#                   the multiplier is a runtime property.
+#   arch            Present only on instructions that exist on one
+#                   architecture. ``blackhole`` means the loader drops the
+#                   entry for Wormhole. (Matches how ``tensix_instructions.yaml``
+#                   keeps Blackhole's superset ops in the shared table.)
+#   isa_doc_name    Set when this file's key -- which follows
+#                   ``tensix_instructions.yaml`` -- differs from the name the
+#                   ISA docs use.
+#
+# A cost value is either a plain integer (meaning "exactly N cycles") or a
+# mapping with ``cycles`` plus a ``bound`` from {exact, at_least, at_most,
+# approximate, range}; ``range`` also carries ``max``. The bounds exist because
+# the ISA docs genuinely write ">= 2 cycles", "~5 cycles" and "<= 2 cycles",
+# and flattening those to a single integer would be inventing precision.
+#
+# An absent ``latency`` / ``occupancy`` / ``throughput_ipc`` means the source
+# does not give one. Every entry that is missing all three must carry a
+# ``note``.
+#
+# Per-unit ``not_documented`` lists opcodes that the unit's ISA-doc table
+# simply does not mention. They are named rather than silently omitted so that
+# "no entry" is visibly a gap in the source, not an oversight here.
+
+schema_version: 1
+
+# Short ids used by every ``source`` field, so an entry reads
+# ``source: wh_matrix_unit#instruction-latency-and-throughput``. The test
+# asserts every source resolves to one of these.
+documents:
+  repo: https://github.com/tenstorrent/tt-isa-documentation
+  wh_matrix_unit: WormholeB0/TensixTile/TensixCoprocessor/MatrixUnit.md
+  wh_vector_unit: WormholeB0/TensixTile/TensixCoprocessor/VectorUnit.md
+  wh_scalar_unit: WormholeB0/TensixTile/TensixCoprocessor/ScalarUnit.md
+  wh_sync_unit: WormholeB0/TensixTile/TensixCoprocessor/SyncUnit.md
+  wh_config_unit: WormholeB0/TensixTile/TensixCoprocessor/ConfigurationUnit.md
+  wh_misc_unit: WormholeB0/TensixTile/TensixCoprocessor/MiscellaneousUnit.md
+  wh_packers: WormholeB0/TensixTile/TensixCoprocessor/Packers/README.md
+  wh_unpackers: WormholeB0/TensixTile/TensixCoprocessor/Unpackers/README.md
+  wh_unpacr: WormholeB0/TensixTile/TensixCoprocessor/UNPACR_Regular.md
+  wh_xmov: WormholeB0/TensixTile/TensixCoprocessor/XMOV.md
+  wh_mop_expander: WormholeB0/TensixTile/TensixCoprocessor/MOPExpander.md
+  wh_replay: WormholeB0/TensixTile/TensixCoprocessor/REPLAY.md
+  wh_l1: WormholeB0/TensixTile/L1.md
+  bh_vector_unit: BlackholeA0/TensixTile/TensixCoprocessor/VectorUnit.md
+  bh_config_unit: BlackholeA0/TensixTile/TensixCoprocessor/ConfigurationUnit.md
+  bh_sync_unit: BlackholeA0/TensixTile/TensixCoprocessor/SyncUnit.md
+
+# Non-ISA-doc sources, used only where the ISA docs are silent. Paths are
+# relative to a tt-metal checkout (0.74 was the one read). These are second-tier
+# authority: they are vendor code and vendor tech reports rather than the ISA
+# contract, and several of them disagree with each other (see the Blackhole
+# clock note in tt_sim/perf/unit_costs.yaml), so an entry sourced from here is
+# marked ``vendor_source``, never ``isa_doc``.
+vendor_documents:
+  repo: https://github.com/tenstorrent/tt-metal
+  version_read: "0.74"
+  tm_gemm_flops: tech_reports/GEMM_FLOPS/GEMM_FLOPS.md
+  tm_matrix_engine: tech_reports/matrix_engine/matrix_engine.md
+  tm_matmul_op: ttnn/cpp/ttnn/operations/matmul/device/matmul_device_operation.cpp
+  tm_operation_hpp: ttnn/api/ttnn/operation.hpp
+  tm_reduce_scatter: ttnn/cpp/ttnn/operations/ccl/reduce_scatter/device/reduce_scatter_device_operation.cpp
+  tm_llk_perf_counters: tt_metal/tt-llk/docs/performance_counters/performance_counters.md
+  tm_llk_unpack_ab_matmul: tt_metal/tt-llk/tt_llk_blackhole/llk_lib/llk_unpack_AB_matmul.h
+
+units:
+
+  # -------------------------------------------------------------------------
+  MATH:
+    isa_doc_name: Matrix Unit (FPU)
+    backend: tt_sim/pe/tensix/backends/matrix.py
+    source: wh_matrix_unit#instruction-latency-and-throughput
+    note: >
+      The Wormhole table is the only per-op latency/throughput table published
+      for this unit. BlackholeA0/.../MatrixUnit.md is a stub pointing back at
+      it, and the Wormhole "Performance" section says outright that "relative
+      ratios between instructions broadly apply to Blackhole, but absolute
+      throughput and product-specific tile counts differ" -- so these cycle
+      counts are used unchanged for both arches, and the arch difference is
+      carried by the clock rate (see tt_sim/perf/unit_costs.yaml) rather than
+      by the per-op numbers.
+    fidelity_phases:
+      cycles_per_tile: { LoFi: 16, HiFi2: 32, HiFi3: 48, HiFi4: 64 }
+      phases: { LoFi: 1, HiFi2: 2, HiFi3: 3, HiFi4: 4 }
+      mul_adds_per_cycle_lofi: 4096
+      provenance: vendor_source
+      source: tm_gemm_flops#L101
+      note: >
+        The ISA docs say only that fidelity phases cost one instruction each,
+        without a cycles-per-tile figure. tt-metal states one directly:
+        "Cycle_per_tile is the ideal compute cycle for each tile, which depends
+        on math fidelity (LoFi: 16, HiFi2: 32, HiFi3: 48, HiFi4: 64)". That is
+        a whole-tile figure, not a per-MVMUL one, so it is recorded here at
+        unit level rather than folded into the MVMUL entry -- deriving a
+        per-instruction cost from it would require assuming how many MVMULs a
+        tile takes, which is a kernel property.
+
+        Corroborating, from the same vendor tree: the matrix engine performs
+        "8x16 x 16x16 = 8x16 in a single cycle. This is 2*8*16*16 = 4096
+        muladds in a single cycle" (tm_matmul_op:206-208, tm_matrix_engine:14),
+        and the fidelity multiplier is 1/2/3/4 for LoFi/HiFi2/HiFi3/HiFi4
+        (tm_operation_hpp OpPerformanceModel::fidelity_multiplier). Note the
+        LLK performance-counter doc gives the weighting as "1 for LoFi, 2 for
+        HiFi2, 4 for HiFi4" and omits HiFi3 (tm_llk_perf_counters#L871), so the
+        vendor sources are not perfectly consistent with each other -- another
+        reason this is vendor_source and not isa_doc.
+    instructions:
+      MVMUL:
+        latency: 5
+        throughput_ipc: 1
+        occupancy: 1
+        scales_with: fidelity_phases
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          Footnote (dagger) on the throughput column: "If multiple fidelity
+          phases are in use, then one instruction is required per fidelity
+          phase, so the effective IPC decreases as the number of fidelity
+          phases increases." The docs do not give a cycles-per-phase figure
+          directly; the "Performance" table's TFLOP/s figures halve from 1 to
+          2 phases and quarter from 1 to 4, consistent with one issue per
+          phase. ``scales_with`` records the dependency without picking a
+          multiplier here, since the phase count is a runtime property of
+          ConfigState.
+      DOTPV:
+        latency: 5
+        throughput_ipc: 1
+        occupancy: 1
+        scales_with: fidelity_phases
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      GAPOOL:
+        latency: 5
+        throughput_ipc: 1
+        occupancy: 1
+        scales_with: fidelity_phases
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      ELWMUL:
+        latency: 5
+        throughput_ipc: 1
+        occupancy: 1
+        scales_with: fidelity_phases
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      GMPOOL:
+        latency: 5
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          Does not need multiple fidelity phases -- the Performance table
+          quotes the same TFLOP/s for all four phase columns.
+      ELWADD:
+        latency: 5
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      ELWSUB:
+        latency: 5
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      SETRWC:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      INCRWC:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      CLEARDVALID:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      CLREXPHIST:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      GATESRCRST:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      SHIFTXA:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      ZEROACC:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      ZEROSRC:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      TRNSPSRCB:
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      SHIFTXB:
+        latency: 2
+        throughput_ipc: 0.5
+        occupancy: 2
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      MOVD2A:
+        latency: 2
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          Footnote (double dagger): "Only certain Matrix Unit (FPU)
+          instructions can be used to hide this latency; see the relevant
+          instruction pages for details."
+      MOVA2D:
+        latency: 4
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+        note: latency is hideable only by certain FPU instructions (double dagger).
+      MOVDBGA2D:
+        latency: 4
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      MOVB2D:
+        latency: 4
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      MOVB2A:
+        latency: 4
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_matrix_unit#instruction-latency-and-throughput
+        derivation: occupancy = 1 / throughput_ipc
+      MOVD2B:
+        provenance: unknown
+        note: >
+          Listed in the unit's instruction matrix (Dst -> SrcB) but absent from
+          the latency/throughput table. Its sibling MOVD2A is 2 cycles and the
+          SrcA-writing moves are 4, so a guess either way would be arbitrary.
+      TRNSPSRCA:
+        provenance: unknown
+        note: >
+          TRNSPSRCB is in the latency table at 1 cycle; TRNSPSRCA is not in the
+          table and has no page in the Wormhole tree.
+      MOVDBGB2D:
+        arch: blackhole
+        provenance: unknown
+        note: >
+          Blackhole-only, and listed in tt_sim's UNMODELLED_BLACKHOLE_INSTRUCTIONS.
+          No latency published.
+    not_documented:
+      instructions:
+        [
+          APOOL3S1,
+          APOOL3S2,
+          CONV3S1,
+          CONV3S2,
+          MFCONV3S1,
+          MPOOL3S1,
+          MPOOL3S2,
+          RAREB,
+          SETASHRMH,
+          SETASHRMH0,
+          SETASHRMH1,
+          SETASHRMV,
+          SETIBRWC,
+          SETPKEDGOF,
+        ]
+      note: >
+        Absent from the ISA docs' latency/throughput table. The first seven are
+        the "Legacy instructions" the Wormhole page describes as neutered
+        (MFCONV3S1 / CONV3S* / APOOL3S* compute "Dst += 0"; MPOOL3S* do a
+        degenerate GMPOOL) and explicitly marks NonContractualBehavior, so
+        there is nothing worth costing. The SETASHR* / SETIBRWC / SETPKEDGOF /
+        RAREB group simply has no published timing.
+
+  # -------------------------------------------------------------------------
+  SFPU:
+    isa_doc_name: Vector Unit (SFPU)
+    backend: tt_sim/pe/tensix/backends/vector.py
+    source: wh_vector_unit#instructions
+    note: >
+      Latencies are per the Wormhole table; the Blackhole table lists identical
+      IPC and latency for every instruction the two share, so only the
+      Blackhole-only opcodes appear with ``arch: blackhole`` and there is no
+      per-arch override for this unit. The arch difference is the clock: the
+      Blackhole page notes the SFPU "clocks at 1.35 GHz rather than 1 GHz".
+
+      Several instructions appear on multiple rows of the doc's table, one per
+      mode, sometimes with different latencies. Where the modes disagree the
+      entry records the worst case with ``bound: at_most`` and says so.
+
+      The unit has five sub-units (load, simple, MAD, round, store) but "can
+      only accept one instruction per cycle from the outside world, so by
+      default four fifths of the Vector Unit (SFPU) is always idle";
+      SFPLOADMACRO is the only way to exceed 1 IPC.
+    instructions:
+      SFPADDI: &sfpu_2cyc
+        latency: 2
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+      SFPADD: *sfpu_2cyc
+      SFPMAD: *sfpu_2cyc
+      SFPMUL: *sfpu_2cyc
+      SFPMULI: *sfpu_2cyc
+      SFPLUT: *sfpu_2cyc
+      SFPLUTFP32: *sfpu_2cyc
+      SFPABS: &sfpu_1cyc
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+      SFPAND: *sfpu_1cyc
+      SFPCAST: *sfpu_1cyc
+      SFPCOMPC: *sfpu_1cyc
+      SFPDIVP2: *sfpu_1cyc
+      SFPENCC: *sfpu_1cyc
+      SFPEXEXP: *sfpu_1cyc
+      SFPEXMAN: *sfpu_1cyc
+      SFPIADD: *sfpu_1cyc
+      SFPLOAD: *sfpu_1cyc
+      SFPLOADI: *sfpu_1cyc
+      SFPLZ: *sfpu_1cyc
+      SFPMOV: *sfpu_1cyc
+      SFPNOP: *sfpu_1cyc
+      SFPNOT: *sfpu_1cyc
+      SFPOR: *sfpu_1cyc
+      SFPPOPC: *sfpu_1cyc
+      SFPPUSHC: *sfpu_1cyc
+      SFPSETCC: *sfpu_1cyc
+      SFPSETEXP: *sfpu_1cyc
+      SFPSETMAN: *sfpu_1cyc
+      SFPSETSGN: *sfpu_1cyc
+      SFPSHFT: *sfpu_1cyc
+      SFPSTORE: *sfpu_1cyc
+      SFPTRANSP: *sfpu_1cyc
+      SFPXOR: *sfpu_1cyc
+      SFP_STOCH_RND:
+        isa_doc_name: SFPSTOCHRND
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          Every SFPSTOCHRND row in the doc's table (sign-magnitude shifts and
+          all three conversion modes) is 1 cycle at 1 IPC.
+      SFPSWAP:
+        latency: 2
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          The doc gives IPC as "<= 1" for every SFPSWAP row, so 1 is an upper
+          bound on throughput and the derived occupancy of 1 is a lower bound.
+          No number is published for the degraded case.
+      SFPSHFT2:
+        latency: { cycles: 2, bound: at_most }
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          Mode-dependent: the LReg-shuffle modes are 1 cycle at 1 IPC, the
+          lane-rotate modes are 2 cycles at "<= 1" IPC. Recorded as the worst
+          case; the modelled cost should pick the mode once the frontend passes
+          one through.
+      SFPCONFIG:
+        latency: { cycles: 2, bound: at_most }
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          The doc lists "<= 2 cycles" for the configuration-write mode and
+          1 cycle for the LReg-broadcast mode.
+      SFPLOADMACRO:
+        throughput_ipc: 1
+        provenance: isa_doc
+        source: wh_vector_unit#instructions
+        note: >
+          The doc's latency column says "Complex" -- SFPLOADMACRO behaves like
+          SFPLOAD and then schedules up to four additional vector instructions,
+          so its cost is the cost of what it expands to. Deliberately left
+          without a latency rather than guessing one; it is also the only way
+          to have more than one SFPU sub-unit active at a time, so a model that
+          collapses it to a single number would misrepresent the unit.
+      SFPARECIP:
+        arch: blackhole
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: bh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+      SFPGT:
+        arch: blackhole
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: bh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+      SFPLE:
+        arch: blackhole
+        latency: 1
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: bh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+      SFPMUL24:
+        arch: blackhole
+        latency: 2
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: bh_vector_unit#instructions
+        derivation: occupancy = 1 / throughput_ipc
+
+  # -------------------------------------------------------------------------
+  THCON:
+    isa_doc_name: Scalar Unit (ThCon)
+    backend: tt_sim/pe/tensix/backends/thcon.py
+    source: wh_scalar_unit
+    note: >
+      This is the one unit whose ISA-doc table is *already* an occupancy table:
+      its column is headed "Number of cycles required for execution", and the
+      page states the unit "is executing at most one instruction at a time, and
+      has no internal pipelining", with the issuing thread unable to start any
+      further instruction (in any unit) until it completes. So occupancy here
+      is isa_doc, not derived, and throughput_ipc is the unit-level 1.
+      No Blackhole ScalarUnit.md exists, which per the Blackhole tree's
+      convention means the behaviour is shared.
+    throughput_ipc: 1
+    instructions:
+      DMANOP:
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_scalar_unit
+        note: >
+          Costed here, in the unit the ISA docs put it in, even though
+          tensix_instructions.yaml marks it ``ex_resource: TDMA`` (and tt-sim
+          therefore dispatches it to the Miscellaneous Unit). See
+          units.TDMA.instructions.DMANOP for the other half of the
+          cross-reference. Both units give it 1 cycle, so the disagreement is
+          about which unit is occupied, not about the cost.
+      SETDMAREG:
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_scalar_unit
+      REG2FLOP:
+        occupancy: { cycles: 2, bound: at_least }
+        provenance: isa_doc
+        source: wh_scalar_unit
+      FLUSHDMA:
+        occupancy: { cycles: 2, bound: at_least }
+        provenance: isa_doc
+        source: wh_scalar_unit
+        note: >
+          The ">= 2" is doing a lot of work: FLUSHDMA waits on the unpackers /
+          packers / mover it names, so its real occupancy is however long that
+          takes. tt-sim already models the stall functionally
+          (``ScalarUnit.stalled``); this entry is the floor, not the cost.
+      ADDDMAREG: &thcon_3_or_4
+        occupancy: { cycles: 3, max: 4, bound: range }
+        provenance: isa_doc
+        source: wh_scalar_unit
+        note: the doc says "3 or 4" without saying what selects between them.
+      CMPDMAREG: *thcon_3_or_4
+      MULDMAREG: *thcon_3_or_4
+      SUBDMAREG: *thcon_3_or_4
+      BITWOPDMAREG: *thcon_3_or_4
+      SHIFTDMAREG: *thcon_3_or_4
+      STOREIND: &thcon_ge3
+        occupancy: { cycles: 3, bound: at_least }
+        provenance: isa_doc
+        source: wh_scalar_unit
+      STOREREG: *thcon_ge3
+      ATSWAP: *thcon_ge3
+      LOADIND: &thcon_ge3_load
+        occupancy: { cycles: 3, bound: at_least }
+        provenance: isa_doc
+        source: wh_scalar_unit
+        note: >
+          Footnote (dagger): "Occupies the Scalar Unit for >= 3 cycles, though
+          the load result isn't delivered until some time later." The delivery
+          latency is not quantified -- that is a separate, unpublished number
+          from the occupancy recorded here.
+      LOADREG: *thcon_ge3_load
+      ATINCGET: *thcon_ge3_load
+      ATCAS: &thcon_ge15
+        occupancy: { cycles: 15, bound: at_least }
+        provenance: isa_doc
+        source: wh_scalar_unit
+      ATINCGETPTR: *thcon_ge15
+      RSTDMA:
+        provenance: unknown
+        note: absent from the Scalar Unit's cycle table; no page in the ISA docs.
+
+  # -------------------------------------------------------------------------
+  SYNC:
+    isa_doc_name: Sync Unit
+    backend: tt_sim/pe/tensix/backends/sync.py
+    source: wh_sync_unit
+    note: >
+      The Blackhole SyncUnit.md table is identical to Wormhole's for every row,
+      so no per-arch override. MOP / MOP_CFG carry ex_resource SYNC in
+      tensix_instructions.yaml but are really frontend MOP-expander
+      instructions, and are sourced from that page instead.
+    instructions:
+      ATGETM:
+        latency: 1
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_sync_unit
+        note: >
+          "Issue up to three per cycle, provided they refer to different
+          mutexes" -- i.e. throughput is per-mutex, not per-unit, so no single
+          throughput_ipc is recorded. The page also notes ATGETM "executes in a
+          single cycle, but it cannot pass through the Wait Gate if some other
+          thread is holding the mutex in question"; that stall is a wait-gate
+          cost, not unit occupancy.
+      ATRELM:
+        latency: 1
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_sync_unit
+      SEMINIT: &sync_sem
+        latency: 1
+        occupancy: 1
+        throughput_ipc: 1
+        provenance: isa_doc
+        source: wh_sync_unit
+        note: >
+          "Issue at most one of these per cycle" -- the 1 IPC is shared across
+          SEMINIT / SEMPOST / SEMGET / STALLWAIT / SEMWAIT and RISCV semaphore
+          write-requests, so it is a unit-level budget rather than a per-op one.
+      SEMPOST: *sync_sem
+      SEMGET: *sync_sem
+      SEMWAIT: &sync_wait
+        latency: 1
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_sync_unit
+        note: >
+          Execution "consists purely of passing them over to the Wait Gate ...
+          where they sit as the Wait Gate's latched wait instruction. The Wait
+          Gate will then re-evaluate the instruction's wait condition every
+          cycle until it is met." The 1 cycle is the hand-off; the wait itself
+          is unbounded and belongs to the wait gate.
+      STALLWAIT: *sync_wait
+      MOP:
+        throughput_ipc: 1
+        provenance: isa_doc
+        source: wh_mop_expander#performance
+        note: >
+          A frontend expander, not a Sync Unit instruction. "Upon receiving a
+          MOP instruction, a MOP Expander will ingest the MOP instruction and
+          then emit a different sequence of instructions, at a rate of one
+          instruction per cycle, only slowing down if backpressured from
+          downstream." So its occupancy is the length of its expansion, plus a
+          documented "one cycle transition penalty" if the next instruction is
+          not itself a MOP. No fixed latency to record.
+      MOP_CFG:
+        throughput_ipc: 1
+        provenance: isa_doc
+        source: wh_mop_expander#performance
+        note: >
+          "While not processing MOP or MOP_CFG instructions, each MOP Expander
+          can ingest one instruction per cycle and emit one instruction per
+          cycle."
+      STREAMWAIT:
+        arch: blackhole
+        provenance: unknown
+        note: >
+          Blackhole-only and in tt_sim's UNMODELLED_BLACKHOLE_INSTRUCTIONS. It
+          stalls until a NoC stream reaches a phase / message count, so its
+          cost is a wait, not a fixed occupancy; no number is published.
+
+  # -------------------------------------------------------------------------
+  CFG:
+    isa_doc_name: Configuration Unit
+    backend: tt_sim/pe/tensix/backends/config.py
+    source: wh_config_unit
+    note: >
+      Wormhole and Blackhole publish separate tables for this unit and they do
+      not agree in shape: Wormhole expresses the limits as prose in a
+      "Throughput" column, Blackhole as an explicit IPC column plus an IPC-group
+      pipeline (stages -4..+1). The shared numbers happen to match, so the base
+      table is Wormhole's and ``arch_overrides.blackhole`` carries the two
+      Blackhole-only opcodes and the IPC-group note.
+    instructions:
+      SETC16:
+        latency: 1
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_config_unit
+        note: >
+          "Issue one per thread per cycle" -- three threads can each issue one
+          in the same cycle, so the unit-level throughput is 3, not 1.
+      WRCFG:
+        latency: 2
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: wh_config_unit
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          "Note that excessive use of WRCFG from one thread can starve RMWCIB
+          and RDCFG from other threads", and can also starve RISCV read/write
+          requests against TENSIX_CFG_BASE. That contention is not expressible
+          as a per-op constant.
+
+          Independently corroborated in the vendor LLK, which pads "to ensure
+          WRCFG instruction has finished, since it takes 2 cycles"
+          (tm_llk_unpack_ab_matmul:84,114) -- one of the few places a tt-metal
+          comment and the ISA docs agree on a number exactly.
+      RMWCIB0: &cfg_rmwcib
+        latency: 1
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_config_unit
+        isa_doc_name: RMWCIB
+        note: >
+          "Issue at most one of these per cycle, provided neither RDCFG nor
+          WRCFG issued in previous cycle by any thread" -- a cross-thread,
+          cross-op constraint, so no per-op throughput_ipc is recorded. The
+          four RMWCIBn opcodes in tensix_instructions.yaml are the one RMWCIB
+          instruction with different byte selects.
+      RMWCIB1: *cfg_rmwcib
+      RMWCIB2: *cfg_rmwcib
+      RMWCIB3: *cfg_rmwcib
+      RDCFG:
+        latency: { cycles: 2, bound: at_least }
+        occupancy: { cycles: 2, bound: at_least }
+        provenance: isa_doc
+        source: wh_config_unit
+        note: >
+          Occupancy is set equal to the documented latency here because the
+          Wormhole page gives RDCFG no separate throughput figure -- it shares
+          the RMWCIB row's "at most one of these per cycle" constraint. On
+          Blackhole the same instruction "can potentially occupy stage 1 for
+          multiple cycles if there is GPR write contention".
+      CFGSHIFTMASK:
+        arch: blackhole
+        latency: 2
+        throughput_ipc: 0.5
+        occupancy: 2
+        provenance: isa_doc_derived
+        source: bh_config_unit
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          The only instruction that halves the Config IPC group's sustained
+          throughput -- it "requires two cycles in stage 0".
+      STREAMWRCFG:
+        arch: blackhole
+        latency: { cycles: 5, bound: at_least }
+        throughput_ipc: 1
+        occupancy: 1
+        provenance: isa_doc_derived
+        source: bh_config_unit
+        derivation: occupancy = 1 / throughput_ipc
+        note: >
+          Blackhole-only, and in tt_sim's UNMODELLED_BLACKHOLE_INSTRUCTIONS.
+          The ">= 5" is the pipeline depth: it enters at stage -4 and the
+          config write lands at stage 0.
+
+  # -------------------------------------------------------------------------
+  TDMA:
+    isa_doc_name: Miscellaneous Unit
+    backend: tt_sim/pe/tensix/backends/misc.py
+    source: wh_misc_unit
+    note: >
+      Named TDMA by ``ex_resource`` in tensix_instructions.yaml but it is the
+      ISA docs' Miscellaneous Unit. One blanket sentence covers every
+      instruction: "All Miscellaneous Unit instructions execute in a single
+      cycle, and the Miscellaneous Unit can accept one instruction per thread
+      per cycle." So each entry below is that sentence applied, not a separate
+      published figure.
+    instructions:
+      SETADC: &misc_1cyc
+        latency: 1
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_misc_unit
+      SETADCXY: *misc_1cyc
+      SETADCXX: *misc_1cyc
+      SETADCZW: *misc_1cyc
+      INCADCXY: *misc_1cyc
+      INCADCZW: *misc_1cyc
+      ADDRCRXY: *misc_1cyc
+      ADDRCRZW: *misc_1cyc
+      SETDVALID: *misc_1cyc
+      DMANOP:
+        provenance: unknown
+        note: >
+          Carries ex_resource TDMA in tensix_instructions.yaml but the ISA docs
+          place DMANOP in the Scalar Unit (ThCon), where it is 1 cycle -- see
+          units.THCON.instructions.DMANOP. Recorded here only so the mismatch
+          between the two tables is visible rather than silent.
+
+  # -------------------------------------------------------------------------
+  PACK:
+    isa_doc_name: Packers
+    backend: tt_sim/pe/tensix/backends/packer.py
+    source: wh_packers
+    note: >
+      There is no per-op latency table for the packers -- the ISA docs describe
+      the issue constraint and the L1 bandwidth, and nothing in between. What
+      *is* documented, and is the useful half for a back-pressure model: "At
+      most one of these instructions can be started per cycle ... the issuing
+      Tensix thread will be blocked until the packers referenced by the
+      instruction have _accepted_ the work, and then the thread can proceed on
+      to its next instruction. To wait for the packers to have finished the
+      work, use STALLWAIT." So issue cost is 1 cycle and completion cost is a
+      function of the datum count and the L1 port, not of the opcode.
+
+      This is the largest honest gap in the file. A search of ttsim and
+      tt-metal 0.74 for a packer datums-per-cycle or cycles-per-tile figure
+      found nothing: tt-metal has the unpacker's 80 B/cycle ceiling but no
+      packer equivalent, and its LLK performance-counter doc only describes how
+      to *measure* packer-busy cycles, not what they are. So the packer's
+      completion cost is left unmodelled rather than estimated.
+    l1_bandwidth:
+      writes_per_packer_per_cycle: { bits: 128, count: 1 }
+      packers: 4
+      atomic_accumulate_period_cycles: 5
+      non_atomic_accumulate_period_cycles: 2
+      provenance: isa_doc
+      source: wh_l1#port-assignments
+      note: >
+        "There are four packers, each theoretically capable of one 128-bit
+        write per cycle, or one 128-bit atomic accumulate (4 lanes of 32-bit or
+        8 lanes of 16-bit) every five cycles, or one 128-bit non-atomic
+        accumulate every two cycles. Port contention and bank contention can
+        reduce this."
+    instructions:
+      PACR:
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_packers
+        note: >
+          The 1 cycle is the *issue* cost ("at most one of these instructions
+          can be started per cycle"), not the time the packers take to drain
+          the work. The drain has no published per-op figure; use
+          ``l1_bandwidth`` above.
+      PACR_SETREG:
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_packers
+        note: >
+          Shares PACR's one-start-per-cycle budget. Its register write "will
+          occur _after_ all earlier PACR instructions have completed all of
+          their late format conversions", so its completion is ordered behind
+          an unbounded amount of packer work.
+      TBUFCMD:
+        provenance: unknown
+        note: no page and no timing in the ISA docs.
+
+  # -------------------------------------------------------------------------
+  UNPACK:
+    isa_doc_name: Unpackers
+    backend: tt_sim/pe/tensix/backends/unpacker.py
+    source: wh_unpacr#performance
+    note: >
+      The unpacker is the clearest case in the whole table of a cost that is
+      not a constant: a fixed address-calculation phase, then a data phase
+      whose length is set by the byte count and the configured throttle mode.
+      Both halves are documented, so both are recorded -- the fixed part as
+      instruction occupancy, the variable part as ``l1_bandwidth``.
+    l1_bandwidth:
+      throttle_modes:
+        x1: { bytes_per_cycle: 16, throttle_mode_value: 0 }
+        x2: { bytes_per_cycle: 32, throttle_mode_value: 1 }
+        x4: { bytes_per_cycle: 64, throttle_mode_value: 2 }
+      provenance: isa_doc
+      source: wh_unpacr#performance
+      note: >
+        Selected by ConfigState.THCON_SEC[WhichUnpacker].Throttle_mode, but
+        constrained by mode: DiscontiguousInputRows always wants x4;
+        !IsUncompressed, UpsampleZeroes >= 3 and BFP2/BFP2a always want x1.
+        When both unpackers are active they interfere -- the ISA doc has a 3x3
+        table of what each actually gets, which is contention, not a per-op
+        cost, and so is not reproduced here.
+    joint_bandwidth:
+      bytes_per_cycle: 80
+      provenance: vendor_source
+      source: tm_reduce_scatter#L221-237
+      note: >
+        The ISA docs give the per-unpacker rates (above) and a qualitative
+        interference table, but no joint ceiling in bytes. tt-metal states one:
+        "Each can run at up to x4 speed (64 B/cycle), but their joint maximum
+        is five 128-bit reads per cycle = 80 B/cycle. This limit applies to all
+        architectures". That is consistent with the ISA docs' L1 page, which
+        says both unpackers together "can theoretically jointly achieve five
+        128-bit reads from L1 per cycle" (wh_l1) -- so the *five reads* half is
+        isa_doc and only the conversion to 80 B/cycle comes from the vendor.
+    instructions:
+      UNPACR:
+        occupancy: { cycles: 2, bound: at_least }
+        provenance: isa_doc
+        source: wh_unpacr#performance
+        note: >
+          "An UNPACR instruction spends at least two cycles calculating the
+          initial input address: uncompressed data requires exactly two cycles,
+          whereas compressed data requires more. For the duration of these
+          cycles, the issuing thread cannot start its next instruction, nor can
+          any other thread start an UNPACR instruction." That is a precise
+          occupancy for the uncompressed case and a floor for the compressed
+          one. The subsequent data movement is pipelined at the
+          ``l1_bandwidth`` rate above and is not part of this occupancy.
+      UNPACR_NOP:
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_unpackers
+        note: >
+          One of UNPACR_NOP's five modes is literally documented as "Occupy
+          Unpacker for one cycle" (UNPACR_NOP_Nop.md). The other four modes
+          (ZEROSRC, SETDVALID, SETREG, OverlayClear) are sequenced with UNPACR
+          but have no separately published cost.
+
+  # -------------------------------------------------------------------------
+  XMOV:
+    isa_doc_name: Mover
+    backend: tt_sim/pe/tensix/backends/mover.py
+    source: wh_xmov
+    note: >
+      A single instruction with a documented issue cost and a documented
+      background transfer rate -- and, unusually, the transfer rates are
+      *measured* rather than theoretical, which the ISA doc says explicitly.
+      The full mover cost model (bytes / rate, plus contention) lives in
+      tt_sim/perf/unit_costs.yaml under ``mover``.
+    instructions:
+      XMOV:
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_xmov
+        note: >
+          "The thread issuing an XMOV instruction will be automatically stalled
+          until the mover is able to _start_ work, at which point XMOV will
+          execute in a single cycle - the mover proceeds with the task in the
+          background." So 1 cycle is the issue cost once the mover is free; the
+          transfer duration is separate and is bandwidth-derived, and STALLWAIT
+          condition C12 is what waits for it.
+
+  # -------------------------------------------------------------------------
+  NONE:
+    isa_doc_name: (no backend unit)
+    source: wh_misc_unit
+    note: >
+      ``ex_resource: NONE`` in tensix_instructions.yaml. NOP is a
+      Miscellaneous Unit instruction despite the marker; REPLAY is a frontend
+      expander.
+    instructions:
+      NOP:
+        latency: 1
+        occupancy: 1
+        provenance: isa_doc
+        source: wh_misc_unit
+        note: >
+          Listed under "instructions which live in the Miscellaneous Unit
+          because they don't fit anywhere else", and covered by that unit's
+          blanket single-cycle statement.
+      REPLAY:
+        throughput_ipc: 1
+        provenance: isa_doc
+        source: wh_replay#performance
+        note: >
+          A Replay Expander instruction, so its cost is the length of what it
+          replays: "For the next Count - 1 cycles (or longer, if backpressured
+          from downstream), it will not ingest anything ... but it will emit
+          one instruction per cycle from its ReplayBuffer." With Load = true
+          and Exec = false it instead ingests one per cycle for Count cycles.
+          Count is an instruction field, so there is no constant to record.
+      RESOURCEDECL:
+        arch: blackhole
+        provenance: unknown
+        note: >
+          Blackhole-only and in tt_sim's UNMODELLED_BLACKHOLE_INSTRUCTIONS. It
+          declares resources for the Tensix-TRISC sync mechanism rather than
+          doing work; no timing published.
+
+# ---------------------------------------------------------------------------
+# Per-architecture differences.
+# ---------------------------------------------------------------------------
+# Deep-merged over ``units`` by the loader. This mirrors how ArchProfile
+# handles arch variation -- one set of fields, per-arch values -- rather than
+# the two-whole-files pattern of tensix_backend_cfg.yaml /
+# tensix_backend_cfg_blackhole.yaml, because the per-op costs are ~95%
+# identical between the two arches and duplicating them would guarantee drift.
+# Instructions that exist on only one arch are marked ``arch:`` in place
+# instead, matching how tensix_instructions.yaml keeps Blackhole's superset
+# opcodes in the shared table.
+arch_overrides:
+  wormhole: {}
+  blackhole:
+    units:
+      CFG:
+        note: >
+          Blackhole restructures this unit around IPC groups: "everything other
+          than SETC16 is part of the same IPC group, and sustained throughput
+          across the entire group is limited to one instruction per cycle (or
+          half an instruction per cycle if CFGSHIFTMASK is used)". SETC16 keeps
+          IPC 3 (one per thread); every other instruction, plus RISCV and Mover
+          requests, contends for a single shared cycle in pipeline stage 0.
+        source: bh_config_unit
+        instructions:
+          SETC16:
+            latency: 1
+            occupancy: 1
+            throughput_ipc: 3
+            provenance: isa_doc
+            source: bh_config_unit
+            note: >
+              Blackhole states the IPC as a number (3) where Wormhole states it
+              as prose ("issue one per thread per cycle"). Same behaviour,
+              recorded from the arch's own table.

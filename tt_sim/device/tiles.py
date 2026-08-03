@@ -87,19 +87,23 @@ class DRAMTile(TTDeviceTile):
     def get_clocks(self):
         return [self.noc0_router, self.noc1_router]
 
-    def clock_quiescent(self):
+    def next_wake_cycle(self, cycle_num):
         # A DRAM tile's only clockables are its two NIUs, and nothing runs on
-        # it — so it is idle exactly when neither NIU has a request queued or
-        # arriving. Written out rather than looping the generic probes because
-        # it is on the per-cycle path of every DRAM tile in the device.
+        # it — so it needs the next cycle exactly when one of them has a
+        # request queued or arriving, and otherwise nothing but an inbound
+        # transmit() can ever wake it. Written out rather than looping the
+        # generic probes because it is on the per-cycle path of every DRAM
+        # tile in the device.
         n0 = self.noc0_router
         n1 = self.noc1_router
-        return not (
+        if (
             n0.noc_requests_to_handle
             or n0.noc_new_requests_to_handle
             or n1.noc_requests_to_handle
             or n1.noc_new_requests_to_handle
-        )
+        ):
+            return cycle_num + 1
+        return None
 
     def get_resets(self):
         return []
@@ -220,20 +224,15 @@ class EthTile(TTDeviceTile):
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
 
     def get_clocks(self):
-        return [self.noc0_router, self.noc1_router, self.erisc, self.tile_ctrl]
+        # tile_ctrl is deliberately absent: since Phase 2 it latches nothing
+        # (the wall clock is read from the tile's TileClock on demand), so it
+        # has no per-cycle work and does not need registering.
+        return [self.noc0_router, self.noc1_router, self.erisc]
 
-    def get_clock_partition(self):
-        # tile_ctrl latches the cycle counter behind RISCV_DEBUG_REG_WALL_CLOCK_*
-        # and must keep ticking while the tile is dormant; it is last in
-        # get_clocks(), so moving it to the always-list preserves tick order.
-        clocks = self.get_clocks()
-        assert clocks[-1] is self.tile_ctrl
-        return clocks[:-1], [self.tile_ctrl]
-
-    def clock_quiescent(self):
+    def next_wake_cycle(self, cycle_num):
         if self.erisc.soft_active:
-            return False
-        return TTDeviceTile.clock_quiescent(self)
+            return cycle_num + 1
+        return TTDeviceTile.next_wake_cycle(self, cycle_num)
 
     def get_resets(self):
         return [self.erisc]
@@ -583,20 +582,12 @@ class TensixTile(TTDeviceTile):
             self.trisc2,
             self.noc0_router,
             self.noc1_router,
-            self.tile_ctrl,
         ]
 
-    def get_clock_partition(self):
-        # See EthTile.get_clock_partition — tile_ctrl is the wall clock and is
-        # last in get_clocks(), so the split preserves tick order exactly.
-        clocks = self.get_clocks()
-        assert clocks[-1] is self.tile_ctrl
-        return clocks[:-1], [self.tile_ctrl]
-
-    def clock_quiescent(self):
-        # Fast reject first: a tile with any baby core out of soft reset is
-        # never quiescent, and five attribute reads settle that. Only when the
-        # whole tile is in reset do we pay for the full sweep over ~20
+    def next_wake_cycle(self, cycle_num):
+        # Fast reject first: a tile with any baby core out of soft reset needs
+        # the very next cycle, and five attribute reads settle that. Only when
+        # the whole tile is in reset do we pay for the full sweep over ~20
         # coprocessor / NoC / TDMA probes.
         if (
             self.brisc.soft_active
@@ -605,8 +596,8 @@ class TensixTile(TTDeviceTile):
             or self.trisc1.soft_active
             or self.trisc2.soft_active
         ):
-            return False
-        return TTDeviceTile.clock_quiescent(self)
+            return cycle_num + 1
+        return TTDeviceTile.next_wake_cycle(self, cycle_num)
 
     def get_tensix_memory(self):
         return self.tensix_mem

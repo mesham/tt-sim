@@ -1,5 +1,7 @@
 from math import ceil, floor
 
+import numpy as np
+
 from tt_sim.network.tt_noc import NoCOverlay
 from tt_sim.pe.tensix.backends.backend_base import (
     DATA_FORMAT_TO_BITS,
@@ -22,6 +24,11 @@ class UnPackerUnit(TensixBackendUnit):
     """
 
     OPCODE_TO_HANDLER = {"UNPACR": "handle_unpacr", "UNPACR_NOP": "handle_unpacr_nop"}
+
+    # Datum widths a block of L1 can be reinterpreted as directly. Datums are
+    # little-endian and so is the host, so this is the same value per datum as
+    # ``conv_to_uint32`` of the datum's bytes -- without assembling each one.
+    _BLOCK_DTYPE = {1: np.uint8, 2: np.uint16, 4: np.uint32}
 
     def __init__(self, backend, unpacker_id):
         self.unpacker_id = unpacker_id
@@ -755,7 +762,24 @@ class UnPackerUnit(TensixBackendUnit):
                 f"{DATA_FORMAT_TO_NAME[inDataFormat]} -> write data type {DATA_FORMAT_TO_NAME[outDataFormat]}"
             )
 
-        for row in range(int(inputNumDatums / 16)):
+        numRows = int(inputNumDatums / 16)
+        if self._unpack_block(
+            stateID,
+            issue_thread,
+            numRows,
+            inAddr_Datums,
+            start_row,
+            datumSizeBytes,
+            colShift,
+            inDataFormat,
+            outDataFormat,
+            unpackToDst,
+            transpose,
+            allDatumsAreZero,
+        ):
+            return
+
+        for row in range(numRows):
             for col in range(16):
                 assert datumSizeBytes <= 4
                 raw_datum = conv_to_uint32(
@@ -820,6 +844,115 @@ class UnPackerUnit(TensixBackendUnit):
                                 outRow + start_row, outCol, datum
                             )
                 outAddr += 1
+
+    def _unpack_block(
+        self,
+        stateID,
+        issue_thread,
+        numRows,
+        inAddr_Datums,
+        start_row,
+        datumSizeBytes,
+        colShift,
+        inDataFormat,
+        outDataFormat,
+        unpackToDst,
+        transpose,
+        allDatumsAreZero,
+    ):
+        """Move the whole ``numRows x 16`` rectangle at once, or decline it.
+
+        The datum loop in ``perform_unpack`` is a rectangle: the input is read
+        contiguously (``rowStride`` is not modelled, so rows abut) and every
+        destination index is arithmetic on ``(row, col)``. So the block reads
+        out of L1 in one slice, converts in one call -- ``formatConversion``
+        below is the *same* function, handed an int64 array instead of an int,
+        exactly as the matrix unit's operand gather does -- and lands in one
+        indexed assignment. Returns True if it did the unpack.
+
+        The cases it declines, and why, are all "this is no longer a rectangle
+        the index arithmetic describes":
+
+        * a datum that is not a whole 1, 2 or 4 bytes (the BFP formats, with
+          their shared exponents, which the scalar loop does not handle either);
+        * ``FP32 -> FP16`` out, the one conversion on this path that still
+          branches per datum (``FP32ToFP16`` saturates and flushes);
+        * a row count large enough for the destination row map to alias, where
+          an indexed assignment would depend on numpy's ordering rather than the
+          scalar loop's explicit last-write-wins.
+        """
+        dtype = self._BLOCK_DTYPE.get(datumSizeBytes)
+        if dtype is None or numRows <= 0:
+            return False
+        if inDataFormat == DataFormat.FP32 and outDataFormat == DataFormat.FP16:
+            return False
+
+        # Destination indices, mirroring the scalar loop's row/column arithmetic
+        # with `row` as an array and `col` as the 16-element axis.
+        rows = np.arange(numRows)
+        if unpackToDst:
+            # Unpacker 0 only, and check_unpacker_settings has already ruled out
+            # colShift and transpose here, so this writes whole Dst rows.
+            if self.backend.getThreadConfigValue(
+                issue_thread, "SRCA_SET_SetOvrdWithAddr"
+            ):
+                if numRows > 16:
+                    return False
+                rows = rows & 15
+            else:
+                if numRows > 1024:
+                    return False
+                rows = rows & 0x3FF
+            rows = rows + start_row
+        elif self.unpacker_id == 1:
+            # Always srcB, and the row index wraps within the 64-row bank.
+            if numRows > 64:
+                return False
+            rows = (rows + self.srcRow[issue_thread] + start_row) & 0x3F
+        elif self.backend.getThreadConfigValue(
+            issue_thread, "SRCA_SET_SetOvrdWithAddr"
+        ):
+            assert numRows <= 64  # the scalar loop's per-datum `outRow < 64`
+        else:
+            assert numRows <= 16  # ... and its `outRow < 16`
+            rows = rows + self.srcRow[issue_thread] + start_row
+
+        # Read the datums, convert them, and zero them if asked -- in the same
+        # order as the scalar loop, so a format combination it rejects is still
+        # rejected here.
+        raw = np.frombuffer(
+            self.backend.addressable_memory.read(
+                inAddr_Datums, numRows * 16 * datumSizeBytes
+            ),
+            dtype=dtype,
+        ).astype(np.int64)
+        values = self.formatConversion(
+            stateID, inDataFormat, outDataFormat, raw, unpackToDst
+        )
+        if allDatumsAreZero:
+            values = np.zeros_like(raw)
+        values = values.reshape(numRows, 16)
+
+        if unpackToDst:
+            dst = self.backend.getDst()
+            if DATA_FORMAT_TO_BITS[outDataFormat] == 32:
+                dst.setDst32bRows(rows, values)
+            else:
+                dst.setDst16bRows(rows, values)
+            return True
+
+        outRows = rows[:, np.newaxis]
+        outCols = (np.arange(16) - colShift)[np.newaxis, :]
+        if transpose:
+            # Haloize transposes each 16x16 block on the way into SrcA; see the
+            # scalar loop for what drives it. Same two assignments, done at once
+            # (the tuple's right-hand side is evaluated before either lands, as
+            # the scalar version's `rowLowBits` temporary ensures).
+            outRows, outCols = (outRows & ~0xF) | outCols, outRows & 0xF
+
+        src = self.backend.getSrcB if self.unpacker_id == 1 else self.backend.getSrcA
+        src(self.srcBank).writeDatums(outRows, outCols, values)
+        return True
 
     def increment_counter(
         self, stateID, issue_thread, whichContext, multiContextMode, useContextCounter
@@ -895,10 +1028,11 @@ class UnPackerUnit(TensixBackendUnit):
                             raw_datum >> 13
                         )
                 case DataFormat.BF16:
-                    if not raw_datum & 0x7F800000:
-                        # Flush denormals to zero
-                        raw_datum &= 0x80000000
-                    raw_datum >>= 16
+                    # Flush denormals to signed zero, then truncate toward zero
+                    # -- which is precisely ``FP32ToBF16``, written there
+                    # without a branch so that this converts a whole block as
+                    # readily as one datum (see DataFormatConversions).
+                    raw_datum = DataFormatConversions.FP32ToBF16(raw_datum)
                     inDataFormat = DataFormat.BF16
                 case DataFormat.FP16:
                     raw_datum = DataFormatConversions.FP32ToFP16(raw_datum)
@@ -922,10 +1056,13 @@ class UnPackerUnit(TensixBackendUnit):
                         )
                     )
                     sign = 0 if int8MeansUnsigned else raw_datum & 0x80
-                    raw_datum -= sign
-                    if raw_datum:
-                        raw_datum |= 16 << 10
-                    raw_datum |= sign << 8
+                    raw_datum = raw_datum - sign
+                    # ``* (raw_datum != 0)`` is the "if the magnitude is
+                    # non-zero" guard written as arithmetic, so a whole block
+                    # converts in one pass; for a single datum it is the same
+                    # int (see DataFormatConversions on branch-free form).
+                    raw_datum = raw_datum | (16 << 10) * (raw_datum != 0)
+                    raw_datum = raw_datum | (sign << 8)
                     inDataFormat = DataFormat.FP16
                 case DataFormat.TF32:
                     if unpackToDst:

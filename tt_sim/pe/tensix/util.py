@@ -201,8 +201,10 @@ class DataFormatConversions:
     Most of these are pure bit arithmetic -- masks, shifts and ors -- which
     numpy applies elementwise, so passing an int64 array converts a whole block
     of Src/Dst in one call with no second implementation to keep in step. The
-    matrix unit's batched MVMUL path does exactly that. ``conversion_batch_test``
-    proves it: it walks the entire 19-bit Src input space and every reachable
+    matrix unit's batched MVMUL path does exactly that, as does the unpacker's
+    batched datum loop (which converts *into* the Src/Dst layouts where the
+    matrix unit converts out of them). ``conversion_batch_test`` proves it: it
+    walks the entire 16- or 19-bit input space of each one, and every reachable
     class of the FP32 ones, asserting the array form equals the scalar loop.
     Keep new conversions branch-free where the branch can be written as
     arithmetic (see :meth:`FP32ToBF16`); the ones that cannot (

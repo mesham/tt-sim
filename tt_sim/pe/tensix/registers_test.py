@@ -227,6 +227,40 @@ def test_src_read_rows_past_the_end_of_the_bank_raises():
     raise AssertionError("reading past row 63 should raise, as scalar indexing does")
 
 
+def test_src_write_datums_matches_the_scalar_setter():
+    """The block writer against the scalar setter, over the unpacker's maps.
+
+    Each case is a (row, column) map the unpacker's batched datum loop builds:
+    the plain rectangle, a wrapped row range (SrcB), a shifted column (which
+    numpy wraps negative, exactly as the scalar setter does), and the haloize
+    transpose of each 16x16 block.
+    """
+    rng = np.random.default_rng(11)
+    values = rng.integers(0, 1 << 19, (32, 16)).astype(np.int64)
+    rows = np.arange(32)
+    cols = np.arange(16)
+
+    cases = {
+        "rectangle": (rows[:, np.newaxis], cols[np.newaxis, :]),
+        "wrapped rows": (((rows + 50) & 0x3F)[:, np.newaxis], cols[np.newaxis, :]),
+        "column shift": (rows[:, np.newaxis], (cols - 3)[np.newaxis, :]),
+    }
+    R = np.broadcast_to(rows[:, np.newaxis], (32, 16))
+    C = np.broadcast_to(cols[np.newaxis, :], (32, 16))
+    cases["transpose"] = ((R & ~0xF) | C, R & 0xF)
+
+    for name, (r, c) in cases.items():
+        batched, scalar = SrcRegister(), SrcRegister()
+        batched.writeDatums(r, c, values)
+        for i in range(32):
+            for j in range(16):
+                scalar[
+                    int(np.broadcast_to(r, (32, 16))[i, j]),
+                    int(np.broadcast_to(c, (32, 16))[i, j]),
+                ] = values[i, j]
+        assert batched.data.tolist() == scalar.data.tolist(), name
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -75,6 +75,11 @@ class TensixBackendUnit(Clockable, ABC):
         self.opcode_to_method_map = opcode_to_method_map
         self.unit_name = unit_name
         self.unit_id: tuple | None = None
+        # Shadows the Clockable class attribute as an instance attribute so
+        # clock_tick's guard is a single dict lookup rather than an MRO walk;
+        # this is read once per unit per cycle on the hot path. See
+        # ``occupy_for``.
+        self.busy_until = None
 
     def issueInstruction(self, instruction, from_thread):
         # The default issuing of instructions here, which applies to most
@@ -112,7 +117,49 @@ class TensixBackendUnit(Clockable, ABC):
         """
         return not self.next_instruction
 
+    def occupy_for(self, cycle_num, cycles):
+        """Declare this unit busy for ``cycles`` cycles starting at ``cycle_num``.
+
+        The Phase 5 entry point (``docs/plans/event-driven-pump.md``): a
+        per-unit cost table calls this at issue with the opcode's cost, and
+        the unit then retires at ``cycle_num + cycles`` instead of in the tick
+        it was handed the instruction. ``cycles <= 1`` is the status quo (a
+        same-cycle retire) and is a no-op, so a table that has no entry for an
+        opcode costs nothing.
+
+        Two things fall out of setting :attr:`busy_until`, both handled here
+        and in :meth:`next_wake_cycle`: ``clock_tick`` stops draining the
+        issue queue until the deadline, which *is* the back-pressure the wait
+        gates already query through
+        :meth:`hasInflightInstructionsFromThread`; and the pump skips
+        straight to the retire cycle rather than visiting the unit in between.
+
+        What it gates is the *base* drain. The five units that override
+        ``clock_tick`` (config, sync, thcon, mover, unpacker) all reach it
+        through ``super()``, but their own pre-``super()`` work — the mover's
+        TDMA queue, ThCon's ``FLUSHDMA`` polling — runs first and is
+        deliberately not covered: that work is the unit servicing somebody
+        else, not retiring the instruction it was issued.
+        """
+        if cycles > 1:
+            self.busy_until = cycle_num + cycles
+
+    def next_wake_cycle(self, cycle_num):
+        # Identical to Clockable's default; spelled out because this is the
+        # unit the cost tables attach to and the derivation should be readable
+        # next to clock_tick's matching guard.
+        busy_until = self.busy_until
+        if busy_until is not None and busy_until > cycle_num:
+            return busy_until
+        return None if self.is_clock_idle() else cycle_num + 1
+
     def clock_tick(self, cycle_num):
+        busy_until = self.busy_until
+        if busy_until is not None:
+            if cycle_num < busy_until:
+                # Occupied by a multi-cycle instruction; nothing retires yet.
+                return
+            self.busy_until = None
         # next_instruction is all instructions to process in this cycle,
         # is often one but for some units might be more
         while len(self.next_instruction) > 0:

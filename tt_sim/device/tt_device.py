@@ -116,7 +116,7 @@ class TT_Device(Device):
         # so they should not pull the composite into threaded mode on
         # their own. Only count Tensix toward the auto-engage threshold.
         gated, always = tile.get_clock_partition()
-        tile_clock = TileClock(gated, always=always, quiescent=tile.clock_quiescent)
+        tile_clock = TileClock(gated, always=always, next_wake=tile.next_wake_cycle)
         tile._bind_clock(tile_clock)
         self.clocks[0].add_tile_clock(tile_clock, heavy=tile.is_tensix)
         self.resets[0].add_resetables(tile.get_resets())
@@ -323,20 +323,45 @@ class TTDeviceTile(DeviceTile, ABC):
         """
         return list(self.get_clocks()), []
 
-    def clock_quiescent(self):
-        """True when ticking this tile's gated components changes nothing.
+    def next_wake_cycle(self, cycle_num):
+        """The tile's aggregate :meth:`Clockable.next_wake_cycle`.
 
-        The generic implementation asks every gated component (see
-        :meth:`~tt_sim.device.clock.Clockable.is_clock_idle`), which fails
-        safe: a component that has not opted in keeps the tile awake forever.
-        Subclasses override to put the cheapest discriminator first — a
-        Tensix tile with a core out of reset is never quiescent, and finding
-        that out costs five attribute reads rather than twenty probe calls.
+        The minimum over the gated components of when each next needs
+        attention, with ``None`` (nobody needs anything) meaning the tile can
+        go dormant until an external stimulus arrives. Short-circuits as soon
+        as any component asks for the very next cycle, which is the common
+        case on a live tile.
+
+        This is what the pump consults; it fails safe for exactly the reason
+        :meth:`~tt_sim.device.clock.Clockable.is_clock_idle` does — a
+        component that has opted into neither predicate answers
+        ``cycle_num + 1`` and keeps the tile awake forever. Subclasses
+        override to put the cheapest discriminator first (a Tensix tile with
+        a core out of reset always needs the next cycle, and finding that out
+        costs five attribute reads rather than twenty probe calls).
         """
-        for probe in self._idle_probes:
-            if not probe():
-                return False
-        return True
+        soonest = None
+        next_cycle = cycle_num + 1
+        for probe in self._wake_probes:
+            when = probe(cycle_num)
+            if when is None:
+                continue
+            if when <= next_cycle:
+                return next_cycle
+            if soonest is None or when < soonest:
+                soonest = when
+        return soonest
+
+    def clock_quiescent(self):
+        """True when nothing on this tile can change without outside help.
+
+        The Phase 1 boolean form, now derived from :meth:`next_wake_cycle` so
+        the two cannot drift: a tile is quiescent exactly when no component
+        names any future cycle at which it needs attention. Not on the pump's
+        hot path any more — kept because it reads better at a call site than
+        ``next_wake_cycle(...) is None``.
+        """
+        return self.next_wake_cycle(0) is None
 
     def _bind_clock(self, tile_clock):
         """Attach the tile's :class:`TileClock` and precompute its probes.
@@ -348,7 +373,7 @@ class TTDeviceTile(DeviceTile, ABC):
         """
         self.clock = tile_clock
         gated, _ = self.get_clock_partition()
-        self._idle_probes = tuple(item.is_clock_idle for item in gated)
+        self._wake_probes = tuple(item.next_wake_cycle for item in gated)
         self.noc0_router.clock_owner = tile_clock
         self.noc1_router.clock_owner = tile_clock
         tile_ctrl = getattr(self, "tile_ctrl", None)
@@ -372,7 +397,7 @@ class TTDeviceTile(DeviceTile, ABC):
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
         #: Set by ``TT_Device._register_tile_internals`` via ``_bind_clock``.
         self.clock = None
-        self._idle_probes = ()
+        self._wake_probes = ()
         # Extra SoC-physical NoC 0 coords that ``TT_Device`` registers as
         # noc-directory aliases on both NoCs (so kernels addressing either
         # sub-endpoint hit the same tile). Default empty; DRAMTile populates.

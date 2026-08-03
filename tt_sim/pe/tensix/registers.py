@@ -207,6 +207,22 @@ class SrcRegister:
             )
         return block.astype(np.int64)
 
+    def writeDatums(self, rows, columns, values):
+        """The per-datum ``__setitem__`` applied to a whole block of datums.
+
+        ``rows`` and ``columns`` are index arrays broadcasting together to the
+        shape of ``values`` -- each broadcast pair is exactly the ``[x, y]`` key
+        the scalar setter takes -- so a caller expresses whatever row/column map
+        it has (the unpacker's column shift and haloize transpose included) and
+        pays numpy's overhead once per block instead of once per datum.
+        Indexing follows numpy's rules just as the scalar setter's does: a
+        negative column wraps to the end of the row, a row past the end of the
+        bank raises. The caller owns injectivity of the map: with a repeated
+        (row, column) pair this writes one of the values rather than the scalar
+        loop's explicit last-one-wins.
+        """
+        self.data[rows, columns] = values
+
 
 class LReg:
     """One SFPU LReg (32 lanes).

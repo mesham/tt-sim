@@ -220,6 +220,16 @@ All are read from the environment and work in this tt-metal-driven flow.
 | `TT_SIM_RECORD=<file>` | record every wire message **and READ reply data** to `<file>` (text) |
 | `TT_SIM_CYCLES_PER_POLL=N` | sim cycles to run after each wire message (default 100) |
 | `TT_SIM_MOCK_TENSIX=1` | skip building the Wormhole; every core is a NullCore (fast, for wire-level debugging only) |
+| `TT_SIM_PUMP_STRIDE=0` | disable the pump's time-skipping (on by default) — see below |
+| `TT_SIM_DISABLE_ALIGNMENT_CHECKS=1` | accept NoC transfers whose source and destination addresses are not congruent, which hardware treats as undefined behaviour |
+
+`TT_SIM_PUMP_STRIDE=0` turns off the event-driven pump's ability to jump
+straight to the next cycle any tile actually needs, making it tick every cycle
+as it did before. `run(N)` advances exactly N cycles either way and
+`TT_SIM_CYCLES_PER_POLL` is unaffected — a stride can never overshoot a poll
+window — so this is a debugging switch: if a result differs with it set, the
+difference is a pump bug and worth reporting. See
+[`docs/plans/event-driven-pump.md`](plans/event-driven-pump.md).
 
 `TT_SIM_LOG_PROTOCOL` is the first tool to reach for on a hang — it shows which
 core/address the host is polling. `TT_SIM_RECORD` additionally captures the

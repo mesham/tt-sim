@@ -1,0 +1,535 @@
+# Cycle costs for the units that are not the Tensix coprocessor: the NoC, DRAM,
+# the baby RISC-V cores, the Mover, and L1 itself.
+#
+# The Tensix per-instruction table is the sibling file
+# ``tt_sim/pe/tensix/tensix_instruction_costs.yaml``, which sits next to the
+# instruction table it parallels (ROADMAP.md section I). These units have no
+# YAML to sit next to, and what they do have is an arch-level constant table --
+# ``tt_sim/arch/profile.py`` -- so this file lives next to the loader instead.
+# Both files share one schema and one loader (``tt_sim/perf/costs.py``).
+#
+# NOTHING CONSUMES THIS YET. See docs/plans/cost-model.md for the schema, the
+# provenance convention, and what calibration would take.
+#
+# The provenance vocabulary and the cost-value form (int, or a mapping with
+# ``cycles`` plus ``bound`` in {exact, at_least, at_most, approximate, range})
+# are documented at the top of tensix_instruction_costs.yaml and are identical
+# here. The short version, because it is the point of the exercise:
+#
+#   isa_doc > isa_doc_derived > vendor_source > estimated > unknown
+#
+# and an entry's provenance is the weakest provenance of any number in it.
+
+schema_version: 1
+
+documents:
+  repo: https://github.com/tenstorrent/tt-isa-documentation
+  wh_noc: WormholeB0/NoC/README.md
+  wh_dram: WormholeB0/DRAMTile/README.md
+  wh_l1: WormholeB0/TensixTile/L1.md
+  wh_riscv: WormholeB0/TensixTile/BabyRISCV/README.md
+  wh_eth_riscv: WormholeB0/EthernetTile/BabyRISCV/README.md
+  wh_mover: WormholeB0/TensixTile/Mover.md
+  wh_ttinsn: WormholeB0/TensixTile/BabyRISCV/PushTensixInstruction.md
+  bh_noc: BlackholeA0/NoC/README.md
+  bh_riscv: BlackholeA0/TensixTile/BabyRISCV/README.md
+  bh_vector_unit: BlackholeA0/TensixTile/TensixCoprocessor/VectorUnit.md
+  bh_ttinsn: BlackholeA0/TensixTile/BabyRISCV/PushTensixInstruction.md
+
+vendor_documents:
+  repo: https://github.com/tenstorrent/tt-metal
+  version_read: "0.74"
+  tm_dm_common: ttnn/cpp/ttnn/operations/data_movement/common/common.cpp
+  tm_noc_latencies: tt_metal/impl/experimental/noc_estimator/latencies/noc_latencies.yaml
+  tm_noc_estimator_readme: tt_metal/api/tt-metalium/experimental/noc_estimator/README.md
+  tm_operation_cpp: ttnn/core/operation.cpp
+  tm_conv2d_common: ttnn/cpp/ttnn/operations/conv/conv2d/conv2d_op_program_factory_common.cpp
+
+# ---------------------------------------------------------------------------
+clock:
+  wormhole:
+    frequency_mhz: 1000
+    provenance: isa_doc
+    source: wh_riscv
+    note: >
+      "Each RISCV core is intended to execute one RV32IM instruction per cycle,
+      running at a clock speed of 1 GHz." The Matrix Unit page independently
+      quotes "Wormhole's standard 1 GHz clock rate".
+  blackhole:
+    frequency_mhz: 1350
+    provenance: isa_doc
+    source: bh_riscv
+    note: >
+      "running at a clock speed of 1.35 GHz", and the Blackhole Vector Unit
+      page says the SFPU "clocks at 1.35 GHz rather than 1 GHz".
+
+      Recorded as a caveat rather than a correction: tt-metal is internally
+      inconsistent about this. Its NoC latency model uses 1.2 GHz for Blackhole
+      (tm_dm_common:214) while its conv2d cost model and its GEMM_FLOPS tech
+      report both use 1.35 GHz. The ISA docs are the higher authority and say
+      1.35, so that is what is here -- but any cycle count taken from
+      tm_dm_common was measured against a 1.2 GHz assumption and does not
+      convert cleanly to wall-clock at 1.35.
+
+# ---------------------------------------------------------------------------
+noc:
+  note: >
+    The ISA docs publish a clean per-hop model: a fixed latency per hop and one
+    flit per cycle per axis. That is exactly the shape Phase 5 of the pump plan
+    wants ("NoC requests gain per-hop latency by scheduling the destination's
+    request event at c + hops * latency instead of c + 1"), and it is fully
+    sourced. What is *not* sourced anywhere is congestion: the docs say
+    congestion "can negatively impact latency" without quantifying it, and
+    neither vendor tree has an intra-chip per-hop congestion model.
+  hops:
+    niu_to_router:
+      latency: { cycles: 5, bound: approximate }
+      throughput_flits_per_cycle: 1
+      provenance: isa_doc
+      source: wh_noc#performance
+      note: the doc writes this as "~5 cycles"; the tilde is preserved as bound approximate.
+    router_to_router:
+      latency: 9
+      throughput_flits_per_cycle: 1
+      per_axis: true
+      provenance: isa_doc
+      source: wh_noc#performance
+      note: >
+        "One flit (256 bits) per cycle per axis", latency 9 cycles. The L1 page
+        restates the latency independently: "the latency of each hop is at
+        least 9 cycles". Identical on Blackhole (bh_noc); only the flit width
+        differs.
+    router_to_niu:
+      latency: { cycles: 5, bound: approximate }
+      throughput_flits_per_cycle: 1
+      provenance: isa_doc
+      source: wh_noc#performance
+  flit_bits: 256
+  link_bandwidth_gb_per_s: 32
+  l1_ports:
+    read_connections: 2
+    write_connections: 2
+    bits_per_connection: 128
+    provenance: isa_doc
+    source: wh_l1#port-assignments
+    note: >
+      "Each NoC has four 128-bit connections to L1: two for reading and two for
+      writing ... This theoretically allows each NoC to read 256 bits per cycle
+      and write 256 bits per cycle."
+  router_buffering:
+    bytes_per_inbound_port: 2048
+    guaranteed_bytes_per_vc: 32
+    shared_pool_max_bytes_per_vc: 480
+    provenance: isa_doc
+    source: wh_dram#performance
+    note: >
+      Recorded because head-of-line blocking (ROADMAP section I "NoC timing
+      model") is a buffering property, not a latency constant, and this is the
+      only published description of the buffers. Not enough on its own to model
+      contention.
+  provenance: isa_doc
+  source: wh_noc#performance
+  congestion:
+    provenance: unknown
+    note: >
+      No published model. The ISA docs say congestion "can negatively impact
+      latency" and that ordering flags (NOC_CMD_VC_LINKED / NOC_CMD_VC_STATIC)
+      and PATH_RESERVE broadcasts make it worse, all qualitatively. tt-metal
+      has a 740-entry measured end-to-end latency table
+      (tm_noc_latencies, described by tm_noc_estimator_readme as "empirically
+      measured latency data (collected by the data movement test suite)"),
+      keyed by transaction size, pattern, memory type and subordinate count --
+      but that is end-to-end, so it folds hop count, congestion, DRAM and the
+      RISC-V issue path into one number and cannot be decomposed into a per-hop
+      congestion term. It is the right thing to *validate* a congestion model
+      against; it is not itself one.
+
+# ---------------------------------------------------------------------------
+dram:
+  note: >
+    ROADMAP section I asks for "latency + bandwidth for NoC and DRAM". Bandwidth
+    is well sourced; DRAM *latency* is the clearest gap in this file, and it is
+    a gap in the sources, not an omission here.
+  bandwidth:
+    per_channel_gb_per_s: 24
+    channels: 12
+    aggregate_gb_per_s: 288
+    achievable_fraction: 0.92
+    provenance: isa_doc
+    source: wh_dram#performance
+    note: >
+      "Running at the typical speed of 12 GT/s, each GDDR6 channel is
+      theoretically capable of reading at 24 GB/s or writing at 24 GB/s ...
+      With twelve channels per Wormhole ASIC, this is 288 GB/s in aggregate ...
+      in practice well-written software can expect to achieve approximately 92%
+      of the theoretical maximum bandwidth." The page also carries measured
+      tables (1/12/48 Tensix tiles against 1 or 12 channels, static vs dynamic
+      VC) showing 22.2-22.3 GB/s for reads, and a dramatic 21.9 -> 7.6 GB/s
+      collapse for 12-tile writes with dynamic VC allocation -- worth reading
+      before trusting any single bandwidth number.
+  access_latency:
+    provenance: unknown
+    note: >
+      The ISA docs give DRAM no access latency at all -- no tCL/tRCD-style
+      device timing, no bank-conflict cost, no refresh-window cost, despite
+      ROADMAP section I naming exactly those. Neither ttsim (whose DRAM is
+      instantaneous) nor tt-metal's hardware headers have one either.
+
+      The nearest available number is tt-metal's measured *end-to-end* figure:
+      "measured initial latency based on the transaction and device types",
+      DRAM = 358 cycles on Wormhole and 529 on Blackhole (tm_dm_common:200-216).
+      That is a NoC round trip plus the DRAM access plus the issuing core's
+      path, so it is an upper bound on DRAM latency and cannot be used as the
+      DRAM term without double-counting the NoC hops modelled above. It is
+      recorded under ``end_to_end_reference`` rather than here for that reason.
+  end_to_end_reference:
+    dram_cycles: { wormhole: 358, blackhole: 529 }
+    l1_local_cycles: { wormhole: 56, blackhole: 88 }
+    l1_remote_write_cycles: { wormhole: 256, blackhole: 404 }
+    l1_remote_read_cycles: { wormhole: 259, blackhole: 403 }
+    provenance: vendor_source
+    source: tm_dm_common#L200-216
+    note: >
+      NOT a DRAM latency and NOT to be plugged in as one. These are tt-metal's
+      measured initial latencies for a whole transaction from a Tensix core,
+      and they are here as a **calibration target**: a per-hop NoC model plus a
+      DRAM term plus the RISC-V issue path should reproduce them within
+      whatever tolerance the estimator claims. That is the cheapest available
+      end-to-end check short of silicon traces, and it is the check ROADMAP
+      section I "Calibration against silicon traces" is asking for a substitute
+      for. Note the Blackhole figures were measured against tt-metal's 1.2 GHz
+      Blackhole assumption; see the clock note.
+  chip_level_bandwidth:
+    wormhole_gb_per_s: 258
+    blackhole_gb_per_s: 512
+    provenance: vendor_source
+    source: tm_operation_cpp#L28-41
+    note: >
+      "WH DRAM bandwidth: 258 GB/s = 21.5 GB/s * 6 channels * 2 banks. BH DRAM
+      bandwidth: 512 GB/s (32GB GDDR6 @ 16 GT/sec)". The Wormhole figure is
+      tt-metal's achievable number and is lower than the ISA docs' theoretical
+      288 GB/s, which is consistent with the docs' own 92% caveat. The
+      Blackhole figure is the only DRAM bandwidth number available for that
+      arch at all -- BlackholeA0 has no DRAMTile directory in the ISA docs.
+
+# ---------------------------------------------------------------------------
+riscv:
+  note: >
+    ROADMAP section I asks for "fetch/issue/retire stages for RV". The ISA docs
+    describe exactly those stages and give per-stage occupancies, so this
+    section is almost entirely isa_doc -- which is a pleasant surprise, since
+    the vendor trees have nothing whatsoever on baby-core instruction timing.
+
+    Wormhole and Blackhole differ enough here to be worth reading separately:
+    Wormhole has Frontend / Integer Unit / Load-Store / Retire, Blackhole has
+    Frontend / EX1 / EX2 (/EX3 on T2) / Load-Store / Retire, which moves
+    multiply out of the main integer stage and doubles the branch-mispredict
+    bubble. Those live under ``arch_overrides``.
+  issue:
+    instructions_per_cycle: 1
+    provenance: isa_doc
+    source: wh_riscv
+    note: >
+      "relatively small 32-bit in-order single-issue cores ... intended to
+      execute one RV32IM instruction per cycle". The Frontend "is capable of
+      sending one instruction per cycle to the Integer Unit".
+  pipeline:
+    stages: [frontend, integer_unit, load_store_unit, retire_unit]
+    min_cycles_per_stage: 1
+    provenance: isa_doc
+    source: wh_riscv#pipeline
+    note: >
+      "every instruction spends at least one cycle in the Integer Unit, at
+      least one cycle in the Load/Store Unit, and at least one cycle in Retire
+      Unit." The Retire Unit is "entirely invisible from an external
+      perspective".
+  integer_unit:
+    default: 1
+    alu_forwarding: true
+    multiply: 2
+    divide_by_zero_or_one: 2
+    divide_int_min_by_minus_one: 2
+    divide_general: { cycles: 6, max: 33, bound: range }
+    branch: 1
+    branch_mispredict_bubble: 2
+    branch_mispredict_observed: 3
+    provenance: isa_doc
+    source: wh_riscv#integer-unit
+    note: >
+      "Multiply instructions (mul, mulh, mulhsu, mulhu) occupy the Integer Unit
+      for two cycles, and the next instruction cannot enter the unit until the
+      multiply instruction has finished." Divide is "between six and 33 cycles
+      ... dependent upon the magnitude of the dividend", with the two-cycle
+      special cases listed above. "A mispredicted branch causes a two cycle
+      pipeline bubble, which from an external perspective looks like
+      mispredicted branches occupy the Integer Unit for three cycles (plus
+      additional cycles if the branch target is not in the instruction RAM or
+      instruction cache)." The forwarding path means "integer operations (other
+      than multiply and divide) appear to execute with latency 1 and throughput
+      1".
+  load_latency:
+    core_local_data_ram: 2
+    mailboxes_pcbufs_ttsync_semaphores: { cycles: 3, bound: at_least }
+    tensix_gprs_and_backend_config: { cycles: 4, bound: at_least }
+    tdma_tilectrl_pic_noc_overlay: { cycles: 7, bound: at_least }
+    l1: { cycles: 8, bound: at_least }
+    minimum: 2
+    max_loads_in_flight: 8
+    max_loads_in_flight_mmio_group: 4
+    provenance: isa_doc
+    source: wh_riscv#loadstore-unit
+    note: >
+      Straight from the load-latency table. "A latency of N cycles means that
+      N - 1 independent instructions need to follow the load if the latency is
+      to be entirely hidden. The minimum possible load latency is two cycles."
+      The ">= 4" and ">= 7" rows say "more in the case of access conflicts";
+      the L1 row says "more in the case of access port conflicts or bank
+      conflicts". The in-flight limits come from the same table's "Maximum
+      loads in flight" column: 8 for local RAM, 4 in aggregate across the
+      mailbox/PCBuf/TTSync/semaphore regions.
+  load_throughput:
+    one_per_cycle_if_latency_under: 5
+    else_loads_per_window: 4
+    else_window_cycles_offset: -1
+    provenance: isa_doc
+    source: wh_riscv#loadstore-unit
+    note: >
+      "Throughput of sustained loads is one per cycle if the load latency is
+      less than five cycles. Otherwise, when the load latency is N cycles, the
+      throughput of sustained loads is four such loads every N - 1 cycles."
+      ``else_window_cycles_offset`` is the "- 1" of that formula, kept as data
+      rather than as a magic number in whatever consumes this.
+  store_throughput:
+    l1_period_cycles: 5
+    other_regions_period_cycles: 1
+    provenance: isa_doc
+    source: wh_riscv#loadstore-unit
+    note: >
+      "Throughput of sustained stores to L1 is at most one store every five
+      cycles. Other memory regions can achieve a throughput of one store every
+      cycle." The L1 page explains why: RISCV stores are always narrow, and a
+      narrow write is a read-modify-write that "blocks both the port and the
+      underlying bank for five cycles".
+  instruction_fetch:
+    bits_per_l1_read: 128
+    instructions_per_read: 4
+    expected_period_cycles: 4
+    provenance: isa_doc
+    source: wh_l1#risc-v-cores
+    note: >
+      "RISCV instruction fetches into the instruction cache are always 128-bit
+      reads against L1, though each read yields four instructions, so
+      instruction fetches are expected to occur at most once every four cycles
+      (and ideally much less frequently than this if the instruction cache hit
+      rate is high)." Instruction *cache* miss cost is not published.
+  ttinsn_fusion:
+    max_fused: 4
+    enqueue_per_thread_per_cycle: 4
+    dequeue_per_thread_per_cycle: 1
+    provenance: isa_doc
+    source: bh_ttinsn
+    note: >
+      "sequences of up to four adjacent .ttinsn instructions can be fused
+      together by the RISCV T0 / T1 / T2 instruction caches and executed in a
+      single cycle (this allows four Tensix instructions to be queued up per
+      thread per cycle, but the maximum dequeue rate is only one instruction
+      per thread per cycle)." Relevant to the pump because it decouples the
+      RISC-V core's rate from the Tensix backend's: the queue can outrun the
+      backend 4:1 for short bursts. Stated on the Blackhole page; the Wormhole
+      page describes the same .ttinsn extension without the fusion claim.
+
+# ---------------------------------------------------------------------------
+mover:
+  note: >
+    Unusually, the Mover's numbers are published as *measured* rather than
+    theoretical, and with both an ideal and a contended column. That is more
+    honest than most of the table and is reproduced as-is. Neither ttsim (whose
+    XMOV is an instantaneous memcpy) nor tt-metal has anything on the Mover, so
+    the ISA doc is the only source.
+  issue:
+    occupancy: 1
+    provenance: isa_doc
+    source: wh_mover
+    note: >
+      See units.XMOV in tensix_instruction_costs.yaml -- the issuing thread
+      stalls until the mover can start, then XMOV itself is a single cycle and
+      the transfer proceeds in the background.
+  transfer:
+    l1_to_l1:
+      ideal: { reads: 8, writes: 8, bits_each: 128, per_cycles: 11, bits_per_cycle: 93.1 }
+      contended: { reads: 1, writes: 1, bits_each: 128, per_cycles: 4, bits_per_cycle: 32 }
+      provenance: isa_doc
+      source: wh_mover#performance
+      note: >
+        Covers XMOV_L1_TO_L1 and XMOV_L1_TO_L0 (memcpy). "Eight 128b reads and
+        eight 128b writes every 11 cycles i.e. 93.1 bits copied per cycle"
+        ideally; "One 128b read and one 128b write every four cycles i.e. 32
+        bits copied per cycle" with some L1 access port contention. The L1 page
+        restates the ideal figure independently.
+    l1_memset:
+      ideal: { writes: 1, bits_each: 128, per_cycles: 1, bits_per_cycle: 128 }
+      contended: { writes: 1, bits_each: 128, per_cycles: 3, bits_per_cycle: 42.7 }
+      provenance: isa_doc
+      source: wh_mover#performance
+      note: XMOV_L0_TO_L1.
+    non_l1_memset:
+      ideal: { writes: 1, bits_each: 128, per_cycles: 1, bits_per_cycle: 128 }
+      contended: { writes: 1, bits_each: 128, per_cycles: 1, bits_per_cycle: 128 }
+      provenance: isa_doc
+      source: wh_mover#performance
+      note: XMOV_L0_TO_L0; does not touch L1, so contention does not apply.
+
+# ---------------------------------------------------------------------------
+l1:
+  note: >
+    Not a unit ROADMAP section I names, but it is where several of the units
+    above actually serialise -- the unpacker, the packers, the mover, the NoC
+    and the RISC-V cores all contend for the same 16 access ports -- so the
+    bank model is recorded here rather than duplicated into each of them.
+  banks: 16
+  bank_size_kib: 91.5
+  access_ports: 16
+  bits_per_bank_access: 128
+  accesses_per_bank_per_cycle: 1
+  narrow_write_block_cycles: 5
+  atomic_block_cycles: 5
+  non_atomic_accumulate_block_cycles: 2
+  provenance: isa_doc
+  source: wh_l1
+  note: >
+    "L1 is organized as 16 banks of 91.5 KiB, with each bank capable of one
+    128-bit read or one 128-bit write per cycle. Access to these banks is
+    arbitrated through 16 access ports; any port can access any bank, but a
+    bank conflict will occur if multiple ports try to access the same bank on
+    the same cycle - all but one of the ports will be forced to wait." Narrow
+    writes, unconditional atomics and conditional atomics are each a
+    read-modify-write which "blocks both the port and the underlying bank for
+    five cycles"; near-memory accumulate can instead be non-atomic and then
+    "only blocks the port and bank for two out of those five cycles".
+  thcon_l1_access:
+    min_request_period_cycles: 3
+    provenance: isa_doc
+    source: wh_l1#tensix-scalar-unit
+    note: >
+      "Due to limitations of the scalar unit, it can only issue one memory
+      request every three cycles ... 32-bit writes by the scalar unit have a
+      peak bandwidth of one 32-bit write every five cycles, so 128-bit writes
+      are preferred where possible (peak bandwidth one 128-bit write every
+      three cycles)."
+
+# ---------------------------------------------------------------------------
+# Per-architecture differences. Deep-merged over the sections above; see the
+# rationale in tensix_instruction_costs.yaml.
+arch_overrides:
+  wormhole: {}
+  blackhole:
+    noc:
+      flit_bits: 512
+      provenance: isa_doc
+      source: bh_noc#performance
+      note: >
+        The hop *latencies* are unchanged from Wormhole (~5 / 9 / ~5); only the
+        flit doubles, from 256 to 512 bits, matching ArchProfile's
+        noc_max_burst_size going 8 KiB -> 16 KiB. No per-hop link bandwidth in
+        GB/s is published for Blackhole, so ``link_bandwidth_gb_per_s`` is not
+        overridden and must not be read as a Blackhole figure.
+      link_bandwidth_gb_per_s:
+        provenance: unknown
+        note: not published for Blackhole; the Wormhole 32 GB/s does not carry over.
+    dram:
+      bandwidth:
+        provenance: unknown
+        note: >
+          BlackholeA0 has no DRAMTile directory in the ISA docs, so there is no
+          per-channel figure, no GT/s and no achievable fraction. The chip has
+          24 DRAM tiles exposing 32 GiB of GDDR6 (BlackholeA0/README.md), and
+          tt-metal quotes 512 GB/s chip-level -- see ``chip_level_bandwidth``,
+          which is vendor_source and applies to both arches.
+    riscv:
+      pipeline:
+        stages: [frontend, ex1, ex2, load_store_unit, retire_unit]
+        min_cycles_per_stage: 1
+        provenance: isa_doc
+        source: bh_riscv
+        note: >
+          Blackhole splits the integer stage: "Every instruction spends at
+          least one cycle in EX1", then multiply and floating-point arithmetic
+          "spend exactly one cycle in EX1, and then exactly one cycle in EX2".
+          EX3 exists only in RISCV T2, for some vector instructions. The Retire
+          Unit gains an eight-entry retire-order queue and instructions can
+          populate it out of order while still retiring in order.
+      integer_unit:
+        default: 1
+        multiply: 1
+        multiply_ex2: 1
+        divide_by_zero_or_one: 2
+        divide_int_min_by_minus_one: 2
+        divide_general: { cycles: 6, max: 33, bound: range }
+        branch: 1
+        branch_mispredict_bubble: 4
+        branch_mispredict_observed: 5
+        provenance: isa_doc
+        source: bh_riscv#ex1
+        note: >
+          Two real differences from Wormhole. Multiply no longer blocks the
+          integer stage for two cycles -- it is one cycle in EX1 plus one in
+          EX2, so it pipelines. And the mispredict penalty doubles: "A
+          mispredicted branch causes a four cycle pipeline bubble, which from
+          an external perspective looks like mispredicted branches occupy EX1
+          for five cycles". Divide is unchanged.
+      load_latency:
+        core_local_data_ram: 2
+        l1_dcache_hit: 2
+        mailboxes_pcbufs_ttsync_semaphores: { cycles: 3, bound: at_least }
+        tensix_gprs_backend_config_tdma: { cycles: 4, bound: at_least }
+        tilectrl_pic_noc_overlay: { cycles: 7, bound: at_least }
+        core_local_data_ram_slow_path: { cycles: 8, bound: at_least }
+        l1_dcache_miss: { cycles: 8, bound: at_least }
+        l1_atomic: { cycles: 12, bound: at_least }
+        minimum: 2
+        provenance: isa_doc
+        source: bh_riscv#loadstore-unit
+        note: >
+          Blackhole gains an L0 data cache, so L1 has two latencies (2 on hit,
+          >= 8 on miss) where Wormhole has one, plus a >= 12 row for atomics
+          that Wormhole does not have. TDMA config moves from the >= 7 group to
+          the >= 4 group. Core-local data RAM gains a second, slow mapping
+          (>= 8) reachable from any RISCV and over the NoC. The table does not
+          repeat Wormhole's "Maximum loads in flight" column.
+      store_throughput:
+        l1_period_cycles: 5
+        l1_coalesced_period_cycles: 1
+        other_regions_period_cycles: 1
+        provenance: isa_doc
+        source: bh_riscv#loadstore-unit
+        note: >
+          Blackhole adds a coalescing store queue: "if it can [coalesce], the
+          constituent stores have a throughput of one store every cycle,
+          otherwise the throughput is one coalesced store every five cycles".
+          Coalescing requires the stores to target the same 16-byte aligned
+          region of L1 with start addresses within +/-4 of each other, and
+          never applies outside L1.
+      local_data_ram_reset_cycles:
+        cycles: 2048
+        provenance: isa_doc
+        source: bh_riscv#local-data-ram
+        note: >
+          "When the RISCV comes out of reset, the local data RAM will spend up
+          to 2048 clock cycles resetting its contents to zero. If a RISCV core
+          tries to access the RAM during this time, the core will be
+          automatically stalled." Not a per-instruction cost, but it is a real
+          stall on a path tt-metal firmware takes on every launch, and it has
+          no Wormhole equivalent.
+    l1:
+      note: >
+        BlackholeA0/TensixTile/L1.md exists but publishes no bank or port
+        timing, so the Wormhole bank model above is carried over unchanged.
+        That carry-over is an assumption, not a sourced fact: Blackhole's L1 is
+        1536 KiB rather than 1464 KiB (ttsim src/config.h TENSIX_SRAM_SIZE), so
+        at minimum the bank size differs.
+      bank_size_kib:
+        provenance: unknown
+        note: >
+          Blackhole L1 is 1536 KiB total; the bank count and per-bank size are
+          not published, so 1536/16 = 96 KiB is a plausible inference and is
+          deliberately not recorded as a fact.
