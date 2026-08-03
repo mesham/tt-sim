@@ -23,12 +23,15 @@ class DstRegister:
         # zero every other consumer sees comes out of the array either way.
         self.dstRowValid = np.ones(1024, dtype=bool)
         # DEST_ACCESS_CFG row-remap gates (Blackhole). Both default off, which
-        # is the hardware reset state and every path tt-sim currently drives.
-        # With them off, Adj16 is the identity and Adj32 reduces to the shared
-        # 32-bit row fold, so the addressing is byte-identical to Wormhole.
-        # tt-sim does not yet model writes to DEST_ACCESS_CFG (a Blackhole
-        # compute path that enables the swizzle is future work), so these stay
-        # False today; see BlackholeA0/.../Dst.md for the gated transforms.
+        # is the hardware reset state. With them off, Adj16 is the identity and
+        # Adj32 reduces to the shared 32-bit row fold, so the addressing is
+        # byte-identical to Wormhole. They are driven by writes to
+        # DEST_ACCESS_CFG -- TensixBackendConfigurationUnit.setConfig mirrors
+        # the register into them -- which on this architecture means tt-metal's
+        # _llk_math_reconfig_remap_, run either side of a pack_untilize. See
+        # BlackholeA0/.../Dst.md for the gated transforms, and PackerUnit's
+        # _read_dst_access_mode for the packer's stride-of-16 Dst read, the one
+        # path that needs them.
         self.dest_remap_addrs = False
         self.dest_swizzle_32b = False
 

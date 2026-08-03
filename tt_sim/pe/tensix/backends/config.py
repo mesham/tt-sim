@@ -58,6 +58,15 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         ]
         self.gprs = gprs
         self.prev_cycle_setc16_or_wrcfg = False
+        # The config word holding Blackhole's DEST_ACCESS_CFG (ADDR32 220), or
+        # None on Wormhole, where the register does not exist. Writes to it are
+        # mirrored into the Dst register's row-remap gates; see
+        # ``_apply_dest_access_cfg``.
+        self.dest_access_cfg_idx = (
+            TensixConfigurationConstants.get_addr32("DEST_ACCESS_CFG_remap_addrs")
+            if TensixConfigurationConstants.exists("DEST_ACCESS_CFG_remap_addrs")
+            else None
+        )
         super().__init__(
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
@@ -154,6 +163,39 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
                 f"value={hex(value)} {frm_thread if from_thread is not None else ''}"
             )
         self.config[stateID][cfgIndex] = value
+        if cfgIndex == self.dest_access_cfg_idx:
+            self._apply_dest_access_cfg(value)
+
+    def _apply_dest_access_cfg(self, value):
+        """Mirror a ``DEST_ACCESS_CFG`` write into the Dst row-remap gates.
+
+        ``DstRegister.adj16`` / ``adj32`` implement BlackholeA0 Dst.md's row
+        transforms gated on ``DEST_ACCESS_CFG_remap_addrs`` /
+        ``DEST_ACCESS_CFG_swizzle_32b``; this is what sets those gates. Until
+        the Blackhole ``pack_untilize`` path arrived nothing wrote the register,
+        so the transforms sat inert (remap off is the identity, swizzle off is
+        the shared 32-bit fold) — the LLK's ``_llk_math_reconfig_remap_`` is the
+        first caller, setting both bits together for the packer's stride-of-16
+        Dst read.
+
+        Dst is one physical register file with one pair of gates, so the most
+        recent write wins whichever config state carried it: the gates are not
+        tracked per ``CFG_STATE_ID``. The LLK fences around every toggle
+        (``tensix_sync`` plus a wait on the MATH_PACK semaphore, because
+        "changing them mid-access would corrupt reads"), so no Dst access
+        straddles a change and the distinction is unobservable in practice.
+        """
+        dst = self.backend.getDst()
+        dst.dest_remap_addrs = bool(
+            TensixConfigurationConstants.parse_raw_config_value(
+                value, "DEST_ACCESS_CFG_remap_addrs"
+            )
+        )
+        dst.dest_swizzle_32b = bool(
+            TensixConfigurationConstants.parse_raw_config_value(
+                value, "DEST_ACCESS_CFG_swizzle_32b"
+            )
+        )
 
     def setThreadConfig(self, thread_id, cfg_index, value):
         if self.getDiagnosticSettings().reportConfigurationSet():

@@ -9,7 +9,7 @@ from tt_sim.pe.tensix.backends.backend_base import (
 )
 from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.perf.model import unit_cost_model
-from tt_sim.util.bits import get_nth_bit
+from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes
 
 
@@ -105,6 +105,85 @@ class PackerUnit(TensixBackendUnit):
         how the tilize pack MOP interleaves two Dst halves into one tile.
         """
         return [k for k in range(4) if get_nth_bit(packMask, k)] or [0, 1, 2, 3]
+
+    #: Dst row stride between successive read interfaces in
+    #: ``DST_ACCESS_STRIDED_MODE``. See ``_read_dst_access_mode``.
+    STRIDED_DST_ROW_STRIDE = 16
+
+    def _read_addr_mode(self, instruction_info, instr_args):
+        """PACR's 2-bit ``addr_mode`` (raw 16:15).
+
+        ``AddrMode`` is the *last* argument in the shared (Wormhole) table, so
+        the decoder gives it every bit up to the opcode — 23:15. That is
+        harmless on Wormhole, where nothing above bit 16 is encoded, but
+        Blackhole packs three more fields into that span: ``dst_access_mode``
+        (17), ``row_pad_zero`` (20:18) and ``cfg_context`` (22:21). A
+        ``pack_untilize`` PACR sets ``dst_access_mode``, so its ``ADDR_MOD_1``
+        decoded as section 5 — a section no LLK programs — and the pack Y
+        counter stopped advancing: every one of the MOP's 16 row-closing PACRs
+        re-read the same Dst face row, so one output row was replicated down the
+        whole tile.
+        """
+        if self.backend.blackhole:
+            return extract_bits(instruction_info["raw_instruction"], 2, 15)
+        return instr_args["AddrMode"]
+
+    def _read_dst_access_mode(self, instruction_info, packMask):
+        """Blackhole PACR's ``dst_access_mode`` (raw bit 17).
+
+        The shared instruction table stops at Wormhole's ``AddrMode`` (start bit
+        15), so this Blackhole-only field is re-read from the raw word, as every
+        other moved/added Blackhole operand is (``MatrixUnit._read_addr_mode``,
+        ``VectorUnit._read_sfpu_addr_mode``, ...).
+
+        ``0`` is ``DST_ACCESS_NORMAL_MODE``, where read interface ``k`` supplies
+        its 16 datums from Dst row ``base + k`` (see ``dst_read_interfaces``).
+        ``1`` is ``DST_ACCESS_STRIDED_MODE``, where the interfaces step by 16
+        rows instead of 1 — interface ``k`` reads row ``base + 16*k`` — so a
+        PACR gathers the *same* row of successive 16-row faces rather than
+        successive rows of one face. That is what makes a row-major
+        ``pack_untilize_dest`` a plain pack: its MOP issues 16 two-interface
+        PACRs per face pair, and each emits one 32-datum output row spanning
+        face ``f`` and face ``f+1``.
+
+        Sources, in order of authority: the ISA docs have no BlackholeA0 PACR
+        or Packers chapter at all (BlackholeA0/.../Dst.md links to pages that do
+        not exist), so all they settle is that ``DEST_ACCESS_CFG_remap_addrs``
+        and ``DEST_ACCESS_CFG_swizzle_32b`` "also affect how packers address
+        Dst" beyond ``Adj16``/``Adj32``. The stride of 16 itself comes from
+        ttsim (``TENSIX_EXECUTE_PACR``: ``row = pack_row + 16*(i / ROW_SIZE)``,
+        "remap and swizzle cause stride to be 16 rows and not 8 here") and is
+        corroborated by tt-metal's ``_llk_math_reconfig_remap_``, which sets
+        both config bits together and documents them as "needed for enabling
+        stride of 16". Note the stride is 16 in *logical* Dst rows: tt-sim, like
+        hardware and unlike ttsim, applies ``Adj16``/``Adj32`` to every Dst
+        access, so the hardware's physical stride of 8 through the remapped
+        layout is the logical stride of 16 modelled here.
+        """
+        if not self.backend.blackhole:
+            return 0
+        strided = get_nth_bit(instruction_info["raw_instruction"], 17)
+        if not strided:
+            return 0
+        dst = self.backend.getDst()
+        if not (dst.dest_remap_addrs and dst.dest_swizzle_32b):
+            # ttsim ties strided mode to both DEST_ACCESS_CFG bits and refuses
+            # otherwise; without the remap the stride is not 16 and there is no
+            # reference for what it would be.
+            raise NotImplementedError(
+                "PACR DST_ACCESS_STRIDED_MODE with DEST_ACCESS_CFG remap_addrs="
+                f"{int(dst.dest_remap_addrs)} swizzle_32b={int(dst.dest_swizzle_32b)} "
+                "is not modelled; the stride-of-16 Dst read is only defined with "
+                "both set (tt-metal always sets them together, in "
+                "_llk_math_reconfig_remap_)"
+            )
+        if packMask not in (0, 1, 3):
+            raise NotImplementedError(
+                f"PACR DST_ACCESS_STRIDED_MODE with read_intf_sel={packMask:#06b} is "
+                "not modelled; only the contiguous interface selections (all four, "
+                "one, or the low pair) have a reference behaviour"
+            )
+        return 1
 
     def getIPackerConfig(self, i, s, one_id, two_id=0):
         if s == 2:
@@ -515,7 +594,8 @@ class PackerUnit(TensixBackendUnit):
         ovrdThreadId = instr_args["OvrdThreadId"]
         packMask = instr_args["PackSel"]
         zeroWrite = get_nth_bit(instr_args["ZeroWrite"], 0)
-        addrMod = instr_args["AddrMode"]
+        addrMod = self._read_addr_mode(instruction_info, instr_args)
+        strided = self._read_dst_access_mode(instruction_info, packMask)
 
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
@@ -558,7 +638,13 @@ class PackerUnit(TensixBackendUnit):
                 idx = self.packerI[i].inputSourceAddr + j
                 row = idx >> 4
                 col = idx & 0xF
-                if readInterfaces is not None:
+                if strided:
+                    # DST_ACCESS_STRIDED_MODE: the interfaces step a whole
+                    # 16-row face apart rather than a row, so run `n` of this
+                    # PACR's datums comes from Dst row `base + 16*n`. See
+                    # _read_dst_access_mode.
+                    row = row_start + self.STRIDED_DST_ROW_STRIDE * (j >> 4)
+                elif readInterfaces is not None:
                     # Rebase the row on the interface supplying this 16-datum
                     # run: `readInterfaces` is [0,1,2,3] for the all-on
                     # selection (the contiguous walk above), [0,2] for

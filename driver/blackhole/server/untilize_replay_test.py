@@ -16,18 +16,18 @@ values. The golden is therefore **computed here** rather than frozen from a
 dump; ttsim-Blackhole reproduces the ramp exactly on all three ops
 (``./optests/diff.sh untilize``).
 
-op0 and op1 are checked. op2 is still a live differential failure against ttsim
-on this architecture, for a reason of its own, and freezing its current value
-would only pin a bug in place: ``pack_untilize_dest`` lowers to a completely
-different instruction sequence on Blackhole than on Wormhole -- one packer
-interface pair in ``DST_ACCESS_STRIDED_MODE`` (PACR's Blackhole-only
-``dst_access_mode``, with ``DEST_ACCESS_CFG`` swizzle/remap), where the second
-half of each PACR's datums comes from Dst row ``base + 16`` rather than
-``base + 1``. tt-sim's PACR decode has no ``dst_access_mode`` field, so it reads
-the rows contiguously and 992 of the 1024 datums land wrong. Wormhole's
-four-packer form of the same op *is* checked, in
-``driver/wormhole/server/untilize_replay_test.py``. When that gap closes, move
-the op into ``CHECKED_OPS``.
+op2 is what makes this guard Blackhole-specific: ``pack_untilize_dest`` lowers
+to a completely different instruction sequence here than on Wormhole. Its MOP
+runs one packer interface *pair* in ``DST_ACCESS_STRIDED_MODE`` -- PACR's
+Blackhole-only ``dst_access_mode`` (raw bit 17), paired with the
+``DEST_ACCESS_CFG`` remap/swizzle the math thread enables -- so the second half
+of each PACR's 32 datums comes from Dst row ``base + 16`` rather than
+``base + 1``, and one PACR emits one 32-datum row spanning two faces. Two decode
+gaps had to close for it: ``dst_access_mode`` did not exist in tt-sim's PACR
+argument table at all, and the same bit was being swallowed by ``AddrMode``,
+whose shared Wormhole encoding runs to bit 23 -- so ``ADDR_MOD_1`` decoded as a
+section nothing programs and the pack Y counter never advanced. Wormhole's own
+form of the op is checked in ``driver/wormhole/server/untilize_replay_test.py``.
 
 op1 is the unpack-side untilize, and it is the reason this guard grew: its
 row-major-ness comes from the *unpacker*'s output address generator rather than
@@ -79,8 +79,7 @@ DATA_SIZE = NUM_OPS * TILE_ELEMS
 OP_NAMES = ["pack_tile (tiled control)", "untilize_block", "pack_untilize_dest"]
 # op -> is the output tiled (rather than row-major)?
 OP_IS_TILED = [True, False, False]
-# See the module docstring for why op2 is not checked here.
-CHECKED_OPS = [0, 1]
+CHECKED_OPS = [0, 1, 2]
 
 
 def _ramp_bits(j):
@@ -189,9 +188,7 @@ def main():
     print(
         f"blackhole untilize_replay test OK ({n_msgs} messages; all "
         f"{len(CHECKED_OPS) * TILE_ELEMS} bfloat16 results across "
-        f"{len(CHECKED_OPS)} ops ({checked}) match the computed golden; "
-        f"pack_untilize_dest not checked -- DST_ACCESS_STRIDED_MODE is "
-        f"unmodelled, see this file's docstring)"
+        f"{len(CHECKED_OPS)} ops ({checked}) match the computed golden)"
     )
     return 0
 

@@ -125,9 +125,11 @@ def _packer(blackhole, compress=False):
         TensixConfigurationConstants.use_blackhole(False)
 
 
-def _pacr(backend, packSel):
+def _pacr(backend, packSel, dst_access_mode=0):
     backend.packer_unit.handle_pacr(
-        None,
+        # Blackhole re-reads dst_access_mode (raw bit 17) off the encoded word;
+        # every PACR here is in the default DST_ACCESS_NORMAL_MODE.
+        {"raw_instruction": (0x41 << 24) | (dst_access_mode << 17)},
         0,
         {
             "Last": 1,

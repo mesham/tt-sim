@@ -3,9 +3,10 @@ per-row validity (the "zero flags").
 
 Runs standalone (``python3 -m tt_sim.pe.tensix.registers_test``) or under pytest.
 Pins three things: the shared, config-off addressing that both Wormhole and
-Blackhole use today; the exact Blackhole ``Adj16`` / ``Adj32`` transforms
-from BlackholeA0/.../Dst.md that a future compute path will enable via
-``DEST_ACCESS_CFG``; and the zero-flag semantics ported from ttsim's
+Blackhole use today; the exact Blackhole ``Adj16`` / ``Adj32`` transforms from
+BlackholeA0/.../Dst.md that ``DEST_ACCESS_CFG`` enables (the pack-side untilize
+is the path that does — see ``pack_strided_test.py``); and the zero-flag
+semantics ported from ttsim's
 ``dst_row_valid`` -- cleared by ZEROACC, re-asserted by any write, and read back
 as all-ones (minus infinity) by GMPOOL alone.
 """
