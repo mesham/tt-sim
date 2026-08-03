@@ -31,9 +31,11 @@
 #     not part of the flight above: a flight time is a property of the
 #     distance, this is a property of the device, and keeping them apart is
 #     what lets the number be derived without double-counting the hops.
-#     **Wormhole only** -- see the entry's own note for why Blackhole's stays a
-#     gap. Everything else under ``dram`` -- both bandwidth blocks and the
-#     end-to-end reference -- is still unconsumed.
+#     Derived on **both** arches now (99 Wormhole, 126 Blackhole); Blackhole's
+#     was a gap until the two things blocking it were chased down and both
+#     turned out not to be about Blackhole's DRAM. Everything else under
+#     ``dram`` -- both bandwidth blocks and the end-to-end reference -- is
+#     still unconsumed.
 #
 # The ``mover`` and ``l1`` sections have no consumer at all.
 # See docs/plans/cost-model.md for the schema, the provenance convention, and
@@ -48,11 +50,11 @@
 #           > estimated > unknown
 #
 # and an entry's provenance is the weakest provenance of any number in it.
-# ``vendor_source_derived`` is the newest rank and exists for exactly one entry
-# (``dram.access_latency`` on Wormhole): arithmetic on vendor numbers, which is
-# what ``isa_doc_derived`` is to ``isa_doc``, one tier down. It requires a
-# ``derivation`` for the same reason -- a derived number is only reviewable if
-# the arithmetic is written out.
+# ``vendor_source_derived`` is the newest rank and exists for exactly two
+# entries (``dram.access_latency``, once per arch): arithmetic on vendor
+# numbers, which is what ``isa_doc_derived`` is to ``isa_doc``, one tier down.
+# It requires a ``derivation`` for the same reason -- a derived number is only
+# reviewable if the arithmetic is written out.
 
 schema_version: 1
 
@@ -78,6 +80,11 @@ vendor_documents:
   tm_noc_estimator_readme: tt_metal/api/tt-metalium/experimental/noc_estimator/README.md
   tm_operation_cpp: ttnn/core/operation.cpp
   tm_conv2d_common: ttnn/cpp/ttnn/operations/conv/conv2d/conv2d_op_program_factory_common.cpp
+  tm_noc_estimator_test: tests/tt_metal/tt_metal/data_movement/noc_estimator_tests/test_noc_estimator.cpp
+  tm_dm_constants: tests/tt_metal/tt_metal/data_movement/python/constants.py
+  tm_dm_stats: tests/tt_metal/tt_metal/data_movement/python/stats_collector.py
+  tm_cluster: tt_metal/llrt/tt_cluster.cpp
+  umd_bh_impl: tt_metal/third_party/umd/device/api/umd/device/arch/blackhole_implementation.hpp
 
 # ---------------------------------------------------------------------------
 clock:
@@ -91,19 +98,44 @@ clock:
       quotes "Wormhole's standard 1 GHz clock rate".
   blackhole:
     frequency_mhz: 1350
+    frequency_idle_mhz: 800
     provenance: isa_doc
     source: bh_riscv
     note: >
       "running at a clock speed of 1.35 GHz", and the Blackhole Vector Unit
       page says the SFPU "clocks at 1.35 GHz rather than 1 GHz".
 
-      Recorded as a caveat rather than a correction: tt-metal is internally
-      inconsistent about this. Its NoC latency model uses 1.2 GHz for Blackhole
-      (tm_dm_common:214) while its conv2d cost model and its GEMM_FLOPS tech
-      report both use 1.35 GHz. The ISA docs are the higher authority and say
-      1.35, so that is what is here -- but any cycle count taken from
-      tm_dm_common was measured against a 1.2 GHz assumption and does not
-      convert cleanly to wall-clock at 1.35.
+      **The 1.2 GHz conflict this note used to record is resolved: it was one
+      stale constant, in one function, on a path that never touches a latency.**
+      Chased 2026-08-03 because it was one of the two things blocking a
+      Blackhole DRAM latency. What the vendor tree actually says:
+
+      * UMD -- the layer that talks to the chip -- defines Blackhole
+        AICLK_BUSY_VAL = 1350 and AICLK_IDLE_VAL = 800 (umd_bh_impl), against
+        Wormhole's 1000 / 500. AICLK is DVFS-managed, so 1.35 GHz is the busy
+        point and 0.8 GHz the idle one; "the Blackhole clock" is 1.35 GHz under
+        load and nothing else in the tree contradicts that.
+      * tt-metal does not assume it at all where it matters: it *reads* AICLK
+        from the device (``Cluster::get_device_aiclk`` -> the UMD
+        ``get_clock()`` ARC message, tm_cluster:739), and the device profiler
+        takes its ``device_core_frequency`` from that call. The data-movement
+        suite that produced every measurement in this file reports "Latency
+        (cycles)" from the RISCV wall clock and converts to GB/s with the
+        *device-logged* clock, falling back to a hardcoded 1.35 GHz for
+        Blackhole when the run did not log one (tm_dm_constants:15-19,
+        tm_dm_stats:227-230).
+      * 1.2 GHz appears exactly once in the tree, as ``device_frequency_hz`` in
+        tm_dm_common's ``get_cycles_for_transaction_size``, and it multiplies
+        only the *bandwidth* term: ``cycles = bytes * freq / (bw * 1e9)``. The
+        ``latency_cyles`` that function returns alongside it -- the four
+        constants under ``dram.end_to_end_reference`` -- are returned unscaled
+        and are measured cycle counts, not converted times.
+
+      So the clock never entered the measurements this file derives from, and
+      the 12.5% swing it would have implied does not exist. Elsewhere in
+      tt-metal 1350 is used consistently (fabric test infra, the ttnn
+      benchmark's ``device_freq``, the distributed socket analysis'
+      CYCLES_PER_US), which is why the single 1.2 is best read as stale.
 
 # ---------------------------------------------------------------------------
 noc:
@@ -135,6 +167,28 @@ noc:
     ``link_bandwidth_gb_per_s: 32`` is 256 bits/cycle at the ``clock``
     section's 1 GHz. No Blackhole GB/s is published, hence the ``unknown``
     override rather than a scaled Wormhole number.
+
+    CORROBORATED 2026-08-03 against measurement, on both architectures, and
+    this is the strongest external check anything in this file has. tt-metal's
+    740-entry ``tm_noc_latencies`` dataset keys every row on ``same_axis``, and
+    its harness (tm_noc_estimator_test:191-193) picks the subordinate core as
+    logical ``{0,1}`` when same_axis is set and ``{1,1}`` when it is not. So
+    the same-axis pair shares a NoC column and the different-axis pair does
+    not, and on a directional torus their *round trips* are exactly
+    ``noc_grid_y`` and ``noc_grid_x + noc_grid_y`` hops -- whatever the actual
+    coordinates. The measured difference is therefore ``noc_grid_x`` hops of
+    pure router-to-router latency with the endpoints, the DRAM and the issuing
+    core's path all cancelled out:
+
+      Wormhole  (grid_x = 10):  293 - 205 =  88 cycles -> 8.8  cycles/hop
+      Blackhole (grid_x = 17):  373 - 226 = 147 cycles -> 8.65 cycles/hop
+
+    (both at 64 B, one transaction, ONE_FROM_ONE read; across all 11
+    transaction sizes and the read/write/stateful variants the eight series
+    give 8.3-9.4, mean 9.0.) The ISA docs' 9-cycle hop is reproduced on both
+    arches to within 4%, from a dataset that never mentions hops -- and it
+    settles that Blackhole's NoC is modelled correctly, which is what the
+    ``dram.access_latency`` note below needed to know.
 
     Still unconsumed: ``l1_ports`` and ``router_buffering``, and with them
     every form of *cross-packet* contention. Only the injecting NIU's own link
@@ -237,31 +291,39 @@ dram:
       Neither ttsim (whose DRAM is instantaneous) nor tt-metal's hardware
       headers have one either.
 
-      This entry stays ``unknown`` for **Blackhole**, and is overridden with a
-      derived figure for Wormhole under ``arch_overrides.wormhole`` -- the
-      first per-arch asymmetry in this file that is about confidence rather
-      than about hardware. The derivation (see there) is the difference of two
-      of tt-metal's measured end-to-end figures, which is only meaningful if
-      that measurement set is internally consistent. On Wormhole it
-      demonstrably is: subtracting the modelled NoC round trip from all four
-      rows leaves 36 (local L1), 38 (remote write) and 41 (remote read), i.e.
-      the same issuing-core path to within 5 cycles. On Blackhole the same
-      check fails outright -- 68 for the local row against 122 / 123 for the
-      remote ones, a 54-cycle disagreement -- so something about the Blackhole
-      row set is not understood, and subtracting two numbers out of a set we
-      have shown we cannot explain is exactly the laundering this convention
-      exists to stop.
+      So the base entry stays ``unknown`` and each arch overrides it with a
+      derived figure -- 99 Wormhole, 126 Blackhole -- under
+      ``arch_overrides.<arch>.dram.access_latency``. Both are the difference of
+      two of tt-metal's measured end-to-end rows; see each entry for its own
+      arithmetic and its own cross-check.
 
-      There is a second, independent reason and it would bite even if the
-      first were fixed: the Blackhole figures were measured against
-      tt-metal's 1.2 GHz assumption, which the ISA docs contradict at 1.35 GHz
-      (see ``clock``). A cycle count converted from a measured *time* scales
-      with the clock, so the Blackhole difference is 126 cycles if
-      tt-metal's own assumption is taken at face value and 142 at the ISA
-      docs' clock. The sources disagree and this file records conflicts
-      rather than resolving them; recording a number here would mean picking
-      one silently. Either fix closes this gap: an internally consistent
-      Blackhole end-to-end set, or a resolved clock.
+      **Blackhole's used to be a gap and the record of why is kept here**,
+      because it was closed by finding out that neither reason was about
+      Blackhole's DRAM. The two were: (1) its end-to-end row set failed the
+      consistency check Wormhole's passed -- subtracting the modelled NoC round
+      trip leaves 36 / 38 / 41 on Wormhole but 68 (local) against 122 / 123
+      (remote) on Blackhole; and (2) the figures were believed to have been
+      measured against tt-metal's 1.2 GHz Blackhole assumption while the ISA
+      docs say 1.35, a 12.5% swing on the quantity being derived.
+
+      (2) is void: the end-to-end figures are measured cycle counts and no
+      clock enters them -- see the ``clock`` note, which chases the single 1.2
+      in the tree to a bandwidth conversion that never touches them.
+
+      (1) is real but is *not* about the two rows the subtraction uses. The
+      per-hop model is now independently confirmed on Blackhole (see ``noc``:
+      8.65 cycles/hop measured against the docs' 9, from the same-axis delta),
+      so the 29-hop round trip is not what is wrong. What is left is that
+      Blackhole's ``l1_local_cycles`` row -- 88 -- does not sit with its own
+      remote rows: taking the 740-entry ``tm_noc_latencies`` set instead, whose
+      campaign has no local row at all, the residual after the modelled round
+      trip is 75 on Wormhole and 92 on Blackhole, a 17-cycle arch difference
+      rather than an 81-cycle one. The anomaly is confined to a single
+      constant, that constant is the *local* one, and the derivation subtracts
+      ``dram_cycles - l1_remote_read_cycles``, neither of which is it. Why 88
+      is what it is remains unexplained and is a real open question about the
+      end-to-end reference; it is no longer a reason not to subtract two rows
+      that are consistent with each other and with the hop model.
   end_to_end_reference:
     dram_cycles: { wormhole: 358, blackhole: 529 }
     l1_local_cycles: { wormhole: 56, blackhole: 88 }
@@ -277,8 +339,18 @@ dram:
       whatever tolerance the estimator claims. That is the cheapest available
       end-to-end check short of silicon traces, and it is the check ROADMAP
       section I "Calibration against silicon traces" is asking for a substitute
-      for. Note the Blackhole figures were measured against tt-metal's 1.2 GHz
-      Blackhole assumption; see the clock note.
+      for. All eight are measured *cycle* counts, returned unscaled by the same
+      function whose bandwidth branch applies a device frequency; no clock
+      conversion is involved in any of them (the ``clock`` note chases this
+      down, because the belief that one was is what kept Blackhole's DRAM
+      latency a gap).
+
+      One row is not understood: ``l1_local_cycles`` on Blackhole, 88. The
+      other three Blackhole rows are mutually consistent with a 29-hop round
+      trip at the docs' per-hop latency, and the local row is 54 cycles below
+      where those three put it. Wormhole's four rows have no such disagreement
+      (residuals 36 / 38 / 41). Named here rather than in ``access_latency``,
+      which does not use this row.
   chip_level_bandwidth:
     wormhole_gb_per_s: 258
     blackhole_gb_per_s: 512
@@ -537,6 +609,14 @@ arch_overrides:
           3 cycles. The residual gap is consistent with an L1 endpoint's own
           service time being a handful of cycles, which is what l1's bank
           model implies and what this entry folds out.
+
+          A third route, added 2026-08-03 when the same subtraction was made
+          to work on Blackhole: tt-metal's 740-entry tm_noc_latencies set is a
+          different measurement campaign by the same test suite, and its
+          DRAM_SHARDED-minus-L1 difference for one 64 B ONE_FROM_ONE read is
+          397 - 293 = 104, with 104 / 104 / 104 / 112 / 104 / 112 over
+          64 B..2 KiB. 99, ~102 and 104-107, from three routes sharing only a
+          vendor.
         note: >
           **A difference, charged as a latency, and that is the honest reading
           of it.** 99 is (DRAM service) - (L1 service), and tt-sim charges an
@@ -577,6 +657,73 @@ arch_overrides:
         provenance: unknown
         note: not published for Blackhole; the Wormhole 32 GB/s does not carry over.
     dram:
+      access_latency:
+        cycles: 126
+        bound: at_least
+        provenance: vendor_source_derived
+        source: tm_dm_common#L200-216
+        derivation: >
+          access_latency = end_to_end_reference.dram_cycles
+                         - end_to_end_reference.l1_remote_read_cycles
+                         = 529 - 403 = 126 cycles (Blackhole).
+
+          The same subtraction as Wormhole's, on the same table, for the same
+          reason: both inputs are tt-metal's measured "initial latency" for the
+          same transaction shape issued by the same agent, so the issuing
+          core's path, the NoC round trip and the response handling cancel and
+          what is left is (DRAM endpoint service) - (L1 endpoint service). No
+          modelled quantity appears in it.
+
+          The geometry assumption is the same and is just as cheap: a round
+          trip between two tiles differing on both axes is exactly
+          noc_grid_x + noc_grid_y = 29 hops *whatever* the distance between
+          them, so two remote measurements cannot differ by hop count unless
+          one shares an axis with its initiator.
+
+          Cross-check, from a second and independent vendor dataset. tt-metal's
+          740-entry tm_noc_latencies set was collected by the same test suite
+          but a different campaign, and it carries L1 and DRAM_SHARDED rows for
+          the *same* pattern (ONE_FROM_ONE read), transaction count (1) and
+          axis relationship, per transaction size. Subtracting those:
+
+            Blackhole  481 - 373 = 108 at 64 B; over the six sizes 64 B..2 KiB
+                       where the comparison is still latency-dominated, the
+                       differences are 108 / 88 / 128 / 127 / 152 / 124,
+                       mean 121.
+            Wormhole   397 - 293 = 104 at 64 B; the same six are
+                       104 / 104 / 104 / 112 / 104 / 112, mean 107.
+
+          So the second dataset says 121 where this entry says 126 (-4%), and
+          107 where the Wormhole entry says 99 (+8%). Two campaigns that share
+          only a test suite agree on both arches at the same level, which is
+          the same standard the Wormhole entry's two routes were held to.
+
+          The shipped number is tm_dm_common's, not tm_noc_latencies', so that
+          the two arches' figures are the *same* arithmetic on the *same* four
+          constants and remain commensurate with each other. Blackhole's
+          scatter is the larger: its L1 row is non-monotonic in transaction
+          size by up to 21 cycles where Wormhole's is flat, so 126 is a
+          coarser number than 99 even though both are one subtraction.
+        note: >
+          Everything the Wormhole entry's note says about what this is and is
+          not applies unchanged: it is a difference charged as a latency, hence
+          ``bound: at_least``; it is a flat per-request service time paid on
+          every read, write and atomic arriving over the NoC; and it models no
+          bank conflicts, no refresh window, no endpoint occupancy and no size
+          dependence.
+
+          One difference worth naming rather than inheriting. Blackhole's
+          measured rows say a *write* to DRAM costs far less over L1 than a
+          read does: in tm_noc_latencies at one transaction the DRAM-minus-L1
+          difference is ~20-30 cycles for ONE_TO_ONE against ~108-152 for
+          ONE_FROM_ONE. That asymmetry is physically unsurprising -- a write is
+          answered when it is accepted, a read when the array has been read --
+          but this entry charges one number to all three request actions, so a
+          Blackhole DRAM write is over-charged relative to that measurement.
+          Wormhole's rows do not show the asymmetry cleanly enough to model it
+          (its DRAM-write row's 64 B column is a visible outlier), so splitting
+          the term by action would be a per-arch shape change resting on one
+          arch's data, and it is not done.
       bandwidth:
         provenance: unknown
         note: >

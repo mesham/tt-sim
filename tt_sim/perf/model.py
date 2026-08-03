@@ -680,14 +680,15 @@ class DramCostModel:
 
     * :attr:`service_cycles` -- cycles between a request landing at a DRAM
       channel and that channel having serviced it, or ``None`` when the tables
-      source nothing for this arch (which is Blackhole, on purpose -- see the
-      ``access_latency`` note).
-    * :attr:`is_exact` -- False for the shipped Wormhole entry, whose
-      ``bound: at_least`` records that the derived 99 is the DRAM-versus-L1
+      source nothing for this arch. Both shipped arches source one (99
+      Wormhole, 126 Blackhole); the ``None`` path is what a third arch, or the
+      base entry's ``unknown``, would land on.
+    * :attr:`is_exact` -- False for both shipped entries, whose
+      ``bound: at_least`` records that the derived figure is the DRAM-versus-L1
       *difference* and therefore a floor under the absolute device latency.
 
-    The provenance is worth checking rather than assuming: this is the file's
-    only ``vendor_source_derived`` entry, which is arithmetic on two vendor
+    The provenance is worth checking rather than assuming: these are the
+    file's only ``vendor_source_derived`` entries, arithmetic on two vendor
     measurements — weaker than a published number and stronger than a guess.
     :attr:`provenance` keeps it reachable so a report can say so.
     """
@@ -697,8 +698,8 @@ class DramCostModel:
         entry = (sections.get("dram") or {}).get("access_latency") or {}
         self.provenance = entry.get("provenance")
         # An ``unknown`` entry carries no ``cycles`` at all — the convention
-        # guarantees it and a test enforces it — so this is also the Blackhole
-        # path, and it lands on ``None`` twice over.
+        # guarantees it and a test enforces it — so an unsourced arch lands on
+        # ``None`` twice over rather than borrowing another arch's number.
         raw = entry if "cycles" in entry else None
         cost = CycleCost.parse(raw)
         self.service_cycles = _sourced_cycles(raw, self.provenance)
@@ -724,9 +725,9 @@ def dram_cost_model(arch):
     """The :class:`DramCostModel` for ``arch``, cached, or ``None`` when off.
 
     Same contract as the three above, plus one of its own: it also returns
-    ``None`` when the arch's table sources no latency at all, so a Blackhole
-    DRAM tile behaves exactly as it did before this landed rather than
-    borrowing Wormhole's number.
+    ``None`` when the arch's table sources no latency at all, so an arch
+    without a derivation of its own keeps an instantaneous DRAM rather than
+    borrowing another arch's number.
     """
     if arch is None or not cost_model_enabled():
         return None

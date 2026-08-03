@@ -13,11 +13,12 @@ So the properties worth pinning divide in three:
 
 1. **The opt-in**, as everywhere: with ``TT_SIM_COST_MODEL`` unset a DRAM tile
    answers on the next cycle exactly as it always did.
-2. **The provenance**, because this is the file's only
-   ``vendor_source_derived`` entry and the whole convention turns on a reader
-   being able to tell it from a published one. Blackhole deliberately gets
-   *nothing*, and that asymmetry is pinned here rather than left to be
-   rediscovered as a bug.
+2. **The provenance**, because these are the file's only
+   ``vendor_source_derived`` entries and the whole convention turns on a reader
+   being able to tell them from published ones. Blackhole got *nothing* until
+   2026-08-03; it now gets 529 − 403 = 126 from the same table by the same
+   subtraction, and that the two arches share one arithmetic is pinned here
+   rather than left to drift apart.
 3. **Where the cost is charged** — at the endpoint, on the request, and not in
    the flight. Charging it in the flight would produce the same total on a
    round trip while being wrong about everything else: it would double-count
@@ -120,17 +121,24 @@ def test_the_derived_latency_does_not_claim_to_be_exact_or_published():
     assert model.is_exact is False
 
 
-def test_blackhole_deliberately_gets_no_number():
-    """Not an oversight and not laundering-by-omission: the same subtraction on
-    Blackhole's rows gives 126, but that row set fails the internal-consistency
-    check the Wormhole one passes (residuals 68 local against 122 / 123
-    remote), and it was measured against tt-metal's 1.2 GHz assumption while
-    the ISA docs say 1.35 — which scales any cycle figure by 12.5 %. The table
-    records the conflict and charges nothing."""
+def test_blackhole_is_the_same_subtraction_on_the_same_table():
+    """529 − 403, the same arithmetic on the same four constants as Wormhole's
+    358 − 259. Pinned as arithmetic rather than as 126 for the same reason the
+    Wormhole side is, and pinned as the *same* arithmetic because a Blackhole
+    figure derived some other way would not be commensurable with Wormhole's.
+
+    This was ``None`` until 2026-08-03, on two grounds that both dissolved: a
+    1.2-vs-1.35 GHz clock conflict that turns out not to touch a measured cycle
+    count, and an internal-consistency failure that turns out to be confined to
+    the ``l1_local_cycles`` row — which is not one of the two rows subtracted
+    here. See the entry's ``derivation`` in ``unit_costs.yaml``."""
     with _env("1"):
-        assert dram_cost_model("blackhole") is None
+        model = dram_cost_model("blackhole")
+        assert model.service_cycles == 529 - 403
+        assert model.provenance == "vendor_source_derived"
+        assert model.bound == "at_least"
         for tile in Blackhole().dram_tiles:
-            assert tile.noc0_router.service_cycles is None
+            assert tile.noc0_router.service_cycles == 529 - 403
 
 
 def test_the_gaps_are_named_rather_than_implied():

@@ -201,11 +201,15 @@ def test_derived_entries_show_their_working():
 
 def test_vendor_derived_entries_are_exactly_the_ones_we_expect():
     """``vendor_source_derived`` is arithmetic on vendor numbers — below a
-    published figure, above a guess. It exists for exactly one entry and adding
-    a second must be as deliberate as adding an ``estimated`` one, so the list
-    is here rather than inferred. Every one must also show its working, which
+    published figure, above a guess. It exists for exactly two entries — the
+    same subtraction once per arch — and adding a third must be as deliberate
+    as adding an ``estimated`` one, so the list is here rather than inferred.
+    Every one must also show its working, which
     :func:`test_derived_entries_show_their_working` enforces."""
-    expected = {"arch_overrides.wormhole.dram.access_latency"}
+    expected = {
+        "arch_overrides.wormhole.dram.access_latency",
+        "arch_overrides.blackhole.dram.access_latency",
+    }
     found = set()
     for raw in _load_raw():
         for path, node in _walk_provenanced(raw):
@@ -220,23 +224,26 @@ def test_the_dram_latency_is_exactly_its_own_derivation():
     measured DRAM end-to-end figure minus the measured L1-remote-read one, both
     from the same vendor table, which is why the NoC round trip and the issuing
     core's path cancel out of it. If either reference figure is corrected, this
-    fails instead of drifting."""
+    fails instead of drifting.
+
+    Both arches now, and the *same* arithmetic on the *same* four constants,
+    which is the point: Blackhole's was a gap until 2026-08-03 and closing it
+    with a different source or a different subtraction would have made the two
+    figures incommensurable."""
     _, units = _load_raw()
     reference = units["dram"]["end_to_end_reference"]
-    derived = units["arch_overrides"]["wormhole"]["dram"]["access_latency"]
-    assert (
-        derived["cycles"]
-        == reference["dram_cycles"]["wormhole"]
-        - reference["l1_remote_read_cycles"]["wormhole"]
-    )
-    # A floor, not an equals sign: the L1 endpoint's own service time is folded
-    # out by the subtraction and is not negative.
-    assert derived["bound"] == "at_least"
-    # And Blackhole stays a gap, on purpose: the base entry is ``unknown`` and
-    # the Blackhole override does not quietly supply a number. See its note.
+    for arch in ("wormhole", "blackhole"):
+        derived = units["arch_overrides"][arch]["dram"]["access_latency"]
+        assert (
+            derived["cycles"]
+            == reference["dram_cycles"][arch] - reference["l1_remote_read_cycles"][arch]
+        )
+        # A floor, not an equals sign: the L1 endpoint's own service time is
+        # folded out by the subtraction and is not negative.
+        assert derived["bound"] == "at_least"
+    # The base entry stays ``unknown``, so a third architecture inherits a gap
+    # rather than one of these two numbers.
     assert units["dram"]["access_latency"]["provenance"] == "unknown"
-    blackhole_dram = units["arch_overrides"]["blackhole"].get("dram") or {}
-    assert "access_latency" not in blackhole_dram
 
 
 def test_no_entry_is_an_uncalibrated_guess_without_saying_so():
@@ -375,22 +382,24 @@ def test_riscv_pipeline_costs_are_the_published_ones():
     assert rv["store_throughput"]["l1_period_cycles"] == 5
 
 
-def test_dram_latency_is_derived_where_it_can_be_and_a_gap_where_it_cannot():
-    """This entry used to be ``unknown`` on both arches, and the half that
-    changed is the interesting half. Wormhole's is now
-    ``vendor_source_derived`` — arithmetic on two vendor measurements, shown in
-    full — and Blackhole's is still a gap, because the same subtraction there
-    rests on a row set that fails its own consistency check. The rank matters
-    as much as the number: a reader must be able to tell at a glance that
-    nobody published 99."""
+def test_dram_latency_is_derived_on_both_arches_and_says_so():
+    """This entry was ``unknown`` on both arches, then derived on Wormhole
+    alone, and is now derived on both. The rank matters as much as the number:
+    a reader must be able to tell at a glance that nobody published 99 or 126.
+
+    Blackhole's was blocked on two things and neither turned out to be about
+    Blackhole's DRAM — a clock conflict that does not touch a measured cycle
+    count, and a consistency failure confined to the one end-to-end row the
+    subtraction does not use. See the entry's ``derivation``."""
     wormhole = load_costs("wormhole").section("dram")
     assert wormhole["access_latency"]["provenance"] == "vendor_source_derived"
     assert wormhole["access_latency"]["cycles"] == 99
     assert wormhole["access_latency"]["derivation"]
 
     blackhole = load_costs("blackhole").section("dram")
-    assert blackhole["access_latency"]["provenance"] == "unknown"
-    assert "cycles" not in blackhole["access_latency"]
+    assert blackhole["access_latency"]["provenance"] == "vendor_source_derived"
+    assert blackhole["access_latency"]["cycles"] == 126
+    assert blackhole["access_latency"]["derivation"]
 
     # The end-to-end measurements are kept under their own key, still not to be
     # plugged in as a DRAM latency: 358 folds in the NoC round trip and the
