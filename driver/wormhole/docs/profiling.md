@@ -1745,12 +1745,15 @@ example replays. Only nine combinations occur:
 Three facts fell out of that census and shaped the change:
 
 1. **The loop is already a clean rectangle.** The awkward modes the ISA doc
-   describes — `rowStride`, `upsampleZeroes`, `upsampleInterleave` — are
+   describes — `rowStride`, `upsampleZeroes`, `upsampleInterleave` — were
    *passed to* `perform_unpack` and never read: the input walk is
    `inAddr_Datums += datumSizeBytes`, flat. So there was no discontiguity to
    work around, and the batched path is exactly as (in)complete as the scalar
    one it replaces. Nothing was skipped by batching that the scalar loop
-   handled.
+   handled. (Since then those three no longer reach `perform_unpack` at all:
+   `check_modelled_settings` rejects a non-abutting `RowStride` or a non-zero
+   `Upsample_rate` at decode, so the rectangle is now a precondition rather
+   than a lucky property of the corpus.)
 2. **Every observed call has `colShift == 0` and `numRows <= 64`**, and the
    only transpose is `reduce`'s 4 calls.
 3. **`two`, `three` and `eight` never enter the function at all** — the
@@ -1898,3 +1901,373 @@ time python3 -m driver.blackhole.server.six_replay_test
 Freeze both trees, alternate the order, and read the control workloads before
 believing any whole-run ratio under ~1.1x — see the method note in the
 event-driven-pump section, which this change's numbers confirm again.
+
+# Investigated and not real: the `six` "regression" after the optests commits
+
+**Measured 2026-08-03**, same machine as the appendix (12th Gen Core i7-12700H,
+CPython 3.12.13, `TT_SIM_THREADED` unset). A single run of `six_replay_test`
+timed 6.99 s before commits `469899b` ("Pumping of instructions") and `0ac4b39`
+(the optests differential fixes) landed, and 8.11 s after — an apparent 16 %
+give-back on the day five optimisations took `six` from 35.68 s to single
+digits. **It does not reproduce. HEAD is faster than the pre-change tree on
+every statistic**, and this section is the evidence, kept because a documented
+non-regression is worth as much as a fix.
+
+## Result: three interleaved A/Bs, three frozen worktrees
+
+`pre` = `fe0d279` (before both commits), `mid` = `469899b`, `head` = `0ac4b39`.
+Full-tree `git worktree` snapshots, order rotated every round, whole-process
+wall clock **and** child CPU time (`RUSAGE_CHILDREN`), min and median of each.
+
+| sweep | rounds | machine | pre | mid | head | head vs pre |
+|---|---|---|---|---|---|---|
+| 1 | 9 | loaded (load 8–18) | 7.552 s | 6.889 s | **6.789 s** | **0.90×** |
+| 2 | 11 | loaded → quiet | 7.691 s | — | **6.977 s** | **0.91×** |
+| 3 | 6 | quiet (load 1.4) | 7.815 s | 7.298 s | **6.094 s** | **0.78×** |
+
+(wall-clock **minimum** of the rounds — the statistic this document uses,
+because contention can only add time. The medians agree in direction in all
+three sweeps: 0.90×, 0.89×, 0.91×. CPU-time min agrees too: 0.92×, 0.94×,
+0.84×.) `head` is not slower than `pre`; it is **~1.1× faster**, which is the
+unpacker batching in `469899b` showing up where it should. The quiet-machine
+`head` minimum of **6.09 s** is *below* the 6.99 s that was reported as the
+"before".
+
+## Why the original numbers disagreed
+
+The machine was not quiet. During the first sweep an unrelated build was
+running (`ftn-opt` / `tt-opt` / `tt-xftn`, load average climbing 1.4 → 18.7),
+and a single `head` run in that window came back at 10.65 s against 7.47 s for
+the same code twelve minutes later. Two single runs taken minutes apart cannot
+separate a 16 % effect from that. This is the third time this document has had
+to say it: **freeze both trees, alternate the order, take the minimum of
+several rounds, and say which statistic you used.**
+
+## Why it could not have been real, mechanically
+
+The four changes in the bisection space were each instrumented in the frozen
+`head` worktree rather than argued about. Call counts are the measurement:
+
+| suspect | reached in `six`? | cost |
+|---|---|---|
+| **Sparse DRAM backing** (`SparseAddressableMemory`) | 192 reads + 48 writes, 480 KiB | **0.004 s of 6.0 s = 0.07 %** |
+| **Cost-model hook** (`busy_until` / `cost_model` guards in `TensixBackendUnit.clock_tick`) | 275,000 unit-ticks | ≤ **0.023 s = 0.3 %** (85 ns/call upper bound, which includes the call frame the guard does not pay for) |
+| **Blackhole SFPU decode** (`_read_dest_reg_addr`, `_compare_lanes`) | **0 calls** — verified, not assumed | 0 |
+| **RV32I `sh` fix** (`rs2_val[0:1]` → `[0:2]`) | a slice bound | 0 |
+
+Sum: **under 0.03 s of a 7 s run**, against the 1.12 s that was being looked
+for. The suspicion that sparse DRAM would bite because "`six` streams tiles
+from DRAM continuously" is the interesting one to correct: `six` moves its
+128³ operands through *L1* once the reader kernel has fetched them, so the
+sparse path sees 240 calls in the whole run, not one per tile row.
+
+Sparse-DRAM census across all 22 Blackhole guards, so the point is not
+specific to `six`:
+
+| guard | sparse calls | bytes | share of run |
+|---|---|---|---|
+| `six` | 240 | 491,520 | 0.07 % |
+| `matmulblock` | 18 | 106,496 | 0.03 % |
+| `optest` | 10 | 81,920 | 0.06 % |
+| every other guard | 3–16 | ≤ 49,152 | **≤ 0.05 %** |
+
+The worst case in the tree is 0.07 %. A last-hit chunk cache, a bigger chunk
+size, or a flat-array fast path would all be measurable in a microbenchmark and
+invisible in every workload, so none was written — the change is already at the
+point where the honest answer is "leave it alone".
+
+## Gates (nothing changed, so these are a pin, not a check)
+
+`ruff check` / `ruff format` clean; `pytest tt_sim driver` **349 passed**;
+**22/22** Blackhole replay guards; `driver.wormhole.server.offline_replay_test`
+**126/126 byte-identical**; `pytest driver/wormhole/server/` **18 passed**;
+`six` reports `PCC(golden, device) = 0.9982`, unmoved.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+git worktree add --detach /tmp/wt_pre  fe0d279
+git worktree add --detach /tmp/wt_head 0ac4b39
+# alternate the order every round, take the min, and check `uptime` while you
+# do it — a background build is worth more than the effect you are chasing.
+
+# whether a change is even reached: wrap the suspect method with a counter and
+# run the guard, e.g. SparseAddressableMemory.read / VectorUnit._compare_lanes.
+```
+
+---
+
+# What landed: the RISC-V cost model, and what it costs when it is off
+
+The §I cycle-cost model reached the baby RISC-V cores' load/store path
+(`tt_sim/pe/rv/cost.py`; write-up in
+[`docs/plans/cost-model.md`](../../../docs/plans/cost-model.md#the-risc-v-cores-where-the-cycles-finally-moved)).
+It is not an optimisation, so the only question this document has to answer is
+the one the RV interpreter's history makes urgent: **the interpreter is the
+hottest path in the simulator and was made ~2.3× faster by deleting
+per-instruction overhead, so what does adding a per-instruction cost hook cost
+when the model is switched off?**
+
+The hook is one instance-attribute read and one predicted branch, before the
+ISA dispatch:
+
+```python
+cost = self.rv_cost                       # None unless TT_SIM_COST_MODEL
+if cost is not None and not cost.can_issue(instr, cycle_num, register_file):
+    return
+```
+
+`rv_cost` is an instance attribute (not the class attribute it shadows), for
+the same reason `TensixBackendUnit.busy_until` is: a class-attribute read on
+this path is an MRO walk.
+
+## Result: no measurable cost, with a control group that says so
+
+Three **frozen full-tree copies** — `new` (the working tree), `base` (the same
+tree with *only* this change reverted, so the concurrently-uncommitted Tensix
+cost wiring is in both arms), and `ctrl` (a byte-identical copy of `base`,
+verified with `diff -rq`). Twelve rounds, order alternated each round, `four`
+timed once per round and `two` five times per round (it is only ~1.5 s, so a
+single run is startup-dominated). `TT_SIM_COST_MODEL` unset throughout.
+
+| guard | statistic | base | ctrl | new |
+| --- | --- | --- | --- | --- |
+| `four` | median of 12 | 11.515 s | 11.502 s (**−0.1 %**) | 11.617 s (**+0.9 %**) |
+| `four` | min of 12 | 10.508 s | 10.965 s (**+4.4 %**) | 10.696 s (**+1.8 %**) |
+| `two` | median of 12×5 | 1.520 s | 1.531 s (**+0.7 %**) | 1.512 s (**−0.6 %**) |
+| `two` | min of 12×5 | 1.398 s | 1.395 s (**−0.2 %**) | 1.396 s (**−0.2 %**) |
+
+The control group is the whole point, and it is why both statistics are
+reported. `ctrl` is the *same code as `base`*, and it lands anywhere from
+−0.1 % to +4.4 % depending on which statistic you take. `new` is inside that
+band on every line, and on `two` — the shorter, more RV-dominated run, where a
+per-instruction overhead should show up most cleanly — it is indistinguishable
+from the control to within 0.2 %. **No cost distinguishable from a control
+group of identical code**, with an upper bound around 1 % rather than a claim
+of exactly zero. (This is the discipline the "Investigated and not real"
+section above exists to enforce — single-run timings on this machine have
+already sent one agent chasing a regression that did not exist. An earlier pass
+of this same A/B, against a `base` that was a plain HEAD worktree and therefore
+*missing* the concurrent Tensix work, produced +0.1 % / −3.0 % with a control
+at +4.4 % / −0.8 %: a different set of numbers, the same conclusion, and a
+reminder to check what is actually in each arm.)
+
+With the model **on**, the same `four` run is ~8 % slower in wall clock (11.55 s
+→ 12.43 s, median of three alternating runs — only just outside the noise floor)
+and 0.18 % longer in simulated cycles. The scoreboard walk is cheap because it
+is a list index and two integer compares; nobody should read the on-state as a
+performance path regardless.
+
+## Gates
+
+`ruff check` / `ruff format` clean; `pytest tt_sim driver` **401 passed** (380
+before, +19 `tt_sim/pe/rv/cost_test.py`, +2
+`tt_sim/pe/tensix/sync_mixed_queue_test.py`); **22/22** Blackhole replay
+guards; `driver.wormhole.server.offline_replay_test` **126/126
+byte-identical**; `pytest driver/wormhole/server/` **18 passed**; `six` reports
+`PCC(golden, device) = 0.9982`, unmoved. All with `TT_SIM_COST_MODEL` unset,
+which is the contract.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+git worktree add --detach /tmp/bench/base HEAD
+cp -a /tmp/bench/base /tmp/bench/ctrl          # the control: identical code
+rsync -a --exclude .git ~/tt-sim/ /tmp/bench/new/
+diff -rq /tmp/bench/base/tt_sim /tmp/bench/ctrl/tt_sim   # verify the control
+# then: 6 rounds, order alternated, median per variant. Report the control's
+# own deviation next to the change's — a change smaller than the control is a
+# non-result, not a win.
+
+# simulated-cycle A/B at one-cycle resolution (the guards poll every 2000-5000
+# cycles, which hides anything smaller): monkeypatch the guard module's
+# PUMP_CHUNK to 1, wrap _build_fabric to keep the device, and read
+# device.tt_device.clocks[0].clock_tick_num after main().
+
+# where the RV stalls went: core.rv_cost.summary() on each baby core after a
+# run — total stall cycles, split by load-use / store-rate / integer-unit, and
+# loads counted per address region.
+```
+
+---
+
+# What landed: the deadlock watchdog, sampled instead of polled
+
+The progress watchdog (`tt_sim/device/deadlock.py`, wired from
+`Wormhole.__init__` as the pump's `on_tick`) took its whole progress signature
+**every cycle** — every tile, every baby core, every NIU, every Tensix thread —
+to find a condition whose window is 50,000 cycles and which fires a handful of
+times in a run, if ever. On the full-worker-grid feasibility study
+([`docs/upstream-examples-status.md`](../../../docs/upstream-examples-status.md#what-the-full-grid-actually-costs))
+that made it **92 % of an 80-worker idle pump**. It is now sampled once per
+`threshold // 8` cycles, with a confirmation pass before it prints.
+
+## Measure first: where the watchdog's time actually went
+
+`cProfile` on an 8-Tensix Wormhole idle pump, striding off, 4,000 cycles:
+`DeadlockDetector.tick` is **0.430 s of the 0.531 s** the pump takes (81 %),
+and inside it the call counts are all one thing — the per-core soft-reset poll:
+160,000 `deque.clear`, 160,000 `get_nth_bit`, 32,000 `conv_to_uint32` for
+8 tiles × 5 cores × 4,000 cycles. Nothing else in the tick is reached, because
+with every core in reset the signature is never built.
+
+That is the *cheap* half. `timeit` on one observation (min of 5×200), with
+cores in reset and then with BRISC out of reset on every tile:
+
+| Tensix tiles | one scan, all cores in reset | per tile | one scan, cores live | per tile |
+| --- | --- | --- | --- | --- |
+| 1 | 4.2 µs | 4.2 | 25.9 µs | 25.9 |
+| 8 | 17.6 µs | 2.2 | 137.8 µs | 17.2 |
+| 20 | 38.7 µs | 1.9 | 357.9 µs | 17.9 |
+| 80 | 218.5 µs | 2.7 | 1,881.9 µs | 23.5 |
+
+**A live core makes the scan ~10× more expensive**, because it is what turns on
+the other two thirds of the signature: a 61-entry tuple copy per NIU (176 of
+them on an 80-worker Wormhole) and `CoprocessorDoneCheck` per Tensix thread,
+which walks every backend unit. One live tile is enough — the signature is
+built if *any* core anywhere is out of reset. Since one live tile also forces
+the Phase 4 stride off, an 80-worker Wormhole with a single running kernel was
+paying ~1.9 ms of watchdog per simulated cycle.
+
+(For the record, the "it stops being the dominant term once tiles are awake"
+line in the feasibility study was measured on **Blackhole**, which never wired
+the detector at all — both arms of that A/B had no watchdog. On Wormhole the
+opposite holds, and the live-workload table below quantifies it.)
+
+## What changed
+
+Three things, all in `deadlock.py` plus one line of `wormhole.py`:
+
+1. **Sampled, not polled.** `tick` is now one integer compare against
+   `_next_sample_cycle` — 91 ns, measured — and the scan happens once per
+   `max(1, threshold // 8)` cycles (6,250 by default).
+2. **Confirmed before reported.** Sampling alone can alias: a loop whose period
+   matches the sample interval looks frozen at every sample point. A stall that
+   clears the threshold is therefore re-checked on 64 consecutive ticks before
+   anything is printed. A wedged device passes trivially; a core that is
+   actually retiring instructions moves its PC and aborts the confirmation. The
+   confirmation also refills the recent-PC window with consecutive-cycle PCs,
+   so the report reads exactly as it did before.
+3. **Disabled means unwired.** `TT_SIM_DEADLOCK=0` no longer installs the
+   `on_tick` hook, so it costs nothing rather than a call that returns.
+
+The window is now counted in simulated cycles rather than pump ticks. The two
+are the same thing except when the pump strides, which only happens when every
+tile is dormant.
+
+## Result: the idle floor
+
+Two frozen full-tree copies (`before` = HEAD, `after` = HEAD + this change),
+`TT_SIM_PUMP_STRIDE=0` (what one live tile forces anyway), 4 rounds × 5
+repeats, order alternated per round, **min of 20** per cell — µs per cycle:
+
+| Tensix tiles | before, watchdog on | before, off | after, watchdog on | after, off | watchdog cost: before → after |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 6.94 | 4.75 | 3.74 | 4.29 | 2.2 → below noise |
+| 8 | 27.14 | 5.66 | 5.47 | 5.39 | 21.5 → 0.08 |
+| 20 | 62.81 | 7.82 | 7.84 | 7.61 | 55.0 → 0.23 |
+| 80 | 207.3 | 18.08 | 18.59 | 17.49 | 189 → 1.1 |
+
+**The idle pump at 80 workers goes 207 → 18.6 µs/cycle (11×)**, and the
+watchdog stops being visible in it: `after`-with-watchdog is within the
+control's own spread of `after`-without.
+
+**Control group.** A third tree, `diff -rq`-verified byte-identical to
+`before`, run against `before` in the same interleaved shape (4 rounds): the
+two identical arms differ by up to **11.5 %** on the min statistic (n=20,
+watchdog on: 58.2 vs 51.5 µs/cycle) and by up to 9 % between separate runs of
+the same arm on different occasions (n=80 watchdog on: 207.3 then 226.6). Every
+number claimed above is a 5–200× effect, i.e. one to two orders of magnitude
+outside that band.
+
+An in-process A/B (same device object, `on_tick` wired and unwired
+alternately, 6 rounds) puts the residual below the pump's own variance at every
+tile count — the watchdog-on arm measured *faster* than watchdog-off in all
+four, which is the honest way of saying "not measurable". The composed upper
+bound from the microbenchmarks is 0.091 µs/cycle for the gate plus
+218.5 µs / 6,250 = 0.035 µs/cycle for the amortised scan at 80 idle workers
+(0.30 µs/cycle when they are live).
+
+## Result: a real workload
+
+The `one` offline replay guard with N workers materialised and one launched —
+the regime an upstream full-grid run is in, since tt-metal releases BRISC on
+every declared worker. Min of 3 alternating rounds; every run reproduced
+**126/126 READs bit-for-bit** in both arms:
+
+| Tensix tiles | before | after | speedup | replay wall clock |
+| --- | --- | --- | --- | --- |
+| 1 | 152.7 µs/cycle | 79.1 | **1.9×** | 0.86 s → 0.44 s |
+| 8 | 279.3 | 81.2 | **3.4×** | 1.77 s → 0.46 s |
+| 20 | 477.8 | 111.5 | **4.3×** | 2.69 s → 0.64 s |
+| 80 | 1,920.2 | 119.9 | **16.0×** | 10.75 s → 0.67 s |
+
+The `after` column is flat in tile count to within 50 % across an 80× range of
+grid sizes; the `before` column is linear in it. That is the whole point: the
+per-cycle cost of a grid you are not using is now the pump's ~0.24 µs per
+dormant tile clock and nothing else.
+
+## What it costs in detection latency
+
+A stall is reported between `threshold` and
+`threshold + threshold//8 + 64` cycles after the last observable change —
+**50,000 to 56,314 cycles** with the defaults, against exactly 50,000 before.
+Lowering `TT_SIM_DEADLOCK_THRESHOLD` shrinks the interval with it (it is a
+fraction of the threshold, floored at 1), so a user who wants prompt detection
+still gets it; at a threshold of 8 or less the detector polls every cycle again.
+
+Directly measured on the same wedged device (BRISC executing `j .`, threshold
+forced to 800): `before` prints at `cycle=800`, `after` at `cycle=864`, with
+byte-identical report text. Nothing that used to be detected stops being
+detected — the signature, the reset gating and the report are unchanged; only
+*when it is looked at* has changed.
+
+`tt_sim/device/deadlock_test.py` pins all of this down: fires on a wedged
+device, latency inside the stated bound, silent while every core is in reset,
+silent on a loop whose period is exactly the sample interval (the aliasing case
+the confirmation pass exists for), and one scan per interval rather than one
+per cycle.
+
+## Should it still be on by default?
+
+Yes, more clearly than before. The residual is ~0.1 µs/cycle plus an amortised
+scan — under 0.4 µs/cycle on an 80-worker grid whose live floor is ~120
+µs/cycle, i.e. **~0.3 %**, and unmeasurable against run-to-run noise. The
+argument for `TT_SIM_DEADLOCK=0` in the practical-guidance sections of
+[`docs/running-tt-metal-on-the-simulator.md`](../../../docs/running-tt-metal-on-the-simulator.md)
+and the upstream-examples status doc no longer has numbers behind it.
+
+## Gates
+
+`ruff check` / `ruff format` clean; `pytest tt_sim driver` **408 passed** (401
+before, +7 `tt_sim/device/deadlock_test.py`); **22/22** Blackhole replay guards;
+`driver.wormhole.server.offline_replay_test` **126/126 byte-identical** (and
+again at 8, 20 and 80 materialised workers); `pytest driver/wormhole/server/`
+**18 passed**; `six` reports `PCC(golden, device) = 0.9982`, unmoved.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+# where the watchdog's time goes (idle, 8 tiles, striding off)
+TT_SIM_PUMP_STRIDE=0 python3 -c "
+import cProfile, pstats
+from driver.wormhole.server.coords import TENSIX_COORD_MAP, default_tensix_coords
+from tt_sim.device.wormhole import Wormhole
+d = Wormhole(tensix_coords=[TENSIX_COORD_MAP[p] for p in default_tensix_coords(8)])
+cProfile.run('d.clocks[0].run(4000)', '/tmp/idle8.prof')
+pstats.Stats('/tmp/idle8.prof').sort_stats('tottime').print_stats(8)"
+
+# idle floor per tile count: build the device, time clocks[0].run(N), divide.
+# Alternate TT_SIM_DEADLOCK=1/0 and the two trees every round; min of >=20.
+
+# live workload at N workers: wrap offline_replay_test._build_fabric, call
+# device.ensure_tensix_tile(p) for default_tensix_coords(N), time main() minus
+# the build, and divide by device.tt_device.clocks[0].clock_tick_num.
+
+# cost of one observation, and of the per-cycle gate:
+#   timeit DeadlockDetector._sample (after) / .tick (before), and
+#   timeit .tick with _next_sample_cycle set past the horizon.
+```

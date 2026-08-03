@@ -245,18 +245,26 @@ buffer counter that never advances, a Tensix backend instruction that never comp
 mailbox read with nothing on the other end. Because the host polls the go-signal mailbox
 in a tight loop, such a wedge shows up as a silent hang.
 
-The simulator runs a per-cycle progress watchdog by default. If nothing observable has
-changed for a configured number of cycles (default 50000), a multi-line `[DEADLOCK]`
-block is printed to stderr describing what it can see (each out-of-reset core's PC, NoC
-counters, the coprocessor frontends/backends, and unknown-instruction counts) and names
-the responsible component. It warns and keeps running, re-printing once per window, so a
-long stall is visible without flooding output. It is dormant while every baby core is in
-soft reset (the normal state before firmware launch).
+The simulator runs a progress watchdog by default. If nothing observable has changed for
+a configured number of cycles (default 50000), a multi-line `[DEADLOCK]` block is printed
+to stderr describing what it can see (each out-of-reset core's PC, NoC counters, the
+coprocessor frontends/backends, and unknown-instruction counts) and names the responsible
+component. It warns and keeps running, re-printing once per window, so a long stall is
+visible without flooding output. It is dormant while every baby core is in soft reset
+(the normal state before firmware launch).
+
+The signature is **sampled** once every `threshold / 8` cycles rather than taken every
+cycle — taking it walks every tile, core, NIU and Tensix thread, which on a large grid
+cost more than the rest of the simulator put together. A stall that clears the threshold
+is then confirmed on 64 consecutive cycles before anything is printed, so a loop that
+merely aliases with the sampling interval is not reported. The practical consequence is
+that a report arrives up to `threshold / 8 + 64` cycles later than it used to
+(50,000–56,314 with the defaults); nothing that used to be detected stops being detected.
 
 | Env var | Effect |
 | --- | --- |
 | `TT_SIM_DEADLOCK` | Set falsy (`0`/`false`/`no`/`off`) to disable the watchdog. On by default. |
-| `TT_SIM_DEADLOCK_THRESHOLD` | Cycles of no observable progress before a warning fires (default `50000`). Raise it if a long compute loop trips a false positive; lower it to surface stalls sooner. |
+| `TT_SIM_DEADLOCK_THRESHOLD` | Cycles of no observable progress before a warning fires (default `50000`). Raise it if a long compute loop trips a false positive; lower it to surface stalls sooner — the sampling interval is a fixed fraction of it, so a low threshold also samples more often, down to every cycle. |
 
 ## NoC alignment checking
 

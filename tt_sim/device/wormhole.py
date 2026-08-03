@@ -165,7 +165,10 @@ class Wormhole(TT_Device):
             tensix_tiles,
             dram_tiles,
         )
-        self.clocks[0].on_tick = self.deadlock_detector.tick
+        # Left unwired when disabled, so TT_SIM_DEADLOCK=0 costs literally
+        # nothing per cycle rather than a call that returns immediately.
+        if enabled:
+            self.clocks[0].on_tick = self.deadlock_detector.tick
         # Second call wires the state-dump writer now that we have tiles.
         enable_from_env(device=self)
 

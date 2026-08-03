@@ -86,6 +86,17 @@ class TT_Device(Device):
         primary cell, and no bank-to-noc flow addresses eth by mirror anyway
         (single-chip kernels like ``hello_world_datatypes_kernel`` read eth by
         its canonical ``(1, 0)``).
+
+        **NoC 1's table is therefore ambiguous by construction**: it holds two
+        coordinate conventions in one ``(x, y)``-keyed dict, and where they
+        collide only one tile is reachable. That is tolerable for *requests*,
+        whose destination coord arrives from the kernel already in one known
+        convention — and it is why nothing else may look a tile up here. A
+        response is routed by the requesting endpoint itself
+        (``NoCDataRequest.reply_to`` / ``NUI.send_response``), not by
+        re-resolving a coordinate; doing the latter delivered ACKs and read
+        responses to whichever tile happened to own the shadowed cell. See
+        ``tt_sim/network/noc_routing_test.py``.
         """
         coord = tile.get_coord_pair()
         assert coord not in self.tile_directory, f"tile already registered at {coord}"

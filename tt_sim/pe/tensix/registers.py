@@ -213,13 +213,16 @@ class SrcRegister:
         ``rows`` and ``columns`` are index arrays broadcasting together to the
         shape of ``values`` -- each broadcast pair is exactly the ``[x, y]`` key
         the scalar setter takes -- so a caller expresses whatever row/column map
-        it has (the unpacker's column shift and haloize transpose included) and
-        pays numpy's overhead once per block instead of once per datum.
+        it has (the unpacker's haloize transpose included) and pays numpy's
+        overhead once per block instead of once per datum.
         Indexing follows numpy's rules just as the scalar setter's does: a
-        negative column wraps to the end of the row, a row past the end of the
-        bank raises. The caller owns injectivity of the map: with a repeated
-        (row, column) pair this writes one of the values rather than the scalar
-        loop's explicit last-one-wins.
+        negative column wraps to the end of the row -- silently clobbering the
+        far end of the row rather than dropping the datum, which is why the
+        unpacker rejects the one mode that would produce one (ColShift) rather
+        than computing it -- and a row past the end of the bank raises. The
+        caller owns injectivity of the map: with a repeated (row, column) pair
+        this writes one of the values rather than the scalar loop's explicit
+        last-one-wins.
         """
         self.data[rows, columns] = values
 

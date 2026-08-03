@@ -60,8 +60,14 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             return False
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         instruction_name = instruction_info["name"]
-        if instruction_name == "ATGEM" or instruction_name == "ATRELM":
-            # Allowed up to three of these as long as they don't reference the same mutex
+        if instruction_name == "ATGETM" or instruction_name == "ATRELM":
+            # Per SyncUnit.md's throughput table, the mutex ops "issue up to
+            # three per cycle, provided they refer to different mutexes",
+            # whereas the semaphore ops issue "at most one of these per cycle"
+            # (the else arm). This branch used to test for "ATGEM", which the
+            # instruction table does not contain, so every ATGETM fell to the
+            # else arm and took the queue exclusively -- both rules were dead
+            # code.
             if len(self.next_instruction) < 3:
                 index = instruction_info["instr_args"]["mutex_index"]
                 for instr, _ in self.next_instruction:
@@ -73,15 +79,17 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                     # while the queue holds nothing else), and reading
                     # ``mutex_index`` off that raised KeyError -- found by the
                     # RISC-V cost model, which delays the drain enough for a
-                    # mixed queue to occur on ``loopback``. A queued SEMWAIT
-                    # cannot conflict over a mutex it does not reference, so
+                    # mixed queue to occur on ``loopback``. Correcting the
+                    # opcode name above made that path reachable with the cost
+                    # model *off* too: two Blackhole guards issue an ATGETM
+                    # while a SEMPOST / SEMWAIT is still queued. A queued
+                    # semaphore op cannot conflict over a mutex it does not
+                    # reference (the doc's throughput limits are per row, not
+                    # shared across the unit), so
                     # skipping it is the correct answer as well as the safe
                     # one. Keyed off the presence of the field rather than off
-                    # the opcode name, because the branch above tests for
-                    # "ATGEM" while the instruction table calls it "ATGETM" --
-                    # a separate pre-existing bug, and one whose fix changes
-                    # issue behaviour with the cost model off, so it is not
-                    # made here.
+                    # the opcode name so it stays right for any future queued
+                    # op that names no mutex.
                     if "mutex_index" not in (
                         instruction_n_info.get("instr_args") or {}
                     ):
@@ -102,7 +110,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         else:
             # Only one of any other instruction allowed
             if not self.checkIfNextInstructionsContainAnyOtherOpcodes(
-                "ATGEM", "ATRELM"
+                "ATGETM", "ATRELM"
             ):
                 self.next_instruction.append(
                     (

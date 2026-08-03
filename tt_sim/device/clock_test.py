@@ -147,6 +147,10 @@ def test_noc_transmit_wakes_a_dormant_tile():
         tile.noc0_router.get_id_pair(),
         0,
         b"\xde\xad\xbe\xef",
+        # The write is response-marked, so it must name the endpoint its ACK
+        # goes back to — here the tile writing to itself. Responses never
+        # route by coordinate (``NUI.send_response``).
+        reply_to=tile.noc0_router,
     )
     tile.noc0_router.transmit(request)
 

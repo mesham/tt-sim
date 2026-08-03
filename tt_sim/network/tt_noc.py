@@ -60,14 +60,13 @@ class NullEndpoint:
     the simulated NoC doesn't deadlock the calling kernel.
     """
 
-    def __init__(self, coord, noc_directory):
+    def __init__(self, coord):
         self.coord = coord
-        self.noc_directory = noc_directory
 
     def transmit(self, request):
-        # The requester is always a real NUI registered at device init time,
-        # so noc_directory[request.source] is guaranteed to resolve.
-        source = self.noc_directory[request.source]
+        # Responses go back to the endpoint that issued the request, never via
+        # a coordinate lookup — see ``NUI.send_response``.
+        source = request.reply_to
         if request.action == NUI.NoCDataRequest.DataRequestAction.READ:
             response = NUI.NoCDataRequest(
                 None,
@@ -146,17 +145,31 @@ class NUI(MemMapable, Clockable):
             tgt_address,
             action,
             data_length_bytes,
-            source,
+            source_coord,
             request_id,
             data=None,
             noc_cmd_resp_marked=True,
             at_data=0,
+            reply_to=None,
         ):
+            """A packet in flight on one NoC.
+
+            ``source_coord`` is the *coordinate* of the sender, carried for
+            diagnostics and trace only. It is deliberately not a routing key:
+            it is the sender's canonical (SoC-physical NoC 0) coord on both
+            NoCs, whereas NoC 1's directory is keyed in NoC 1's mirrored
+            space, so resolving it against ``noc_directory`` on NoC 1 can hand
+            back a completely different tile (see ``NUI.send_response``).
+
+            ``reply_to`` is the *endpoint object* that issued the request —
+            the only thing a response is ever routed by.
+            """
             self.tgt_address = tgt_address
             self.action = action
             self.request_id = request_id
             self.data_length_bytes = data_length_bytes
-            self.source = source
+            self.source_coord = source_coord
+            self.reply_to = reply_to
             self.data = data
             self.noc_cmd_resp_marked = noc_cmd_resp_marked
             # Immediate operand for ATOMIC requests (increment value for
@@ -247,6 +260,7 @@ class NUI(MemMapable, Clockable):
                     chunk_size,
                     self.nui.id_pair,
                     noc_packet_transaction_id,
+                    reply_to=self.nui,
                 )
                 self.nui.add_outstanding_noc_request(
                     noc_packet_transaction_id, self.ret_addr_low + chunk_offset
@@ -312,6 +326,7 @@ class NUI(MemMapable, Clockable):
                 noc_packet_transaction_id,
                 data,
                 noc_cmd_resp_marked,
+                reply_to=self.nui,
             )
             self.nui.add_outstanding_noc_request(
                 noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
@@ -394,6 +409,7 @@ class NUI(MemMapable, Clockable):
                     noc_packet_transaction_id,
                     data,
                     noc_cmd_resp_marked,
+                    reply_to=self.nui,
                 )
                 self.nui.add_outstanding_noc_request(
                     noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
@@ -548,6 +564,7 @@ class NUI(MemMapable, Clockable):
                     noc_packet_transaction_id,
                     data,
                     bool(noc_cmd_resp_marked),
+                    reply_to=self.nui,
                 )
                 # Each destination's ACK pops one entry from the FIFO.
                 self.nui.add_outstanding_noc_request(
@@ -609,6 +626,7 @@ class NUI(MemMapable, Clockable):
                 noc_packet_transaction_id,
                 noc_cmd_resp_marked=bool(noc_cmd_resp_marked),
                 at_data=self.at_data,
+                reply_to=self.nui,
             )
             if noc_cmd_resp_marked:
                 self.nui.add_outstanding_noc_request(noc_packet_transaction_id, None)
@@ -762,12 +780,18 @@ class NUI(MemMapable, Clockable):
         tile_kind="T",
     ):
         """``x_coord`` / ``y_coord`` are the tile's canonical SoC-physical
-        NoC 0 coord. The NUI's ``id_pair`` (directory key + the ``source``
-        field of NoC requests) is the canonical coord on BOTH NoCs — that's
-        what tt-metal kernels supply when ``translation_id_enabled`` is set
-        in the SoC descriptor. Per-NoC physical coords for the
-        kernel-visible ``NOC_NODE_ID`` register reads are derived by
-        mirroring through the grid dimensions for NoC 1.
+        NoC 0 coord. The NUI's ``id_pair`` is that canonical coord on BOTH
+        NoCs — that's what tt-metal kernels supply when
+        ``translation_id_enabled`` is set in the SoC descriptor. Per-NoC
+        physical coords for the kernel-visible ``NOC_NODE_ID`` register reads
+        are derived by mirroring through the grid dimensions for NoC 1.
+
+        ``id_pair`` is therefore a NoC 0 coord even on NoC 1, and must never
+        be used to look a tile up in NoC 1's directory (which is also keyed by
+        mirrored coords, in which the same tuple names a different tile). It
+        is a directory key on NoC 0 and an identity/diagnostic label
+        everywhere else; responses route by endpoint object instead — see
+        :meth:`send_response`.
 
         ``noc_grid_x`` / ``noc_grid_y`` / ``noc_max_burst_size`` come from the
         architecture profile; each falls back to the Wormhole default when not
@@ -859,14 +883,14 @@ class NUI(MemMapable, Clockable):
                 if self.snoop:
                     print(
                         f"[NoC{self.noc_number} {self.id_pair}]: Read request id {noc_request.request_id} from NUI "
-                        f"{noc_request.source} at {hex(noc_request.tgt_address)} of size "
+                        f"{noc_request.source_coord} at {hex(noc_request.tgt_address)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
                 self._publish_noc_event(
                     cycle_num,
                     phase="request",
                     txn_type="read",
-                    src=noc_request.source,
+                    src=noc_request.source_coord,
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
@@ -899,21 +923,21 @@ class NUI(MemMapable, Clockable):
                     noc_request.request_id,
                     data,
                 )
-                self.noc_directory[noc_request.source].transmit(response)
+                self.send_response(noc_request, response)
             elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.WRITE:
                 # When handle multiple 8192 size messages then will need to chunk this and slightly different
                 # as NIU_SLV_NONPOSTED_WR_REQ_RECEIVED is incremented only for the last flit
                 if self.snoop:
                     print(
                         f"[NoC{self.noc_number} {self.id_pair}]: Write request id {noc_request.request_id} from NUI "
-                        f"{noc_request.source} to {hex(noc_request.tgt_address)} of size "
+                        f"{noc_request.source_coord} to {hex(noc_request.tgt_address)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
                 self._publish_noc_event(
                     cycle_num,
                     phase="request",
                     txn_type="write",
-                    src=noc_request.source,
+                    src=noc_request.source_coord,
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
@@ -948,7 +972,7 @@ class NUI(MemMapable, Clockable):
                     self.id_pair,
                     noc_request.request_id,
                 )
-                self.noc_directory[noc_request.source].transmit(response)
+                self.send_response(noc_request, response)
             elif (
                 noc_request.action == NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ
             ):
@@ -958,14 +982,14 @@ class NUI(MemMapable, Clockable):
                 if self.snoop:
                     print(
                         f"[NoC{self.noc_number} {self.id_pair}]: Read response id {noc_request.request_id} from NUI "
-                        f"{noc_request.source}, stored in to {hex(tgt_addr)} of size "
+                        f"{noc_request.source_coord}, stored in to {hex(tgt_addr)} of size "
                         f"{hex(noc_request.data_length_bytes)}"
                     )
                 self._publish_noc_event(
                     cycle_num,
                     phase="response",
                     txn_type="read",
-                    src=noc_request.source,
+                    src=noc_request.source_coord,
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
@@ -994,14 +1018,14 @@ class NUI(MemMapable, Clockable):
                 if self.snoop:
                     print(
                         f"[NoC{self.noc_number} {self.id_pair}]: Atomic-add id "
-                        f"{noc_request.request_id} from NUI {noc_request.source} "
+                        f"{noc_request.request_id} from NUI {noc_request.source_coord} "
                         f"at {hex(noc_request.tgt_address)} += {noc_request.at_data}"
                     )
                 self._publish_noc_event(
                     cycle_num,
                     phase="request",
                     txn_type="atomic",
-                    src=noc_request.source,
+                    src=noc_request.source_coord,
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
@@ -1040,7 +1064,7 @@ class NUI(MemMapable, Clockable):
                         noc_request.request_id,
                         data=conv_to_bytes(old_val),
                     )
-                    self.noc_directory[noc_request.source].transmit(response)
+                    self.send_response(noc_request, response)
             elif (
                 noc_request.action
                 == NUI.NoCDataRequest.DataRequestAction.RESPONSE_ATOMIC
@@ -1048,13 +1072,13 @@ class NUI(MemMapable, Clockable):
                 if self.snoop:
                     print(
                         f"[NoC{self.noc_number} {self.id_pair}]: Atomic response id "
-                        f"{noc_request.request_id} from NUI {noc_request.source}"
+                        f"{noc_request.request_id} from NUI {noc_request.source_coord}"
                     )
                 self._publish_noc_event(
                     cycle_num,
                     phase="response",
                     txn_type="atomic",
-                    src=noc_request.source,
+                    src=noc_request.source_coord,
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
@@ -1071,13 +1095,13 @@ class NUI(MemMapable, Clockable):
                 if self.snoop:
                     print(
                         f"[NoC{self.noc_number} {self.id_pair}]: Write acknowledge to response id "
-                        f"{noc_request.request_id} from NUI {noc_request.source}"
+                        f"{noc_request.request_id} from NUI {noc_request.source_coord}"
                     )
                 self._publish_noc_event(
                     cycle_num,
                     phase="response",
                     txn_type="write",
-                    src=noc_request.source,
+                    src=noc_request.source_coord,
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
@@ -1132,13 +1156,55 @@ class NUI(MemMapable, Clockable):
         if owner is not None:
             owner.awake = True
 
+    def send_response(self, noc_request, response):
+        """Return a response to whoever issued ``noc_request``.
+
+        The single choke point for the response direction — and deliberately
+        the *only* routing decision on the NoC that is not a coordinate
+        lookup. A response goes to ``noc_request.reply_to``, the endpoint
+        object that issued the request, so it cannot be misdelivered no matter
+        how the directories are keyed.
+
+        This matters because the two directories are keyed in two different
+        coordinate spaces that are both plain ``(x, y)`` tuples: NoC 0 by the
+        canonical SoC-physical coord, NoC 1 additionally by the mirrored
+        ``(GRID_X-1-x, GRID_Y-1-y)`` coord that tt-metal's bank-to-noc table
+        emits (see ``TT_Device._register_tile_internals``). Those two spaces
+        overlap — on Wormhole the DRAM column ``x=5`` mirrors onto the worker
+        column ``x=4`` — so routing a response by the requester's coord
+        resolved a *different* tile's NUI, which then popped an empty
+        outstanding-request FIFO and killed the run. Requests keep resolving
+        by coord because a request's destination coord genuinely arrives from
+        the kernel in that NoC's own space; only the response direction had a
+        space to get wrong, and it no longer carries one.
+
+        (A per-hop latency model belongs here as much as in
+        ``resolve_destination``: delay the ``transmit`` rather than
+        reintroducing a lookup.)
+        """
+        assert noc_request.reply_to is not None, (
+            f"NoC{self.noc_number} request {noc_request.request_id} from "
+            f"{noc_request.source_coord} needs a response but carries no "
+            f"reply_to endpoint"
+        )
+        noc_request.reply_to.transmit(response)
+
     def set_noc_directory(self, noc_directory):
         self.noc_directory = noc_directory
 
     def resolve_destination(self, coord):
+        """Look up the endpoint a *request* is addressed to.
+
+        The only coordinate lookup left on the NoC, and the only one that is
+        well defined: ``coord`` comes straight out of the initiator's command
+        registers, so it is already expressed in this NoC's own coordinate
+        space. Unknown coords get a :class:`NullEndpoint` so the requester
+        still completes. Responses do not come through here — see
+        :meth:`send_response`.
+        """
         dest = self.noc_directory.get(coord)
         if dest is None:
-            dest = NullEndpoint(coord, self.noc_directory)
+            dest = NullEndpoint(coord)
             self.noc_directory[coord] = dest
             if self.snoop:
                 print(

@@ -2,11 +2,14 @@
 
 ``UNPACR_Regular.md`` lets the input rows be *discontiguous*: with
 ``Tileize_mode`` set, the input address advances by ``RowStride`` bytes every
-``UnpackRowWidth`` datums instead of abutting, and ``Upsample_rate`` spreads
-each input datum over several output positions. ``perform_unpack`` models
-neither -- it walks the input flat and emits one output datum per input datum --
-so a configuration using either used to read the wrong L1 addresses (or write
-the wrong Src/Dst rows) with no error at all. These pin the boundary:
+``UnpackRowWidth`` datums instead of abutting, ``Upsample_rate`` spreads each
+input datum over several output positions, and -- with ``Tileize_mode`` clear --
+``ColShift`` slides each datum towards column 0, dropping the ones that fall off
+the near edge. ``perform_unpack`` models none of them: it walks the input flat
+and emits one output datum per input datum at its own column, so a configuration
+using any of them used to read the wrong L1 addresses, or write the wrong
+Src/Dst rows, or (for ``ColShift``) write a *negative* column that numpy wraps
+onto the far end of the row -- with no error at all. These pin the boundary:
 
 * the *contiguous* RowStride is ``DatumSizeBytes * UnpackRowWidth``, and
   ``UnpackRowWidth`` is 16 on Wormhole but 32 on Blackhole for anything wider
@@ -15,7 +18,10 @@ the wrong Src/Dst rows) with no error at all. These pin the boundary:
 * ``RowStride`` is assembled from three 4-bit ``Shift_amount_cntx`` fields at
   shifts 4, 8 and 12 (max 65520 bytes);
 * ``Upsample_and_interleave`` on its own, at ``Upsample_rate == 0``, is a no-op
-  -- the doc's inner loop runs exactly once -- so it is accepted, not rejected.
+  -- the doc's inner loop runs exactly once -- so it is accepted, not rejected;
+* the *same* ``Shift_amount_cntx0`` field is the ``RowStride`` when
+  ``Tileize_mode`` is set and the ``ColShift`` when it is clear, so the two
+  rejections are told apart by ``Tileize_mode`` and nothing else.
 
 Every case drives a real backend through ``read_unpack_state`` /
 ``perform_unpack_state``, so the config decode, the checks and (for the accepted
@@ -265,6 +271,62 @@ def test_upsample_interleave_alone_is_accepted():
     land.
     """
     with _unpacker(upsample=(0, 1)) as (backend, memory):
+        _fill(memory, stride=32)
+        assert _unpack(backend) == _expected()
+
+
+@pytest.mark.parametrize("blackhole", [False, True])
+@pytest.mark.parametrize("shift", [1, 2, 15])
+def test_col_shift_raises(blackhole, shift):
+    """ColShift slides each datum left and drops what falls off; the walk does not.
+
+    Without ``Tileize_mode``, ``Shift_amount_cntx0`` is the ColShift rather than
+    the RowStride, and the doc's walk is ``if (Row < 4 || Col < ColShift)
+    continue; Col -= ColShift;`` -- so the datums in the first ``ColShift``
+    columns are *discarded* and the last ``ColShift`` columns of every SrcA row
+    are left as they were.
+    """
+    with _unpacker(blackhole, shifts=(shift, 0, 0)) as (backend, memory):
+        _fill(memory, stride=32)
+        with pytest.raises(NotImplementedError) as excinfo:
+            _unpack(backend)
+        message = str(excinfo.value)
+        assert f"ColShift={shift}" in message
+        assert "drops" in message
+
+
+@pytest.mark.parametrize("blackhole", [False, True])
+def test_col_shift_raises_before_any_datum_moves(blackhole):
+    """The regression guard for what the unguarded ``Col -= ColShift`` used to do.
+
+    ``outCol = col - ColShift`` is a negative index for the datums the doc drops,
+    and numpy wraps a negative column onto the *far* end of the row: with
+    ColShift 2 the datums from columns 0 and 1 landed in columns 14 and 15,
+    clobbering the two columns the doc says to leave untouched, on both the
+    scalar walk and the batched ``_unpack_block``. The rejection is raised from
+    ``read_unpack_state``, i.e. at decode and before either walk runs, so SrcA is
+    still exactly as it was.
+    """
+    with _unpacker(blackhole, shifts=(2, 0, 0)) as (backend, memory):
+        _fill(memory, stride=32)
+        srcA = backend.getSrcA(0)
+        with pytest.raises(NotImplementedError):
+            backend.unpacker_units[0].read_unpack_state(0, UNPACR_ARGS)
+        assert [[srcA[row, col] for col in range(16)] for row in range(NUM_ROWS)] == [
+            [0] * 16 for _ in range(NUM_ROWS)
+        ]
+
+
+@pytest.mark.parametrize("blackhole", [False, True])
+def test_col_shift_reads_only_the_selected_context(blackhole):
+    """ColShift is one context's field, not the three assembled into a RowStride.
+
+    ``Shift_amount_cntx1`` and ``cntx2`` are the upper bits of the RowStride when
+    Tileize_mode is set, but with it clear they belong to contexts 1 and 2 -- so
+    a single-context unpack reading context 0 must ignore them rather than
+    rejecting on a stride-shaped assembly of all three.
+    """
+    with _unpacker(blackhole, shifts=(0, 0xF, 0xF)) as (backend, memory):
         _fill(memory, stride=32)
         assert _unpack(backend) == _expected()
 

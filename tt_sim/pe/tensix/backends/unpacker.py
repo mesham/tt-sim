@@ -747,6 +747,7 @@ class UnPackerUnit(TensixBackendUnit):
         upsampleRate,
         upsampleZeroes,
         upsampleInterleave,
+        colShift,
     ):
         """Reject the UNPACR modes whose datum walk this unpacker does not model.
 
@@ -787,6 +788,22 @@ class UnPackerUnit(TensixBackendUnit):
                 f"in specification is weak') -- see UNPACR_Regular.md."
             )
 
+        if colShift:
+            raise NotImplementedError(
+                f"Unpacker {self.unpacker_id}: ColShift={colShift} "
+                f"(THCON_SEC{self.unpacker_id}_REG2_Shift_amount_cntx, with "
+                f"Tileize_mode clear) is not modelled. It shifts each datum "
+                f"{colShift} columns towards column 0 and *drops* the datums "
+                f"whose source column is below {colShift} -- 'if (Row < 4 || Col "
+                f"< ColShift) continue;' -- leaving the top {colShift} columns of "
+                f"every SrcA row untouched. Only ColShift=0 is modelled. Note the "
+                f"ISA docs mark ColShift UnsupportedFunctionality themselves in "
+                f"the same breath as upsampling ('no known usage, confidence in "
+                f"specification is weak'), and the reference simulator declines "
+                f"it too, so there is nothing to validate an implementation "
+                f"against -- see UNPACR_Regular.md."
+            )
+
     def perform_unpack(
         self,
         stateID,
@@ -795,17 +812,17 @@ class UnPackerUnit(TensixBackendUnit):
         inAddr_Datums,
         outAddr,
         datumSizeBytes,
-        colShift,
         inDataFormat,
         outDataFormat,
         unpackToDst,
         transpose,
         allDatumsAreZero,
     ):
-        # RowStride / UpsampleZeroes / UpsampleInterleave are not parameters of
-        # this walk: it reads the input contiguously and writes one output datum
-        # per input datum, which ``check_modelled_settings`` has already required
-        # of the configuration by the time we get here.
+        # RowStride / UpsampleZeroes / UpsampleInterleave / ColShift are not
+        # parameters of this walk: it reads the input contiguously and writes one
+        # output datum per input datum at its own column, which
+        # ``check_modelled_settings`` has already required of the configuration
+        # by the time we get here.
         start_row = int(outAddr / 16)
         if self.unpacker_id == 0:
             assert start_row >= 4
@@ -830,7 +847,6 @@ class UnPackerUnit(TensixBackendUnit):
             inAddr_Datums,
             start_row,
             datumSizeBytes,
-            colShift,
             inDataFormat,
             outDataFormat,
             unpackToDst,
@@ -867,7 +883,6 @@ class UnPackerUnit(TensixBackendUnit):
                 else:
                     # Always srcA
                     if not unpackToDst:
-                        outCol -= colShift
                         if self.backend.getThreadConfigValue(
                             issue_thread, "SRCA_SET_SetOvrdWithAddr"
                         ):
@@ -913,7 +928,6 @@ class UnPackerUnit(TensixBackendUnit):
         inAddr_Datums,
         start_row,
         datumSizeBytes,
-        colShift,
         inDataFormat,
         outDataFormat,
         unpackToDst,
@@ -953,7 +967,7 @@ class UnPackerUnit(TensixBackendUnit):
         rows = np.arange(numRows)
         if unpackToDst:
             # Unpacker 0 only, and check_unpacker_settings has already ruled out
-            # colShift and transpose here, so this writes whole Dst rows.
+            # transpose here, so this writes whole Dst rows.
             if self.backend.getThreadConfigValue(
                 issue_thread, "SRCA_SET_SetOvrdWithAddr"
             ):
@@ -1003,7 +1017,7 @@ class UnPackerUnit(TensixBackendUnit):
             return True
 
         outRows = rows[:, np.newaxis]
-        outCols = (np.arange(16) - colShift)[np.newaxis, :]
+        outCols = np.arange(16)[np.newaxis, :]
         if transpose:
             # Haloize transposes each 16x16 block on the way into SrcA; see the
             # scalar loop for what drives it. Same two assignments, done at once
@@ -1283,6 +1297,7 @@ class UnPackerUnit(TensixBackendUnit):
             upsampleRate,
             upsampleZeroes,
             upsampleInterleave,
+            colShift,
         )
 
         return {
@@ -1305,7 +1320,6 @@ class UnPackerUnit(TensixBackendUnit):
             "outDataFormat": outDataFormat,
             "unpackToDst": unpackToDst,
             "transpose": transpose,
-            "colShift": colShift,
         }
 
     def perform_unpack_state(self, issue_thread, state):
@@ -1318,7 +1332,6 @@ class UnPackerUnit(TensixBackendUnit):
             state["inAddr_Datums"],
             state["outAddr"],
             state["datumSizeBytes"],
-            state["colShift"],
             state["inDataFormat"],
             state["outDataFormat"],
             state["unpackToDst"],
