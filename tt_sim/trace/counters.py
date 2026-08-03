@@ -9,9 +9,27 @@ other categories either share the cycle field or carry no clock
 context (``cycle == 0``).
 
 Counters today are event-derived (instruction counts, dispatch
-breakdowns, NoC throughput, mem op counts per region). As §I cycle
-accuracy lands, more counters can be added without changing the
-aggregator's external contract.
+breakdowns, NoC throughput, mem op counts per region) plus, where the
+cost model supplies the state, cycle-attributing ones:
+
+- ``stall_cycles`` and ``stall_<reason>`` per baby RISC-V core, from
+  ``InstrEvent.stall_cycles`` — the per-instruction half of
+  ``tt_sim.pe.rv.cost.RiscvCostState.stall_by_reason``, so a run can
+  say *where* its RV time went.
+- ``busy_cycles`` per Tensix backend unit, from
+  ``ComputeEvent.duration`` — the occupancy the cost tables charged,
+  which against the run length is the unit's utilisation.
+- ``noc_flight_cycles`` and ``noc_txns_timed`` per NIU, from
+  ``NoCEvent.issue_cycle`` against the event's own cycle.
+
+Every one of those is **absent, not zero, with ``TT_SIM_COST_MODEL``
+unset**: a counter is only emitted when something incremented it, so a
+dataset from an un-modelled run simply has no ``stall_cycles`` rows
+rather than rows asserting a stall-free machine. (``noc_flight_cycles``
+is the exception and is emitted in both regimes, because a flight time
+is measured rather than modelled — it is just always the one or two
+cycles the two-list swap in ``NUI.clock_tick`` costs when the model is
+off.)
 """
 
 from collections import defaultdict
@@ -52,6 +70,9 @@ class CounterAggregator:
         self._counters[(e.unit_id, "instr_retired")] += 1
         if e.stalled:
             self._counters[(e.unit_id, "instr_stalled")] += 1
+        if e.stall_cycles:
+            self._counters[(e.unit_id, "stall_cycles")] += e.stall_cycles
+            self._counters[(e.unit_id, f"stall_{e.stall_reason}")] += e.stall_cycles
         self._maybe_flush(e.cycle)
 
     def _on_dispatch(self, e: DispatchEvent):
@@ -61,12 +82,22 @@ class CounterAggregator:
 
     def _on_compute(self, e: ComputeEvent):
         self._counters[(e.unit_id, "compute_ops")] += 1
+        if e.duration:
+            # Modelled occupancy only. An uncosted opcode contributes nothing
+            # rather than a presumed 1, so ``busy_cycles`` is never inflated by
+            # ops the tables have no opinion about.
+            self._counters[(e.unit_id, "busy_cycles")] += e.duration
         self._maybe_flush(e.cycle)
 
     def _on_noc(self, e: NoCEvent):
         self._counters[(e.unit_id, f"noc_{e.phase}_{e.txn_type}")] += 1
         if e.phase == "response":
             self._counters[(e.unit_id, "noc_bytes_total")] += e.size_bytes
+        if e.issue_cycle >= 0:
+            self._counters[(e.unit_id, "noc_flight_cycles")] += max(
+                0, e.cycle - e.issue_cycle
+            )
+            self._counters[(e.unit_id, "noc_txns_timed")] += 1
         self._maybe_flush(e.cycle)
 
     def _on_mem(self, e: MemEvent):

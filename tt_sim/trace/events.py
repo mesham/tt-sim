@@ -49,7 +49,7 @@ class Unit(Enum):
 
 @dataclass(frozen=True, slots=True)
 class Event:
-    SCHEMA_VERSION: ClassVar[int] = 2
+    SCHEMA_VERSION: ClassVar[int] = 3
     CATEGORY: ClassVar[EventCategory | None] = None
     cycle: int
     unit_id: tuple
@@ -67,6 +67,15 @@ class InstrEvent(Event):
     # recorded (Spike's commitlog format excludes them).
     reg_write_idx: int = -1
     reg_write_value: int = 0
+    # How many cycles this core was held before this instruction could
+    # issue, and which of ``tt_sim.pe.rv.cost.STALL_REASON_NAMES`` held
+    # it. Both are cost-model state: without ``TT_SIM_COST_MODEL`` no
+    # RV instruction can stall at all, so ``0`` / ``""`` is the truthful
+    # reading of an un-modelled run, not a missing measurement. Distinct
+    # from ``stalled``, which is the Tensix-instruction-buffer back-
+    # pressure that exists in both regimes.
+    stall_cycles: int = 0
+    stall_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +95,13 @@ class NoCEvent(Event):
     dst: tuple
     size_bytes: int = 0
     txn_id: int = 0
+    #: Cycle the sending NIU put this packet on the wire; ``cycle`` is the
+    #: cycle the receiving NIU serviced it, so ``cycle - issue_cycle`` is the
+    #: flight time. Both are real measurements in either regime — with the
+    #: cost model off the flight is simply always the one cycle the two-list
+    #: swap in ``NUI.clock_tick`` costs. ``-1`` means the flight could not be
+    #: timed: a NIU with no owning tile clock (unit tests, ``driver/simple``).
+    issue_cycle: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +131,13 @@ class ComputeEvent(Event):
     target_unit: str  # FPU / SFPU / PACKER / UNPACKER / MATRIX / MOVER / THCON
     thread_id: int = -1  # -1 when not thread-attributed
     detail: str = ""
+    #: Cycles this op occupies its backend unit, straight from
+    #: ``tensix_instruction_costs.yaml`` via
+    #: ``TensixBackendUnit.instruction_occupancy``. ``0`` means *not modelled*
+    #: — either ``TT_SIM_COST_MODEL`` is unset (nothing occupies anything) or
+    #: the unit/opcode is one of the ones the tables deliberately leave
+    #: uncosted. A consumer must not read 0 as "one cycle"; it is "no claim".
+    duration: int = 0
 
 
 @dataclass(frozen=True, slots=True)

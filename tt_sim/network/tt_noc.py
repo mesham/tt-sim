@@ -83,6 +83,33 @@ def noc_hop_count(src, dst, grid_x, grid_y):
     return (dst[0] - src[0]) % grid_x + (dst[1] - src[1]) % grid_y
 
 
+class NoCResponseError(RuntimeError):
+    """A response arrived that no outstanding request accounts for.
+
+    Raised rather than guessed at. Every response carries the issue sequence
+    number of the request it answers (``NoCDataRequest.seq``), and the issuing
+    NIU looks the state it saved up by that number — the L1 address a read's
+    data belongs at, or the flags a write's ACK needs. If the number is not
+    there, the alternative to failing is to hand back *some other* request's
+    state, which silently writes the wrong data to the wrong address. A loud
+    failure is the only honest option, and this is the same choice
+    ``NoCAlignmentError`` makes for a violated congruence rule.
+    """
+
+
+def _payload_bytes(packet):
+    """Bytes of data ``packet`` actually carries on the wire.
+
+    Not ``data_length_bytes``, which is the *transaction* size and is set on
+    both legs of a read: a read request is a header that names 8 KiB and
+    carries none of it, and the 8 KiB travels on the response. What is on the
+    wire is whatever ``data`` holds — ``None`` for a read request, a write ACK
+    and an atomic request, whose operand rides in the header.
+    """
+    data = packet.data
+    return 0 if data is None else len(data)
+
+
 def _endpoint_noc_coord(endpoint):
     """An endpoint's coordinate in the coordinate space of its own NoC.
 
@@ -110,6 +137,51 @@ class NullEndpoint:
         self.coord = coord
 
     def transmit(self, request, delay=None):
+        if request.action == NUI.NoCDataRequest.DataRequestAction.READ:
+            self._respond(
+                request,
+                delay,
+                NUI.NoCDataRequest(
+                    None,
+                    NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ,
+                    request.data_length_bytes,
+                    self.coord,
+                    request.request_id,
+                    bytes(request.data_length_bytes),
+                    seq=request.seq,
+                ),
+            )
+        elif request.action == NUI.NoCDataRequest.DataRequestAction.WRITE:
+            if request.noc_cmd_resp_marked:
+                self._respond(
+                    request,
+                    delay,
+                    NUI.NoCDataRequest(
+                        None,
+                        NUI.NoCDataRequest.DataRequestAction.ACK,
+                        request.data_length_bytes,
+                        self.coord,
+                        request.request_id,
+                        seq=request.seq,
+                    ),
+                )
+        elif request.action == NUI.NoCDataRequest.DataRequestAction.ATOMIC:
+            if request.noc_cmd_resp_marked:
+                self._respond(
+                    request,
+                    delay,
+                    NUI.NoCDataRequest(
+                        None,
+                        NUI.NoCDataRequest.DataRequestAction.RESPONSE_ATOMIC,
+                        request.data_length_bytes,
+                        self.coord,
+                        request.request_id,
+                        data=bytes(request.data_length_bytes),
+                        seq=request.seq,
+                    ),
+                )
+
+    def _respond(self, request, delay, response):
         # Responses go back to the endpoint that issued the request, never via
         # a coordinate lookup — see ``NUI.send_response``. The return flight is
         # timed by the requester (which owns the latency model and the grid
@@ -120,39 +192,11 @@ class NullEndpoint:
         if back is not None:
             # This endpoint has no clock, so it cannot hold the request for its
             # outbound flight the way a real NIU does. Both legs are charged to
-            # the response instead: the same total time, without a queue.
-            back += delay or 0
-        if request.action == NUI.NoCDataRequest.DataRequestAction.READ:
-            response = NUI.NoCDataRequest(
-                None,
-                NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ,
-                request.data_length_bytes,
-                self.coord,
-                request.request_id,
-                bytes(request.data_length_bytes),
-            )
-            source.transmit(response, back)
-        elif request.action == NUI.NoCDataRequest.DataRequestAction.WRITE:
-            if request.noc_cmd_resp_marked:
-                response = NUI.NoCDataRequest(
-                    None,
-                    NUI.NoCDataRequest.DataRequestAction.ACK,
-                    request.data_length_bytes,
-                    self.coord,
-                    request.request_id,
-                )
-                source.transmit(response, back)
-        elif request.action == NUI.NoCDataRequest.DataRequestAction.ATOMIC:
-            if request.noc_cmd_resp_marked:
-                response = NUI.NoCDataRequest(
-                    None,
-                    NUI.NoCDataRequest.DataRequestAction.RESPONSE_ATOMIC,
-                    request.data_length_bytes,
-                    self.coord,
-                    request.request_id,
-                    data=bytes(request.data_length_bytes),
-                )
-                source.transmit(response, back)
+            # the response instead: the same total time, without a queue. For
+            # the same reason it has no injection port to occupy, so only the
+            # response's own tail is charged, never a queueing delay.
+            back += (delay or 0) + source.tail_cycles_for(response)
+        source.transmit(response, back)
 
 
 # Maximum NoC packet payload per Wormhole's
@@ -206,6 +250,7 @@ class NUI(MemMapable, Clockable):
             noc_cmd_resp_marked=True,
             at_data=0,
             reply_to=None,
+            seq=None,
         ):
             """A packet in flight on one NoC.
 
@@ -218,6 +263,16 @@ class NUI(MemMapable, Clockable):
 
             ``reply_to`` is the *endpoint object* that issued the request —
             the only thing a response is ever routed by.
+
+            ``seq`` is the issuing NIU's own monotonic request number, echoed
+            unchanged by whatever answers the request. ``request_id`` (the
+            transaction ID) cannot do this job: kernels reuse one trid for many
+            in-flight requests on purpose, which is why the outstanding-request
+            store is per-trid in the first place. ``seq`` is what makes a
+            response identify *which* of them it answers, so the store does not
+            have to assume responses come back in issue order — an assumption
+            per-destination flight times can break. See
+            :meth:`NUI.take_outstanding_noc_request`.
             """
             self.tgt_address = tgt_address
             self.action = action
@@ -225,11 +280,17 @@ class NUI(MemMapable, Clockable):
             self.data_length_bytes = data_length_bytes
             self.source_coord = source_coord
             self.reply_to = reply_to
+            self.seq = seq
             self.data = data
             self.noc_cmd_resp_marked = noc_cmd_resp_marked
             # Immediate operand for ATOMIC requests (increment value for
             # atomic add). Unused for non-atomic ops.
             self.at_data = at_data
+            # Cycle the sending NIU handed this packet to the wire, stamped by
+            # ``NUI.transmit``. Trace-only (``NoCEvent.issue_cycle``); nothing
+            # routes or schedules on it. -1 until transmitted, and for a NIU
+            # with no owning tile clock, which cannot know the absolute cycle.
+            self.issue_cycle = -1
 
     class RequestInitiator:
         def __init__(self, nui):
@@ -309,6 +370,7 @@ class NUI(MemMapable, Clockable):
             )
 
             for chunk_offset, chunk_size in chunks:
+                seq = self.nui.next_request_seq()
                 read_req = NUI.NoCDataRequest(
                     self.target_addr_low + chunk_offset,
                     NUI.NoCDataRequest.DataRequestAction.READ,
@@ -316,9 +378,10 @@ class NUI(MemMapable, Clockable):
                     self.nui.id_pair,
                     noc_packet_transaction_id,
                     reply_to=self.nui,
+                    seq=seq,
                 )
                 self.nui.add_outstanding_noc_request(
-                    noc_packet_transaction_id, self.ret_addr_low + chunk_offset
+                    noc_packet_transaction_id, self.ret_addr_low + chunk_offset, seq
                 )
                 self.nui.send_to(destination, read_req)
 
@@ -373,6 +436,7 @@ class NUI(MemMapable, Clockable):
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
 
+            seq = self.nui.next_request_seq()
             write_req = NUI.NoCDataRequest(
                 self.ret_addr_low,
                 NUI.NoCDataRequest.DataRequestAction.WRITE,
@@ -382,9 +446,12 @@ class NUI(MemMapable, Clockable):
                 data,
                 noc_cmd_resp_marked,
                 reply_to=self.nui,
+                seq=seq,
             )
             self.nui.add_outstanding_noc_request(
-                noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
+                noc_packet_transaction_id,
+                (noc_cmd_wr_inline, noc_cmd_resp_marked),
+                seq,
             )
             self.nui.send_to(destination, write_req)
 
@@ -456,6 +523,7 @@ class NUI(MemMapable, Clockable):
                 data = self.nui.attached_memory.read(
                     self.target_addr_low + chunk_offset, chunk_size
                 )
+                seq = self.nui.next_request_seq()
                 write_req = NUI.NoCDataRequest(
                     self.ret_addr_low + chunk_offset,
                     NUI.NoCDataRequest.DataRequestAction.WRITE,
@@ -465,9 +533,12 @@ class NUI(MemMapable, Clockable):
                     data,
                     noc_cmd_resp_marked,
                     reply_to=self.nui,
+                    seq=seq,
                 )
                 self.nui.add_outstanding_noc_request(
-                    noc_packet_transaction_id, (noc_cmd_wr_inline, noc_cmd_resp_marked)
+                    noc_packet_transaction_id,
+                    (noc_cmd_wr_inline, noc_cmd_resp_marked),
+                    seq,
                 )
                 self.nui.send_to(destination, write_req)
 
@@ -609,8 +680,16 @@ class NUI(MemMapable, Clockable):
 
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
 
+            # One packet leaves this NIU however wide the rectangle is -- the
+            # routers do the splitting -- so the injection port is claimed once
+            # for the whole fan-out and every copy shares the wait. Charging
+            # each modelled unicast its own injection time would invent
+            # serialisation the hardware does not have.
+            queued = self.nui.claim_injection_port(len(data) if data else 0)
+
             for dest_coord in destinations:
                 destination = self.nui.resolve_destination(dest_coord)
+                seq = self.nui.next_request_seq()
                 write_req = NUI.NoCDataRequest(
                     self.ret_addr_low,
                     NUI.NoCDataRequest.DataRequestAction.WRITE,
@@ -620,13 +699,18 @@ class NUI(MemMapable, Clockable):
                     data,
                     bool(noc_cmd_resp_marked),
                     reply_to=self.nui,
+                    seq=seq,
                 )
-                # Each destination's ACK pops one entry from the FIFO.
+                # Each destination's ACK clears its own entry. The rectangle is
+                # the one place in the tree where one trid's requests genuinely
+                # go to many tiles at once, so it is also where their ACKs are
+                # most obviously free to come back in any order.
                 self.nui.add_outstanding_noc_request(
                     noc_packet_transaction_id,
                     (noc_cmd_wr_inline, noc_cmd_resp_marked),
+                    seq,
                 )
-                self.nui.send_to(destination, write_req)
+                self.nui.send_to(destination, write_req, queued=queued)
 
             if self.nui.snoop:
                 print(
@@ -673,6 +757,7 @@ class NUI(MemMapable, Clockable):
             )
             destination = self.nui.resolve_destination((target_tile_x, target_tile_y))
 
+            seq = self.nui.next_request_seq()
             atomic_req = NUI.NoCDataRequest(
                 self.target_addr_low,
                 NUI.NoCDataRequest.DataRequestAction.ATOMIC,
@@ -682,9 +767,12 @@ class NUI(MemMapable, Clockable):
                 noc_cmd_resp_marked=bool(noc_cmd_resp_marked),
                 at_data=self.at_data,
                 reply_to=self.nui,
+                seq=seq,
             )
             if noc_cmd_resp_marked:
-                self.nui.add_outstanding_noc_request(noc_packet_transaction_id, None)
+                self.nui.add_outstanding_noc_request(
+                    noc_packet_transaction_id, None, seq
+                )
             self.nui.send_to(destination, atomic_req)
 
             if self.nui.snoop:
@@ -894,7 +982,17 @@ class NUI(MemMapable, Clockable):
         self.nui_counters = NUI.NUICounters()
         self.noc_directory = None
         self.attached_memory = attached_memory
+        #: ``{trid: {seq: state}}`` — what this NIU saved when it issued each
+        #: request that is still awaiting a response. See
+        #: :meth:`take_outstanding_noc_request` for why it is keyed by ``seq``
+        #: rather than being a FIFO.
         self.outstanding_noc_requests = {}
+        self._request_seq = 0
+        #: Responses that came back before an older one under the same trid.
+        #: Zero on every in-tree workload so far; counted rather than assumed,
+        #: because the whole point of keying by ``seq`` is that the number is
+        #: allowed to be non-zero.
+        self.out_of_order_responses = 0
         # Separate these out to ensure we have atleast one clock cycle
         # between a request and it being handled (can increase)
         self.noc_requests_to_handle = []
@@ -909,6 +1007,11 @@ class NUI(MemMapable, Clockable):
         #: Earliest key of :attr:`delayed_arrivals`, cached so the pump's
         #: per-tile wake probe is one attribute read rather than a ``min``.
         self.next_arrival = None
+        #: Cycle this NIU's outbound link finishes injecting the last packet
+        #: handed to :meth:`send_to`. The bandwidth model's serialisation
+        #: point; never read without a latency model, so it stays 0 for every
+        #: run with the cost model off.
+        self._tx_free_cycle = 0
         # Guards cross-thread appends to noc_new_requests_to_handle from
         # source tiles' transmit() calls and the owning tile's per-cycle
         # swap in clock_tick(). The destination then drains
@@ -927,11 +1030,52 @@ class NUI(MemMapable, Clockable):
         # Return the ID in this NoC coordinate system
         return self.id_pair
 
-    def add_outstanding_noc_request(self, request_id, tgt_addr):
-        # Per-trid FIFO: tt-metal kernels (e.g. DRAM-sharded reads) issue
-        # multiple requests with the same transaction ID before any barrier,
-        # so we cannot keep a single slot per trid.
-        self.outstanding_noc_requests.setdefault(request_id, []).append(tgt_addr)
+    def next_request_seq(self):
+        """A fresh issue number for a request this NIU is about to send."""
+        self._request_seq += 1
+        return self._request_seq
+
+    def add_outstanding_noc_request(self, request_id, tgt_addr, seq):
+        # Per-trid, because tt-metal kernels (e.g. DRAM-sharded reads) issue
+        # multiple requests with the same transaction ID before any barrier, so
+        # a single slot per trid loses all but the last. Keyed within the trid
+        # by the request's own issue number, so which response is which does
+        # not depend on the order they come back in.
+        self.outstanding_noc_requests.setdefault(request_id, {})[seq] = tgt_addr
+
+    def take_outstanding_noc_request(self, response):
+        """The state saved when the request ``response`` answers was issued.
+
+        The alternative this replaces was a per-trid FIFO popped from the
+        front, which is correct exactly while responses return in issue order.
+        Nothing guarantees that. Hops are directional and per-destination, and
+        with the bandwidth model a large transfer to one tile occupies its
+        link while a small one to another does not — so two requests sharing a
+        trid but not a destination can be answered in either order, and a
+        multicast write sends one trid's requests to a whole rectangle at
+        once. A FIFO fed out of order does not fail: it hands a read response
+        the *other* request's L1 address and writes the right bytes to the
+        wrong place, silently. Matching on the issue number removes the
+        assumption rather than detecting its violation.
+
+        Instrumented across the in-tree guards, out-of-order arrival is still
+        rare-to-absent — :attr:`out_of_order_responses` counts it — so this is
+        a hazard closed rather than a bug fixed. What *is* raised is a response
+        no outstanding request accounts for, because there is nothing sensible
+        to return for one.
+        """
+        pending = self.outstanding_noc_requests.get(response.request_id)
+        if not pending or response.seq not in pending:
+            raise NoCResponseError(
+                f"NoC{self.noc_number} {self.id_pair}: response "
+                f"{response.action.name} for trid {response.request_id} "
+                f"(issue #{response.seq}) from {response.source_coord} matches "
+                f"no outstanding request; awaiting "
+                f"{sorted(pending) if pending else 'nothing'} on that trid"
+            )
+        if response.seq != next(iter(pending)):
+            self.out_of_order_responses += 1
+        return pending.pop(response.seq)
 
     def is_clock_idle(self):
         """No requests in flight, so ``clock_tick`` would only swap two empty
@@ -990,6 +1134,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
+                    issue_cycle=noc_request.issue_cycle,
                 )
                 self.nui_counters.increment(
                     [
@@ -1018,6 +1163,7 @@ class NUI(MemMapable, Clockable):
                     self.id_pair,
                     noc_request.request_id,
                     data,
+                    seq=noc_request.seq,
                 )
                 self.send_response(noc_request, response)
             elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.WRITE:
@@ -1037,6 +1183,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
+                    issue_cycle=noc_request.issue_cycle,
                 )
                 if noc_request.noc_cmd_resp_marked:
                     self.nui_counters.increment(
@@ -1067,12 +1214,13 @@ class NUI(MemMapable, Clockable):
                     noc_request.data_length_bytes,
                     self.id_pair,
                     noc_request.request_id,
+                    seq=noc_request.seq,
                 )
                 self.send_response(noc_request, response)
             elif (
                 noc_request.action == NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ
             ):
-                tgt_addr = self.outstanding_noc_requests[noc_request.request_id].pop(0)
+                tgt_addr = self.take_outstanding_noc_request(noc_request)
                 self.attached_memory.write(tgt_addr, noc_request.data)
 
                 if self.snoop:
@@ -1089,6 +1237,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
+                    issue_cycle=noc_request.issue_cycle,
                 )
 
                 self.nui_counters.increment(
@@ -1125,6 +1274,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
+                    issue_cycle=noc_request.issue_cycle,
                 )
                 if noc_request.noc_cmd_resp_marked:
                     self.nui_counters.increment(
@@ -1159,6 +1309,7 @@ class NUI(MemMapable, Clockable):
                         self.id_pair,
                         noc_request.request_id,
                         data=conv_to_bytes(old_val),
+                        seq=noc_request.seq,
                     )
                     self.send_response(noc_request, response)
             elif (
@@ -1178,6 +1329,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
+                    issue_cycle=noc_request.issue_cycle,
                 )
                 self.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_ATOMIC_RESP_RECEIVED
@@ -1186,7 +1338,7 @@ class NUI(MemMapable, Clockable):
                     NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
                     + noc_request.request_id
                 )
-                self.outstanding_noc_requests[noc_request.request_id].pop(0)
+                self.take_outstanding_noc_request(noc_request)
             elif noc_request.action == NUI.NoCDataRequest.DataRequestAction.ACK:
                 if self.snoop:
                     print(
@@ -1201,15 +1353,16 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
+                    issue_cycle=noc_request.issue_cycle,
                 )
 
                 self.nui_counters.decrement(
                     NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
                     + noc_request.request_id
                 )
-                _noc_cmd_wr_inline, noc_cmd_resp_marked = self.outstanding_noc_requests[
-                    noc_request.request_id
-                ].pop(0)
+                _noc_cmd_wr_inline, noc_cmd_resp_marked = (
+                    self.take_outstanding_noc_request(noc_request)
+                )
                 if noc_cmd_resp_marked:
                     self.nui_counters.increment(
                         NUI.NUICounters.CounterNames.NIU_MST_WR_ACK_RECEIVED
@@ -1225,7 +1378,7 @@ class NUI(MemMapable, Clockable):
             self.noc_new_requests_to_handle = []
 
     def _publish_noc_event(
-        self, cycle_num, phase, txn_type, src, dst, size_bytes, txn_id
+        self, cycle_num, phase, txn_type, src, dst, size_bytes, txn_id, issue_cycle=-1
     ):
         if self.unit_id is None:
             return
@@ -1242,6 +1395,10 @@ class NUI(MemMapable, Clockable):
                 dst=tuple(dst) if not isinstance(dst, tuple) else dst,
                 size_bytes=int(size_bytes),
                 txn_id=int(txn_id),
+                # ``cycle_num`` is the arrival — this NIU servicing the packet
+                # — so pairing the two gives the flight time. See
+                # ``NUI.transmit``, which stamps it.
+                issue_cycle=int(issue_cycle),
             )
         )
 
@@ -1260,8 +1417,13 @@ class NUI(MemMapable, Clockable):
         every caller passes ``None``, so the whole path collapses back to the
         original two lines.
         """
+        cycle = self._current_cycle()
+        if cycle is not None:
+            # Trace-only: what makes NoCEvent.issue_cycle a measurement rather
+            # than a placeholder, in both regimes. Hoisted out of the delayed
+            # branch below so an un-modelled (next-cycle) flight is stamped too.
+            data_request.issue_cycle = cycle
         if delay is not None and delay > 1:
-            cycle = self._current_cycle()
             if cycle is not None:
                 arrival = cycle + delay
                 with self._inbox_lock:
@@ -1305,7 +1467,7 @@ class NUI(MemMapable, Clockable):
                 self.noc_requests_to_handle.extend(self.delayed_arrivals.pop(c))
             self.next_arrival = min(self.delayed_arrivals, default=None)
 
-    def send_to(self, destination, packet):
+    def send_to(self, destination, packet, queued=None):
         """Send ``packet`` from this NIU to ``destination``, timing the flight.
 
         The one place a NoC packet's latency is decided, for requests and
@@ -1313,12 +1475,103 @@ class NUI(MemMapable, Clockable):
         space* (:attr:`x_coord` / :attr:`y_coord`, mirrored on NoC 1), never
         from the packet, so this cannot reintroduce the cross-NoC coordinate
         confusion :meth:`send_response` exists to prevent.
+
+        The size of the packet is charged here too, and it is a different shape
+        from the distance: see :meth:`_bandwidth_delay`. ``queued`` is a
+        pre-claimed injection-port delay, for the multicast fan-out — see
+        :meth:`claim_injection_port`.
         """
         model = self.noc_latency
         if model is None:
             destination.transmit(packet)
         else:
-            destination.transmit(packet, self.flight_cycles_to(destination))
+            destination.transmit(
+                packet,
+                self._bandwidth_delay(
+                    packet, self.flight_cycles_to(destination), queued
+                ),
+            )
+
+    def claim_injection_port(self, payload_bytes):
+        """Hold this NIU's outbound link long enough to inject ``payload_bytes``.
+
+        Returns how long the packet has to wait before it can start — which is
+        how much of the *previous* packet is still going out. Separate from
+        :meth:`_bandwidth_delay` for one caller: a multicast write is a single
+        packet that the routers fan out, so it is injected **once** however
+        many tiles are in the rectangle. tt-sim models the fan-out as N
+        unicasts, and charging each of them the full injection time would
+        invent serialisation the hardware does not have — the over-charging
+        direction this project's cost policy asks callers to avoid. So the
+        multicast path claims the port once and passes the answer to every
+        :meth:`send_to` in the group.
+        """
+        model = self.noc_latency
+        if model is None:
+            return 0
+        occupancy = model.serialisation_cycles(payload_bytes)
+        now = self._current_cycle()
+        if occupancy is None or now is None:
+            return 0
+        queued = self._tx_free_cycle - now
+        if queued < 0:
+            queued = 0
+        self._tx_free_cycle = now + queued + occupancy
+        return queued
+
+    def _bandwidth_delay(self, packet, flight, queued=None):
+        """Add the bandwidth terms to a packet's ``flight`` time.
+
+        Bandwidth is not a per-packet latency, it is an **occupancy of a
+        link**: the NoC carries one flit per cycle, so a packet of N flits
+        spends N cycles being pushed onto the wire. That single number is
+        spent twice, in two different ways:
+
+        * **The tail.** The last flit arrives ``N - 1`` cycles after the first,
+          so the packet's arrival moves out by that much. Once, not per hop,
+          because the NoC is wormhole-routed and the tail follows the head
+          rather than being re-assembled at each router.
+        * **The port.** This NIU's injection link is held for the whole N
+          cycles, so the *next* packet this NIU sends departs no earlier than
+          that. This is the serialisation half, and it is where an 8 KiB tile
+          read actually differs from a semaphore poke: not by arriving 255
+          cycles later, but by keeping everything behind it waiting.
+
+        The port occupancy is also what keeps the model honest about ordering.
+        Without it a one-flit packet issued right after a 256-flit one to the
+        same destination would *overtake* it, which no NoC does and which the
+        outstanding-request bookkeeping would have to cope with; with it,
+        departures are monotonic and arrivals to a given destination are too.
+        (Two *different* destinations can still reorder — that is real, and
+        :meth:`take_outstanding_noc_request` is what makes it safe.)
+
+        Only this NIU's own injection link is modelled. The router-to-router
+        links a packet crosses on the way are not, because a packet only waits
+        on those behind *other tiles'* traffic, which is arbitration, which is
+        the congestion term the ISA docs decline to quantify.
+        """
+        occupancy = self.noc_latency.serialisation_cycles(_payload_bytes(packet))
+        if occupancy is None:
+            return flight
+        if queued is None:
+            # An NIU with no clock (unit tests, ``driver/simple``) cannot hold
+            # a port for N cycles because it does not know when N cycles are
+            # up, and :meth:`claim_injection_port` answers 0 for it. The tail
+            # is still charged; the queue is not.
+            queued = self.claim_injection_port(_payload_bytes(packet))
+        return (0 if flight is None else flight) + queued + occupancy - 1
+
+    def tail_cycles_for(self, packet):
+        """Cycles ``packet``'s last flit arrives after its first, or 0.
+
+        The half of :meth:`_bandwidth_delay` that an endpoint with no clock of
+        its own can still charge — see :meth:`NullEndpoint._respond`.
+        """
+        model = self.noc_latency
+        if model is None:
+            return 0
+        tail = model.tail_cycles(_payload_bytes(packet))
+        return 0 if tail is None else tail
 
     def flight_cycles_to(self, destination):
         """Modelled cycles for a packet from here to ``destination``, or ``None``."""

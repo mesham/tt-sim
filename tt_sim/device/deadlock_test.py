@@ -57,7 +57,25 @@ def _device_with_watchdog(device_class=Wormhole, threshold=THRESHOLD):
     )
     device.deadlock_detector = detector
     device.clocks[0].on_tick = detector.tick
+    device.clocks[0].on_tick_wake = detector.next_sample_cycle
     return device, coord, detector
+
+
+def _send_every_tile_dormant(device):
+    """Make the pump believe every tile has nothing left to do.
+
+    The Phase 4 pump strides over a cycle no tile clock asks for, and a tile
+    asks by way of its ``next_wake_cycle`` probe. Today no in-tree tile
+    answers "never" while one of its baby cores is out of soft reset
+    (``TensixTile.next_wake_cycle`` short-circuits to ``cycle + 1`` for any
+    ``soft_active`` core), so the only way to reach full dormancy *and* a
+    wedged core is to say so directly — which is precisely the hazard: the
+    watchdog's latency bound must not rest on an invariant that lives in
+    another module and that a new component's ``busy_until`` / arrival
+    deadline could quietly break.
+    """
+    for tile in device.tile_directory.values():
+        tile.clock.wake_probe = lambda cycle: None
 
 
 def _launch_brisc(device, coord, program):
@@ -125,6 +143,64 @@ def test_detection_latency_is_bounded(capsys, device_class):
     assert reports, "watchdog never fired on a wedged device"
     first = int(reports[0])
     assert THRESHOLD <= first <= THRESHOLD + detector.sample_interval + _CONFIRM_TICKS
+
+
+@DEVICES
+def test_fires_on_a_fully_dormant_wedged_device(capsys, device_class):
+    """The blind spot the detector's own wake cycle closes.
+
+    A device every tile of which reports dormant is strided over in one jump
+    per ``run()`` call, so ``on_tick`` fires once and a wedged core is never
+    sampled. With ``on_tick_wake`` wired the pump has to stop at each sample,
+    and the report — including its cycle — is identical to the awake case.
+    """
+    device, coord, detector = _device_with_watchdog(device_class)
+    _launch_brisc(device, coord, WEDGE)
+    device.run(4)
+    _send_every_tile_dormant(device)
+
+    device.run(2 * THRESHOLD)
+
+    err = capsys.readouterr().err
+    assert "[DEADLOCK" in err, err
+    assert "BRISC: frozen at 0x0" in err, err
+    first = int(re.findall(r"\[DEADLOCK cycle=(\d+)\]", err)[0])
+    assert THRESHOLD <= first <= THRESHOLD + detector.sample_interval + _CONFIRM_TICKS
+
+
+@DEVICES
+def test_unwired_wake_probe_is_the_blind_spot(capsys, device_class):
+    """Guards the guard: without ``on_tick_wake`` the same device is silent.
+
+    If this ever starts reporting, the fix above has become dead code and the
+    test that pins it is no longer testing anything.
+    """
+    device, coord, _detector = _device_with_watchdog(device_class)
+    device.clocks[0].on_tick_wake = None
+    _launch_brisc(device, coord, WEDGE)
+    device.run(4)
+    _send_every_tile_dormant(device)
+
+    device.run(50 * THRESHOLD)
+
+    assert capsys.readouterr().err == ""
+
+
+@DEVICES
+def test_dormant_device_is_still_sampled_once_per_interval(device_class):
+    """Striding does not cost samples — one per interval, dormant or not."""
+    device, _coord, detector = _device_with_watchdog(device_class)
+    sampled = []
+    inner = detector._sample
+    detector._sample = lambda cycle: (sampled.append(cycle), inner(cycle))[1]
+
+    # Every core is in soft reset, so every tile clock goes dormant on the
+    # first tick and the pump would otherwise jump the whole window.
+    cycles = 20 * detector.sample_interval
+    device.run(cycles)
+
+    assert device.clocks[0].stride_skipped_cycles > 0, "the pump never strode"
+    assert len(sampled) >= cycles // detector.sample_interval
 
 
 @DEVICES

@@ -272,10 +272,21 @@ class MultiTileClock(Clock):
     back to the cycle-by-cycle loop; striding is also declined automatically
     for any tile carrying ``always_items``, which by definition need a tick
     on every cycle.
+
+    An ``on_tick`` consumer that needs to be *sampled* rather than merely
+    notified sets :attr:`on_tick_wake` — a ``(cycle) -> int | None`` probe
+    that joins the stride computation exactly as a tile clock's
+    ``next_event_cycle`` does, so the pump cannot jump past a cycle it asked
+    for. The deadlock watchdog is the one in-tree user; see
+    ``tt_sim/device/deadlock.py``.
     """
 
     def __init__(self, on_tick=None, *, force_sequential=False, stride=None):
         super().__init__([], on_tick=on_tick)
+        #: Optional ``(cycle) -> int | None`` deadline for :attr:`on_tick`.
+        #: Consulted only when the pump is about to stride, so it costs
+        #: nothing on a workload that never does.
+        self.on_tick_wake = None
         self._tile_clocks: list[Clock] = []
         # Tile clocks flagged as "heavy" run on dedicated worker threads;
         # cheap clocks (DRAM, eth) are ticked by the coordinator each cycle
@@ -421,6 +432,7 @@ class MultiTileClock(Clock):
         tile_clocks = self._tile_clocks
         fast_reject = self._heavy_tile_clocks
         on_tick = self.on_tick
+        on_tick_wake = self.on_tick_wake
         cycle = self.clock_tick_num
         end = cycle + num_iterations
         while cycle < end:
@@ -443,6 +455,13 @@ class MultiTileClock(Clock):
                     nxt = end
                     for tile_clock in tile_clocks:
                         when = tile_clock.next_event_cycle(cycle)
+                        if when is not None and when < nxt:
+                            nxt = when
+                    if on_tick_wake is not None:
+                        # An on_tick consumer that must be sampled on a cycle
+                        # of its own choosing, even when every tile is dormant
+                        # and there would otherwise be nothing to stop at.
+                        when = on_tick_wake(cycle)
                         if when is not None and when < nxt:
                             nxt = when
                     skipped = nxt - cycle - 1

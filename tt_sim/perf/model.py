@@ -447,11 +447,20 @@ def riscv_cost_model(arch):
 # (``tt_sim.network.tt_noc.noc_hop_count``) and this class never sees a
 # coordinate.
 #
+# Bandwidth is a *fourth* shape and arrives with the same class: not a latency
+# at all but an **occupancy of a link**. One flit per cycle, 256 bits on
+# Wormhole and 512 on Blackhole, so a packet of N flits holds the link it is
+# injected on for N cycles and its tail lands N-1 cycles after its head. That
+# is what makes a 32-byte semaphore poke cost less than an 8 KiB tile read,
+# which the hop term alone cannot express because it never sees a size.
+#
 # What is deliberately absent is congestion. The docs say it "can negatively
 # impact latency" and give no number; ``noc.congestion`` in the table is
 # ``provenance: unknown`` for that reason, so this model charges a packet the
-# same flight time whether the link is empty or saturated. That is the honest
-# under-charge -- the same direction as every other bound in these files.
+# same flight time whether *somebody else's* traffic is on the link or not --
+# only the packet's own bytes are charged, and only on the one link tt-sim can
+# name without an arbitration policy. That is the honest under-charge -- the
+# same direction as every other bound in these files.
 
 
 class NocCostModel:
@@ -491,6 +500,92 @@ class NocCostModel:
         #: as an attribute so a report can name the gap rather than imply it
         #: was modelled. See ``noc.congestion`` (``provenance: unknown``).
         self.congestion_modelled = False
+        noc = sections.get("noc") or {}
+        #: Bytes in one flit, or ``None`` when the section is not sourced. The
+        #: table records ``flit_bits`` (256 Wormhole, 512 Blackhole) under the
+        #: ``noc`` section's own ``isa_doc`` provenance.
+        self.flit_bytes = self._flit_bytes(noc)
+        #: Flits a link carries per cycle, from the hop table's
+        #: ``throughput_flits_per_cycle``. Every entry says 1.
+        self.flits_per_cycle = self._flit_rate(hops)
+        #: Bytes per cycle one NoC link carries: 32 on Wormhole, 64 on
+        #: Blackhole. Not a second source — it is ``flit_bytes`` x
+        #: ``flits_per_cycle`` — but it is the form the *other* recorded
+        #: bandwidth figure is in, and the two agree: Wormhole's
+        #: ``link_bandwidth_gb_per_s: 32`` is exactly 32 B/cycle at the
+        #: ``clock`` section's 1 GHz. Two independently recorded fields, one
+        #: number, which is why the flit rate is safe to spend as bandwidth.
+        self.bytes_per_cycle = (
+            None
+            if self.flit_bytes is None or self.flits_per_cycle is None
+            else self.flit_bytes * self.flits_per_cycle
+        )
+
+    def _flit_bytes(self, noc):
+        """Bytes per flit, or ``None`` when the section is not sourced.
+
+        ``flit_bits`` is a bare scalar under the section, so the provenance
+        that governs it is the section's own — which the Blackhole override
+        restates (``bh_noc#performance``) alongside the doubled width.
+        """
+        if noc.get("provenance") not in SOURCED_PROVENANCE:
+            return None
+        bits = noc.get("flit_bits")
+        return None if not bits else bits // 8
+
+    @staticmethod
+    def _flit_rate(hops):
+        entry = hops.get("niu_to_router") or {}
+        if entry.get("provenance") not in SOURCED_PROVENANCE:
+            return None
+        return entry.get("throughput_flits_per_cycle")
+
+    @property
+    def bandwidth_modelled(self):
+        """True when a packet's size reaches its cost at all."""
+        return self.bytes_per_cycle is not None
+
+    def packet_flits(self, payload_bytes):
+        """Flits a packet carrying ``payload_bytes`` of data is made of.
+
+        At least one, because a packet with no payload — a read request, a
+        write ACK, an atomic whose operand rides in the header — is still a
+        packet and still occupies the link for a cycle. The header flit itself
+        is **not** counted on top: the docs' flit accounting does not say how
+        many flits a header takes, and inventing one would be a number with no
+        source. That is the under-charging direction, like every other bound in
+        these tables.
+        """
+        if self.flit_bytes is None:
+            return None
+        return max(1, int(math.ceil(payload_bytes / self.flit_bytes)))
+
+    def serialisation_cycles(self, payload_bytes):
+        """Cycles a packet of ``payload_bytes`` holds the link it is injected on.
+
+        The bandwidth term, and deliberately an *occupancy* rather than a
+        latency: a link carries :attr:`flits_per_cycle` flits per cycle, so a
+        packet made of N flits takes N cycles to push onto the wire and the
+        next packet behind it cannot start until it has. ``None`` when the
+        table sources no flit width, which charges nothing.
+        """
+        flits = self.packet_flits(payload_bytes)
+        if flits is None or not self.flits_per_cycle:
+            return None
+        return int(math.ceil(flits / self.flits_per_cycle))
+
+    def tail_cycles(self, payload_bytes):
+        """Extra cycles for a packet's last flit to arrive after its first.
+
+        :meth:`serialisation_cycles` minus one, and the reason it is minus one
+        rather than the whole thing is that the NoC is *wormhole*-routed: the
+        head flit propagates hop by hop and the tail follows one cycle behind
+        it, rather than the whole packet being received and re-sent at each
+        router. So a packet's own size is paid **once**, whatever the distance,
+        and the hop term is untouched by this.
+        """
+        cycles = self.serialisation_cycles(payload_bytes)
+        return None if cycles is None else cycles - 1
 
     def _hop_term(self, hops, name):
         entry = hops.get(name) or {}
@@ -547,3 +642,95 @@ def noc_cost_model(arch):
     if arch not in _NOC_MODELS:
         _NOC_MODELS[arch] = NocCostModel(load_costs(arch).sections, arch)
     return _NOC_MODELS[arch]
+
+
+# ---------------------------------------------------------------------------
+# DRAM.
+# ---------------------------------------------------------------------------
+#
+# The fourth shape, and the smallest: one number, paid once per request, at the
+# *endpoint*. It is deliberately not part of the flight time above -- a packet's
+# flight is what the interconnect costs, and this is what the device on the far
+# end costs after the packet has landed. Keeping them separate is what stops the
+# two terms double-counting, and it is why the number can be derived at all: see
+# the ``derivation`` on ``dram.access_latency``, which subtracts one measured
+# end-to-end figure from another of identical shape so that the NoC cancels.
+#
+# Three things this is not, all of which ROADMAP section I asks for and none of
+# which any source quantifies:
+#
+# * **bank conflicts** -- tt-sim models no DRAM banks, and the ISA docs publish
+#   no bank geometry or conflict cost for the DRAM tile;
+# * **refresh windows** -- unpublished, and periodic rather than per-request, so
+#   it is not even this shape;
+# * **occupancy** -- the endpoint does not hold off a second request while it
+#   services the first, so this adds latency and no contention. The
+#   under-charging direction, like every other bound in these files.
+#
+# Nor is it size-dependent. DRAM *bandwidth* is well sourced (24 GB/s per
+# channel, isa_doc) and deliberately unconsumed: turning a byte count into
+# cycles is the same physical serialisation the NoC's per-link bandwidth term
+# describes, so it belongs in one place, once, not in two that add up.
+
+
+class DramCostModel:
+    """What a DRAM endpoint's own service time costs, in cycles.
+
+    One attribute worth reading and one worth naming:
+
+    * :attr:`service_cycles` -- cycles between a request landing at a DRAM
+      channel and that channel having serviced it, or ``None`` when the tables
+      source nothing for this arch (which is Blackhole, on purpose -- see the
+      ``access_latency`` note).
+    * :attr:`is_exact` -- False for the shipped Wormhole entry, whose
+      ``bound: at_least`` records that the derived 99 is the DRAM-versus-L1
+      *difference* and therefore a floor under the absolute device latency.
+
+    The provenance is worth checking rather than assuming: this is the file's
+    only ``vendor_source_derived`` entry, which is arithmetic on two vendor
+    measurements — weaker than a published number and stronger than a guess.
+    :attr:`provenance` keeps it reachable so a report can say so.
+    """
+
+    def __init__(self, sections, arch):
+        self.arch = arch
+        entry = (sections.get("dram") or {}).get("access_latency") or {}
+        self.provenance = entry.get("provenance")
+        # An ``unknown`` entry carries no ``cycles`` at all — the convention
+        # guarantees it and a test enforces it — so this is also the Blackhole
+        # path, and it lands on ``None`` twice over.
+        raw = entry if "cycles" in entry else None
+        cost = CycleCost.parse(raw)
+        self.service_cycles = _sourced_cycles(raw, self.provenance)
+        #: The bound the entry carries, or ``None``. ``at_least`` here means
+        #: the same thing it means everywhere else in this module: charged at
+        #: the low end, so a modelled cycle count is a floor.
+        self.bound = None if cost is None else cost.bound
+        #: Named so a report can say the gaps are gaps rather than imply they
+        #: were modelled. All three are unquantified by every available source.
+        self.bank_conflicts_modelled = False
+        self.refresh_modelled = False
+        self.occupancy_modelled = False
+
+    @property
+    def is_exact(self):
+        return self.bound not in INEXACT_BOUNDS
+
+
+_DRAM_MODELS = {}
+
+
+def dram_cost_model(arch):
+    """The :class:`DramCostModel` for ``arch``, cached, or ``None`` when off.
+
+    Same contract as the three above, plus one of its own: it also returns
+    ``None`` when the arch's table sources no latency at all, so a Blackhole
+    DRAM tile behaves exactly as it did before this landed rather than
+    borrowing Wormhole's number.
+    """
+    if arch is None or not cost_model_enabled():
+        return None
+    if arch not in _DRAM_MODELS:
+        model = DramCostModel(load_costs(arch).sections, arch)
+        _DRAM_MODELS[arch] = model if model.service_cycles else None
+    return _DRAM_MODELS[arch]

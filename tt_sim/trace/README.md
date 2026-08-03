@@ -80,14 +80,47 @@ Canned SQL queries that run in Perfetto's **Query (SQL)** tab live in
 per-unit event counts, and NoC roundtrip latency. The schema is
 documented at <https://perfetto.dev/docs/analysis/sql-tables>.
 
-**Cycle-as-time mapping:** events are stamped with `ts = cycle` and
-`dur = 1`. The simulator isn't cycle-accurate today, so durations are
-synthetic placeholders — useful for spatial reasoning ("what happened
-on the SFPU around cycle 3000?") but not for absolute timing. Once §I
-cycle accuracy lands, durations become meaningful and the writer
-needs no schema change. Events with `cycle == 0` (mem / sync /
-lifecycle) are stamped with the highest cycle seen so far, so they
-appear at the "current time" rather than collapsing onto t=0.
+**Cycle-as-time mapping:** events are stamped with `ts = cycle`, one
+trace microsecond per simulated cycle. Events with `cycle == 0` (mem /
+sync / lifecycle) are stamped with the highest cycle seen so far, so
+they appear at the "current time" rather than collapsing onto t=0.
+
+**Durations are real, and say which regime produced them.** A slice is
+only ever as wide as a number the simulator actually holds:
+
+| slice | width | source |
+|---|---|---|
+| `compute` (`ELWADD`, `ATCAS`, …) | modelled occupancy | `ComputeEvent.duration` ← `tensix_instruction_costs.yaml` |
+| `noc:<phase>:<type>` | issue → arrival | `NoCEvent.issue_cycle` vs. the event's cycle |
+| `stall:<reason>` | cycles the core was held | `InstrEvent.stall_cycles` ← the RV load-use interlock |
+| `pc=0x…`, `dispatch:…` | 1 cycle | a core retires one instruction per cycle; issue is single-cycle |
+
+With **`TT_SIM_COST_MODEL` unset every one of those is 1**, and that is
+the truth rather than a placeholder: with the model off nothing stalls
+and every unit retires in the tick it was issued. The writer will not
+invent a plausible number to fill the gap. Which regime a trace came
+from is stated three ways so a file copied away from its run is never
+ambiguous:
+
+- `otherData.cost_model` (plus a one-line `timing_note`) in the file
+  trailer — Perfetto shows it under **Info and stats**;
+- a `process_labels` metadata event per tile, reading
+  `TT_SIM_COST_MODEL on` / `off`;
+- a `timing_model` argument on any individual slice whose width is not
+  a modelled figure.
+
+NoC transactions are emitted as **async** slices (`ph` `b`/`e`) rather
+than `X`, because a NIU can have several packets in flight at once and
+partially overlapping `X` slices are not legally nestable — Perfetto
+drops them. The request→response arrows ride on the slices themselves
+as `bind_id` + `flow_out`/`flow_in`; a standalone `s`/`f` flow event
+binds to the enclosing slice of a *thread* track, which an async slice
+is not, and would be reported as `flow_no_enclosing_slice`.
+
+Verified by loading the output into Perfetto's own `trace_processor`
+(the engine behind `ui.perfetto.dev`): a `four` run with the cost model
+on imports with zero `error`/`data_loss` stats, 77,413 `stall:load_use`
+slices totalling 80,570 cycles, and NoC flights up to 235 cycles.
 
 **`mem` events are skipped** from the Perfetto stream — their volume
 (~50k+ per kernel) would swamp the UI without adding slice-level
@@ -154,16 +187,44 @@ Canned queries (top counters by total, per-unit instruction counts,
 kernel-to-kernel diff, NoC hotspot detection) live in
 [`queries/counters.sql`](queries/counters.sql).
 
-As §I cycle accuracy lands, more counters (FPU stall reasons, packer
-back-pressure, L1 bank conflicts) drop into the same long-format
-schema with no consumer changes needed.
+Where §I supplies the state, the dataset also carries cycle
+attribution — same long format, no consumer changes:
+
+| counter | meaning |
+|---|---|
+| `stall_cycles`, `stall_load_use`, `stall_store_rate`, `stall_integer_unit` | per baby core, cycles the RV cost model held an instruction, split by reason |
+| `busy_cycles` | per Tensix backend unit, the occupancy the cost tables charged |
+| `noc_flight_cycles`, `noc_txns_timed` | per NIU, issue→arrival summed over timed transactions |
+
+The stall and busy counters are **absent, not zero**, with
+`TT_SIM_COST_MODEL` unset: a counter row only exists once something
+incremented it, so an un-modelled run's dataset does not assert a
+stall-free machine. `noc_flight_cycles` is emitted in both regimes
+because a flight time is measured rather than modelled — it is just
+always 1 with the model off. Measured on the Blackhole `four` guard:
+
+```
+                     model off      model on
+stall_cycles                 -        80,695
+stall_load_use               -        80,570
+stall_store_rate             -           100
+stall_integer_unit           -            25
+busy_cycles                  -           267
+noc_flight_cycles           36         3,384
+```
+
+Still gated on §I, with nothing to read yet: packer back-pressure and
+unpacker idle cycles (neither unit is wired to the tables — the packer
+charges its `PACR` issue cost only, the unpacker is uncosted), and L1
+bank conflicts (tt-sim models no banks).
 
 ### NoC transactions (Parquet)
 
 `TT_SIM_TRACE_NOC=<dir>` writes a Hive-partitioned Parquet dataset
 (`chip=N/*.parquet`) — one row per `NoCEvent` emission with columns
 `cycle, chip, core_y, core_x, unit, phase, txn_type, src_x, src_y,
-dst_x, dst_y, size_bytes, txn_id`. Suitable for SQL queries about data
+dst_x, dst_y, size_bytes, txn_id, issue_cycle, arrival_cycle,
+flight_cycles, cost_model`. Suitable for SQL queries about data
 movement:
 
 ```bash
@@ -176,9 +237,28 @@ duckdb -c "
 "
 ```
 
-VC occupancy, issue/arrival cycle, and other cycle-accurate fields
-are gated on §I and will land as additional columns once the
-simulator carries that state.
+`issue_cycle` is when the *sending* NIU put the packet on the wire and
+`arrival_cycle` (== `cycle`) when the receiving NIU serviced it, so
+`flight_cycles` is their difference. Both regimes measure it, but a
+`flight_cycles` of 1 means different things in each, which is what the
+`cost_model` column is for: with `TT_SIM_COST_MODEL` unset a packet is
+delivered on the next cycle however far it travelled. `issue_cycle` is
+`-1` (and `flight_cycles` `0`) for the one case neither regime can
+time — a NIU with no owning tile clock, i.e. the unit tests and
+`driver/simple`.
+
+```bash
+duckdb -c "
+  SELECT phase, txn_type, avg(flight_cycles), max(flight_cycles), any_value(cost_model)
+  FROM read_parquet('/tmp/noc/**/*.parquet', hive_partitioning=true)
+  WHERE issue_cycle >= 0 GROUP BY 1, 2
+"
+# model off:  request/read flight 2, response/read 1
+# model on:   request/read flight 235, response/read 46  (Blackhole `four`)
+```
+
+**VC occupancy remains gated on §I** — tt-sim models no virtual
+channels, so there is no `vc` column rather than a column of zeroes.
 
 ### Memory accesses (Callgrind / KCachegrind)
 
@@ -363,11 +443,18 @@ Per-type fields published today:
 Emitted on each RV instruction retirement on the five baby cores
 (BRISC, NCRISC, TRISC0–2).
 
-| Field         | Type   |                                                   |
-|---------------|--------|---------------------------------------------------|
-| `pc`          | `int`  | PC at the retiring instruction.                   |
-| `instruction` | `int`  | Raw 32-bit instruction word.                      |
-| `stalled`     | `bool` | True if the core stalled this cycle (no retire).  |
+| Field          | Type   |                                                   |
+|----------------|--------|---------------------------------------------------|
+| `pc`           | `int`  | PC at the retiring instruction.                   |
+| `instruction`  | `int`  | Raw 32-bit instruction word.                      |
+| `stalled`      | `bool` | True if the core stalled this cycle (no retire).  |
+| `stall_cycles` | `int`  | Cycles the cost model held this instruction before it could issue. |
+| `stall_reason` | `str`  | `load_use` / `store_rate` / `integer_unit`, or `""`. |
+
+`stall_cycles` / `stall_reason` are cost-model state: `0` / `""`
+whenever `TT_SIM_COST_MODEL` is unset, because no RV instruction can
+stall then. They are distinct from `stalled`, which is the
+Tensix-instruction-buffer back-pressure that exists in both regimes.
 
 Disassembly is **not** included — kept out of the hot path. Decoding is
 the consumer's job (every event carries the raw 32-bit word).
@@ -399,9 +486,11 @@ Emitted at the four `NUI.clock_tick` snoop sites.
 | `dst`        | `tuple` | Destination NoC coord.                            |
 | `size_bytes` | `int`   | Transfer size.                                    |
 | `txn_id`     | `int`   | NoC transaction ID (reused on issue + response).  |
+| `issue_cycle`| `int`   | Cycle the sending NIU put the packet on the wire; `-1` if untimed. |
 
-Pair an `(issue, txn_id)` with its `(response, txn_id)` to recover
-round-trip latency once cycle-accuracy lands (ROADMAP §I).
+`cycle` is the *arrival* — this NIU servicing the packet — so
+`cycle - issue_cycle` is the flight time. Pair a `request` with its
+`response` on `(txn_id, src, dst, txn_type)` for the round trip.
 
 ### `LifecycleEvent` (category `lifecycle`)
 
@@ -462,6 +551,12 @@ unit uniformly. Source `unit_id` is the per-tile backend unit
 | `target_unit` | `str` | Unit name string (matches `TensixBackendUnit.unit_name`).|
 | `thread_id`   | `int` | Issuing TRISC thread (0/1/2), or -1 if unattributed.   |
 | `detail`      | `str` | Free-form per-handler payload (empty today).           |
+| `duration`    | `int` | Modelled occupancy in cycles; `0` means *no claim*.    |
+
+`duration` is the cycles `tensix_instruction_costs.yaml` charges the
+op. `0` is "the tables have no opinion" — the model is off, the unit is
+unwired (unpacker, config, mover, misc), or the opcode is uncosted. A
+consumer must not read `0` as one cycle.
 
 Both `unit_id` and `target_unit` carry the same architectural unit
 information — `unit_id` is the canonical join key, `target_unit` is the
@@ -592,10 +687,13 @@ out of scope across phases:
 - **Multi-Tensix / multi-chip identity.** `chip_id` is hard-coded to
   `0`; `core_y/core_x` are the unified tile coords for the single
   Tensix at `(18, 18)`. Falls out of ROADMAP §A multi-Tensix.
-- **Cycle-accurate fields:** Perfetto durations (`dur = 1`
-  synthetic), NoC per-transaction `vc` / `issue_cycle` /
-  `arrival_cycle`, FPU/SFPU stalled-cycles-with-reason counters,
-  packer back-pressure, L1 bank conflicts. All gated on ROADMAP §I.
+- **Cycle-accurate fields.** Landed: Perfetto durations, NoC
+  `issue_cycle` / `arrival_cycle` / `flight_cycles`, per-core RV
+  stall cycles with reason, per-unit `busy_cycles`. Still gated on
+  ROADMAP §I because the simulator holds no such state: NoC `vc` and
+  VC occupancy (no virtual channels are modelled), packer
+  back-pressure and unpacker idle cycles (neither unit is wired to the
+  cost tables), and L1 bank conflicts (no banks are modelled).
 - **Inline-print migration.** Events are additive today — existing
   `if self.snoop: print(...)` sites still run alongside bus publish.
 - **VS Code coverage extension** and **end-to-end `libttsim.so`

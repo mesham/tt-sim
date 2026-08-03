@@ -303,6 +303,16 @@ def test_wall_clock_is_sampled_lazily_and_unaffected_by_striding(monkeypatch):
 
 
 def test_a_fully_dormant_device_costs_nothing_per_cycle(monkeypatch):
+    """Everything but the watchdog's sample points is jumped.
+
+    One tick per tile settles the dormancy decision and the remaining ~10^6
+    cycles are strided over — except that the deadlock watchdog names a wake
+    cycle of its own (``MultiTileClock.on_tick_wake``), so the pump also stops
+    once per sample interval. Without those stops a wedged-but-dormant device
+    would never be sampled at all; see ``tt_sim/device/deadlock.py``. It is
+    one visit per ``threshold // 8`` cycles, i.e. 160 over this run, so the
+    per-cycle cost is still nothing.
+    """
     monkeypatch.setenv("TT_SIM_PUMP_STRIDE", "1")
     device = _blackhole_with_tensix()
 
@@ -310,7 +320,23 @@ def test_a_fully_dormant_device_costs_nothing_per_cycle(monkeypatch):
 
     pump = device.clocks[0]
     assert pump.clock_tick_num == 1_000_000
-    # One tick per tile settles it; the remaining ~10^6 cycles are jumped.
-    assert pump.stride_skipped_cycles == 1_000_000 - 1
+    samples = 1_000_000 // device.deadlock_detector.sample_interval
+    assert pump.stride_skipped_cycles == 1_000_000 - samples
     for tile in device.tile_directory.values():
         assert tile.clock.dormant_cycles == 1_000_000 - 1
+
+
+def test_a_fully_dormant_device_is_still_visited_for_the_watchdog(monkeypatch):
+    """...and with the watchdog off, not even that.
+
+    ``TT_SIM_DEADLOCK=0`` leaves both ``on_tick`` and ``on_tick_wake``
+    unwired, so a dormant device is back to exactly one tick per ``run``.
+    """
+    monkeypatch.setenv("TT_SIM_PUMP_STRIDE", "1")
+    monkeypatch.setenv("TT_SIM_DEADLOCK", "0")
+    device = _blackhole_with_tensix()
+    assert device.clocks[0].on_tick_wake is None
+
+    device.run(1_000_000)
+
+    assert device.clocks[0].stride_skipped_cycles == 1_000_000 - 1

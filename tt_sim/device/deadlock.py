@@ -34,9 +34,26 @@ resolution a 50,000-cycle window can use. Two consequences, both deliberate:
   with consecutive-cycle PCs, so the report reads exactly as it did when the
   detector polled every cycle.
 
-The window is measured in **simulated cycles**, not in pump ticks. The two
-differ only when the Phase 4 pump strides (i.e. when every tile is dormant, in
-which case there is by definition no progress to observe).
+The window is measured in **simulated cycles**, not in pump ticks. The
+detector keeps the two from drifting by naming its own wake cycle:
+:meth:`DeadlockDetector.next_sample_cycle` is handed to ``MultiTileClock`` as
+``on_tick_wake``, so the Phase 4 pump clamps every stride to the next
+scheduled sample. Without it a **fully dormant** device — every tile answering
+``next_event_cycle() is None`` — was strided over in one jump per ``run()``
+call, so a 200,000-cycle ``run`` took exactly one sample and a wedged-but-
+dormant device could go unreported indefinitely. That was previously argued
+safe on the grounds that dormancy implies every baby core is in soft reset
+(``TensixTile.next_wake_cycle`` answers ``cycle + 1`` for any ``soft_active``
+core), which is the one state the watchdog deliberately ignores. True today,
+but it is an invariant in a *different* module holding up this one's latency
+bound; naming the wake cycle makes the bound local. The cost is one call per
+*stride decision*, and a stride decision is only reached when no Tensix tile
+wants the next cycle — i.e. exactly when the pump has nothing else to do.
+
+Full dormancy is deliberately **not** treated as a deadlock signal in itself.
+It is not provable that nothing can wake such a device: under the wire bridge
+the host writes to it between ``run`` calls, and "every core in soft reset" is
+the ordinary pre-launch and post-completion state.
 
 Configured via two env vars, read in :func:`deadlock_config_from_env`:
 
@@ -144,6 +161,22 @@ class DeadlockDetector:
 
     def _read_soft_reset(self, tile):
         return conv_to_uint32(tile.tile_ctrl.RISCV_DEBUG_REG_SOFT_RESET_0)
+
+    def next_sample_cycle(self, cycle):
+        """Earliest cycle at which :meth:`tick` must run again, or ``None``.
+
+        The pump's ``on_tick_wake`` probe (see the module docstring): it is
+        consulted alongside every tile clock's ``next_event_cycle`` when
+        :class:`~tt_sim.device.clock.MultiTileClock` computes a stride, so a
+        scheduled sample is never jumped over however dormant the device is.
+        ``None`` only when the detector is disabled, in which case it is not
+        wired at all. Never returns a value ``<= cycle``, so it cannot stall
+        the pump.
+        """
+        nxt = self._next_sample_cycle
+        if nxt == float("inf"):
+            return None
+        return nxt if nxt > cycle else cycle + 1
 
     def tick(self, cycle):
         # Hot path: one comparison per pumped cycle. ``_next_sample_cycle`` is

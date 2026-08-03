@@ -36,7 +36,12 @@ import pytest
 
 from tt_sim.arch.blackhole import BLACKHOLE_PROFILE
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
-from tt_sim.pe.tensix.util import DataFormatConversions, TensixConfigurationConstants
+from tt_sim.pe.tensix.util import (
+    DataFormatConversions,
+    TensixConfigurationConstants,
+    TensixInstructionDecoder,
+)
+from tt_sim.util.bits import get_nth_bit
 
 BF16 = 5  # DataFormat.BF16
 #: L1_Dest_addr, in 16-byte units, and the byte address it names.
@@ -76,7 +81,16 @@ def _dst_value(row, col):
     return ((row * ROW + col + 1) << 8) | 0x3F
 
 
-def _pacr_word(addr_mode=0, dst_access_mode=0, read_intf_sel=0, last=1):
+def _pacr_word(
+    addr_mode=0,
+    dst_access_mode=0,
+    read_intf_sel=0,
+    last=1,
+    ctxt_ctrl=0,
+    addr_cnt_context=0,
+    row_pad_zero=0,
+    cfg_context=0,
+):
     """A Blackhole PACR, encoded exactly as ``TT_OP_PACR`` does.
 
     ``ckernel_ops.h``: ``cfg_context << 21 | row_pad_zero << 18 |
@@ -86,9 +100,13 @@ def _pacr_word(addr_mode=0, dst_access_mode=0, read_intf_sel=0, last=1):
     """
     return (
         (0x41 << 24)
+        | (cfg_context << 21)
+        | (row_pad_zero << 18)
         | (dst_access_mode << 17)
         | (addr_mode << 15)
+        | (addr_cnt_context << 13)
         | (read_intf_sel << 8)
+        | (ctxt_ctrl << 2)
         | last
     )
 
@@ -138,23 +156,20 @@ def _packer(blackhole=True, remap=True):
         TensixConfigurationConstants.use_blackhole(False)
 
 
+def _decode(word):
+    """The arguments the shared (Wormhole-layout) table produces for ``word``.
+
+    The real decoder, not a hand-rolled stand-in: each argument is handed every
+    bit up to the next one's ``start_bit``, so ``Flush`` runs 3:1, ``ZeroWrite``
+    12:14 and ``AddrMode`` -- being last -- 23:15. Blackhole's extra fields all
+    land inside those spans, which is exactly what these tests are about.
+    """
+    return TensixInstructionDecoder.getInstructionInfo(word)["instr_args"]
+
+
 def _pacr(backend, **kwargs):
     word = _pacr_word(**kwargs)
-    backend.packer_unit.handle_pacr(
-        {"raw_instruction": word},
-        0,
-        {
-            "Last": word & 1,
-            "Flush": 0,
-            "OvrdThreadId": 0,
-            "PackSel": (word >> 8) & 0xF,
-            "ZeroWrite": 0,
-            # What the shared (Wormhole-layout) decoder produces for this word:
-            # AddrMode is the last argument, so it runs 23:15 and swallows
-            # dst_access_mode. Blackhole re-reads the true 2-bit field.
-            "AddrMode": (word >> 15) & 0x1FF,
-        },
-    )
+    backend.packer_unit.handle_pacr({"raw_instruction": word}, 0, _decode(word))
 
 
 def _packed(memory, count):
@@ -260,6 +275,77 @@ def test_strided_with_a_non_contiguous_interface_mask_raises():
     with _packer() as (backend, _):
         with pytest.raises(NotImplementedError, match="read_intf_sel"):
             _pacr(backend, dst_access_mode=1, read_intf_sel=0x5)
+
+
+# --- The four Blackhole PACR fields tt-sim does not decode at all ------------
+#
+# ``ctxt_ctrl`` (3:2), ``addr_cnt_context`` (14:13), ``row_pad_zero`` (20:18)
+# and ``cfg_context`` (22:21) have no entry in the shared Wormhole argument
+# table and nothing in ``PackerUnit`` reads them. None of them is *mis*-decoded
+# (the test below pins that), but a kernel setting one would have it silently
+# ignored -- so, as ttsim does in ``TENSIX_EXECUTE_PACR``, PACR refuses.
+
+#: ``(kwarg, all-ones value, bit span as it appears in the error)``.
+BH_ONLY_FIELDS = [
+    ("ctxt_ctrl", 0b11, "3:2"),
+    ("addr_cnt_context", 0b11, "14:13"),
+    ("row_pad_zero", 0b111, "20:18"),
+    ("cfg_context", 0b11, "22:21"),
+]
+
+
+@pytest.mark.parametrize(
+    "field, value, span", BH_ONLY_FIELDS, ids=[f[0] for f in BH_ONLY_FIELDS]
+)
+def test_unmodelled_blackhole_pacr_field_raises(field, value, span):
+    with _packer() as (backend, _):
+        with pytest.raises(NotImplementedError, match=f"{field}={value}.*{span}"):
+            _pacr(backend, read_intf_sel=0x1, **{field: value})
+
+
+@pytest.mark.parametrize(
+    "field, value, span", BH_ONLY_FIELDS, ids=[f[0] for f in BH_ONLY_FIELDS]
+)
+def test_unmodelled_field_never_leaked_into_an_argument_that_is_read(
+    field, value, span
+):
+    """Why nothing was silently *wrong* before the refusal, only ignored.
+
+    Each field lands inside a decoded argument's span -- ``ctxt_ctrl`` inside
+    ``Flush`` (3:1), ``addr_cnt_context`` inside ``ZeroWrite`` (14:12),
+    ``row_pad_zero`` and ``cfg_context`` inside ``AddrMode`` (23:15) -- but
+    every consumer takes only the bit or bits Wormhole defines: ``Flush`` and
+    ``ZeroWrite`` via ``get_nth_bit(..., 0)``, ``AddrMode`` (on Blackhole) via
+    a raw 16:15 re-read. ``Last`` is one bit, ``Concat`` is never read and
+    ``read_intf_sel`` occupies Wormhole's ``PackSel`` span exactly.
+    """
+    baseline = _decode(_pacr_word(read_intf_sel=0x1))
+    polluted = _decode(_pacr_word(read_intf_sel=0x1, **{field: value}))
+
+    # The raw argument really is polluted for two of the four -- this is not a
+    # vacuous test.
+    assert polluted != baseline
+
+    assert polluted["Last"] == baseline["Last"]
+    assert polluted["PackSel"] == baseline["PackSel"]
+    assert polluted["OvrdThreadId"] == baseline["OvrdThreadId"]
+    assert get_nth_bit(polluted["Flush"], 0) == get_nth_bit(baseline["Flush"], 0)
+    assert get_nth_bit(polluted["ZeroWrite"], 0) == get_nth_bit(
+        baseline["ZeroWrite"], 0
+    )
+    # Blackhole's AddrMode is the raw 2-bit field, not the decoded 23:15 span.
+    assert (_pacr_word(read_intf_sel=0x1, **{field: value}) >> 15) & 3 == 0
+
+
+@pytest.mark.parametrize(
+    "field, value, span", BH_ONLY_FIELDS, ids=[f[0] for f in BH_ONLY_FIELDS]
+)
+def test_wormhole_pacr_is_unaffected(field, value, span):
+    """Those bit positions mean something else on Wormhole, whose PACR is
+    correct today -- so the refusal must be Blackhole-only."""
+    with _packer(blackhole=False) as (backend, memory):
+        _pacr(backend, read_intf_sel=0x1, **{field: value})
+        assert _packed(memory, ROW) == _expected([0])
 
 
 if __name__ == "__main__":

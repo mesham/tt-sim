@@ -39,20 +39,41 @@ from tt_sim.util.yaml_cache import load_yaml_cached
 #: Provenance kinds, ranked strongest to weakest. An entry's provenance is the
 #: weakest provenance of any number in it, so ranking them lets a consumer ask
 #: "is everything in this table at least ``vendor_source``?" in one comparison.
+#:
+#: ``vendor_source_derived`` is the rank the DRAM access latency needed and is
+#: exactly ``isa_doc_derived``'s relationship one tier down: **arithmetic on
+#: vendor numbers**, requiring both a ``source`` and a ``derivation`` so a
+#: reader can redo the subtraction. It sits *below* ``vendor_source`` because
+#: no document prints the result, and *above* ``estimated`` because it is not a
+#: judgement call — every input is a published figure and the arithmetic is
+#: written down. It is emphatically not a licence to dress a guess up: the test
+#: ``test_vendor_derived_entries_are_exactly_the_ones_we_expect`` pins the list,
+#: so adding one means editing it.
 PROVENANCE_RANK = {
-    "isa_doc": 4,
-    "isa_doc_derived": 3,
-    "vendor_source": 2,
+    "isa_doc": 5,
+    "isa_doc_derived": 4,
+    "vendor_source": 3,
+    "vendor_source_derived": 2,
     "estimated": 1,
     "unknown": 0,
 }
 
 #: Provenance kinds that stand for a real published number.
-SOURCED_PROVENANCE = frozenset({"isa_doc", "isa_doc_derived", "vendor_source"})
+SOURCED_PROVENANCE = frozenset(
+    {"isa_doc", "isa_doc_derived", "vendor_source", "vendor_source_derived"}
+)
 
 #: Kinds that must name a document in the file's ``documents`` /
 #: ``vendor_documents`` map.
-PROVENANCE_REQUIRING_SOURCE = frozenset({"isa_doc", "isa_doc_derived", "vendor_source"})
+PROVENANCE_REQUIRING_SOURCE = frozenset(
+    {"isa_doc", "isa_doc_derived", "vendor_source", "vendor_source_derived"}
+)
+
+#: Kinds that must also show their working, so a reader can redo the
+#: arithmetic rather than take the result on trust.
+PROVENANCE_REQUIRING_DERIVATION = frozenset(
+    {"isa_doc_derived", "vendor_source_derived"}
+)
 
 #: Kinds that must explain themselves in prose instead.
 PROVENANCE_REQUIRING_NOTE = frozenset({"estimated", "unknown"})

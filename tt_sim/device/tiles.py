@@ -22,8 +22,62 @@ from tt_sim.pe.pe import PEMemory
 from tt_sim.pe.rv.babyriscv import BabyRISCV, BabyRISCVCoreType
 from tt_sim.pe.tensix.tdma import TDMA
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
+from tt_sim.perf.model import dram_cost_model
 from tt_sim.trace import Unit, get_registry
 from tt_sim.util.conversion import conv_to_bytes
+
+
+class DRAMEndpointNUI(NUI):
+    """A DRAM channel's NIU, which charges the device's own service time.
+
+    The NoC hop model (``docs/plans/cost-model.md``) times a packet's *flight*
+    and parks it until it lands. DRAM access latency is the different thing
+    that happens next: the time the endpoint takes to service the request once
+    it has arrived. It belongs here rather than in the flight, because a flight
+    time is a property of the distance and this is a property of the device —
+    and because keeping them apart is what lets the number be derived at all
+    (``dram.access_latency``'s derivation subtracts one end-to-end measurement
+    from another so that the NoC term cancels).
+
+    Modelled by holding the *request* rather than delaying the response, which
+    is both the more faithful ordering — the data really is not read until the
+    device has got to it, so a write becomes visible late and its ACK later
+    still — and free in machinery: :meth:`NUI.transmit` already parks a packet
+    in ``delayed_arrivals`` until its cycle, and ``DRAMTile.next_wake_cycle``
+    already reports ``next_arrival``, so the tile *sleeps* through the service
+    window instead of being ticked 99 times for nothing.
+
+    Only requests are charged. A DRAM tile has no request initiator of its own
+    (its NIU registers are not mapped into any core's address space), so in
+    practice nothing else arrives here — but naming the three request actions
+    keeps that an assertion of intent rather than an accident.
+
+    ``service_cycles`` is ``None`` with ``TT_SIM_COST_MODEL`` unset **and** on
+    any architecture whose table sources no latency, so this class then costs
+    one attribute read and one extra frame per inbound packet, and changes no
+    cycle.
+    """
+
+    #: The actions that reach a DRAM endpoint from outside — everything a
+    #: remote NIU can ask a memory to do. Responses (``RESPONSE_READ``,
+    #: ``ACK``, ``RESPONSE_ATOMIC``) only ever travel the other way.
+    _SERVICED_ACTIONS = frozenset(
+        {
+            NUI.NoCDataRequest.DataRequestAction.READ,
+            NUI.NoCDataRequest.DataRequestAction.WRITE,
+            NUI.NoCDataRequest.DataRequestAction.ATOMIC,
+        }
+    )
+
+    def __init__(self, *args, service_cycles=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.service_cycles = service_cycles
+
+    def transmit(self, data_request, delay=None):
+        service = self.service_cycles
+        if service is not None and data_request.action in self._SERVICED_ACTIONS:
+            delay = service if delay is None else delay + service
+        NUI.transmit(self, data_request, delay)
 
 
 class DRAMTile(TTDeviceTile):
@@ -57,22 +111,30 @@ class DRAMTile(TTDeviceTile):
 
         self.dram_memory = TileMemory(dram_tile_mem_map, safe, snoop_addresses)
 
+        # The DRAM device's own service time, or None with the cost model off
+        # (and on Blackhole, whose figure is not derivable from a set the
+        # sources agree on — see ``dram.access_latency``).
+        latency = dram_cost_model(profile.name)
+        service_cycles = None if latency is None else latency.service_cycles
+
         # tile_kind="D" so NoC reads sourced from this tile pick the DRAM
         # congruence rule (32 B Wormhole / 64 B Blackhole) rather than L1's 16 B.
-        r0 = NUI(
+        r0 = DRAMEndpointNUI(
             0,
             physical_x,
             physical_y,
             self.dram_memory,
             tile_kind="D",
+            service_cycles=service_cycles,
             **profile.noc_kwargs,
         )
-        r1 = NUI(
+        r1 = DRAMEndpointNUI(
             1,
             physical_x,
             physical_y,
             self.dram_memory,
             tile_kind="D",
+            service_cycles=service_cycles,
             **profile.noc_kwargs,
         )
 

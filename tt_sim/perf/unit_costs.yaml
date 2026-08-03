@@ -18,25 +18,41 @@
 #     hidden".
 #   * ``noc.hops`` -> tt_sim/network/tt_noc.py, as the flight time of a packet:
 #     ``endpoint + per_hop * hops``, with the hop count a forward distance on
-#     each NoC's own (directional, wrapping) torus. Everything else under
-#     ``noc`` -- the flit width, the link bandwidth, the L1 port count, the
-#     router buffers -- is bandwidth and contention, and is still unconsumed.
+#     each NoC's own (directional, wrapping) torus. ``noc.flit_bits`` and the
+#     hops' ``throughput_flits_per_cycle`` go to the same consumer as
+#     *bandwidth*, which is an occupancy rather than a latency: a packet holds
+#     the injecting NIU's link for one cycle per flit and its tail lands that
+#     much after its head. Still unconsumed under ``noc``: the L1 port count
+#     and the router buffers, i.e. everything that would model one packet
+#     waiting behind *another's*.
 #
-# The ``dram``, ``mover`` and ``l1`` sections have no consumer at all. DRAM
-# access latency is now the ranked next term and is ``unknown`` here rather
-# than merely unwired; with the hop model landed, ``dram.end_to_end_reference``
-# finally constrains it (see docs/plans/cost-model.md, "The NoC hop model").
-# See that file for the schema, the provenance convention, and what
-# calibration would take.
+#   * ``dram.access_latency`` -> tt_sim/device/tiles.py, as the time a DRAM
+#     endpoint holds an arriving request before it services it. Deliberately
+#     not part of the flight above: a flight time is a property of the
+#     distance, this is a property of the device, and keeping them apart is
+#     what lets the number be derived without double-counting the hops.
+#     **Wormhole only** -- see the entry's own note for why Blackhole's stays a
+#     gap. Everything else under ``dram`` -- both bandwidth blocks and the
+#     end-to-end reference -- is still unconsumed.
+#
+# The ``mover`` and ``l1`` sections have no consumer at all.
+# See docs/plans/cost-model.md for the schema, the provenance convention, and
+# what calibration would take.
 #
 # The provenance vocabulary and the cost-value form (int, or a mapping with
 # ``cycles`` plus ``bound`` in {exact, at_least, at_most, approximate, range})
 # are documented at the top of tensix_instruction_costs.yaml and are identical
 # here. The short version, because it is the point of the exercise:
 #
-#   isa_doc > isa_doc_derived > vendor_source > estimated > unknown
+#   isa_doc > isa_doc_derived > vendor_source > vendor_source_derived
+#           > estimated > unknown
 #
 # and an entry's provenance is the weakest provenance of any number in it.
+# ``vendor_source_derived`` is the newest rank and exists for exactly one entry
+# (``dram.access_latency`` on Wormhole): arithmetic on vendor numbers, which is
+# what ``isa_doc_derived`` is to ``isa_doc``, one tier down. It requires a
+# ``derivation`` for the same reason -- a derived number is only reviewable if
+# the arithmetic is written out.
 
 schema_version: 1
 
@@ -105,10 +121,27 @@ noc:
     NIU services it. The hop count is the *forward* distance on the NoC's own
     torus, so it is directional -- an outbound and a return trip between two
     tiles differing on both axes always sum to noc_grid_x + noc_grid_y hops.
-    Only ``hops`` is consumed; ``flit_bits``, ``link_bandwidth_gb_per_s``,
-    ``l1_ports`` and ``router_buffering`` are the bandwidth and contention
-    half and remain unconsumed, so a packet costs the same whatever its size
-    and whatever else is on the link.
+
+    CONSUMED since 2026-08-03 also as *bandwidth*, which is a different shape
+    from the hop model: not a latency but an occupancy of a link. ``flit_bits``
+    (256 Wormhole / 512 Blackhole) with ``throughput_flits_per_cycle: 1`` gives
+    32 and 64 bytes per cycle, so a packet of N flits holds the injecting NIU's
+    link for N cycles and its tail arrives N-1 cycles after its head -- once,
+    not once per hop, because a wormhole-routed NoC lets the tail follow the
+    head rather than re-assembling the packet at each router. That is what
+    makes a 32-byte semaphore poke cheaper than an 8 KiB tile read, which the
+    hop term alone cannot express because it never sees a size. Note the two
+    bandwidth figures here are one fact recorded twice and they agree exactly:
+    ``link_bandwidth_gb_per_s: 32`` is 256 bits/cycle at the ``clock``
+    section's 1 GHz. No Blackhole GB/s is published, hence the ``unknown``
+    override rather than a scaled Wormhole number.
+
+    Still unconsumed: ``l1_ports`` and ``router_buffering``, and with them
+    every form of *cross-packet* contention. Only the injecting NIU's own link
+    is occupied; the router-to-router links a packet crosses are not, because
+    waiting there means waiting behind another tile's traffic, which needs an
+    arbitration policy, which is the congestion term above that nothing
+    publishes. A saturated link still costs what an empty one does.
   hops:
     niu_to_router:
       latency: { cycles: 5, bound: approximate }
@@ -198,32 +231,37 @@ dram:
   access_latency:
     provenance: unknown
     note: >
-      The ISA docs give DRAM no access latency at all -- no tCL/tRCD-style
-      device timing, no bank-conflict cost, no refresh-window cost, despite
-      ROADMAP section I naming exactly those. Neither ttsim (whose DRAM is
-      instantaneous) nor tt-metal's hardware headers have one either.
+      No document publishes one. The ISA docs give DRAM no access latency at
+      all -- no tCL/tRCD-style device timing, no bank-conflict cost, no
+      refresh-window cost, despite ROADMAP section I naming exactly those.
+      Neither ttsim (whose DRAM is instantaneous) nor tt-metal's hardware
+      headers have one either.
 
-      The nearest available number is tt-metal's measured *end-to-end* figure:
-      "measured initial latency based on the transaction and device types",
-      DRAM = 358 cycles on Wormhole and 529 on Blackhole (tm_dm_common:200-216).
-      That is a NoC round trip plus the DRAM access plus the issuing core's
-      path, so it is an upper bound on DRAM latency and cannot be used as the
-      DRAM term without double-counting the NoC hops modelled above. It is
-      recorded under ``end_to_end_reference`` rather than here for that reason.
+      This entry stays ``unknown`` for **Blackhole**, and is overridden with a
+      derived figure for Wormhole under ``arch_overrides.wormhole`` -- the
+      first per-arch asymmetry in this file that is about confidence rather
+      than about hardware. The derivation (see there) is the difference of two
+      of tt-metal's measured end-to-end figures, which is only meaningful if
+      that measurement set is internally consistent. On Wormhole it
+      demonstrably is: subtracting the modelled NoC round trip from all four
+      rows leaves 36 (local L1), 38 (remote write) and 41 (remote read), i.e.
+      the same issuing-core path to within 5 cycles. On Blackhole the same
+      check fails outright -- 68 for the local row against 122 / 123 for the
+      remote ones, a 54-cycle disagreement -- so something about the Blackhole
+      row set is not understood, and subtracting two numbers out of a set we
+      have shown we cannot explain is exactly the laundering this convention
+      exists to stop.
 
-      That double-counting objection is now *quantifiable*, because the hop
-      model above has a consumer. Subtracting the modelled NoC round trip from
-      each measured end-to-end figure leaves a residual, and on Wormhole the
-      residuals agree: 36 cycles for a local L1 access (no hops), 41 for a
-      remote read and 38 for a remote write (22 hops) -- so the hop term
-      explains the whole local/remote difference to within 5 cycles, and the
-      leftover ~38 is the issuing core's own path. The same subtraction on the
-      DRAM figure leaves ~140, i.e. **roughly 100 cycles of DRAM device
-      latency on Wormhole**. Deliberately NOT recorded as a number here: it is
-      an inference from a vendor measurement minus a model, which is a
-      calibration target, not a source. Blackhole does not reproduce the same
-      consistency (residuals 68 local vs 122/123 remote), and its figures were
-      measured against tt-metal's 1.2 GHz assumption -- see ``clock``.
+      There is a second, independent reason and it would bite even if the
+      first were fixed: the Blackhole figures were measured against
+      tt-metal's 1.2 GHz assumption, which the ISA docs contradict at 1.35 GHz
+      (see ``clock``). A cycle count converted from a measured *time* scales
+      with the clock, so the Blackhole difference is 126 cycles if
+      tt-metal's own assumption is taken at face value and 142 at the ISA
+      docs' clock. The sources disagree and this file records conflicts
+      rather than resolving them; recording a number here would mean picking
+      one silently. Either fix closes this gap: an internally consistent
+      Blackhole end-to-end set, or a resolved clock.
   end_to_end_reference:
     dram_cycles: { wormhole: 358, blackhole: 529 }
     l1_local_cycles: { wormhole: 56, blackhole: 88 }
@@ -463,7 +501,67 @@ l1:
 # Per-architecture differences. Deep-merged over the sections above; see the
 # rationale in tensix_instruction_costs.yaml.
 arch_overrides:
-  wormhole: {}
+  wormhole:
+    dram:
+      access_latency:
+        cycles: 99
+        bound: at_least
+        provenance: vendor_source_derived
+        source: tm_dm_common#L200-216
+        derivation: >
+          access_latency = end_to_end_reference.dram_cycles
+                         - end_to_end_reference.l1_remote_read_cycles
+                         = 358 - 259 = 99 cycles (Wormhole).
+
+          Both inputs are tt-metal's measured "initial latency" for the *same*
+          transaction shape issued by the *same* agent: a remote read from a
+          Tensix core. Everything the two have in common therefore cancels --
+          the issuing core's own path, the NoC round trip, the response
+          handling -- and what is left is the difference between what a DRAM
+          endpoint costs to service and what an L1 endpoint costs to service.
+          Note what this does NOT require: it never touches the hop model, so
+          it cannot double-count the NoC term the way plugging in the raw 358
+          would.
+
+          The subtraction assumes the two figures were measured at the same NoC
+          geometry. On Wormhole that is close to free: a round trip between two
+          tiles differing on both axes is exactly grid_x + grid_y = 22 hops
+          *whatever* the distance between them (each NoC is a directional
+          torus), so two remote measurements cannot differ by hop count unless
+          one of them shares an axis with its initiator.
+
+          Cross-check, from the other direction and using the hop model:
+          358 - 218 (modelled 22-hop round trip) = 140, minus the ~38-cycle
+          issuing-core path that the three L1 rows agree on (36 / 38 / 41)
+          = ~102. Two derivations that share only their source data agree to
+          3 cycles. The residual gap is consistent with an L1 endpoint's own
+          service time being a handful of cycles, which is what l1's bank
+          model implies and what this entry folds out.
+        note: >
+          **A difference, charged as a latency, and that is the honest reading
+          of it.** 99 is (DRAM service) - (L1 service), and tt-sim charges an
+          L1 endpoint nothing, so charging 99 at the DRAM endpoint reproduces
+          the measured DRAM-vs-L1 difference exactly while remaining a *floor*
+          on the absolute device latency -- hence ``bound: at_least``. The
+          bound comes from the derivation, not from a qualifier anybody
+          printed.
+
+          What is modelled: a flat per-request service time at the DRAM
+          endpoint, paid once, on every read, write and atomic that arrives
+          over the NoC.
+
+          What is NOT modelled, and none of it is folded into this number:
+          bank conflicts and refresh windows (ROADMAP section I names both;
+          no source quantifies either, and tt-sim has no bank model for DRAM
+          at all), read/write turnaround, and *occupancy* -- a second request
+          arriving during the first's service window is not queued behind it,
+          so this term adds latency and no contention. Nor is transfer time:
+          a 32-byte poke and an 8 KiB burst are charged the same 99. Size
+          dependence is a bandwidth term, and it is the *same physical
+          serialisation* that ``noc.flit_bits`` already charges a packet on
+          the wire, so charging it here as well would bill one queue twice.
+          ``dram.bandwidth`` above is well sourced (isa_doc, 24 GB/s per
+          channel) and deliberately stays unconsumed for that reason.
   blackhole:
     noc:
       flit_bits: 512

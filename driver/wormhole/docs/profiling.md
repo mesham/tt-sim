@@ -940,6 +940,52 @@ Perfetto (`TT_SIM_TRACE_PERFETTO`) measures the same as counters
   obtained by calling `enable_from_env()` explicitly from the harness.
   Wiring it into `Blackhole.__init__` is a one-line fix and is a
   prerequisite for using any of §H's observability on Blackhole.
+  (Since fixed — `enable_from_env` is called from `TT_Device.__init__`,
+  guarded by `tt_sim/device/parity_test.py`, so the numbers below were
+  taken on Blackhole with no harness patching.)
+
+### What §H's cycle-attributing fields cost (2026-08-03)
+
+Measured when ROADMAP §H's "gated on §I" observability landed (real
+Perfetto durations, NoC `issue_cycle`/`arrival_cycle`, RV stall
+attribution, per-unit `busy_cycles`). Method as elsewhere in this
+document: **two frozen full-tree copies** — the change, and the same
+tree with only the change reverted — alternating order per round,
+**minimum of 5 rounds**, end-to-end wall clock of
+`driver.blackhole.server.four_replay_test`. The Perfetto row is a
+separate 3-round A/B re-run after the output-size fix below, so that it
+measures the writer that shipped.
+
+| config | before | after | ratio |
+|---|---|---|---|
+| tracing off | 11.53 s | 10.92 s | **0.95** |
+| `TT_SIM_TRACE_COUNTERS` | 25.42 s | 28.81 s | 1.13 |
+| `TT_SIM_TRACE_PERFETTO` | 31.60 s | 30.41 s | **0.96** |
+| `TT_SIM_TRACE_COUNTERS` + `TT_SIM_COST_MODEL=1` | 22.49 s | 24.12 s | 1.07 |
+
+- **Nothing measurable off the tracing path.** The after tree measured
+  *faster* with tracing off, which is the only honest reading of "no
+  cost": the added work is inside `if trace_instr:` and inside the
+  writers. The one exception is a `self._current_cycle()` per NoC
+  `transmit` (two attribute reads, 24 times on this workload).
+- **Single-digit-percent on the tracing path**, and the 1.13 is the
+  weakest of the four numbers: the `before`-minimum for that config came
+  from the only round that ran on a quiet machine. Restricted to
+  rounds 1–4, where both trees saw the same contention, the same config
+  is **1.07**. Two other agents were running gates on this machine
+  throughout, which the interleave-and-take-the-minimum protocol bounds
+  but does not remove.
+- **Perfetto output size is unchanged**: 65,828,313 B after vs
+  65,805,799 B before (+0.03 %). It was +9 MB (+13.6 %) in a first cut
+  that put `"stall_cycles": 0` in the args of every instruction slice —
+  ~16 bytes of zero on the highest-volume event in the trace, on a run
+  where nothing can stall. The arg is now emitted only when there was a
+  stall, which is also the only time it says anything. Before that fix
+  the same A/B measured 1.09; after it, 0.96 — the writer's extra work
+  was never the cost, the extra bytes were.
+- The headline from the previous section stands: **the cost is
+  `EventBus.enabled`, not what the writers do with the events.** These
+  fields ride along inside a 2–4× that was already being paid.
 
 ## How far is a 640³ matmul?
 
@@ -2233,6 +2279,44 @@ device, latency inside the stated bound, silent while every core is in reset,
 silent on a loop whose period is exactly the sample interval (the aliasing case
 the confirmation pass exists for), and one scan per interval rather than one
 per cycle.
+
+### Follow-up: the bound holds on a *dormant* device too
+
+Sampling made the watchdog depend on the Phase 4 pump actually visiting a
+cycle, and it does not visit one that every tile clock has declined — a fully
+dormant device is strided over in a single jump per `run()` call. Measured:
+one sample in a 1,000,000-cycle `run`, and a wedged-but-dormant BRISC produced
+**zero** `[DEADLOCK]` lines over 400,000 cycles. That was previously argued
+unobservable, because dormancy implies every baby core is in soft reset, which
+is the one state the watchdog ignores by design — a true statement resting on
+an invariant in `tt_sim/device/tiles.py` rather than in the detector.
+
+`DeadlockDetector.next_sample_cycle` is now handed to `MultiTileClock` as
+`on_tick_wake` and joins the stride computation alongside every tile clock's
+`next_event_cycle`, so a scheduled sample can never be jumped. The **stated
+latency does not change** — `threshold` to `threshold + threshold//8 + 64`,
+and the wedged-dormant device reports at `cycle=864` for a threshold of 800,
+byte-identical to the awake case.
+
+What it costs, on the same dormant-pump-floor benchmark (Blackhole, min of 3,
+1,000,000 cycles):
+
+| Tensix tiles | dormant floor, probe unwired | probe wired | delta |
+| --- | --- | --- | --- |
+| 1 | 0.0002 µs/cycle | 0.0021 | +0.002 |
+| 8 | 0.0013 | 0.0051 | +0.004 |
+| 80 | 0.0084 | 0.0410 | +0.033 |
+
+The 80-worker delta is the amortised signature scan (218.5 µs / 6,250 =
+0.035 µs/cycle) that the table above already charges the watchdog on an
+*awake* idle grid — it is now paid on a dormant one as well, against a ~120
+µs/cycle live floor. A **live** workload pays nothing: the probe is consulted
+only when the pump is about to stride, which requires no Tensix tile to want
+the next cycle, and BRISC spins in the firmware loop from launch to teardown.
+The `one` offline replay measures 1.27 s wired against 1.30 s unwired (min of
+3, 126/126 byte-identical in both arms) — i.e. inside noise, in the wrong
+direction. `TT_SIM_DEADLOCK=0` leaves `on_tick_wake` unwired along with
+`on_tick`.
 
 ## Should it still be on by default?
 

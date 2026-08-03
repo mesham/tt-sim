@@ -239,6 +239,14 @@ class RV32I(ProcessingElement):
             else:
                 reg_idx = -1
                 reg_val = 0
+            # How long the cost model held this instruction before it could
+            # issue, drained here rather than counted on the issue path so the
+            # non-tracing interpreter is unchanged. Always (0, "") with
+            # TT_SIM_COST_MODEL unset, because nothing stalls then.
+            if cost is None:
+                stall_cycles, stall_reason = 0, ""
+            else:
+                stall_cycles, stall_reason = cost.take_pending_stall()
             self.bus.publish(
                 InstrEvent(
                     cycle=cycle_num,
@@ -248,6 +256,8 @@ class RV32I(ProcessingElement):
                     stalled=pe_stall,
                     reg_write_idx=reg_idx,
                     reg_write_value=reg_val,
+                    stall_cycles=stall_cycles,
+                    stall_reason=stall_reason,
                 )
             )
 

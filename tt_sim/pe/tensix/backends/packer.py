@@ -110,6 +110,63 @@ class PackerUnit(TensixBackendUnit):
     #: ``DST_ACCESS_STRIDED_MODE``. See ``_read_dst_access_mode``.
     STRIDED_DST_ROW_STRIDE = 16
 
+    #: Blackhole PACR fields that the shared (Wormhole) argument table has no
+    #: entry for and that nothing here models, as
+    #: ``(name, bit span, width, start bit)``. See
+    #: :meth:`_check_unmodelled_bh_fields`.
+    BH_UNMODELLED_FIELDS = (
+        ("ctxt_ctrl", "3:2", 2, 2),
+        ("addr_cnt_context", "14:13", 2, 13),
+        ("row_pad_zero", "20:18", 3, 18),
+        ("cfg_context", "22:21", 2, 21),
+    )
+
+    def _check_unmodelled_bh_fields(self, instruction_info):
+        """Refuse a Blackhole PACR that sets a field tt-sim does not decode.
+
+        Blackhole's PACR encodes four fields on top of Wormhole's, and the
+        instruction table in ``tensix_instructions.yaml`` is the *Wormhole*
+        one — so none of them has a name here and none is ever read. Nothing
+        is mis-decoded as a result (see below), but a kernel that set one
+        would have it silently ignored, which is the failure shape everything
+        else on this unit refuses outright. ttsim refuses all four the same
+        way, as ``MissingSpecification`` under ``TT_ARCH_VERSION == 1`` at the
+        top of ``TENSIX_EXECUTE_PACR``; this mirrors that.
+
+        Why nothing is currently mis-decoded, given that the shared table
+        hands each argument every bit up to the next one's ``start_bit``
+        (``TensixInstructions.getInstructionInfo``):
+
+        * ``ctxt_ctrl`` (3:2) lands inside ``Flush``'s decoded 3:1, and
+          ``handle_pacr`` takes only ``get_nth_bit(Flush, 0)`` — raw bit 1.
+        * ``addr_cnt_context`` (14:13) lands inside ``ZeroWrite``'s decoded
+          14:12, likewise consumed as ``get_nth_bit(ZeroWrite, 0)`` — raw
+          bit 12.
+        * ``row_pad_zero`` (20:18) and ``cfg_context`` (22:21) land inside
+          ``AddrMode``'s decoded 23:15, which on Blackhole is not read from
+          the decoded argument at all — :meth:`_read_addr_mode` re-reads raw
+          16:15 precisely because that span is shared.
+
+        That last one is why these are read from ``raw_instruction`` here and
+        not from ``instr_args``: two separate bugs have already come out of
+        the 23:15 span, and a decoded argument is the wrong thing to look at.
+        """
+        if not self.backend.blackhole:
+            # Wormhole's PACR is correct today and these bit positions mean
+            # something else there (Flush, ZeroWrite and AddrMode's tail).
+            return
+        raw = instruction_info["raw_instruction"]
+        for name, span, width, start in self.BH_UNMODELLED_FIELDS:
+            value = extract_bits(raw, width, start)
+            if value:
+                raise NotImplementedError(
+                    f"Blackhole PACR sets {name}={value} (raw bits {span}), which is "
+                    "not modelled; tt-sim decodes PACR through the shared Wormhole "
+                    "argument table, which has no entry for this field, so it would "
+                    "otherwise be silently ignored (ttsim refuses it too, as "
+                    "MissingSpecification in TENSIX_EXECUTE_PACR)"
+                )
+
     def _read_addr_mode(self, instruction_info, instr_args):
         """PACR's 2-bit ``addr_mode`` (raw 16:15).
 
@@ -589,6 +646,7 @@ class PackerUnit(TensixBackendUnit):
         return masks, max(1, min(16, readsPerPlane))
 
     def handle_pacr(self, instruction_info, issue_thread, instr_args):
+        self._check_unmodelled_bh_fields(instruction_info)
         last = instr_args["Last"]
         flush = get_nth_bit(instr_args["Flush"], 0)
         ovrdThreadId = instr_args["OvrdThreadId"]

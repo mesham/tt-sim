@@ -165,6 +165,9 @@ class TT_Device(Device):
         # nothing per cycle rather than a call that returns immediately.
         if enabled:
             self.clocks[0].on_tick = self.deadlock_detector.tick
+            # ...and let it name its own wake cycle, so the Phase 4 pump
+            # cannot stride a fully dormant device past a scheduled sample.
+            self.clocks[0].on_tick_wake = self.deadlock_detector.next_sample_cycle
         # Second tracing pass: wires the state-dump writer, which needs the
         # (now fully assembled) device to poll.
         enable_from_env(device=self)

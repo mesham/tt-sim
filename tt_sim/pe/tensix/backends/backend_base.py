@@ -250,6 +250,11 @@ class TensixBackendUnit(Clockable, ABC):
                             op=instruction_name,
                             target_unit=self.unit_name,
                             thread_id=issue_thread,
+                            # The occupancy the cost table charged, or 0 for
+                            # "no claim" — an unwired unit, an uncosted opcode,
+                            # or TT_SIM_COST_MODEL unset. A trace consumer must
+                            # not read 0 as one cycle; see ComputeEvent.
+                            duration=occupancy or 0,
                         )
                     )
                 if occupancy is not None:

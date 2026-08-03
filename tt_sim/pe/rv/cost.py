@@ -184,6 +184,7 @@ class RiscvCostState:
         "stall_by_reason",
         "loads_by_region",
         "l1_stores",
+        "pending_stall",
     )
 
     def __init__(self, model):
@@ -211,6 +212,11 @@ class RiscvCostState:
         self.stall_by_reason = [0] * STALL_REASON_COUNT
         self.loads_by_region = [0] * RV_REGION_COUNT
         self.l1_stores = 0
+        # Stalls accumulated since the last instruction retired, drained by
+        # :meth:`take_pending_stall`. Only the trace path reads it, so it is
+        # written on the stall path (which is already the slow path) and never
+        # on the issue path.
+        self.pending_stall = 0
 
     def reset(self):
         """Drop every in-flight hazard. Called when a core is (re)started, so
@@ -221,8 +227,27 @@ class RiscvCostState:
         self._stall_until = 0
         self._store_ready = 0
         self._group_block = -1
+        self.pending_stall = 0
 
     # -- reporting ---------------------------------------------------------
+    def take_pending_stall(self):
+        """``(cycles, reason)`` this core was held before the instruction that
+        is about to retire, clearing the accumulator.
+
+        The per-instruction half of :attr:`stall_by_reason`: the same stalls,
+        attributed to the instruction that eventually issued rather than only
+        totalled, which is what lets a Perfetto slice have a real width. Called
+        from ``RV32I.clock_tick`` **only when an ``InstrEvent`` is actually
+        being published**, so the interpreter's non-tracing path is untouched.
+        The reason is the last one recorded, which for a run of stalled cycles
+        is the reason that ended them.
+        """
+        n = self.pending_stall
+        if not n:
+            return 0, ""
+        self.pending_stall = 0
+        return n, STALL_REASON_NAMES[self._stall_reason]
+
     def summary(self):
         """A plain dict of what this core was charged, for the §I reports."""
         return {
@@ -241,6 +266,7 @@ class RiscvCostState:
         self._stall_reason = reason
         self.stall_cycles += 1
         self.stall_by_reason[reason] += 1
+        self.pending_stall += 1
         return False
 
     def can_issue(self, instr, cycle_num, register_file):
@@ -255,6 +281,7 @@ class RiscvCostState:
         if cycle_num < self._stall_until:
             self.stall_cycles += 1
             self.stall_by_reason[self._stall_reason] += 1
+            self.pending_stall += 1
             return False
         if instr & 0x3 != 0x3:
             # A .ttinsn — a rotated Tensix instruction word with no GPR

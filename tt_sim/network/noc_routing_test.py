@@ -143,8 +143,8 @@ def _noc1_dram_roundtrip(device, tile, dram, dram_address, payload):
 
 def _assert_settled(nui):
     """Every request the NUI issued has been answered, exactly once."""
-    for trid, fifo in nui.outstanding_noc_requests.items():
-        assert fifo == [], f"NUI {nui.id_pair} still awaiting trid {trid}: {fifo}"
+    for trid, pending in nui.outstanding_noc_requests.items():
+        assert not pending, f"NUI {nui.id_pair} still awaiting trid {trid}: {pending}"
         assert nui.nui_counters[_OUTSTANDING_ID_0 + trid] == 0, (
             f"NUI {nui.id_pair} OUTSTANDING[{trid}] = "
             f"{nui.nui_counters[_OUTSTANDING_ID_0 + trid]}"

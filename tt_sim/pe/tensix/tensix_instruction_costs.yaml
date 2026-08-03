@@ -29,6 +29,15 @@
 #                    ``derivation`` are required.
 #   vendor_source    Taken from vendor source code (ttsim, tt-metal, tt-llk)
 #                    rather than prose documentation. ``source`` is required.
+#   vendor_source_derived
+#                    Arithmetic on vendor numbers -- what isa_doc_derived is to
+#                    isa_doc, one tier down. ``source`` and ``derivation`` are
+#                    required, and the derivation must be complete enough for a
+#                    reader to redo it, because nobody published the result.
+#                    Ranked below vendor_source (no document prints the answer)
+#                    and above estimated (nothing here is a judgement call).
+#                    Used by exactly one entry so far -- Wormhole's DRAM access
+#                    latency in unit_costs.yaml -- and a test pins that list.
 #   estimated        Uncalibrated. A guess, however educated. ``note`` is
 #                    required and must say what would replace it.
 #   unknown          Deliberately left without a number because no source gives

@@ -34,7 +34,7 @@ from tt_sim.device.blackhole import Blackhole
 from tt_sim.device.wormhole import Wormhole
 from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.network.tt_noc import noc_hop_count
-from tt_sim.perf.model import noc_cost_model
+from tt_sim.perf.model import dram_cost_model, noc_cost_model
 
 _L1_SRC = 0x20000
 _L1_DST = 0x21000
@@ -244,7 +244,12 @@ def test_a_dram_read_lands_on_the_cycle_the_hop_model_predicts():
     device.write(dram.get_coord_pair(), 0x1000, _PAYLOAD)
     initiator = _read_from_dram(device, tile, dst.id_pair, noc=0)
     landed = _cycles_until_landed(device, tile, initiator, _PAYLOAD, budget=2000)
-    assert landed == (10 + 9 * there) + (10 + 9 * back) + 1
+    # The DRAM endpoint's own service time is deliberately *not* part of the
+    # flight (see ``tt_sim/device/tiles.py``), so it is added here rather than
+    # folded into either leg — a round trip is what the two models sum to.
+    with _env("1"):
+        service = dram_cost_model("wormhole").service_cycles
+    assert landed == (10 + 9 * there) + service + (10 + 9 * back) + 1
 
 
 def test_the_untimed_noc_still_answers_in_two_cycles():
@@ -300,6 +305,239 @@ def test_an_unmodelled_destination_is_delayed_like_a_real_one():
         + (10 + 9 * noc_hop_count(unknown, src, *grid))
         + 1
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. Bandwidth: the term that makes a packet's *size* cost something.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("arch,flit_bytes", [("wormhole", 32), ("blackhole", 64)])
+def test_bandwidth_is_the_flit_rate_and_the_two_recorded_figures_agree(
+    arch, flit_bytes
+):
+    """One flit per cycle, 256 bits on Wormhole and 512 on Blackhole.
+
+    The table records the same fact twice and independently — ``flit_bits``
+    with a ``throughput_flits_per_cycle`` of 1, and a
+    ``link_bandwidth_gb_per_s`` of 32 — and the two agree exactly: at the
+    ``clock`` section's 1 GHz, 32 bytes per cycle *is* 32 GB/s. That is a
+    property of the data rather than of this consumer, so the cross-check
+    lives in ``tt_sim/perf/costs_test.py``, where reading the raw tables is
+    what the file is for. (No Blackhole GB/s figure is published; its override
+    marks the field ``unknown`` rather than scaling Wormhole's.)
+    """
+    with _env("1"):
+        model = noc_cost_model(arch)
+    assert model.flit_bytes == flit_bytes
+    assert model.flits_per_cycle == 1
+    assert model.bytes_per_cycle == flit_bytes
+    assert model.bandwidth_modelled is True
+
+
+def test_a_packet_pays_for_its_own_size_once_and_not_once_per_hop():
+    """Wormhole routing: the head flit propagates and the tail follows it one
+    cycle behind, rather than each router receiving the whole packet before
+    forwarding it. So a packet's bytes cost the same whether it crosses one
+    router or twenty, and the hop term is untouched by size."""
+    with _env("1"):
+        model = noc_cost_model("wormhole")
+    assert model.tail_cycles(32) == 0  # one flit: nothing follows the head
+    assert model.tail_cycles(64) == 1
+    assert model.tail_cycles(8192) == 255
+    assert model.serialisation_cycles(8192) == 256
+    # A packet with no payload at all -- a read request, a write ACK -- is
+    # still one flit, and still holds the injection port for its cycle.
+    assert model.serialisation_cycles(0) == 1
+    assert model.tail_cycles(0) == 0
+    # The distance term does not know about any of this.
+    assert model.flight_cycles(3) == 10 + 27
+
+
+def test_a_semaphore_poke_no_longer_costs_what_a_tile_read_costs():
+    """The headline, end to end and on a real device: two DRAM reads over the
+    same path, 32 bytes and 2 KiB (a bf16 32x32 tile). Under the hop model
+    alone they landed on the same cycle. They now differ by exactly the tile's
+    serialisation — ``2048 / 32 - 1`` cycles on Wormhole's 256-bit flit."""
+    small = _PAYLOAD
+    large = bytes((i * 7) & 0xFF for i in range(2048))
+    with _env("1"):
+        device, tile, dram = _wormhole_worker_and_dram()
+        device.write(dram.get_coord_pair(), 0x1000, small)
+        initiator = _read_from_dram(device, tile, dram.noc0_router.id_pair, noc=0)
+        small_cycles = _cycles_until_landed(device, tile, initiator, small, budget=4000)
+
+        device, tile, dram = _wormhole_worker_and_dram()
+        device.write(dram.get_coord_pair(), 0x2000, large)
+        initiator = _read_from_dram(
+            device, tile, dram.noc0_router.id_pair, noc=0, dram_address=0x2000
+        )
+        initiator.at_len_be = len(large)
+        large_cycles = _cycles_until_landed(device, tile, initiator, large, budget=4000)
+
+    assert large_cycles - small_cycles == len(large) // 32 - 1 == 63
+
+
+def test_the_injection_port_is_held_for_the_whole_packet():
+    """The serialisation half, which is the half that makes bandwidth a
+    *bandwidth* model rather than a size-dependent latency: while a big packet
+    is being pushed onto the wire, everything behind it waits. It is also what
+    stops a small packet overtaking a large one to the same destination, which
+    no NoC does and which nothing downstream should have to cope with."""
+    with _env("1"):
+        device, tile, dram = _wormhole_worker_and_dram()
+    src = tile.noc0_router
+    flight = src.flight_cycles_to(dram.noc0_router)
+    payload = bytes(4096)
+    packet = _write_packet(src, payload)
+
+    first = src._bandwidth_delay(packet, flight)
+    second = src._bandwidth_delay(_write_packet(src, payload), flight)
+    flits = len(payload) // 32
+    # The first packet's tail lands ``flits - 1`` after its head; the second
+    # cannot even start until the first has finished being injected.
+    assert first == flight + flits - 1
+    assert second == first + flits
+
+
+def _write_packet(nui, payload):
+    from tt_sim.network.tt_noc import NUI
+
+    return NUI.NoCDataRequest(
+        0x1000,
+        NUI.NoCDataRequest.DataRequestAction.WRITE,
+        len(payload),
+        nui.id_pair,
+        0,
+        payload,
+        reply_to=nui,
+    )
+
+
+def test_a_multicast_is_injected_once_however_wide_the_rectangle():
+    """The place this model could easily over-charge, and the policy says not
+    to. A multicast write leaves the NIU as **one** packet that the routers
+    split across the destination rectangle; tt-sim models the fan-out as N
+    unicasts, so charging each of them the full injection time would invent
+    serialisation the hardware does not have. The port is claimed once."""
+    with _env("1"):
+        device, tile, dram = _wormhole_worker_and_dram()
+    src = tile.noc0_router
+    payload = bytes(1024)
+    device.write(tile.get_coord_pair(), _L1_SRC, payload)
+
+    initiator = src.request_initiators[0]
+    initiator.target_addr_low = _L1_SRC
+    initiator.ret_addr_low = _L1_DST
+    initiator.at_len_be = len(payload)
+    x_start, y_start, x_end, y_end = 1, 1, 4, 3  # 4 x 3 = 12 destinations
+    initiator.ret_addr_mid = (
+        (x_end << 4) | (y_end << 10) | (x_start << 16) | (y_start << 22)
+    )
+    initiator.ctrl = 2 | (1 << 5)  # write, broadcast
+    before = src._tx_free_cycle
+    initiator.cmd_ctrl = 1
+    initiator.initiate()
+    # One packet's worth of injection time, not twelve.
+    assert src._tx_free_cycle - before == len(payload) // 32
+
+
+def test_size_costs_nothing_with_the_model_off():
+    """The opt-in, for the bandwidth half specifically: an 8 KiB write and a
+    4-byte one are still delivered on the same cycle with the switch unset."""
+    with _env(None):
+        device, tile, dram = _wormhole_worker_and_dram()
+    big = bytes(8192)
+    device.write(tile.get_coord_pair(), _L1_SRC, big)
+    initiator = tile.noc0_router.request_initiators[0]
+    _set_coord(initiator, "ret", dram.noc0_router.id_pair)
+    initiator.target_addr_low = _L1_SRC
+    initiator.ret_addr_low = 0x3000
+    initiator.at_len_be = len(big)
+    initiator.ctrl = 2 | (1 << 4)
+    initiator.cmd_ctrl = 1
+    initiator.initiate()
+    device.run(2)
+    assert bytes(device.read(dram.get_coord_pair(), 0x3000, 16)) == big[:16]
+
+
+# ---------------------------------------------------------------------------
+# 6. Response ordering: the hazard variable latency creates, and bandwidth
+#    makes likelier.
+# ---------------------------------------------------------------------------
+
+
+def test_a_response_that_overtakes_an_older_one_still_lands_where_it_belongs():
+    """Two reads, one transaction ID, two destinations at different distances.
+
+    This is the hazard the per-hop latency model created and the bandwidth
+    model widens: the outstanding-request store used to be a per-trid FIFO, so
+    the *first* response to arrive was handed the *first* request's L1
+    destination address whether or not it was answering it. Nothing about a
+    NoC guarantees the order — here a local L1 read (0 hops each way) is
+    answered while a DRAM read issued before it is still in flight — and the
+    failure mode was a silently wrong address, not a crash.
+
+    Both payloads must land at their own address, and the NIU must *know* it
+    happened: ``out_of_order_responses`` is the instrumentation that turns
+    "this cannot happen today" into a number.
+    """
+    with _env("1"):
+        device, tile, dram = _wormhole_worker_and_dram()
+    unified = tile.get_coord_pair()
+    far_payload = _PAYLOAD
+    near_payload = bytes(range(64, 96))
+    device.write(dram.get_coord_pair(), 0x1000, far_payload)
+    device.write(unified, 0x22000, near_payload)
+    device.write(unified, _L1_DST, b"\xff" * 32)
+    device.write(unified, 0x23000, b"\xff" * 32)
+
+    initiator = tile.noc0_router.request_initiators[0]
+    # 1. The far read: worker -> DRAM and back, a couple of hundred cycles.
+    _set_coord(initiator, "target", dram.noc0_router.id_pair)
+    initiator.target_addr_low = 0x1000
+    initiator.ret_addr_low = _L1_DST
+    initiator.at_len_be = 32
+    initiator.ctrl = 0
+    initiator.cmd_ctrl = 1
+    initiator.initiate()
+    # 2. The near read, same trid: this tile's own L1, 0 hops, ~20 cycles.
+    _set_coord(initiator, "target", tile.noc0_router.id_pair)
+    initiator.target_addr_low = 0x22000
+    initiator.ret_addr_low = 0x23000
+    initiator.at_len_be = 32
+    initiator.ctrl = 0
+    initiator.cmd_ctrl = 1
+    initiator.initiate()
+
+    device.run(1000)
+    assert bytes(device.read(unified, 0x23000, 32)) == near_payload
+    assert bytes(device.read(unified, _L1_DST, 32)) == far_payload
+    assert tile.noc0_router.out_of_order_responses == 1
+
+
+def test_a_response_no_request_accounts_for_is_a_loud_failure():
+    """The other half of dropping the FIFO. Matching on the issue number means
+    a response can fail to match — a duplicate, or one for a trid this NIU
+    never used — and there is nothing sensible to return for it. tt-sim's
+    established answer for a case it cannot model is to say so."""
+    from tt_sim.network.tt_noc import NUI, NoCResponseError
+
+    with _env("1"):
+        device, tile, dram = _wormhole_worker_and_dram()
+    nui = tile.noc0_router
+    stray = NUI.NoCDataRequest(
+        None,
+        NUI.NoCDataRequest.DataRequestAction.RESPONSE_READ,
+        32,
+        dram.noc0_router.id_pair,
+        3,
+        bytes(32),
+        seq=99,
+    )
+    nui.transmit(stray)
+    with pytest.raises(NoCResponseError, match="matches no outstanding request"):
+        device.run(4)
 
 
 def test_a_tile_sleeps_through_a_packets_flight_rather_than_spinning():

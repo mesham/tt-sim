@@ -31,6 +31,7 @@ from tt_sim.perf.costs import (
     BOUNDS,
     ENTRY_KEYS,
     PROVENANCE_RANK,
+    PROVENANCE_REQUIRING_DERIVATION,
     PROVENANCE_REQUIRING_NOTE,
     PROVENANCE_REQUIRING_SOURCE,
     CostTable,
@@ -184,14 +185,58 @@ def test_unknown_entries_carry_no_numbers():
 
 
 def test_derived_entries_show_their_working():
-    tensix, _ = _load_raw()
-    for unit_name, unit in tensix["units"].items():
-        for name, entry in (unit.get("instructions") or {}).items():
-            if entry["provenance"] != "isa_doc_derived":
+    """Both derived ranks, everywhere they appear. A derived number is only
+    reviewable if the arithmetic is written down — which is the whole
+    difference between ``isa_doc_derived`` / ``vendor_source_derived`` and a
+    number somebody arrived at privately."""
+    for raw in _load_raw():
+        for path, node in _walk_provenanced(raw):
+            if node["provenance"] not in PROVENANCE_REQUIRING_DERIVATION:
                 continue
-            assert entry.get("derivation"), (
-                f"{unit_name}.{name} is derived but does not say from what"
+            where = ".".join(path) or "<root>"
+            assert node.get("derivation"), (
+                f"{where} is derived but does not say from what"
             )
+
+
+def test_vendor_derived_entries_are_exactly_the_ones_we_expect():
+    """``vendor_source_derived`` is arithmetic on vendor numbers — below a
+    published figure, above a guess. It exists for exactly one entry and adding
+    a second must be as deliberate as adding an ``estimated`` one, so the list
+    is here rather than inferred. Every one must also show its working, which
+    :func:`test_derived_entries_show_their_working` enforces."""
+    expected = {"arch_overrides.wormhole.dram.access_latency"}
+    found = set()
+    for raw in _load_raw():
+        for path, node in _walk_provenanced(raw):
+            if node["provenance"] == "vendor_source_derived":
+                found.add(".".join(path))
+    assert found == expected
+
+
+def test_the_dram_latency_is_exactly_its_own_derivation():
+    """The one number in these files that is neither published nor guessed, so
+    the arithmetic is checked rather than described: DRAM access latency is the
+    measured DRAM end-to-end figure minus the measured L1-remote-read one, both
+    from the same vendor table, which is why the NoC round trip and the issuing
+    core's path cancel out of it. If either reference figure is corrected, this
+    fails instead of drifting."""
+    _, units = _load_raw()
+    reference = units["dram"]["end_to_end_reference"]
+    derived = units["arch_overrides"]["wormhole"]["dram"]["access_latency"]
+    assert (
+        derived["cycles"]
+        == reference["dram_cycles"]["wormhole"]
+        - reference["l1_remote_read_cycles"]["wormhole"]
+    )
+    # A floor, not an equals sign: the L1 endpoint's own service time is folded
+    # out by the subtraction and is not negative.
+    assert derived["bound"] == "at_least"
+    # And Blackhole stays a gap, on purpose: the base entry is ``unknown`` and
+    # the Blackhole override does not quietly supply a number. See its note.
+    assert units["dram"]["access_latency"]["provenance"] == "unknown"
+    blackhole_dram = units["arch_overrides"]["blackhole"].get("dram") or {}
+    assert "access_latency" not in blackhole_dram
 
 
 def test_no_entry_is_an_uncalibrated_guess_without_saying_so():
@@ -330,14 +375,29 @@ def test_riscv_pipeline_costs_are_the_published_ones():
     assert rv["store_throughput"]["l1_period_cycles"] == 5
 
 
-def test_dram_latency_is_an_honest_gap_not_an_invented_constant():
-    dram = load_costs("wormhole").section("dram")
-    assert dram["access_latency"]["provenance"] == "unknown"
-    assert "cycles" not in dram["access_latency"]
-    # The end-to-end measurement is kept, but as a calibration target under a
-    # different key so it cannot be mistaken for the DRAM term.
-    assert dram["end_to_end_reference"]["provenance"] == "vendor_source"
-    assert dram["end_to_end_reference"]["dram_cycles"]["wormhole"] == 358
+def test_dram_latency_is_derived_where_it_can_be_and_a_gap_where_it_cannot():
+    """This entry used to be ``unknown`` on both arches, and the half that
+    changed is the interesting half. Wormhole's is now
+    ``vendor_source_derived`` — arithmetic on two vendor measurements, shown in
+    full — and Blackhole's is still a gap, because the same subtraction there
+    rests on a row set that fails its own consistency check. The rank matters
+    as much as the number: a reader must be able to tell at a glance that
+    nobody published 99."""
+    wormhole = load_costs("wormhole").section("dram")
+    assert wormhole["access_latency"]["provenance"] == "vendor_source_derived"
+    assert wormhole["access_latency"]["cycles"] == 99
+    assert wormhole["access_latency"]["derivation"]
+
+    blackhole = load_costs("blackhole").section("dram")
+    assert blackhole["access_latency"]["provenance"] == "unknown"
+    assert "cycles" not in blackhole["access_latency"]
+
+    # The end-to-end measurements are kept under their own key, still not to be
+    # plugged in as a DRAM latency: 358 folds in the NoC round trip and the
+    # issuing core's path, and it is the *difference* of two of these rows —
+    # not any single one of them — that the derivation above uses.
+    assert wormhole["end_to_end_reference"]["provenance"] == "vendor_source"
+    assert wormhole["end_to_end_reference"]["dram_cycles"]["wormhole"] == 358
 
 
 def test_mover_records_ideal_and_contended_rates():
@@ -395,11 +455,28 @@ def test_arch_differences_in_the_non_tensix_units():
     # Hop latency is unchanged between the arches; only the flit width moved.
     assert wh.section("noc")["hops"]["router_to_router"]["latency"] == 9
     assert bh.section("noc")["hops"]["router_to_router"]["latency"] == 9
+    # Blackhole's link bandwidth in GB/s is deliberately not carried over: the
+    # override marks it ``unknown`` rather than scaling Wormhole's 32.
+    assert bh.section("noc")["link_bandwidth_gb_per_s"]["provenance"] == "unknown"
     assert wh.section("riscv")["integer_unit"]["branch_mispredict_bubble"] == 2
     assert bh.section("riscv")["integer_unit"]["branch_mispredict_bubble"] == 4
     assert wh.section("riscv")["integer_unit"]["multiply"] == 2
     assert bh.section("riscv")["integer_unit"]["multiply"] == 1
     assert bh.section("riscv")["pipeline"]["stages"][1] == "ex1"
+
+
+def test_the_nocs_two_bandwidth_figures_are_one_fact_and_agree():
+    """``flit_bits`` at one flit per cycle and ``link_bandwidth_gb_per_s`` are
+    the same number written two ways, and the file records both without either
+    citing the other: 256 bits per cycle at the ``clock`` section's 1 GHz is
+    exactly 32 GB/s. Cheap, and it is the check that says the flit rate is safe
+    to spend as bandwidth (``tt_sim/perf/model.py``'s ``NocCostModel``) rather
+    than being a packet-format detail that happens to be in the same block."""
+    wh = load_costs("wormhole")
+    bytes_per_cycle = wh.section("noc")["flit_bits"] / 8
+    assert wh.section("noc")["hops"]["niu_to_router"]["throughput_flits_per_cycle"] == 1
+    ghz = wh.section("clock")["wormhole"]["frequency_mhz"] / 1000
+    assert bytes_per_cycle * ghz == wh.section("noc")["link_bandwidth_gb_per_s"]
 
 
 def test_loading_one_arch_does_not_perturb_the_other():
@@ -535,6 +612,27 @@ EXPECTED_CONSUMERS = {
     # ``noc_hop_count``; the table only supplies the two constants.
     "tt_sim/network/tt_noc.py",
     "tt_sim/network/noc_cost_model_test.py",
+    # DRAM, and the first cost charged at an *endpoint* rather than to a unit
+    # or to a flight: ``DRAMEndpointNUI`` holds an arriving request for the
+    # device's own service time before the channel answers it. Separate from
+    # the NoC consumer above on purpose — a flight time is a property of the
+    # distance, this is a property of the device, and keeping them apart is
+    # what lets the number be derived without double-counting the hops.
+    "tt_sim/device/tiles.py",
+    "tt_sim/device/dram_cost_model_test.py",
+    # The trace writers, and the only consumers that read the tables to
+    # *describe* a run rather than to charge it: nothing here can move a cycle.
+    # They ask ``cost_model_enabled()`` one question — which timing regime
+    # produced this trace — so that a duration can say whether it is a modelled
+    # figure or the flat 1 an un-modelled unit really did retire in. That
+    # distinction is the whole reason they appear here: a writer that guessed
+    # would fabricate performance data, which is worse than emitting none.
+    "tt_sim/trace/writers/perfetto.py",
+    "tt_sim/trace/writers/noc_parquet.py",
+    # Prose only — ``ComputeEvent.duration`` documents which table its cycles
+    # came from. No import; the event is a plain dataclass field populated by
+    # ``TensixBackendUnit.clock_tick``, which is already on this list.
+    "tt_sim/trace/events.py",
 }
 
 #: The Tensix backend units that are *not* wired to the tables, and why. Kept
