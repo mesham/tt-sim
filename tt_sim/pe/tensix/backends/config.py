@@ -61,6 +61,31 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         super().__init__(
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
+        # NOT wired to the cycle-cost tables (Phase 5 of
+        # docs/plans/event-driven-pump.md), and this is the one unit whose
+        # omission is a finding rather than a scoping decision.
+        #
+        # Both arches publish this unit's table in full, and everything tt-sim
+        # implements is one cycle except RDCFG, which the Wormhole page gives
+        # ">= 2". Charging that documented 2 makes `matmulblock` compute the
+        # wrong answer: the occupancy delays five SETC16s on the math thread
+        # and four WRCFGs on the pack thread by one cycle each, and something
+        # downstream reads config that has not landed yet. Refusing the issue
+        # outright (TensixBackendUnit.is_occupied) rather than deferring it
+        # does not fix it either, so this is not the frontend reordering one
+        # thread's stream -- it is a missing ordering guarantee between a
+        # config write and the units that read it, of the kind the ISA docs'
+        # config-visibility rules and the LLK's "WRCFG takes 2 cycles" padding
+        # both exist to express. That is worth fixing on its own terms, and it
+        # is worth *not* hiding by charging RDCFG a 1 the docs do not give it.
+        #
+        # The other reason this unit is a poor fit for a per-opcode occupancy:
+        # its real constraints are cross-thread. SETC16 is one per thread per
+        # cycle, RMWCIB needs neither RDCFG nor WRCFG issued in the previous
+        # cycle by *any* thread, and Blackhole folds everything but SETC16
+        # into one shared IPC group. tt-sim models the first two in
+        # ``issueInstruction`` / ``prev_cycle_setc16_or_wrcfg``; none of them
+        # is expressible as a number attached to an opcode.
 
     def is_clock_idle(self):
         # The override also clears prev_cycle_setc16_or_wrcfg, which is
@@ -74,6 +99,12 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         super().clock_tick(cycle_num)
 
     def issueInstruction(self, instruction, from_thread):
+        # An occupied unit takes nothing, however many slots the per-opcode
+        # rules below would otherwise allow. See TensixBackendUnit.is_occupied
+        # -- this is the unit where deferring instead of refusing was shown to
+        # reorder a thread's program.
+        if self.is_occupied():
+            return False
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         instruction_name = instruction_info["name"]
         if instruction_name == "SETC16":

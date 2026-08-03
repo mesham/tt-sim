@@ -494,17 +494,65 @@ def test_unsourced_lists_exactly_the_entries_without_numbers_we_expect():
 #: Every module outside ``tt_sim/perf/`` that may name the cost tables. This
 #: list started empty — the tables were dead data by design until Phase 5 of
 #: ``docs/plans/event-driven-pump.md`` — and it grows one unit at a time,
-#: deliberately. The matrix unit was the first, and everything it needed lives
-#: in ``tt_sim/perf/model.py``, so a second unit should add itself here rather
-#: than grow its own reading of the YAML.
+#: deliberately. The matrix unit was the first, and everything any of them
+#: needs lives in ``tt_sim/perf/model.py``, so the next unit adds itself here
+#: rather than growing its own reading of the YAML.
 EXPECTED_CONSUMERS = {
     # The FPU: MVMUL and friends charged the table's occupancy, fidelity-phase
     # aware. See MatrixUnit.instruction_occupancy.
     "tt_sim/pe/tensix/backends/matrix.py",
+    # The SFPU. Best-sourced unit in the file (a published latency for all 42
+    # opcodes) and every one of them is a 1-cycle *occupancy*: the sub-units
+    # are pipelined, so latency 2 is time-to-result, not time-held.
+    "tt_sim/pe/tensix/backends/vector.py",
+    # ThCon. The only unit whose ISA-doc table is already an occupancy table,
+    # and the first place in tt-sim where an op costs more than one cycle.
+    "tt_sim/pe/tensix/backends/thcon.py",
+    # The packers: PACR's documented one-cycle *issue* cost only. The drain has
+    # no published figure and is charged nothing.
+    "tt_sim/pe/tensix/backends/packer.py",
+    # The sync unit: one cycle throughout; the real costs are wait-gate stalls,
+    # which are not occupancy.
+    "tt_sim/pe/tensix/backends/sync.py",
     # Only mentions the model in prose: the ``cost_model`` attribute and the
-    # ``instruction_occupancy`` hook every unit inherits.
+    # ``instruction_occupancy`` hook every unit inherits, whose default is now
+    # the straight table lookup the five constant-cost units above rely on.
     "tt_sim/pe/tensix/backends/backend_base.py",
     "tt_sim/pe/tensix/matrix_cost_model_test.py",
+    "tt_sim/pe/tensix/backend_cost_model_test.py",
+    # The baby RISC-V cores' load/store path — the first consumer outside the
+    # Tensix coprocessor, and the first to read the tables as something other
+    # than a per-opcode occupancy: ``riscv.load_latency`` is a latency table
+    # driving a load-use scoreboard, not a table of cycles a unit is held.
+    # ``rv32.py``, ``babyriscv.py`` and ``cost_test.py`` deliberately do not
+    # appear here; they reach the model only through ``tt_sim/pe/rv/cost.py``,
+    # which is the single point where the RV side names the tables at all.
+    "tt_sim/pe/rv/cost.py",
+}
+
+#: The Tensix backend units that are *not* wired to the tables, and why. Kept
+#: next to the allow-list so "which units are costed" is one thing to read.
+UNWIRED_UNITS = {
+    # Owned by concurrent work on its row-stride path at the time this landed;
+    # its cost is also the one genuinely non-constant entry in the file (a
+    # ">= 2" address phase plus a throttle-mode-dependent data phase), so it
+    # wants more than the flat lookup the other units use.
+    "UNPACK": "tt_sim/pe/tensix/backends/unpacker.py",
+    # The one omission that is a finding rather than a scoping decision.
+    # RDCFG's documented ">= 2" is the only cost in this unit's table above one
+    # cycle, and charging it makes `matmulblock` compute a wrong answer -- a
+    # config write lands one cycle late and something reads it stale. See the
+    # comment in config.py; the divergence is tt-sim's, not the table's, and
+    # charging RDCFG a 1 the docs do not give it would only hide it.
+    "CFG": "tt_sim/pe/tensix/backends/config.py",
+    # XMOV's 1-cycle entry is the issue cost only; the transfer duration is
+    # bandwidth-derived and lives in tt_sim/perf/unit_costs.yaml under
+    # ``mover``, which nothing consumes yet.
+    "XMOV": "tt_sim/pe/tensix/backends/mover.py",
+    # Every Miscellaneous Unit op is one cycle by one blanket sentence, so
+    # wiring it would charge nothing; left out to keep the allow-list honest
+    # about which units the model has actually been reasoned about for.
+    "TDMA": "tt_sim/pe/tensix/backends/misc.py",
 }
 
 
@@ -533,6 +581,21 @@ def test_the_consumers_only_reach_the_tables_through_the_model():
     for relative in EXPECTED_CONSUMERS:
         text = (_REPO_ROOT / relative).read_text()
         assert "tt_sim.perf.costs" not in text, relative
+
+
+def test_every_unit_with_a_backend_is_either_wired_or_named_as_unwired():
+    """No unit gets to be neither. The table names a ``backend`` file for every
+    unit that has one, so "which units read their own costs" is answerable from
+    the data rather than from memory, and dropping a unit off both lists — the
+    way a partial rollout goes quietly stale — fails here."""
+    unwired = set(UNWIRED_UNITS.values())
+    assert not (unwired & EXPECTED_CONSUMERS)
+    for name, unit in load_costs("blackhole").units.items():
+        if unit.backend is None:
+            assert name == "NONE", name  # the only unit with no backend at all
+            continue
+        assert (_REPO_ROOT / unit.backend).exists(), unit.backend
+        assert unit.backend in EXPECTED_CONSUMERS or unit.backend in unwired, name
 
 
 def test_raw_tables_exposes_the_unresolved_yaml():

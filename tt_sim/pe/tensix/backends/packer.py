@@ -8,6 +8,7 @@ from tt_sim.pe.tensix.backends.backend_base import (
     TensixBackendUnit,
 )
 from tt_sim.pe.tensix.util import DataFormatConversions
+from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes
 
@@ -54,6 +55,19 @@ class PackerUnit(TensixBackendUnit):
     def __init__(self, backend):
         self.packerI = [PackerUnit.PackerI() for i in range(4)]
         super().__init__(backend, PackerUnit.OPCODE_TO_HANDLER, "Packer")
+        # Phase 5 of docs/plans/event-driven-pump.md. ``None`` unless
+        # TT_SIM_COST_MODEL is set, and even then it charges only what the ISA
+        # docs actually publish for this unit: PACR's *issue* cost of one cycle
+        # ("at most one of these instructions can be started per cycle"). The
+        # time the packers take to drain the work afterwards has no published
+        # per-op figure anywhere -- not the ISA docs, not tt-metal, not the LLK
+        # -- so it is charged nothing rather than estimated. That is the
+        # largest deliberate gap in the cost tables; see the PACK unit's note
+        # in tensix_instruction_costs.yaml and "What is missing" in
+        # docs/plans/cost-model.md.
+        self.cost_model = unit_cost_model(
+            "PACK", "blackhole" if backend.blackhole else "wormhole"
+        )
 
     def getIPackerConfig(self, i, s, one_id, two_id=0):
         if s == 2:

@@ -8,8 +8,15 @@
 # ``tt_sim/arch/profile.py`` -- so this file lives next to the loader instead.
 # Both files share one schema and one loader (``tt_sim/perf/costs.py``).
 #
-# NOTHING CONSUMES THIS YET. See docs/plans/cost-model.md for the schema, the
-# provenance convention, and what calibration would take.
+# CONSUMED, so far, only by the ``riscv`` section: the baby cores' load/store
+# path reads it through tt_sim/perf/model.py -> tt_sim/pe/rv/cost.py, behind
+# TT_SIM_COST_MODEL. Note what that consumer does *not* do -- the load-latency
+# table is spent as a load-use interlock, not as occupancy, because the ISA
+# docs define it as "N - 1 independent instructions need to follow the load if
+# the latency is to be entirely hidden". The ``noc``, ``dram``, ``mover`` and
+# ``l1`` sections still have no consumer at all; the NoC hop model is the
+# ranked next one. See docs/plans/cost-model.md for the schema, the provenance
+# convention, and what calibration would take.
 #
 # The provenance vocabulary and the cost-value form (int, or a mapping with
 # ``cycles`` plus ``bound`` in {exact, at_least, at_most, approximate, range})

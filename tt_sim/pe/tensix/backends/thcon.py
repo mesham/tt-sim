@@ -2,6 +2,7 @@ from enum import IntEnum
 
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.registers import SrcRegister
+from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.bits import get_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
@@ -57,6 +58,24 @@ class ScalarUnit(TensixBackendUnit):
         self.stalled_condition = 0
         self.stalled_thread = 0
         super().__init__(backend, ScalarUnit.OPCODE_TO_HANDLER, "Scalar")
+        # Phase 5 of docs/plans/event-driven-pump.md. ``None`` unless
+        # TT_SIM_COST_MODEL is set. ThCon is the only unit whose ISA-doc table
+        # is *already* an occupancy table ("Number of cycles required for
+        # execution") and the first in tt-sim where an instruction costs more
+        # than one cycle: the GPR arithmetic ops are "3 or 4", the load/store
+        # ops ">= 3" and ATCAS / ATINCGETPTR ">= 15". Charged at the low end of
+        # every bound (tt_sim/perf/model.py), so a modelled run is a floor.
+        #
+        # It is only the *base* drain that the resulting ``busy_until`` gates.
+        # A ThCon stalled on FLUSHDMA / ATCAS / a Src bank re-evaluates its
+        # stall every cycle through the override below, which never reaches
+        # ``super().clock_tick`` — deliberately, since that polling is the unit
+        # waiting on somebody else rather than retiring its own instruction,
+        # and the ">= 2" the table gives FLUSHDMA is explicitly a floor under
+        # exactly that wait.
+        self.cost_model = unit_cost_model(
+            "THCON", "blackhole" if backend.blackhole else "wormhole"
+        )
 
     def issueInstruction(self, instruction, from_thread):
         if self.stalled:

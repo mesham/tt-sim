@@ -129,6 +129,14 @@ class RV32I(ProcessingElement):
                 registers.append(Register(4))
             registers.append(Register(4))  # fcsr
 
+        # A ``tt_sim.pe.rv.cost.RiscvCostState`` once a core opts into the
+        # cycle-cost tables *and* ``TT_SIM_COST_MODEL`` is set; ``None``
+        # otherwise, which is the default. ``clock_tick`` reads it once per
+        # instruction, so the switched-off cost is one attribute read and one
+        # predicted branch on the hottest path in the simulator. Only the baby
+        # cores set it (they are the ones with an architecture and a memory
+        # map to classify addresses against); see ``tt_sim/pe/rv/cost.py``.
+        self.rv_cost = None
         self.register_file = RegisterFile(registers, REGISTER_NAME_MAPPING)
         # PC and next-PC are touched several times per simulated cycle; resolve
         # them once instead of going through the name map every time.
@@ -170,6 +178,21 @@ class RV32I(ProcessingElement):
         nextpc.write(conv_to_bytes(pc_val + 4))
         self.visible_memory.caller_context = (self.unit_id, self.core_label, pc_val)
 
+        # Fetch once per cycle and hand the word to every ISA in the list —
+        # each one used to re-read it from memory, which cost a full memory-map
+        # traversal per ISA tried.
+        instr = int.from_bytes(self.visible_memory.read(pc_val, 4), "little")
+
+        # Memory-stall back-pressure (ROADMAP section I). Consulted before any
+        # tracing or snoop output is produced, because a stalled cycle must
+        # look like a cycle in which this core did nothing at all: no
+        # instruction retires, the PC does not advance, and the same word is
+        # re-offered on a later cycle. ``rv_cost`` is ``None`` unless
+        # ``TT_SIM_COST_MODEL`` is set, so this is one attribute read otherwise.
+        cost = self.rv_cost
+        if cost is not None and not cost.can_issue(instr, cycle_num, register_file):
+            return
+
         # The InstrEvent below reports which GPR the instruction wrote, which
         # needs a recording hook on every Register.write — the hottest call in
         # the simulator. Install it only while a subscriber is listening, and
@@ -184,11 +207,6 @@ class RV32I(ProcessingElement):
 
         if self.snoop:
             print(f"[{self.core_id}-> {cycle_num}][{hex(pc_val)}] ", end="")
-
-        # Fetch once per cycle and hand the word to every ISA in the list —
-        # each one used to re-read it from memory, which cost a full memory-map
-        # traversal per ISA tried.
-        instr = int.from_bytes(self.visible_memory.read(pc_val, 4), "little")
 
         actioned = False
         pe_stall = False
@@ -251,6 +269,8 @@ class RV32I(ProcessingElement):
         pc.write(conv_to_bytes(self.get_start_address()))
 
         self.unknown_instructions = 0
+        if self.rv_cost is not None:
+            self.rv_cost.reset()
 
     def start(self):
         self.initialise_core()

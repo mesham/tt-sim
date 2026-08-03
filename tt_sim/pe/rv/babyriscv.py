@@ -1,6 +1,7 @@
 from enum import IntEnum
 
 from tt_sim.memory.memory import MemorySpace
+from tt_sim.pe.rv.cost import make_cost_state
 from tt_sim.pe.rv.isa.a_isa import RV_ZAAMO_ISA
 from tt_sim.pe.rv.isa.b_isa import RV_ZBA_ISA, RV_ZBB_ISA
 from tt_sim.pe.rv.isa.guard_isa import RV_F_GUARD_ISA, RV_V_GUARD_ISA
@@ -63,6 +64,7 @@ class BabyRISCV(RV32IM_TT):
         reset_pc_debug_regs=False,
         start_address=None,
         isa_extensions=(),
+        arch=None,
     ):
         # Blackhole moves the NCRISC/TRISC reset-PC override out of the Tensix
         # backend config (Wormhole) into the RISCV_DEBUG_REG tile-control block.
@@ -110,6 +112,11 @@ class BabyRISCV(RV32IM_TT):
             fp_registers=fp_registers,
         )
         self.core_label = core_type.name
+        # The cycle-cost model for the load/store path. ``None`` unless the
+        # caller names an architecture *and* ``TT_SIM_COST_MODEL`` is set, so
+        # cores built outside a device (driver/simple, the ISA unit tests) are
+        # never charged. See tt_sim/pe/rv/cost.py.
+        self.rv_cost = make_cost_state(arch)
 
     def get_start_address(self):
         """

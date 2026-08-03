@@ -1,6 +1,7 @@
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
+from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
@@ -36,12 +37,27 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
 
     def __init__(self, backend):
         super().__init__(backend, TensixSyncUnit.OPCODE_TO_HANDLER, "Sync")
+        # Phase 5 of docs/plans/event-driven-pump.md. ``None`` unless
+        # TT_SIM_COST_MODEL is set. Every Sync Unit instruction is one cycle in
+        # both arches' tables, so this charges nothing new -- the interesting
+        # costs of this unit are not occupancy at all: SEMWAIT / STALLWAIT
+        # "consist purely of passing them over to the Wait Gate", so the wait
+        # is unbounded and belongs to the gate, and ATGETM's stall on a held
+        # mutex is likewise a gate cost. tt-sim already models both
+        # functionally.
+        self.cost_model = unit_cost_model(
+            "SYNC", "blackhole" if backend.blackhole else "wormhole"
+        )
         self.semaphores = [TensixSyncUnit.TTSemaphore() for i in range(8)]
         # 7 mutexes, but index 1 is ignored
         self.mutexes = [TensixSyncUnit.TTMutex() for i in range(8)]
         self.blocked_mutex = []
 
     def issueInstruction(self, instruction, from_thread):
+        # An occupied unit takes nothing; see TensixBackendUnit.is_occupied.
+        # No Sync Unit op is costed above one cycle, so this never fires today.
+        if self.is_occupied():
+            return False
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         instruction_name = instruction_info["name"]
         if instruction_name == "ATGEM" or instruction_name == "ATRELM":
@@ -52,6 +68,24 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                     instruction_n_info = TensixInstructionDecoder.getInstructionInfo(
                         instr
                     )
+                    # Only the mutex ops name a mutex. The queue can also hold
+                    # one op that does not (the else branch below admits one
+                    # while the queue holds nothing else), and reading
+                    # ``mutex_index`` off that raised KeyError -- found by the
+                    # RISC-V cost model, which delays the drain enough for a
+                    # mixed queue to occur on ``loopback``. A queued SEMWAIT
+                    # cannot conflict over a mutex it does not reference, so
+                    # skipping it is the correct answer as well as the safe
+                    # one. Keyed off the presence of the field rather than off
+                    # the opcode name, because the branch above tests for
+                    # "ATGEM" while the instruction table calls it "ATGETM" --
+                    # a separate pre-existing bug, and one whose fix changes
+                    # issue behaviour with the cost model off, so it is not
+                    # made here.
+                    if "mutex_index" not in (
+                        instruction_n_info.get("instr_args") or {}
+                    ):
+                        continue
                     if instruction_n_info["instr_args"]["mutex_index"] == index:
                         # Same mutex referenced, do not issue this cycle
                         return False

@@ -224,6 +224,7 @@ class EthTile(TTDeviceTile):
             [self.eth_memory, self.erisc_mem],
             snoop=erisc_snoop,
             isa_extensions=profile.baby_core_isa_extensions,
+            arch=profile.name,
         )
 
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
@@ -385,6 +386,7 @@ class TensixTile(TTDeviceTile):
             [self.tensix_mem, self.brisc0_mem],
             snoop=brisc_snoop,
             isa_extensions=profile.baby_core_isa_extensions,
+            arch=profile.name,
         )
 
         # Create ncrisc CPU
@@ -412,6 +414,7 @@ class TensixTile(TTDeviceTile):
             reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
             start_address=profile.ncrisc_firmware_base,
             isa_extensions=profile.baby_core_isa_extensions,
+            arch=profile.name,
         )
 
         # Common addresses for TRISC cores
@@ -454,6 +457,7 @@ class TensixTile(TTDeviceTile):
             reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
             start_address=profile.trisc0_firmware_base,
             isa_extensions=profile.baby_core_isa_extensions,
+            arch=profile.name,
         )
 
         # Create trisc1 CPU
@@ -485,6 +489,7 @@ class TensixTile(TTDeviceTile):
             reset_pc_debug_regs=profile.baby_core_reset_pc_debug_regs,
             start_address=profile.trisc1_firmware_base,
             isa_extensions=profile.baby_core_isa_extensions,
+            arch=profile.name,
         )
 
         # Create trisc2 CPU
@@ -519,6 +524,7 @@ class TensixTile(TTDeviceTile):
             isa_extensions=(
                 profile.baby_core_isa_extensions + profile.trisc2_isa_extensions
             ),
+            arch=profile.name,
         )
 
         # Set addressable memory for Tensix co-processor

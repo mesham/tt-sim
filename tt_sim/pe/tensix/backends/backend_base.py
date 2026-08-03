@@ -90,6 +90,8 @@ class TensixBackendUnit(Clockable, ABC):
         # The default issuing of instructions here, which applies to most
         # units, is one instruction per cycle. Can override for specific
         # units with more complex behaviour
+        if self.is_occupied():
+            return False
         if len(self.next_instruction) == 0:
             self.next_instruction.append(
                 (
@@ -149,21 +151,60 @@ class TensixBackendUnit(Clockable, ABC):
         if cycles > 1:
             self.busy_until = cycle_num + cycles
 
+    def is_occupied(self):
+        """True while a multi-cycle instruction still holds this unit.
+
+        Always False with the cost model off, because nothing arms
+        :attr:`busy_until` — so this costs one attribute read per issue and
+        changes nothing.
+
+        Why issue is refused rather than queued, which is the whole reason this
+        exists: tt-sim's frontend treats an instruction as *issued* the moment
+        a unit accepts it, and the thread moves on in the same cycle. Phase 4's
+        ``occupy_for`` stopped an occupied unit *draining* its queue but left it
+        *accepting* into one — so a parked instruction would retire after the
+        thread's next instruction had already run in a different, idle unit.
+        That is a reordering of a single thread's program, and it is not a
+        theoretical hazard: it was found while charging the config unit's
+        documented ">= 2" for ``RDCFG``, which delays five ``SETC16``s on the
+        math thread and four ``WRCFG``s on the pack thread by a cycle each.
+        (Refusing did *not* fix that particular failure — see the comment in
+        ``config.py`` for what it turned out to be — but the reordering it
+        removes is real and would have bitten the next unit instead.)
+
+        Refusing is also the closer reading of the ISA docs, which say of the
+        Scalar Unit that the issuing thread "is unable to start any further
+        instruction (in any unit)" until the current one completes. This models
+        the weaker half of that — the thread cannot start another instruction
+        *in this unit* — which is a floor on the stall, in the same direction
+        as charging bounded costs at their low end.
+        """
+        return self.busy_until is not None
+
     def instruction_occupancy(self, instruction_name, issue_thread):
         """Cycles ``instruction_name`` occupies this unit, or ``None``.
 
-        Only consulted when :attr:`cost_model` is set, and only overridden by
+        Only consulted when :attr:`cost_model` is set, which happens only for
         units that have been wired to the cycle-cost tables (Phase 5 of
-        ``docs/plans/event-driven-pump.md``); the matrix unit is the first.
-        ``None`` means "no opinion" and leaves the same-cycle retire alone,
-        which is deliberately what an untabulated opcode gets — see
-        ``tt_sim/perf/model.py`` for why that choice is made once, there.
+        ``docs/plans/event-driven-pump.md``) *and* only when
+        ``TT_SIM_COST_MODEL`` is truthy — so an unwired unit reads one ``None``
+        attribute per instruction and nothing else.
+
+        The default is the straight table lookup, which is the right answer for
+        every unit whose published cost is a per-opcode constant (SFPU, ThCon,
+        packer, sync). ``None`` means "no opinion" and leaves the same-cycle
+        retire alone, which is deliberately what an untabulated opcode gets —
+        see ``tt_sim/perf/model.py`` for why that choice is made once, there.
+        Only a unit whose cost is a *function* of state needs an override; the
+        matrix unit is the one such case, because its fidelity-scaled ops are
+        costed against the phase they run at.
 
         Called *before* the handler runs, because occupancy is a property of
         issue and because a handler may advance the state the cost depends on
         (the matrix unit's ``ADDR_MOD`` step moves the fidelity phase on).
         """
-        return None
+        model = self.cost_model
+        return None if model is None else model.occupancy(instruction_name)
 
     def next_wake_cycle(self, cycle_num):
         # Identical to Clockable's default; spelled out because this is the

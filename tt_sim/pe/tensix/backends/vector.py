@@ -1,6 +1,7 @@
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
 from tt_sim.pe.tensix.registers import LReg
 from tt_sim.pe.tensix.util import DataFormatConversions
+from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.bits import extract_bits, get_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_float, conv_to_int32, conv_to_uint32
 
@@ -484,6 +485,18 @@ class VectorUnit(TensixBackendUnit):
         self.laneConfig = [0] * 32
         self.loadMacroConfig = [VectorUnit.LoadMacroConfig() for i in range(32)]
         super().__init__(backend, VectorUnit.OPCODE_TO_HANDLER, "Vector")
+        # Phase 5 of docs/plans/event-driven-pump.md. ``None`` unless
+        # TT_SIM_COST_MODEL is set. The SFPU's table is the best-sourced in the
+        # file -- the ISA docs publish a latency for all 42 opcodes -- and its
+        # answer is that *occupancy* is 1 cycle for every one of them: the five
+        # sub-units are pipelined, so the 2-cycle latency of the arithmetic and
+        # LUT ops is time-to-result, not time-the-unit-is-held. The unit "can
+        # only accept one instruction per cycle from the outside world", which
+        # is exactly tt-sim's issue behaviour, so this charges nothing new.
+        # See docs/plans/cost-model.md ("The first consumer").
+        self.cost_model = unit_cost_model(
+            "SFPU", "blackhole" if backend.blackhole else "wormhole"
+        )
 
     def laneConfigValue(self, lane, key):
         assert len(key) == 2

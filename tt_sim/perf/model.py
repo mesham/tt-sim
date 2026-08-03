@@ -211,3 +211,218 @@ def unit_cost_model(unit_name, arch):
     if key not in _UNIT_MODELS:
         _UNIT_MODELS[key] = UnitCostModel(load_costs(arch).unit(unit_name), arch)
     return _UNIT_MODELS[key]
+
+
+# ---------------------------------------------------------------------------
+# The baby RISC-V cores.
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is the Tensix coprocessor, whose cost is a
+# per-opcode occupancy. The baby cores are a different shape and the tables say
+# so: ``riscv.load_latency`` is a *latency* table keyed by address region, and
+# the ISA docs are explicit about what that means —
+#
+#   "A latency of N cycles means that N - 1 independent instructions need to
+#    follow the load if the latency is to be entirely hidden."
+#
+# So a load's cost is not occupancy at all. It is a scoreboard entry: the core
+# is single-issue and in-order, it keeps running after the load, and it stalls
+# only when something *reads the loaded register* too soon. That is the same
+# distinction the SFPU forced (latency 2 is time-to-result, not time-held), read
+# off the opposite kind of table, and it is what ROADMAP section I asks for by
+# name: "memory-stall back-pressure on L1 / NoC reads".
+#
+# What *is* occupancy for these cores is the throughput half — "at most one
+# store to L1 every five cycles" — and the integer unit's own multiply/divide
+# blocking. Those are charged as occupancy; the load table is charged as a
+# scoreboard.
+
+#: Canonical address regions of the load-latency table. Integers rather than
+#: strings because this is indexed once per RISC-V load, on the hottest path in
+#: the simulator. The arch-specific YAML keys are mapped onto them below —
+#: Wormhole and Blackhole group the regions differently (Blackhole moves the
+#: TDMA registers from the ">= 7" row to the ">= 4" row) and the consumer
+#: should not have to know that.
+RV_REGION_L1 = 0
+RV_REGION_LOCAL_DATA_RAM = 1
+RV_REGION_MAILBOX_GROUP = 2
+RV_REGION_TENSIX_GPR_CFG = 3
+RV_REGION_TDMA = 4
+RV_REGION_TILECTRL_PIC_OVERLAY = 5
+#: An address the load-latency table does not name. Charged nothing — see
+#: :data:`RV_UNNAMED_REGIONS` for which blocks these are and why that matters.
+RV_REGION_UNNAMED = 6
+RV_REGION_COUNT = 7
+
+RV_REGION_NAMES = (
+    "l1",
+    "local_data_ram",
+    "mailbox_group",
+    "tensix_gpr_cfg",
+    "tdma",
+    "tilectrl_pic_overlay",
+    "unnamed",
+)
+
+#: The MMIO blocks tt-sim maps into a baby core's address space that the ISA
+#: docs' load-latency table does not have a row for, so nothing can be charged
+#: for them without inventing a number. Documented here rather than in a
+#: comment because one of them is load-bearing: the **NoC NIU registers**
+#: (0xFFB20000 / 0xFFB30000) are the target of every ``noc_async_*_barrier``
+#: poll in every tt-metal dataflow kernel, i.e. the busiest MMIO load in the
+#: tree, and the table's ">= 7" row names "TDMA / tile control / PIC / NoC
+#: *overlay*" — a different block. Charging the overlay's cost to the NIUs
+#: would be a guess dressed up as a citation.
+RV_UNNAMED_REGIONS = (
+    "noc niu registers (0xFFB20000 / 0xFFB30000)",
+    "mop expander config (0xFFB80000)",
+    "riscv instruction ram (0xFFC00000)",
+    "tensix instruction push buffers (0xFFE40000-0xFFE60000)",
+)
+
+#: Which ``riscv.load_latency`` key supplies each canonical region, per arch.
+#: Blackhole's table is not a superset of Wormhole's — it renames rows, splits
+#: L1 into a d-cache hit and a miss, and moves TDMA between groups — so the
+#: mapping is spelled out per arch rather than guessed by name similarity.
+_LOAD_LATENCY_KEYS = {
+    "wormhole": {
+        RV_REGION_L1: "l1",
+        RV_REGION_LOCAL_DATA_RAM: "core_local_data_ram",
+        RV_REGION_MAILBOX_GROUP: "mailboxes_pcbufs_ttsync_semaphores",
+        RV_REGION_TENSIX_GPR_CFG: "tensix_gprs_and_backend_config",
+        RV_REGION_TDMA: "tdma_tilectrl_pic_noc_overlay",
+        RV_REGION_TILECTRL_PIC_OVERLAY: "tdma_tilectrl_pic_noc_overlay",
+    },
+    "blackhole": {
+        # Blackhole has an L0 data cache in front of L1, so the table gives two
+        # numbers: 2 on a hit, >= 8 on a miss. tt-sim models no such cache and
+        # no hit rate is published anywhere, so the pair is treated exactly
+        # like the file's other two-ended costs and charged at its **low end**
+        # — the same "a modelled count is a floor" policy as `at_least` and
+        # `range`. Charging the miss instead would invent a 100 % miss rate,
+        # which is both unsourced and the over-charging direction.
+        RV_REGION_L1: "l1_dcache_hit",
+        RV_REGION_LOCAL_DATA_RAM: "core_local_data_ram",
+        RV_REGION_MAILBOX_GROUP: "mailboxes_pcbufs_ttsync_semaphores",
+        RV_REGION_TENSIX_GPR_CFG: "tensix_gprs_backend_config_tdma",
+        RV_REGION_TDMA: "tensix_gprs_backend_config_tdma",
+        RV_REGION_TILECTRL_PIC_OVERLAY: "tilectrl_pic_noc_overlay",
+    },
+}
+
+
+def _sourced_cycles(raw, provenance):
+    """Cycles to charge for one raw YAML cost value, or ``None``.
+
+    The same three policies as :class:`UnitCostModel`, applied to the plain
+    mappings in ``unit_costs.yaml`` (which the loader leaves as raw dicts
+    rather than turning into :class:`~tt_sim.perf.costs.CostEntry`): an
+    ``unknown`` / ``estimated`` block is charged nothing whatever numbers it
+    carries, and a bound is resolved by :data:`BOUND_POLICY`.
+    """
+    if provenance not in SOURCED_PROVENANCE:
+        return None
+    return modelled_occupancy(CycleCost.parse(raw))
+
+
+class RiscvCostModel:
+    """What the tables say a baby RISC-V core's memory path costs.
+
+    Three separate things, because the ISA docs publish three separate things:
+
+    * :attr:`load_latency` — cycles from a load issuing to its destination
+      register being readable, by address region. A *scoreboard* input, not an
+      occupancy: the core keeps issuing and only stalls on a dependent read.
+    * :attr:`l1_store_period` / :attr:`l1_coalesced_store_period` — the
+      sustained store rate, which *is* an occupancy of the load/store unit.
+    * :attr:`multiply` / the divide costs — the integer unit's own blocking,
+      the one place the docs say outright that "the next instruction cannot
+      enter the unit until the multiply instruction has finished".
+
+    Anything the tables do not name is ``None`` and is charged nothing.
+    """
+
+    def __init__(self, sections, arch):
+        self.arch = arch
+        riscv = sections["riscv"]
+        self._table = riscv.get("load_latency") or {}
+        self.load_latency = self._load_latencies(riscv, arch)
+        #: Cycles a dependent instruction stalls when it issues in the cycle
+        #: right after the load. ``latency - 1``, which is the docs' own
+        #: statement of the table ("N - 1 independent instructions ... to be
+        #: entirely hidden") turned round.
+        self.load_use_stall = tuple(
+            None if c is None else max(c - 1, 0) for c in self.load_latency
+        )
+        stores = riscv.get("store_throughput") or {}
+        store_prov = stores.get("provenance")
+        self.l1_store_period = _sourced_cycles(
+            stores.get("l1_period_cycles"), store_prov
+        )
+        self.l1_coalesced_store_period = _sourced_cycles(
+            stores.get("l1_coalesced_period_cycles"), store_prov
+        )
+        self.other_store_period = _sourced_cycles(
+            stores.get("other_regions_period_cycles"), store_prov
+        )
+        integer = riscv.get("integer_unit") or {}
+        int_prov = integer.get("provenance")
+        self.multiply = _sourced_cycles(integer.get("multiply"), int_prov)
+        self.divide_general = _sourced_cycles(integer.get("divide_general"), int_prov)
+        self.divide_trivial = _sourced_cycles(
+            integer.get("divide_by_zero_or_one"), int_prov
+        )
+        self.divide_int_min = _sourced_cycles(
+            integer.get("divide_int_min_by_minus_one"), int_prov
+        )
+        #: The mispredict penalty is sourced (2-cycle bubble on Wormhole, 4 on
+        #: Blackhole) and deliberately **not** charged: it is a cost per
+        #: *mispredicted* branch and neither the ISA docs nor tt-sim describe
+        #: the predictor, so the number of mispredictions is unknowable. Kept
+        #: reachable so a report can say the gap is the predictor, not the
+        #: table.
+        self.branch_mispredict_observed = _sourced_cycles(
+            integer.get("branch_mispredict_observed"), int_prov
+        )
+
+    @staticmethod
+    def _load_latencies(riscv, arch):
+        table = riscv.get("load_latency") or {}
+        provenance = table.get("provenance")
+        keys = _LOAD_LATENCY_KEYS[arch]
+        latencies = []
+        for region in range(RV_REGION_COUNT):
+            key = keys.get(region)
+            latencies.append(
+                None if key is None else _sourced_cycles(table.get(key), provenance)
+            )
+        return tuple(latencies)
+
+    def load_latency_bound(self, region):
+        """The bound the source printed for ``region``'s latency, or ``None``.
+
+        Every row but the local-data-RAM one is a ``>=``, so a modelled stall
+        is a floor. Exposed for reporting rather than used for charging.
+        """
+        key = _LOAD_LATENCY_KEYS[self.arch].get(region)
+        if key is None:
+            return None
+        cost = CycleCost.parse(self._table.get(key))
+        return None if cost is None else cost.bound
+
+
+_RISCV_MODELS = {}
+
+
+def riscv_cost_model(arch):
+    """The :class:`RiscvCostModel` for ``arch``, cached, or ``None`` when off.
+
+    Same contract as :func:`unit_cost_model`: with ``TT_SIM_COST_MODEL`` unset
+    this returns ``None`` and the caller stores one ``None`` attribute, which
+    is the whole cost of the model on the RV interpreter's hot path.
+    """
+    if arch is None or not cost_model_enabled():
+        return None
+    if arch not in _RISCV_MODELS:
+        _RISCV_MODELS[arch] = RiscvCostModel(load_costs(arch).sections, arch)
+    return _RISCV_MODELS[arch]

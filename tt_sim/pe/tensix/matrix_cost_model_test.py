@@ -133,6 +133,16 @@ def test_an_uncosted_op_leaves_the_timing_alone():
 
 
 def test_a_multi_cycle_cost_holds_the_unit_and_back_pressures_the_thread():
+    """An occupied unit refuses the next instruction rather than queueing it.
+
+    Queueing was the original shape and it is wrong for a reason worth keeping
+    written down: tt-sim's frontend treats an instruction as issued the moment
+    a unit accepts it, so an instruction parked in an occupied unit's queue
+    retires *after* the thread's next instruction has already run in a
+    different unit — a reordering of one thread's program. See
+    ``TensixBackendUnit.is_occupied``, which found it by making the config
+    unit's ``RDCFG`` cost two cycles and watching ``matmulblock`` go wrong.
+    """
     with _cost_model(True) as matrix:
         matrix.cost_model = _FixedCost(3)
         rwc = matrix.backend.getRWC(0)
@@ -142,18 +152,21 @@ def test_a_multi_cycle_cost_holds_the_unit_and_back_pressures_the_thread():
         assert rwc.SrcA == 1  # the first one retires in the cycle it issued
         assert matrix.busy_until == 3
         # The wait gates read this; it is the back-pressure signal.
-        assert matrix.issueInstruction(INCRWC_A1, 0)
-        assert matrix.hasInflightInstructionsFromThread(0)
+        assert not matrix.issueInstruction(INCRWC_A1, 0)
 
         for cycle in (1, 2):
             matrix.clock_tick(cycle)
             assert rwc.SrcA == 1, cycle
-            assert matrix.hasInflightInstructionsFromThread(0), cycle
+            assert not matrix.issueInstruction(INCRWC_A1, 0), cycle
 
+        # Backend units tick before the frontend issues, so the deadline tick
+        # frees the unit and the retry lands on the deadline cycle itself.
         matrix.clock_tick(3)
+        assert matrix.busy_until is None
+        assert matrix.issueInstruction(INCRWC_A1, 0)
+        matrix.clock_tick(4)
         assert rwc.SrcA == 2
-        assert not matrix.hasInflightInstructionsFromThread(0)
-        assert matrix.busy_until == 6
+        assert matrix.busy_until == 7
 
 
 def test_an_occupied_unit_tells_the_pump_when_to_come_back():

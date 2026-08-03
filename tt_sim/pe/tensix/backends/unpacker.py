@@ -559,6 +559,16 @@ class UnPackerUnit(TensixBackendUnit):
         inAddr_Datums = self.wrapAddr(stateID, inAddr_Datums)
         inAddr_Deltas = self.wrapAddr(stateID, inAddr_Deltas)
 
+        # Number of datums read from L1 before the input address advances by
+        # RowStride rather than by one datum. Blackhole reads wider input rows
+        # for anything above a byte per datum (UNPACR_Regular.md,
+        # "UnpackRowWidth"), which is what makes a contiguous RowStride
+        # arch-dependent.
+        if self.backend.blackhole and datumSizeBytes > 1:
+            unpackRowWidth = 32
+        else:
+            unpackRowWidth = 16
+
         discontiguousInputRows = self.getConfigValue(
             stateID, "THCON_SEC" + str(self.unpacker_id) + "_REG2_Tileize_mode"
         )
@@ -582,7 +592,7 @@ class UnPackerUnit(TensixBackendUnit):
                         + str(self.unpacker_id)
                         + "_REG2_Shift_amount_cntx1",
                     )
-                    << 4
+                    << 8
                 )
                 | (
                     self.getConfigValue(
@@ -595,7 +605,7 @@ class UnPackerUnit(TensixBackendUnit):
                 )
             )
         else:
-            rowStride = datumSizeBytes * 16
+            rowStride = datumSizeBytes * unpackRowWidth
 
         return (
             inAddr_Datums,
@@ -604,6 +614,7 @@ class UnPackerUnit(TensixBackendUnit):
             inAddr_Deltas,
             inAddr_Exponents,
             rowStride,
+            unpackRowWidth,
             discontiguousInputRows,
             isUncompressed,
             inDataFormat,
@@ -728,6 +739,54 @@ class UnPackerUnit(TensixBackendUnit):
         )
         assert not (unpackToDst and (colShift or transpose))
 
+    def check_modelled_settings(
+        self,
+        rowStride,
+        unpackRowWidth,
+        datumSizeBytes,
+        upsampleRate,
+        upsampleZeroes,
+        upsampleInterleave,
+    ):
+        """Reject the UNPACR modes whose datum walk this unpacker does not model.
+
+        Deliberately *not* suppressible by an environment variable, unlike the
+        NoC alignment checks: those guard against hardware ``UndefinedBehavior``
+        that a user may legitimately want to explore, whereas these are simply
+        "tt-sim does not implement this", where carrying on reads the wrong L1
+        addresses or writes the wrong Src/Dst rows with nothing to notice it by.
+        """
+        contiguousRowStride = datumSizeBytes * unpackRowWidth
+        if rowStride != contiguousRowStride:
+            raise NotImplementedError(
+                f"Unpacker {self.unpacker_id}: Tileize_mode gives a RowStride of "
+                f"{rowStride} bytes, but the datum walk reads the input rows "
+                f"contiguously, which is only correct at {contiguousRowStride} "
+                f"bytes ({datumSizeBytes}-byte datums x {unpackRowWidth} datums "
+                f"per input row). A strided walk -- input datum i read from "
+                f"InAddr_Datums + {datumSizeBytes}*(i % {unpackRowWidth}) + "
+                f"RowStride*(i / {unpackRowWidth}) -- is not modelled, and "
+                f"ignoring RowStride would silently read the wrong L1 addresses "
+                f"(see UNPACR_Regular.md, 'RowStride')."
+            )
+
+        if upsampleZeroes:
+            raise NotImplementedError(
+                f"Unpacker {self.unpacker_id}: Upsample_rate={upsampleRate} "
+                f"(UpsampleZeroes={upsampleZeroes}, Upsample_and_interleave="
+                f"{int(bool(upsampleInterleave))}) is not modelled. Upsampling "
+                f"emits {upsampleZeroes + 1} output datums per input datum -- the "
+                f"datum then {upsampleZeroes} zeroes, or, with interleave, the "
+                f"datum then {upsampleZeroes} output positions left untouched for "
+                f"a later unpack to fill -- so the walk here, which emits one "
+                f"output datum per input datum, would put every datum after the "
+                f"first in the wrong SrcA/SrcB/Dst position. Only Upsample_rate=0 "
+                f"is modelled; Upsample_and_interleave is a no-op at that rate and "
+                f"is accepted. Note the ISA docs mark upsampling "
+                f"UnsupportedFunctionality themselves ('no known usage, confidence "
+                f"in specification is weak') -- see UNPACR_Regular.md."
+            )
+
     def perform_unpack(
         self,
         stateID,
@@ -736,9 +795,6 @@ class UnPackerUnit(TensixBackendUnit):
         inAddr_Datums,
         outAddr,
         datumSizeBytes,
-        rowStride,
-        upsampleZeroes,
-        upsampleInterleave,
         colShift,
         inDataFormat,
         outDataFormat,
@@ -746,6 +802,10 @@ class UnPackerUnit(TensixBackendUnit):
         transpose,
         allDatumsAreZero,
     ):
+        # RowStride / UpsampleZeroes / UpsampleInterleave are not parameters of
+        # this walk: it reads the input contiguously and writes one output datum
+        # per input datum, which ``check_modelled_settings`` has already required
+        # of the configuration by the time we get here.
         start_row = int(outAddr / 16)
         if self.unpacker_id == 0:
             assert start_row >= 4
@@ -863,12 +923,13 @@ class UnPackerUnit(TensixBackendUnit):
         """Move the whole ``numRows x 16`` rectangle at once, or decline it.
 
         The datum loop in ``perform_unpack`` is a rectangle: the input is read
-        contiguously (``rowStride`` is not modelled, so rows abut) and every
-        destination index is arithmetic on ``(row, col)``. So the block reads
-        out of L1 in one slice, converts in one call -- ``formatConversion``
-        below is the *same* function, handed an int64 array instead of an int,
-        exactly as the matrix unit's operand gather does -- and lands in one
-        indexed assignment. Returns True if it did the unpack.
+        contiguously (``check_modelled_settings`` rejects any RowStride that
+        would not abut) and every destination index is arithmetic on
+        ``(row, col)``. So the block reads out of L1 in one slice, converts in
+        one call -- ``formatConversion`` below is the *same* function, handed an
+        int64 array instead of an int, exactly as the matrix unit's operand
+        gather does -- and lands in one indexed assignment. Returns True if it
+        did the unpack.
 
         The cases it declines, and why, are all "this is no longer a rectangle
         the index arithmetic describes":
@@ -1170,6 +1231,7 @@ class UnPackerUnit(TensixBackendUnit):
             inAddr_Deltas,
             inAddr_Exponents,
             rowStride,
+            unpackRowWidth,
             discontiguousInputRows,
             isUncompressed,
             inDataFormat,
@@ -1181,12 +1243,10 @@ class UnPackerUnit(TensixBackendUnit):
             stateID, issue_thread, multiContextMode, whichContext
         )
 
-        upsampleZeroes = (
-            1
-            << self.getConfigValue(
-                stateID, "THCON_SEC" + str(self.unpacker_id) + "_REG2_Upsample_rate"
-            )
-        ) - 1
+        upsampleRate = self.getConfigValue(
+            stateID, "THCON_SEC" + str(self.unpacker_id) + "_REG2_Upsample_rate"
+        )
+        upsampleZeroes = (1 << upsampleRate) - 1
         upsampleInterleave = self.getConfigValue(
             stateID,
             "THCON_SEC" + str(self.unpacker_id) + "_REG2_Upsample_and_interleave",
@@ -1213,6 +1273,18 @@ class UnPackerUnit(TensixBackendUnit):
             colShift,
         )
 
+        # ... and that the ones which shape the datum walk are ones we model.
+        # Checked here, at decode, so an unmodelled unpack fails before it moves
+        # a single datum (and before it can block on a Src bank).
+        self.check_modelled_settings(
+            rowStride,
+            unpackRowWidth,
+            datumSizeBytes,
+            upsampleRate,
+            upsampleZeroes,
+            upsampleInterleave,
+        )
+
         return {
             "stateID": stateID,
             "whichContext": whichContext,
@@ -1228,14 +1300,11 @@ class UnPackerUnit(TensixBackendUnit):
             "inAddr_Datums": inAddr_Datums,
             "datumSizeBytes": datumSizeBytes,
             "inputNumDatums": inputNumDatums,
-            "rowStride": rowStride,
             "inDataFormat": inDataFormat,
             "outAddr": outAddr,
             "outDataFormat": outDataFormat,
             "unpackToDst": unpackToDst,
             "transpose": transpose,
-            "upsampleZeroes": upsampleZeroes,
-            "upsampleInterleave": upsampleInterleave,
             "colShift": colShift,
         }
 
@@ -1249,9 +1318,6 @@ class UnPackerUnit(TensixBackendUnit):
             state["inAddr_Datums"],
             state["outAddr"],
             state["datumSizeBytes"],
-            state["rowStride"],
-            state["upsampleZeroes"],
-            state["upsampleInterleave"],
             state["colShift"],
             state["inDataFormat"],
             state["outDataFormat"],
