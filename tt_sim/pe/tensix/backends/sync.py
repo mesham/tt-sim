@@ -139,10 +139,19 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                     issue_thread
                 ).wait_gate.informMutexAcquired()
                 to_remove.append(idx)
-        if len(to_remove) > 1:
-            to_remove.reverse()
-            for idx in to_remove:
-                del self.blocked_mutex[idx]
+        # Every granted waiter leaves the queue, not just the second and
+        # subsequent ones. Deleting only when ``len(to_remove) > 1`` left a
+        # lone grant queued forever, and a queued entry is re-granted on every
+        # later tick -- so the mutex was pinned to that thread for the rest of
+        # the device's life, silently re-acquired the cycle after each ATRELM.
+        # Nothing failed while no other thread wanted it; the first ATGETM from
+        # another thread then blocked for ever (a live spin, not a stall: the
+        # queue also keeps the unit non-idle). That is what made a second
+        # ``LaunchProgram`` in one process hang once the first had contended
+        # for a mutex. Delete back-to-front so the surviving indices stay
+        # valid.
+        for idx in reversed(to_remove):
+            del self.blocked_mutex[idx]
 
     def getSemaphore(self, idx):
         assert idx <= 7

@@ -148,6 +148,7 @@ BASELINE = {
     "blackhole/tilize": VALUE_PUMPED,
     "blackhole/transpose": VALUE_PUMPED,
     "blackhole/two": VALUE_POLL_BUDGET,
+    "blackhole/twolaunch": VALUE_PUMPED,
     "blackhole/untilize": VALUE_PUMPED,
     "blackhole/where": VALUE_PUMPED,
     "wormhole/examples": TIMING_PINNED,
