@@ -20,10 +20,12 @@
 //     subtracts an empty-body control loop to cancel the RISC-V loop overhead.
 //     It is repeated with one, two and three issuing TRISCs so an issue-limited
 //     result can be told apart from a unit-limited one. `--dvalid-once`
-//     (default) / `--dvalid-per-thread` selects how the three MATH probes get
-//     their SrcA/SrcB valid bits; that is experiment X1 of
-//     docs/plans/matrix-unit-thread-contention.md and it is the only thing that
-//     changes what phase A measures.
+//     (default) / `--dvalid-per-thread` / `--dvalid-unpacr-nop` selects how the
+//     three MATH probes get their SrcA/SrcB valid bits; the first two are
+//     experiment X1 of docs/plans/matrix-unit-thread-contention.md and the third
+//     is X2, which additionally makes the source data format a runtime axis
+//     (`--src-format`). That choice is the only thing that changes what phase A
+//     measures.
 //   * Phase B times `matmul_tiles` at three math fidelities. The absolute
 //     number is a confounded composite; the DIFFERENCE between fidelities is
 //     not, and is a direct check on `fidelity_phases.mvmuls_per_tile`. The
@@ -162,6 +164,62 @@ int popcount(uint32_t v) {
     return n;
 }
 
+// ---------------------------------------------------------------------------
+// The source data format axis (experiment X2). Only reachable with the
+// UNPACR_NOP dvalid setup, because that is the only setup which gives the
+// Matrix Unit a DEFINED source format to vary: a bare SETDVALID leaves
+// `ImpliedSrc{A,B}Fmt` an `UnpredictableValue()` on Blackhole, and that field is
+// what the FPU reads there.
+//
+// The `style` column is the three-way `SrcAStyle` the MVMUL/ELWADD/ELWMUL
+// functional models reduce the format to. It is recorded because it is the
+// documented prediction: two formats that share a style are predicted to be
+// EXACTLY indistinguishable, which makes bf16-vs-fp32 a null control rather than
+// a comparison.
+// ---------------------------------------------------------------------------
+struct SrcFormat {
+    const char* name;
+    uint32_t code;  // tt::DataFormat, and the 4-bit hardware field value
+    const char* style;
+};
+
+const SrcFormat SRC_FORMATS[] = {
+    {"bf16", 5, "BF16"},  // tt::DataFormat::Float16_b
+    {"fp32", 0, "BF16"},  // tt::DataFormat::Float32 -- same style as bf16
+    {"tf32", 4, "TF32"},  // tt::DataFormat::Tf32
+    {"fp16", 1, "FP16"},  // tt::DataFormat::Float16
+};
+
+const SrcFormat* find_src_format(const std::string& name) {
+    for (const auto& f : SRC_FORMATS) {
+        if (name == f.name) {
+            return &f;
+        }
+    }
+    return nullptr;
+}
+
+std::string src_format_names() {
+    std::string out;
+    for (const auto& f : SRC_FORMATS) {
+        out += (out.empty() ? "" : ",");
+        out += f.name;
+    }
+    return out;
+}
+
+// The three dvalid setups, in the order their numeric values take. The name is
+// what goes into the CSV header's `dvalid_setup=` token and is how a dataset
+// tells itself apart from the others.
+const char* dvalid_setup_name(uint32_t mode) {
+    switch (mode) {
+        case TTBENCH_DVALID_PER_THREAD: return "per-thread";
+        case TTBENCH_DVALID_ONCE: return "once";
+        case TTBENCH_DVALID_UNPACR_NOP: return "unpacr-nop";
+        default: return "unknown";
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -172,7 +230,11 @@ int main(int argc, char** argv) {
     std::string out_path;
     // Experiment X1 of docs/plans/matrix-unit-thread-contention.md. Default is
     // the de-confounded setup: exactly one SETDVALID regardless of thread count.
-    uint32_t dvalid_once = 1;
+    uint32_t dvalid_mode = TTBENCH_DVALID_ONCE;
+    // Experiment X2, ibid. Only meaningful with the UNPACR_NOP setup; left null
+    // otherwise, because with a bare SETDVALID there is no defined format to
+    // name and printing one would be a lie in the header.
+    const SrcFormat* src_format = nullptr;
     // Which phase B fidelities to launch. On hardware, all three, always. On the
     // simulator a single fidelity is minutes and the three together have never
     // completed, so being able to ask for one is the difference between phase B
@@ -191,9 +253,22 @@ int main(int argc, char** argv) {
         } else if (a == "--no-dvalid-probes") {
             probe_mask &= ~DVALID_PROBE_MASK;
         } else if (a == "--dvalid-per-thread") {
-            dvalid_once = 0;
+            dvalid_mode = TTBENCH_DVALID_PER_THREAD;
         } else if (a == "--dvalid-once") {
-            dvalid_once = 1;
+            dvalid_mode = TTBENCH_DVALID_ONCE;
+        } else if (a == "--dvalid-unpacr-nop") {
+            dvalid_mode = TTBENCH_DVALID_UNPACR_NOP;
+        } else if (a == "--src-format") {
+            const std::string name = next();
+            src_format = find_src_format(name);
+            if (src_format == nullptr) {
+                fprintf(
+                    stderr,
+                    "unknown --src-format %s (want one of %s)\n",
+                    name.c_str(),
+                    src_format_names().c_str());
+                return 2;
+            }
         } else if (a == "--phase") {
             phases = next();
         } else if (a == "--fidelities") {
@@ -204,6 +279,8 @@ int main(int argc, char** argv) {
             printf(
                 "usage: tensixbench [--blocks N] [--iters N] [--probes 0xMASK]\n"
                 "                   [--no-dvalid-probes] [--phase a|b|ab] [--out FILE]\n"
+                "                   [--dvalid-once | --dvalid-per-thread |\n"
+                "                    --dvalid-unpacr-nop [--src-format NAME]]\n"
                 "\n"
                 "  --blocks N            phase A sweeps blocks = N, 2N, 3N, 4N of %d\n"
                 "                        instructions each (default 4)\n"
@@ -222,6 +299,19 @@ int main(int argc, char** argv) {
                 "                        bank state move together. Run this to reproduce\n"
                 "                        the 6.1x/12.1x MVMUL result and diff it against\n"
                 "                        the default. Written to a distinct default CSV.\n"
+                "  --dvalid-unpacr-nop   the Blackhole-SANCTIONED setup: one UNPACR_NOP\n"
+                "                        carrying set_dvalid per unpacker, from thread 1,\n"
+                "                        barriered. Unlike SETDVALID it leaves both banks\n"
+                "                        a DEFINED ImpliedSrc{A,B}Fmt, taken from\n"
+                "                        THCON_SEC*_REG2_Out_data_format -- which is what\n"
+                "                        makes --src-format mean anything. Experiment X2\n"
+                "                        of docs/plans/matrix-unit-thread-contention.md.\n"
+                "  --src-format NAME     source data format for the MATH probes, one of\n"
+                "                        %s. REQUIRES --dvalid-unpacr-nop:\n"
+                "                        with a bare SETDVALID the format is\n"
+                "                        UnpredictableValue on Blackhole and there is\n"
+                "                        nothing well defined to vary. Each format gets\n"
+                "                        its own default CSV name.\n"
                 "  --phase a|b|ab        which phases to run (default ab)\n"
                 "  --fidelities LIST     comma-separated subset of LoFi,HiFi2,HiFi4 for\n"
                 "                        phase B (default all three). For the simulator,\n"
@@ -229,7 +319,8 @@ int main(int argc, char** argv) {
                 "                        it alone -- the DIFFERENCE needs at least two.\n"
                 "  --out FILE            CSV path (default tensixbench-<arch>.csv)\n",
                 TTBENCH_UNROLL,
-                TTBENCH_NUM_PROBES);
+                TTBENCH_NUM_PROBES,
+                src_format_names().c_str());
             return 0;
         } else {
             fprintf(stderr, "unknown argument: %s (try --help)\n", a.c_str());
@@ -240,13 +331,39 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--blocks and --iters must be >= 1\n");
         return 2;
     }
+    // A format is only a *measurable* axis under the UNPACR_NOP setup. Refusing
+    // the combination rather than quietly ignoring it is the point: a CSV
+    // labelled `src_format=fp32` whose FPU actually decoded an
+    // `UnpredictableValue()` would be worse than no CSV at all.
+    if (src_format != nullptr && dvalid_mode != TTBENCH_DVALID_UNPACR_NOP) {
+        fprintf(
+            stderr,
+            "--src-format needs --dvalid-unpacr-nop. A bare SETDVALID leaves\n"
+            "ImpliedSrc{A,B}Fmt an UnpredictableValue() on Blackhole, and that is the\n"
+            "field the Matrix Unit reads, so there would be no defined format to vary.\n"
+            "See docs/plans/matrix-unit-thread-contention.md, experiment X2.\n");
+        return 2;
+    }
+    // Under the UNPACR_NOP setup a format is always programmed -- there is no
+    // "leave it alone" option, because the instruction copies whatever is in
+    // THCON_SEC*_REG2_Out_data_format either way. bf16 is the default because it
+    // is what phase B and every example in this repository use.
+    if (dvalid_mode == TTBENCH_DVALID_UNPACR_NOP && src_format == nullptr) {
+        src_format = find_src_format("bf16");
+    }
 
     IDevice* device = CreateDevice(0);
     const std::string arch = arch_name(device);
     if (out_path.empty()) {
-        // The non-default dvalid setup gets its own name so the X1 pair cannot
-        // silently overwrite each other.
-        out_path = "tensixbench-" + arch + (dvalid_once ? "" : "-dvalid-per-thread") + ".csv";
+        // Every non-default configuration gets its own name so that runs which
+        // measure different things cannot silently overwrite each other.
+        std::string suffix;
+        if (dvalid_mode == TTBENCH_DVALID_PER_THREAD) {
+            suffix = "-dvalid-per-thread";
+        } else if (dvalid_mode == TTBENCH_DVALID_UNPACR_NOP) {
+            suffix = std::string("-unpacr-nop-") + src_format->name;
+        }
+        out_path = "tensixbench-" + arch + suffix + ".csv";
     }
     constexpr CoreCoord core = {0, 0};
 
@@ -285,15 +402,22 @@ int main(int argc, char** argv) {
             return false;
         }
         fprintf(csv, "# tensixbench raw points -- see docs/plans/tensix-cost-benchmark.md\n");
+        // Every token here is `key=value` because the analysis harness
+        // (tt_sim/perf/tensix_bench_sweep.read_csv) harvests them into `meta`.
+        // `src_format` is `undefined` rather than absent when no format was
+        // programmed: under a bare SETDVALID the format the FPU decodes really
+        // is undefined on Blackhole, and saying so is the honest header.
         fprintf(
             csv,
-            "# arch=%s magic=0x%08X unroll=%u probe_mask=0x%X dvalid_setup=%s mm_block=%u "
-            "fidelities=%s\n",
+            "# arch=%s magic=0x%08X unroll=%u probe_mask=0x%X dvalid_setup=%s "
+            "src_format=%s src_style=%s mm_block=%u fidelities=%s\n",
             arch.c_str(),
             TTBENCH_MAGIC,
             TTBENCH_UNROLL,
             probe_mask,
-            dvalid_once ? "once" : "per-thread",
+            dvalid_setup_name(dvalid_mode),
+            src_format ? src_format->name : "undefined",
+            src_format ? src_format->style : "undefined",
             TTBENCH_MM_BLOCK,
             fidelity_filter.c_str());
         fprintf(csv, "phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles\n");
@@ -349,7 +473,13 @@ int main(int argc, char** argv) {
                 program,
                 bench,
                 core,
-                {results_addr, barrier_addr, base_blocks, probe_mask, ts.mask, dvalid_once});
+                {results_addr,
+                 barrier_addr,
+                 base_blocks,
+                 probe_mask,
+                 ts.mask,
+                 dvalid_mode,
+                 src_format ? src_format->code : 0u});
 
             std::vector<uint32_t> zeros(16, 0);
             detail::WriteToDeviceL1(device, core, barrier_addr, zeros);
@@ -523,11 +653,25 @@ int main(int argc, char** argv) {
     printf("tensixbench summary [%s] -- slopes only, no absolute measurement is a cost\n", arch.c_str());
     printf("%s\n", std::string(78, '=').c_str());
     if (phases.find('a') != std::string::npos) {
-        printf(
-            "dvalid setup: %s -- %s\n",
-            dvalid_once ? "once" : "per-thread",
-            dvalid_once ? "one SETDVALID for the tile (X1, de-confounded)"
-                        : "one SETDVALID per ACTIVE thread (original, confounded)");
+        const char* what = "one SETDVALID per ACTIVE thread (original, confounded)";
+        if (dvalid_mode == TTBENCH_DVALID_ONCE) {
+            what = "one SETDVALID for the tile (X1, de-confounded)";
+        } else if (dvalid_mode == TTBENCH_DVALID_UNPACR_NOP) {
+            what = "one UNPACR_NOP+set_dvalid per unpacker (X2, sanctioned)";
+        }
+        printf("dvalid setup: %s -- %s\n", dvalid_setup_name(dvalid_mode), what);
+        if (src_format != nullptr) {
+            printf(
+                "source format: %s (code %u, SrcAStyle %s) -- programmed into\n"
+                "  THCON_SEC{0,1}_REG2_Out_data_format and ALU_FORMAT_SPEC_REG{0_SrcA,1_SrcB}.\n"
+                "  The ISA docs give the Matrix Unit 1 IPC with no format qualification, and\n"
+                "  reduce every format to one of three SrcAStyles, so a cost difference\n"
+                "  between two formats sharing a style would contradict the model outright\n"
+                "  and a difference between styles is undocumented either way.\n",
+                src_format->name,
+                src_format->code,
+                src_format->style);
+        }
     }
     printf("\n");
     printf("%-14s %-7s %-6s %-4s %12s %10s %8s\n", "probe", "variant", "unit", "thr", "cyc/block", "cyc/instr", "R^2");

@@ -42,10 +42,26 @@ from tt_sim.pe.tensix.backends.backend_base import DataFormat
 from tt_sim.pe.tensix.backends.config import TensixConfigurationConstants
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
+from tt_sim.pe.tensix.util import TensixInstructionDecoder
 
 #: ``SETDVALID`` from ``tensix_instructions.yaml``: op_binary 87, opcode in bits
 #: 24-31, ``setvalid`` at bit 0 (bit 0 = SrcA, bit 1 = SrcB).
 SETDVALID = 87 << 24
+
+
+#: ``UNPACR_NOP``, opcode 0x43. The two architectures lay the low 24 bits out
+#: differently, so the benchmark's kernel emits a different word on each and both
+#: are pinned here. These are exactly what
+#: ``perfbench/tensixbench/src/kernels/compute/raw_probes.cpp`` builds via
+#: ``TTI_UNPACR_NOP`` under ``TTBENCH_DVALID_UNPACR_NOP``.
+#:
+#: Blackhole: ``unpacker_select`` at bit 23, ``set_dvalid`` at bit 8,
+#: ``unpack_pop`` at bits 1:0 (``p_unpacr_nop::UNP_ZEROSRC`` = 1).
+#: Wormhole: ``unpacker_select`` at bit 23, ``NoOp`` mode select in the low bits
+#: (``p_unpacr_nop::UNP_SET_DVALID`` = 0b111).
+def _unpacr_nop_setdvalid(unpacker, blackhole):
+    word = (0x43 << 24) | (unpacker << 23)
+    return word | ((1 << 8) | 1 if blackhole else 0x7)
 
 
 def _backend():
@@ -54,6 +70,17 @@ def _backend():
         WORMHOLE_PROFILE.tensix_cfg_state_size,
         WORMHOLE_PROFILE.tensix_thd_state_size,
     ).getBackend()
+
+
+@contextmanager
+def _wormhole_backend():
+    """A Wormhole backend, as a context manager so both arches read alike.
+
+    Also pins the process-global config layout back to Wormhole on the way in,
+    which matters when a Blackhole case ran first in the same session.
+    """
+    TensixConfigurationConstants.use_blackhole(False)
+    yield _backend()
 
 
 @contextmanager
@@ -155,6 +182,74 @@ def test_blackhole_implied_src_format_survives_setdvalid():
         backend.getSrcA(bank).setDataFormat(DataFormat.TF32)
         backend.misc_unit.handle_setdvalid(None, 1, {"setvalid": 0b1})
         assert matrix.implied_srcA_format(1, DataFormat.FP32) == DataFormat.TF32
+
+
+def _set_config(backend, key, value):
+    """Write one config field, the way ``RMWCIB`` would, for the current state."""
+    addr32 = TensixConfigurationConstants.get_addr32(key)
+    shamt = TensixConfigurationConstants.get_shamt(key)
+    mask = TensixConfigurationConstants.get_mask(key)
+    unit = backend.getConfigUnit()
+    old = unit.get_config_entry(0, addr32)
+    unit.setConfig(0, addr32, (old & ~mask) | ((value << shamt) & mask))
+
+
+def test_unpacr_nop_setdvalid_takes_a_defined_format_from_config():
+    """Experiment X2's whole premise, pinned on both architectures.
+
+    ``SETDVALID`` leaves ``ImpliedSrc{A,B}Fmt`` an ``UnpredictableValue()`` on
+    Blackhole (see ``test_blackhole_implied_src_format_survives_setdvalid``: what
+    tt-sim gives instead is whatever the last unpack happened to latch). The
+    Blackhole-sanctioned replacement, ``UNPACR_NOP`` carrying ``set_dvalid``,
+    does not have that problem -- ``UNPACR_NOP_SETDVALID.md`` has it copy
+    ``THCON_SEC{0,1}_REG2_Out_data_format`` into the bank it hands over.
+
+    That is what makes a source-format axis possible at all, and it is what
+    ``perfbench/tensixbench --dvalid-unpacr-nop --src-format`` relies on: the
+    benchmark writes the format into exactly this register and then issues
+    exactly these instruction words. Anything that broke the link would make the
+    format axis silently measure nothing, so it is pinned rather than assumed.
+    """
+    for blackhole in (False, True):
+        maker = _blackhole_backend if blackhole else _wormhole_backend
+        with maker() as backend:
+            for fmt in (
+                DataFormat.BF16,
+                DataFormat.FP32,
+                DataFormat.TF32,
+                DataFormat.FP16,
+            ):
+                for unpacker_id, key, get_src in (
+                    (0, "THCON_SEC0_REG2_Out_data_format", backend.getSrcA),
+                    (1, "THCON_SEC1_REG2_Out_data_format", backend.getSrcB),
+                ):
+                    unpacker = backend.unpacker_units[unpacker_id]
+                    bank = unpacker.srcBank
+                    # Both banks back to the unpackers first. Blackhole's
+                    # handler stalls (and does nothing) if the Matrix Unit still
+                    # owns the bank it is about to reuse, which is the whole
+                    # point of the ZEROSRC form -- but it means a previous
+                    # iteration's hand-over would silently swallow this one.
+                    for b in (0, 1):
+                        get_src(b).setAllowedClient(SrcRegister.SrcClient.Unpackers)
+                    _set_config(backend, key, int(fmt))
+
+                    word = _unpacr_nop_setdvalid(unpacker_id, blackhole)
+                    unpacker.handle_unpacr_nop(
+                        TensixInstructionDecoder.getInstructionInfo(word),
+                        1,
+                        TensixInstructionDecoder.getInstructionInfo(word)["instr_args"],
+                    )
+
+                    src = get_src(bank)
+                    assert src.getAllowedClient() is SrcRegister.SrcClient.MatrixUnit
+                    assert src.getDataFormat() == fmt, (
+                        f"{'blackhole' if blackhole else 'wormhole'} unpacker "
+                        f"{unpacker_id}: expected {fmt!r}, got {src.getDataFormat()!r}"
+                    )
+                    # The instruction flips the unpacker's bank pointer, so the
+                    # next iteration legitimately works on the other bank.
+                    assert unpacker.srcBank == bank ^ 1
 
 
 if __name__ == "__main__":  # pragma: no cover

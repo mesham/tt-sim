@@ -45,6 +45,7 @@ Run it
     python3 -m tt_sim.perf.tensix_bench_sweep --measured hw.csv
     python3 -m tt_sim.perf.tensix_bench_sweep --measured hw.csv --reference sim.csv
     python3 -m tt_sim.perf.tensix_bench_sweep --measured sim.csv --arch blackhole
+    python3 -m tt_sim.perf.tensix_bench_sweep --formats bf16.csv fp32.csv tf32.csv
 
 With no ``--measured`` the sweep reads the **primary tracked reference
 measurement** (:data:`PRIMARY_DATASET`) in ``tt_sim/perf/datasets/``, so the
@@ -63,6 +64,13 @@ choose it for you.
 With ``--reference`` the report additionally diffs two runs of the same binary
 -- silicon against tt-sim -- which is the differential form ``optests/diff.sh``
 established for values, applied to cycles.
+
+With ``--formats`` it does something different again: it reads SEVERAL runs of
+the same binary that differ only in the source data format the Matrix Unit
+decoded, and reports the MATH probes side by side. That is experiment X2 of
+``docs/plans/matrix-unit-thread-contention.md``, and it needs several files
+because the format is a per-run configuration and not a column. See
+:data:`FORMAT_EXPECTATION` for what it predicts and why.
 
 If no dataset can be found the script prints where it looked and exits 0 -- the
 same "degrade gracefully" contract ``tt_sim/perf/noc_dataset_sweep.py`` uses for
@@ -121,6 +129,33 @@ SHARED_LOWER = 0.75
 #: benchmark-setup artefact came within one word of reading as documented
 #: behaviour. See docs/plans/matrix-unit-thread-contention.md.
 SUPERLINEAR_UPPER = 1.15
+
+#: The dvalid setup a format comparison requires, and the reason it is a
+#: requirement rather than a preference. ``SETDVALID`` is
+#: ``UnsupportedFunctionality`` on Blackhole and leaves ``ImpliedSrc{A,B}Fmt`` an
+#: ``UnpredictableValue()`` -- and that field is exactly what the Matrix Unit
+#: reads for the source format there, since no Blackhole LLK ever sets
+#: ``DISABLE_IMPLIED_SRC{A,B}_FMT_Base``. So a run whose header says
+#: ``dvalid_setup=once`` has no defined source format at all, whatever else its
+#: header claims, and comparing two of them by format would be comparing two
+#: unpredictable values.
+FORMAT_SETUP = "unpacr-nop"
+
+#: The Matrix Unit probes a format axis can move. Everything else in phase A is
+#: format-blind by construction: the SFPU, ThCon, TDMA and config probes read
+#: neither ``SrcA`` nor ``SrcB``, and ``SETRWC``/``INCRWC`` are matrix-unit
+#: instructions that touch no Src rows.
+FORMAT_PROBES = ("MVMUL", "ELWADD", "ELWMUL")
+
+#: Which formats share a decoded ``SrcAStyle``, from the functional models in
+#: ``MVMUL.md`` / ``ELWADD.md`` / ``ELWMUL.md``. Read from the CSV header's
+#: ``src_style=`` token when present; this is the fallback and the pin.
+FORMAT_STYLE = {
+    "bf16": "BF16",
+    "fp32": "BF16",
+    "tf32": "TF32",
+    "fp16": "FP16",
+}
 
 #: How many standard errors of the fitted slope count as "the fit cannot tell".
 #: Two, i.e. ~95 %, which is the ordinary convention and is written here rather
@@ -221,6 +256,46 @@ Two things are predicted, and only the second is a test of the tables.
    each thread's slope grows in proportion. If it does not grow, either the
    unit accepts more than one instruction per cycle or the issue path never
    back-pressures -- which are different findings and the report says which."""
+
+
+FORMAT_EXPECTATION = """\
+This is EXPLORATORY, not confirmatory. Say so first, because the difference
+decides how a null result reads.
+
+WHAT THE ISA DOCUMENTATION PREDICTS. `MatrixUnit.md`'s throughput table gives
+MVMUL, ELWMUL, ELWADD one instruction per cycle with NO format qualification of
+any kind; the one caveat it carries is about fidelity phases, which is a count
+of instructions software issues rather than a per-instruction cost. And the
+functional models in MVMUL.md / ELWADD.md / ELWMUL.md reduce every source format
+to a three-way `SrcAStyle`:
+
+    FP32, BF16, BFP8, BFP4, BFP2, INT32, INT16  ->  SrcAStyle = BF16
+    FP16, FP8, BFP8a, BFP4a, BFP2a, INT8        ->  SrcAStyle = FP16
+    TF32                                        ->  SrcAStyle = TF32
+
+So the documented prediction has two strengths, and the report separates them:
+
+  * SAME STYLE (bf16 vs fp32 is the case in point) -- predicted EXACTLY
+    indistinguishable. The two codes take the same branch of the same decode.
+    A difference here would contradict the functional model outright, and is
+    the strongest thing this comparison can find.
+  * DIFFERENT STYLE (anything vs tf32 or fp16) -- the datapath genuinely
+    differs, but no document gives it a cost. There is no prediction to confirm
+    or refute, only a number nothing has ever measured.
+
+WHY THE TABLES CARE. `tensix_instruction_costs.yaml` gives the MATH occupancies
+no format axis at all, and `docs/plans/tensix-cost-benchmark.md` lists data
+format under "what is not measured, and why". A format-dependent cost would mean
+the MATH entries need one, alongside the existing `scales_with: fidelity_phases`.
+A format-independent one closes the question with a measurement instead of an
+omission, which is worth about as much.
+
+WHAT THIS CANNOT SEE. Phase A issues each op as an individual `.ttinsn` word, so
+every number here is the Wait-Gate-bound regime (~6 cycles on Blackhole), not
+the MOP-issued ~1 cycle the tables charge. A format effect visible here is
+evidence about the Wait Gate and the operand decode; it is NOT directly a
+measurement of the quantity the tables hold. See "Two regimes for one
+instruction" in docs/plans/tensix-cost-benchmark.md."""
 
 
 def _exclusions():
@@ -495,7 +570,7 @@ def _grouped(rows, key_fn):
     return groups
 
 
-def report(rows, arch, out=None, label="measured", reference=None):
+def report(rows, arch, out=None, label="measured", reference=None, meta=None):
     """The whole sweep. Returns the retained per-instruction series."""
     out = sys.stdout if out is None else out
 
@@ -510,6 +585,13 @@ def report(rows, arch, out=None, label="measured", reference=None):
     emit("=" * 78)
     emit()
     emit(f"input: {len(rows)} raw points -> {len(series)} fitted series ({label})")
+    # The MATH rows mean different things under different setups, and the
+    # difference is not visible in any column -- it is a per-run configuration.
+    # Printing it next to the input is the cheapest way to stop a reader
+    # attributing one setup's numbers to another.
+    for key in ("dvalid_setup", "src_format"):
+        if meta and meta.get(key):
+            emit(f"  {key} = {meta[key]}")
     emit()
     emit("Exclusion ladder (declared before any residual was computed):")
     total = len(series)
@@ -815,6 +897,173 @@ def _fidelity_check(series, arch, emit):
         )
 
 
+def format_report(datasets, arch, out=None):
+    """Experiment X2: the MATH probes at several source data formats.
+
+    ``datasets`` is a list of ``(label, rows, meta)``, one per run. The format is
+    a per-run configuration rather than a column in the CSV -- it is programmed
+    once, before the burst -- so the comparison is across files by construction,
+    and each file's ``#`` header is what says which format it was.
+
+    Returns ``{(probe, format): cycles_per_instruction}`` for the retained
+    series, so a caller can assert on it without re-parsing the report.
+    """
+    out = sys.stdout if out is None else out
+
+    def emit(line=""):
+        print(line, file=out)
+
+    emit("=" * 78)
+    emit(f"Experiment X2: MATH cost against the source data format [{arch}]")
+    emit("=" * 78)
+    emit()
+    emit(FORMAT_EXPECTATION)
+    emit()
+
+    # -- admission, declared before any number is read from any file ---------
+    emit("-" * 78)
+    emit("Which runs are admitted, and why the criteria are these")
+    emit("-" * 78)
+    emit(
+        f"  1. dvalid_setup == {FORMAT_SETUP}. Any other setup uses a bare\n"
+        f"     SETDVALID, which on Blackhole is UnsupportedFunctionality and\n"
+        f"     leaves ImpliedSrc{{A,B}}Fmt an UnpredictableValue() -- the very\n"
+        f"     field the Matrix Unit reads. Such a run has no source format,\n"
+        f"     so it cannot be a point on a format axis.\n"
+        f"  2. src_format names one of {', '.join(sorted(FORMAT_STYLE))}.\n"
+        f"  3. one run per format. Two files claiming the same format are a\n"
+        f"     repeat measurement, not an axis, and are refused rather than\n"
+        f"     silently averaged.\n"
+        f"  4. then the ordinary per-instruction exclusion ladder, unchanged,\n"
+        f"     so a format point is admitted on exactly the terms every other\n"
+        f"     measurement in this module is.\n"
+    )
+
+    admitted, refused = {}, []
+    for label, rows, meta in datasets:
+        setup = meta.get("dvalid_setup")
+        fmt = meta.get("src_format")
+        if setup != FORMAT_SETUP:
+            refused.append((label, f"dvalid_setup={setup!r}, not {FORMAT_SETUP!r}"))
+            continue
+        if fmt not in FORMAT_STYLE:
+            refused.append((label, f"src_format={fmt!r} is not a known format"))
+            continue
+        if fmt in admitted:
+            refused.append((label, f"src_format={fmt} already supplied by another run"))
+            continue
+        admitted[fmt] = (label, rows, meta)
+    for label, why in refused:
+        emit(f"  REFUSED {label}: {why}")
+    if refused:
+        emit()
+    if len(admitted) < 2:
+        emit(
+            f"  {len(admitted)} admissible run(s); a format axis needs at least\n"
+            "  two. Nothing to compare."
+        )
+        return {}
+
+    # -- the ladder, per run ------------------------------------------------
+    per_format = {}
+    for fmt, (label, rows, _meta) in sorted(admitted.items()):
+        kept, _ladder = retained(attach_table(apply_control(series_of(rows)), arch))
+        per_format[fmt] = {s["probe"]: s for s in kept if s["probe"] in FORMAT_PROBES}
+        emit(
+            f"  admitted {fmt:<5} ({FORMAT_STYLE[fmt]:<4}) from {label}: "
+            f"{len(per_format[fmt])} of {len(FORMAT_PROBES)} MATH probes retained"
+        )
+    emit()
+
+    formats = sorted(per_format, key=lambda f: (FORMAT_STYLE[f], f))
+    probes = [p for p in FORMAT_PROBES if all(p in per_format[f] for f in formats)]
+    if not probes:
+        emit("  no MATH probe survives the ladder in every run; nothing to compare.")
+        return {}
+
+    emit("-" * 78)
+    emit("Cycles per instruction, single thread, by source format")
+    emit("-" * 78)
+    emit(f"  {'probe':<10}" + "".join(f"{f:>10}" for f in formats) + f"{'spread':>10}")
+    values = {}
+    for probe in probes:
+        cells = [per_format[f][probe]["measured"] for f in formats]
+        for fmt, cell in zip(formats, cells):
+            values[(probe, fmt)] = cell
+        emit(
+            f"  {probe:<10}"
+            + "".join(f"{c:>10.3f}" for c in cells)
+            + f"{max(cells) - min(cells):>10.3f}"
+        )
+    emit()
+    emit("  style:    " + "".join(f"{FORMAT_STYLE[f]:>10}" for f in formats))
+    emit()
+
+    # -- the pairwise verdicts ---------------------------------------------
+    emit("-" * 78)
+    emit("Pairwise, against what the functional models predict")
+    emit("-" * 78)
+    emit(f"  {'pair':<14}{'probe':<10}{'delta':>9}{'resol':>8}  verdict")
+    findings = []
+    for i, a in enumerate(formats):
+        for b in formats[i + 1 :]:
+            same_style = FORMAT_STYLE[a] == FORMAT_STYLE[b]
+            for probe in probes:
+                sa, sb = per_format[a][probe], per_format[b][probe]
+                delta = sb["measured"] - sa["measured"]
+                # Both runs carry their own one-sided control bias and fit
+                # noise; a difference can hide inside either, so take the
+                # larger rather than pretending they cancel.
+                resolution = max(sa["resolution"] or 0.0, sb["resolution"] or 0.0)
+                resolved = abs(delta) > resolution
+                if same_style:
+                    verdict = (
+                        "CONTRADICTS the model (same SrcAStyle)"
+                        if resolved
+                        else "as predicted: indistinguishable"
+                    )
+                else:
+                    verdict = (
+                        "format-dependent (undocumented)"
+                        if resolved
+                        else "no difference beyond the instrument"
+                    )
+                if resolved:
+                    findings.append((a, b, probe, delta, same_style))
+                emit(
+                    f"  {a + ' vs ' + b:<14}{probe:<10}{delta:>9.3f}"
+                    f"{resolution:>8.3f}  {verdict}"
+                )
+    emit()
+    if not findings:
+        emit(
+            "  VERDICT: no format effect this instrument can resolve. On silicon\n"
+            "  that says the MATH occupancies need no format axis on this\n"
+            "  evidence -- a measured statement where there was an unexamined\n"
+            "  one -- subject to its being one run per format, on one part, in\n"
+            "  the Wait-Gate regime rather than the MOP-issued one the tables\n"
+            "  charge.\n"
+            "\n"
+            "  AGAINST tt-sim this verdict is FORCED and means nothing about any\n"
+            "  hardware: nothing back-pressures the issuing core there, so every\n"
+            "  phase A probe reads exactly 1.000 whatever the unit or the format\n"
+            "  (docs/plans/tensix-cost-benchmark.md, 'the cost model is invisible\n"
+            "  to a device-side clock'). A null from a simulator run tests this\n"
+            "  harness end to end and nothing else."
+        )
+    else:
+        contradictions = [f for f in findings if f[4]]
+        emit(
+            f"  VERDICT: {len(findings)} pair(s) differ beyond the instrument's\n"
+            f"  resolution, of which {len(contradictions)} are between formats the\n"
+            "  functional models decode IDENTICALLY. A format axis on the MATH\n"
+            "  occupancies is now motivated -- but see FORMAT_EXPECTATION: phase A\n"
+            "  measures the Wait-Gate regime, so what this licenses is an\n"
+            "  investigation, not an edit to a table charging the MOP-issued cost."
+        )
+    return values
+
+
 def _differential(rows, reference_rows, arch, emit):
     """The same binary, two devices: silicon against tt-sim, per series.
 
@@ -878,11 +1127,42 @@ def main(argv=None):
         help="a second CSV of the same binary on another device, for a differential",
     )
     parser.add_argument(
+        "--formats",
+        nargs="+",
+        metavar="CSV",
+        help="two or more tensixbench CSVs differing only in --src-format, for "
+        "experiment X2. Mutually exclusive with the ordinary report: the "
+        "format is a per-run configuration, so the comparison is across files",
+    )
+    parser.add_argument(
         "--arch",
         choices=("wormhole", "blackhole"),
         help="architecture the tables are read for (default: the CSV's arch= comment)",
     )
     args = parser.parse_args(argv)
+
+    if args.formats:
+        datasets, archs = [], set()
+        for name in args.formats:
+            path = Path(name)
+            if not path.exists():
+                print(f"no CSV at {path}.")
+                return 2
+            rows, meta = read_csv(path)
+            datasets.append((str(path), rows, meta))
+            archs.add(args.arch or meta.get("arch"))
+        if len(archs) != 1 or archs == {None}:
+            print(
+                "the format comparison needs every run to be from the same "
+                f"architecture; found {sorted(str(a) for a in archs)}. Pass --arch."
+            )
+            return 2
+        arch = archs.pop()
+        if arch not in ("wormhole", "blackhole"):
+            print(f"unknown architecture {arch!r}; pass --arch.")
+            return 2
+        format_report(datasets, arch)
+        return 0
 
     if args.measured:
         path = Path(args.measured)
@@ -920,7 +1200,7 @@ def main(argv=None):
             return 2
         reference_rows, _ = read_csv(reference_path)
 
-    report(rows, arch, label=str(path), reference=reference_rows)
+    report(rows, arch, label=str(path), reference=reference_rows, meta=meta)
     return 0
 
 

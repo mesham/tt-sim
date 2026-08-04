@@ -26,6 +26,28 @@
 #define TTBENCH_NUM_PROBES 20
 #define TTBENCH_MAX_THREADS 3
 
+// How the three MATH probes get their SrcA/SrcB data-valid bits. Runtime arg 5
+// of kernels/compute/raw_probes.cpp; the host names them on the command line and
+// records the choice in the CSV header as `dvalid_setup=`.
+//
+// The numeric values of PER_THREAD and ONCE are the 0/1 that arg 5 carried when
+// it was a bare boolean, so the two pre-existing configurations are unchanged
+// bit for bit. UNPACR_NOP is new; see experiment X2 of
+// docs/plans/matrix-unit-thread-contention.md.
+#define TTBENCH_DVALID_PER_THREAD 0  // one SETDVALID per ACTIVE thread (confounded)
+#define TTBENCH_DVALID_ONCE 1        // one SETDVALID, thread 1, barriered (X1)
+#define TTBENCH_DVALID_UNPACR_NOP 2  // one UNPACR_NOP+set_dvalid per unpacker (X2)
+
+// The source data format programmed before an UNPACR_NOP setup, as the 4-bit
+// code the hardware's data-format fields take (tt::DataFormat on the host side).
+// Only these four are offered: they are the ones that reach a DISTINCT SrcAStyle
+// in the Matrix Unit's documented decode, plus FP32, which deliberately does not
+// -- see the header comment of raw_probes.cpp.
+#define TTBENCH_FMT_FP32 0
+#define TTBENCH_FMT_FP16 1
+#define TTBENCH_FMT_TF32 4
+#define TTBENCH_FMT_BF16 5
+
 #define TTBENCH_RESULT_WORDS \
     (TTBENCH_HDR_WORDS + TTBENCH_MAX_THREADS * TTBENCH_NUM_PROBES * TTBENCH_NUM_POINTS)
 

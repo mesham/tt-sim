@@ -1,9 +1,9 @@
 # tensixbench — running it on real hardware
 
 **You have a Tenstorrent card. This page is everything you need; you do not need
-to know anything about tt-sim.** It asks you to build one program, run it
-**twice**, and send back two CSV files. Budget **20 minutes**, most of it the
-build.
+to know anything about tt-sim.** It asks you to build one program, run it a
+handful of times, and send back the CSV files. Budget **20 minutes**, most of it
+the build.
 
 If you want to know *why* the benchmark is shaped the way it is, and what its
 numbers can and cannot prove, read
@@ -39,7 +39,7 @@ you send is thrown away because of a phase you did not care about.
 | Hardware | One Wormhole **or** Blackhole card. The program detects which and adapts; you do not choose. |
 | tt-metal | A built checkout that exports the `TT-Metalium` CMake package, i.e. `<tt-metal>/build/lib/cmake/tt-metalium/tt-metalium-config.cmake` exists. |
 | Tools | `cmake` ≥ 3.22 and a C++ compiler. tt-metal supplies every flag and include path. |
-| Time | ~15 min to build, ~1 min to run. |
+| Time | ~15 min to build, ~1 min per run, six runs. |
 
 The program writes to one core (logical `(0,0)`) and one small L1 buffer. It
 does not touch DRAM, does not allocate large buffers, and cannot corrupt
@@ -75,15 +75,32 @@ unset TT_METAL_SIMULATOR                 # make sure you are on the real card
 
 # Run 2 -- the A/B for the matrix-unit question. Same binary, one flag.
 ./build/tensixbench --blocks 32 --iters 64 --dvalid-per-thread --phase a
+
+# Runs 3-6 -- the source data format sweep (experiment X2). Four separate
+# invocations, because the format is programmed once per run, not per probe.
+# Each writes its own file. About a minute each.
+for f in bf16 fp32 tf32 fp16; do
+  ./build/tensixbench --blocks 32 --phase a --dvalid-unpacr-nop --src-format $f
+done
 ```
 
 `--blocks 32` and `--iters 64` are the **hardware settings** — bigger than the
 defaults, which are sized for the simulator. Larger bursts push the fixed costs
 further into the noise; on silicon they cost milliseconds.
 
-The two runs write **two different files** — `tensixbench-<arch>.csv` and
-`tensixbench-<arch>-dvalid-per-thread.csv` — next to the binary, so they cannot
-overwrite each other. Each prints its own summary table.
+Every run writes its **own file** next to the binary, named after its
+configuration, so none of them can overwrite another:
+
+```
+tensixbench-<arch>.csv                    run 1
+tensixbench-<arch>-dvalid-per-thread.csv  run 2
+tensixbench-<arch>-unpacr-nop-bf16.csv    runs 3-6, one per format
+tensixbench-<arch>-unpacr-nop-fp32.csv
+tensixbench-<arch>-unpacr-nop-tf32.csv
+tensixbench-<arch>-unpacr-nop-fp16.csv
+```
+
+Each prints its own summary table.
 
 ### Why the second run
 
@@ -117,6 +134,71 @@ of the two settles it:
 Run 2 only needs `--phase a`; phase B has nothing to do with this.
 The reasoning is `docs/plans/matrix-unit-thread-contention.md`, experiment X1.
 
+### Why runs 3–6 — the source data format
+
+**This one is exploratory. It is not confirming anything, and a boring result is
+a real result.** Say so up front because it changes how the numbers read.
+
+Runs 1 and 2 both set the SrcA/SrcB valid bits with a bare `SETDVALID`. On
+Blackhole that instruction is `UnsupportedFunctionality` and its own page says it
+leaves `ImpliedSrc{A,B}Fmt` an `UnpredictableValue()` — and *that field is what
+Blackhole's matrix unit reads for the source data format*, since no Blackhole LLK
+ever sets `DISABLE_IMPLIED_SRC{A,B}_FMT_Base`. So in runs 1 and 2 the format the
+FPU decoded is simply undefined. Not wrong, not bf16: undefined.
+
+`--dvalid-unpacr-nop` swaps it for the sanctioned replacement, `UNPACR_NOP`
+carrying `set_dvalid` (`UNPACR_NOP_SETDVALID.md`), issued once per unpacker from
+one thread with a barrier after. That instruction copies
+`THCON_SEC{0,1}_REG2_Out_data_format` into the bank it hands over, so the format
+becomes **defined** — and, being config, becomes something a run can *choose*.
+`--src-format` chooses it. Getting a defined format is the precondition; the
+sweep is what it buys.
+
+**What the ISA documentation predicts.** `MatrixUnit.md` gives `MVMUL`,
+`ELWMUL` and `ELWADD` one instruction per cycle with **no format qualification
+at all**. And the functional models collapse every format code to one of three
+`SrcAStyle`s:
+
+| source format | decoded `SrcAStyle` |
+|---|---|
+| **bf16**, **fp32**, bfp8/4/2, int32, int16 | `BF16` |
+| **fp16**, fp8, bfp8a/4a/2a, int8 | `FP16` |
+| **tf32** | `TF32` |
+
+So the prediction has two strengths, and they are worth keeping apart:
+
+- **bf16 vs fp32 is predicted to be *exactly* nothing.** They are the same
+  branch of the same decode. A difference there contradicts the functional
+  model outright — that is the strongest thing this sweep can find, and it is
+  why fp32 is in the list even though `SrcA`/`SrcB` cannot hold FP32 (19 bits
+  is TF32 at most).
+- **tf32 and fp16 genuinely change the datapath**, and no document gives that a
+  cost. There is nothing to confirm or refute, only a number nothing has ever
+  measured.
+
+**What each outcome would mean for the cost tables**
+(`tt_sim/pe/tensix/tensix_instruction_costs.yaml`, whose MATH entries carry no
+format axis today, and `docs/plans/tensix-cost-benchmark.md`, which lists data
+format under "what is not measured, and why"):
+
+| result | what it means |
+|---|---|
+| **All four formats identical** (expected) | The MATH occupancies are right to have no format axis, and that becomes a *measured* statement instead of an unexamined omission. The benchmark's "data format is unmeasured" limitation is closed. Nothing in the tables changes. |
+| **Costs differ between `SrcAStyle`s** (e.g. tf32 ≠ bf16) but bf16 = fp32 | The tables need a **format axis on the MATH occupancies**, alongside the existing `scales_with: fidelity_phases` — the first well-founded new axis this benchmark has motivated. The docs are silent rather than wrong. |
+| **bf16 ≠ fp32** | The functional models are wrong about the decode, not just silent about the cost. That is a documentation finding, and it goes upstream before it goes into a table. |
+
+**One caveat that belongs with the numbers, not in a footnote.** Phase A issues
+each op as an individual `.ttinsn` word, so every figure here is the
+**Wait-Gate-bound** regime (~6 cycles/instruction on Blackhole), not the
+MOP-issued ~1 cycle the tables actually charge. A format effect visible here is
+evidence about the operand decode; it is not directly a measurement of the
+quantity in the table. See "Two regimes for one instruction" in
+`docs/plans/tensix-cost-benchmark.md`.
+
+`--src-format` **requires** `--dvalid-unpacr-nop` and the program refuses the
+combination otherwise, on purpose: a CSV labelled `src_format=fp32` whose FPU
+actually decoded an unpredictable value would be worse than no CSV.
+
 > **`TT_METAL_SLOW_DISPATCH_MODE=1`** makes `LaunchProgram` the launch path.
 > The benchmark works either way on hardware; setting it keeps the hardware run
 > and the simulator run on the same path, which is the entire point of the
@@ -127,9 +209,10 @@ The reasoning is `docs/plans/matrix-unit-thread-contention.md`, experiment X1.
 ### If it hangs
 
 Three probes (`MVMUL`, `ELWADD`, `ELWMUL`) need the matrix unit's SrcA/SrcB
-data-valid bits, which the benchmark sets with a bare `SETDVALID`. That is the
-one thing here that depends on Tensix state rather than being self-contained.
-If the program hangs, kill it and run:
+data-valid bits, which the benchmark sets with a bare `SETDVALID` in runs 1–2
+and with `UNPACR_NOP` in runs 3–6. That is the one thing here that depends on
+Tensix state rather than being self-contained, and it is the likeliest place for
+a hang. If the program hangs, kill it, **note which run it was**, and run:
 
 ```bash
 ./build/tensixbench --blocks 32 --iters 64 --no-dvalid-probes
@@ -145,12 +228,16 @@ table prints the probes in slot order. `--phase a` or `--phase b` runs one half.
 
 ## What to send back
 
-**Both CSVs.** Plus the terminal output of each if you have it, because the
+**All six CSVs.** Plus the terminal output of each if you have it, because the
 summary tables and the validity verdicts are in there and not in the CSV.
 
 ```
 tensixbench-<arch>.csv
 tensixbench-<arch>-dvalid-per-thread.csv
+tensixbench-<arch>-unpacr-nop-bf16.csv
+tensixbench-<arch>-unpacr-nop-fp32.csv
+tensixbench-<arch>-unpacr-nop-tf32.csv
+tensixbench-<arch>-unpacr-nop-fp16.csv
 ```
 
 Each has one row per raw measurement and no derived numbers at all:
@@ -160,10 +247,17 @@ phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
 ```
 
 with the run's configuration in a `#` header line (`arch=`, `probe_mask=`,
-`dvalid_setup=`, `mm_block=`), which is how the two runs tell themselves apart.
+`dvalid_setup=`, `src_format=`, `src_style=`, `mm_block=`), which is how the
+runs tell themselves apart.
 
 If you ran with `--no-dvalid-probes`, or without slow dispatch, or the program
 exited non-zero — say which. All three change how the numbers are read.
+
+**If runs 3–6 hang or fail and runs 1–2 do not, say so and send runs 1–2
+anyway.** The `UNPACR_NOP` setup is the one thing in this benchmark that has
+never touched silicon: it has been exercised only against the simulator, where
+nothing back-pressures the issuing core, so a hardware-only failure mode would
+not have shown up. That is a result about the setup, not a wasted run.
 
 ---
 
@@ -326,6 +420,24 @@ python3 -m tt_sim.perf.tensix_bench_sweep --measured tensixbench-blackhole.csv
 python3 -m tt_sim.perf.tensix_bench_sweep --measured tensixbench-blackhole-dvalid-per-thread.csv
 ```
 
+The X2 format sweep has its own mode, because the format is a per-run
+configuration rather than a column and the comparison is therefore across files:
+
+```bash
+python3 -m tt_sim.perf.tensix_bench_sweep --formats \
+    tensixbench-blackhole-unpacr-nop-bf16.csv \
+    tensixbench-blackhole-unpacr-nop-fp32.csv \
+    tensixbench-blackhole-unpacr-nop-tf32.csv \
+    tensixbench-blackhole-unpacr-nop-fp16.csv
+```
+
+It prints its expectation before any number, refuses any run whose header does
+not say `dvalid_setup=unpacr-nop` (such a run has no defined source format to be
+a point on the axis), applies the ordinary exclusion ladder unchanged, and then
+reports each pair against what the functional models predict — distinguishing
+"two formats that share a `SrcAStyle` differ", which contradicts the model, from
+"two formats that do not share one differ", which is merely undocumented.
+
 ## Running it against the simulator instead
 
 ```bash
@@ -354,3 +466,19 @@ CSV.
 
 `--phase a --blocks 2` is the cheap half — about five minutes for all three
 thread sets — and covers everything the X1 question needs.
+
+The X2 format runs are cheaper still against the simulator if you narrow the
+probe mask to the control plus the three MATH probes, which is all a format axis
+can move:
+
+```bash
+TT_METAL_HOME=/path/to/tt-metal ./perfbench/run.sh tensixbench -- \
+    --phase a --blocks 1 --probes 0xE0001 --dvalid-unpacr-nop --src-format bf16
+```
+
+Against tt-sim every format reads exactly `1.000`, and that is **forced** rather
+than informative: nothing back-pressures the issuing core there, so no phase-A
+probe of any unit at any format can read anything else. The simulator run proves
+the plumbing — that the kernel builds, that the `UNPACR_NOP` word is accepted,
+that the config write lands, that the CSV header and the sweep agree — and
+nothing about the hardware. The sweep says so in its own verdict.

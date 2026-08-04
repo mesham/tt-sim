@@ -414,6 +414,115 @@ def test_no_tracked_dataset_for_an_arch_says_where_it_looked(capsys):
 # and is tested.
 
 
+# ---------------------------------------------------------------------------
+# Experiment X2: the source data format axis.
+# ---------------------------------------------------------------------------
+
+
+def _format_csv(tmp_path, name, fmt, costs, setup="unpacr-nop"):
+    """One run's CSV at a named source format. ``costs`` is probe -> cyc/instr."""
+    header = (
+        "# tensixbench raw points\n"
+        f"# arch=blackhole unroll=64 dvalid_setup={setup} src_format={fmt} "
+        f"src_style={sweep.FORMAT_STYLE.get(fmt, 'undefined')}\n"
+        "phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles\n"
+    )
+    rows = list(_control(per_block=0))
+    for probe, cost in costs.items():
+        rows += _phase_a(probe, "MATH", int(round(cost * 64)))
+    path = tmp_path / name
+    path.write_text(header + "".join(rows))
+    return path
+
+
+def _format_dataset(path):
+    rows, meta = sweep.read_csv(path)
+    return (str(path), rows, meta)
+
+
+def test_a_format_comparison_needs_the_sanctioned_dvalid_setup(tmp_path, capsys):
+    """A ``SETDVALID`` run has no source format, whatever its header says.
+
+    This is the whole reason X2 exists as a separate setup rather than a flag on
+    the old one: on Blackhole the format the Matrix Unit decodes after a bare
+    ``SETDVALID`` is ``UnpredictableValue()``, so labelling such a run "fp32"
+    would be a fiction, and comparing two of them would compare two fictions.
+    """
+    good = _format_csv(tmp_path, "a.csv", "bf16", {"MVMUL": 6.0})
+    bad = _format_csv(tmp_path, "b.csv", "fp32", {"MVMUL": 6.0}, setup="once")
+    values = sweep.format_report(
+        [_format_dataset(good), _format_dataset(bad)], "blackhole"
+    )
+    out = capsys.readouterr().out
+    assert "REFUSED" in out
+    assert "dvalid_setup" in out
+    assert values == {}, "one admissible run is not an axis"
+
+
+def test_two_runs_claiming_the_same_format_are_refused_not_averaged(tmp_path, capsys):
+    a = _format_csv(tmp_path, "a.csv", "bf16", {"MVMUL": 6.0})
+    b = _format_csv(tmp_path, "b.csv", "bf16", {"MVMUL": 9.0})
+    sweep.format_report([_format_dataset(a), _format_dataset(b)], "blackhole")
+    out = capsys.readouterr().out
+    assert "already supplied by another run" in out
+
+
+def test_two_formats_sharing_a_srcastyle_are_predicted_identical(tmp_path, capsys):
+    """bf16 and fp32 are the same branch of the same decode, so a difference
+    between them contradicts the functional model rather than merely being
+    undocumented. The report has to say which of those two it is seeing."""
+    assert sweep.FORMAT_STYLE["bf16"] == sweep.FORMAT_STYLE["fp32"]
+    assert sweep.FORMAT_STYLE["tf32"] != sweep.FORMAT_STYLE["bf16"]
+
+    a = _format_csv(tmp_path, "a.csv", "bf16", {"MVMUL": 6.0})
+    b = _format_csv(tmp_path, "b.csv", "fp32", {"MVMUL": 9.0})
+    sweep.format_report([_format_dataset(a), _format_dataset(b)], "blackhole")
+    out = capsys.readouterr().out
+    assert "CONTRADICTS the model (same SrcAStyle)" in out
+
+    c = _format_csv(tmp_path, "c.csv", "tf32", {"MVMUL": 9.0})
+    sweep.format_report([_format_dataset(a), _format_dataset(c)], "blackhole")
+    out = capsys.readouterr().out
+    assert "format-dependent (undocumented)" in out
+    assert "CONTRADICTS" not in out
+
+
+def test_a_format_difference_inside_the_resolution_is_not_a_finding(tmp_path, capsys):
+    """The same one-sided-bias discipline as the per-instruction sweep. A
+    difference smaller than the control over-subtraction is not evidence, and
+    calling it one here would be the mistake `FIT_RESOLUTION_NOTE` exists to
+    prevent, transplanted to a new axis."""
+    a = _format_csv(tmp_path, "a.csv", "bf16", {"MVMUL": 6.0})
+    b = _format_csv(tmp_path, "b.csv", "tf32", {"MVMUL": 6.0})
+    values = sweep.format_report([_format_dataset(a), _format_dataset(b)], "blackhole")
+    out = capsys.readouterr().out
+    assert "no format effect this instrument can resolve" in out
+    assert values[("MVMUL", "bf16")] == pytest.approx(6.0, abs=1e-6)
+    assert values[("MVMUL", "tf32")] == pytest.approx(6.0, abs=1e-6)
+
+
+def test_the_format_expectation_is_declared_as_exploratory(tmp_path):
+    """A pre-declaration is only worth having if it says what it is. The docs
+    make no per-format cost claim, so this experiment cannot confirm one; the
+    text has to say so before any number is printed."""
+    assert "EXPLORATORY" in sweep.FORMAT_EXPECTATION
+    assert "SrcAStyle" in sweep.FORMAT_EXPECTATION
+    # And it must warn that phase A is the wrong regime for the tables' number.
+    assert "Wait-Gate" in sweep.FORMAT_EXPECTATION
+
+
+def test_a_null_against_the_simulator_is_labelled_as_forced(tmp_path, capsys):
+    """tt-sim retires one instruction per cycle whatever the format, so a null
+    there is produced by the simulator's missing FIFO back-pressure and not by
+    the hardware. Reading it as "no format effect" is exactly the mistake."""
+    a = _format_csv(tmp_path, "a.csv", "bf16", {"MVMUL": 1.0})
+    b = _format_csv(tmp_path, "b.csv", "tf32", {"MVMUL": 1.0})
+    sweep.format_report([_format_dataset(a), _format_dataset(b)], "blackhole")
+    out = capsys.readouterr().out
+    assert "FORCED" in out
+    assert "tt-sim" in out
+
+
 def test_the_tracked_dataset_carries_its_own_provenance():
     """A measurement without its card, firmware and flags is not a measurement.
 
@@ -433,10 +542,15 @@ def test_the_tracked_dataset_carries_its_own_provenance():
         header = path.read_text().split("phase,variant")[0]
         assert "--blocks" in header, "the run's flags are part of its identity"
         assert "ONE RUN" in header.upper()
-        assert meta["dvalid_setup"] in ("once", "per-thread"), (
+        assert meta["dvalid_setup"] in ("once", "per-thread", sweep.FORMAT_SETUP), (
             "the dvalid setup is the difference between a result and an "
             "artefact; a dataset that does not name it cannot be read"
         )
+        if meta["dvalid_setup"] == sweep.FORMAT_SETUP:
+            # The UNPACR_NOP setup exists precisely to make the source format
+            # defined, so a dataset taken under it that does not name the
+            # format has thrown away the only thing it was for.
+            assert meta.get("src_format") in sweep.FORMAT_STYLE
 
 
 def test_the_default_dataset_is_the_deconfounded_one():
