@@ -54,7 +54,13 @@ class MiscellaneousUnit(TensixBackendUnit):
                 self.backend.unpacker_units[0].srcBank
             ).allowedClient = SrcRegister.SrcClient.MatrixUnit
             self.backend.unpacker_units[0].srcBank ^= 1
-            self.backend.unpacker_units[0].srcRow = (
+            # Indexed by thread, exactly as the unpacker's own bank-flip does
+            # (``UnPackerUnit.handle_give_src_to_fpu``). Assigning the bare
+            # attribute replaces the per-thread list with a scalar and the next
+            # ``UNPACR`` dies with "'int' object does not support item
+            # assignment" -- reachable from any kernel that issues SETDVALID
+            # before an unpack.
+            self.backend.unpacker_units[0].srcRow[issue_thread] = (
                 self.backend.getThreadConfigValue(issue_thread, "SRCA_SET_Base") << 4
             )
         if flipSrcB:
@@ -62,7 +68,7 @@ class MiscellaneousUnit(TensixBackendUnit):
                 self.backend.unpacker_units[1].srcBank
             ).allowedClient = SrcRegister.SrcClient.MatrixUnit
             self.backend.unpacker_units[1].srcBank ^= 1
-            self.backend.unpacker_units[1].srcRow = (
+            self.backend.unpacker_units[1].srcRow[issue_thread] = (
                 self.backend.getThreadConfigValue(issue_thread, "SRCB_SET_Base") << 4
             )
 

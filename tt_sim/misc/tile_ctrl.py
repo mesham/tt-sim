@@ -14,6 +14,14 @@ class TensixTileControl(MemMapable, Clockable):
         # model clock gating, so these behave as plain read-what-you-wrote
         # registers, which is what the firmware's init sequence expects.
         self.regs = {}
+        # The high half of the wall clock, latched by a read of
+        # RISCV_DEBUG_REG_WALL_CLOCK_L (0x1F0) and returned by ..._H (0x1F8).
+        # Initialised here because 0x1F8 may be read first: tt-metal's
+        # kernel_profiler reads 0x1F0 then 0x1F4 and never trips it, but
+        # `realtime_profiler.hpp` reads 0x1F8 directly, and an AttributeError
+        # in a memory read kills the server rather than raising anywhere a
+        # driver could see it.
+        self.counter_high_at = 0
         # Owning tile's TileClock, set by TTDeviceTile._bind_clock. A write to
         # RISCV_DEBUG_REG_SOFT_RESET_0 can bring a core out of reset, so it
         # must wake the tile whatever path the write arrived by.
