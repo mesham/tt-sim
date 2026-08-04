@@ -19,10 +19,22 @@
 //   * Phase A times unrolled TTI_* bursts, one `.ttinsn` per issue slot, and
 //     subtracts an empty-body control loop to cancel the RISC-V loop overhead.
 //     It is repeated with one, two and three issuing TRISCs so an issue-limited
-//     result can be told apart from a unit-limited one.
+//     result can be told apart from a unit-limited one. `--dvalid-once`
+//     (default) / `--dvalid-per-thread` selects how the three MATH probes get
+//     their SrcA/SrcB valid bits; that is experiment X1 of
+//     docs/plans/matrix-unit-thread-contention.md and it is the only thing that
+//     changes what phase A measures.
 //   * Phase B times `matmul_tiles` at three math fidelities. The absolute
 //     number is a confounded composite; the DIFFERENCE between fidelities is
-//     not, and is a direct check on `fidelity_phases.mvmuls_per_tile`.
+//     not, and is a direct check on `fidelity_phases.mvmuls_per_tile`. The
+//     fidelity setting is known to reach the math thread -- see the disassembly
+//     evidence in kernels/compute/matmul_fidelity.cpp -- so a null difference
+//     means the loop was not math-bound, which is a result and not a fault.
+//
+// THE VERDICT IS PER PHASE. Phase A and phase B fail independently, print
+// independent `TTBENCH_VALID_A:`/`TTBENCH_VALID_B:` lines, and set independent
+// bits in the exit status (1 = A, 2 = B). A phase B that measures nothing must
+// not throw away a phase A that measured everything.
 //
 // TIMESTAMPS come from RISCV_DEBUG_REG_WALL_CLOCK_L (0xFFB121F0), which is
 // exactly the register tt-metal's device profiler reads for DeviceZoneScopedN
@@ -158,6 +170,14 @@ int main(int argc, char** argv) {
     uint32_t probe_mask = ALL_PROBES;
     std::string phases = "ab";
     std::string out_path;
+    // Experiment X1 of docs/plans/matrix-unit-thread-contention.md. Default is
+    // the de-confounded setup: exactly one SETDVALID regardless of thread count.
+    uint32_t dvalid_once = 1;
+    // Which phase B fidelities to launch. On hardware, all three, always. On the
+    // simulator a single fidelity is minutes and the three together have never
+    // completed, so being able to ask for one is the difference between phase B
+    // being checkable at all and not.
+    std::string fidelity_filter = "LoFi,HiFi2,HiFi4";
 
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -170,8 +190,14 @@ int main(int argc, char** argv) {
             probe_mask = std::stoul(next(), nullptr, 0) & ALL_PROBES;
         } else if (a == "--no-dvalid-probes") {
             probe_mask &= ~DVALID_PROBE_MASK;
+        } else if (a == "--dvalid-per-thread") {
+            dvalid_once = 0;
+        } else if (a == "--dvalid-once") {
+            dvalid_once = 1;
         } else if (a == "--phase") {
             phases = next();
+        } else if (a == "--fidelities") {
+            fidelity_filter = next();
         } else if (a == "--out") {
             out_path = next();
         } else if (a == "-h" || a == "--help") {
@@ -187,7 +213,20 @@ int main(int argc, char** argv) {
                 "  --no-dvalid-probes    drop MVMUL/ELWADD/ELWMUL, the only probes that\n"
                 "                        depend on the SrcA/SrcB valid bits. Use this if\n"
                 "                        phase A hangs, and say so in the report.\n"
+                "  --dvalid-once         (default) exactly one SETDVALID before the three\n"
+                "                        MATH probes, issued by thread 1, barriered. The\n"
+                "                        de-confounded setup -- experiment X1 of\n"
+                "                        docs/plans/matrix-unit-thread-contention.md.\n"
+                "  --dvalid-per-thread   the original setup: one SETDVALID per ACTIVE\n"
+                "                        thread, so the thread count and the SrcA/SrcB\n"
+                "                        bank state move together. Run this to reproduce\n"
+                "                        the 6.1x/12.1x MVMUL result and diff it against\n"
+                "                        the default. Written to a distinct default CSV.\n"
                 "  --phase a|b|ab        which phases to run (default ab)\n"
+                "  --fidelities LIST     comma-separated subset of LoFi,HiFi2,HiFi4 for\n"
+                "                        phase B (default all three). For the simulator,\n"
+                "                        where one fidelity is minutes; on hardware leave\n"
+                "                        it alone -- the DIFFERENCE needs at least two.\n"
                 "  --out FILE            CSV path (default tensixbench-<arch>.csv)\n",
                 TTBENCH_UNROLL,
                 TTBENCH_NUM_PROBES);
@@ -205,7 +244,9 @@ int main(int argc, char** argv) {
     IDevice* device = CreateDevice(0);
     const std::string arch = arch_name(device);
     if (out_path.empty()) {
-        out_path = "tensixbench-" + arch + ".csv";
+        // The non-default dvalid setup gets its own name so the X1 pair cannot
+        // silently overwrite each other.
+        out_path = "tensixbench-" + arch + (dvalid_once ? "" : "-dvalid-per-thread") + ".csv";
     }
     constexpr CoreCoord core = {0, 0};
 
@@ -224,7 +265,13 @@ int main(int argc, char** argv) {
     const uint32_t barrier_addr = barrier_scratch->address();
 
     std::vector<Row> rows;
-    int failures = 0;
+    // The verdict is PER PHASE. A phase A run can be perfect and a phase B run
+    // useless in the same process -- that is exactly what the first Blackhole
+    // run was -- and a single global verdict threw away nineteen good series
+    // because of one bad composite. Each phase now stands or falls alone, in the
+    // printed summary and in the exit status.
+    int fail_a = 0;
+    int fail_b = 0;
 
     // Rewritten after every program launch, not once at the end. A launch is
     // seconds on silicon but can be tens of minutes against the simulator (a
@@ -240,11 +287,15 @@ int main(int argc, char** argv) {
         fprintf(csv, "# tensixbench raw points -- see docs/plans/tensix-cost-benchmark.md\n");
         fprintf(
             csv,
-            "# arch=%s magic=0x%08X unroll=%u probe_mask=0x%X\n",
+            "# arch=%s magic=0x%08X unroll=%u probe_mask=0x%X dvalid_setup=%s mm_block=%u "
+            "fidelities=%s\n",
             arch.c_str(),
             TTBENCH_MAGIC,
             TTBENCH_UNROLL,
-            probe_mask);
+            probe_mask,
+            dvalid_once ? "once" : "per-thread",
+            TTBENCH_MM_BLOCK,
+            fidelity_filter.c_str());
         fprintf(csv, "phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles\n");
         for (const auto& r : rows) {
             fprintf(
@@ -295,7 +346,10 @@ int main(int argc, char** argv) {
             KernelHandle bench = CreateKernel(
                 program, "kernels/compute/raw_probes.cpp", core, ComputeConfig{});
             SetRuntimeArgs(
-                program, bench, core, {results_addr, barrier_addr, base_blocks, probe_mask, ts.mask});
+                program,
+                bench,
+                core,
+                {results_addr, barrier_addr, base_blocks, probe_mask, ts.mask, dvalid_once});
 
             std::vector<uint32_t> zeros(16, 0);
             detail::WriteToDeviceL1(device, core, barrier_addr, zeros);
@@ -368,12 +422,19 @@ int main(int argc, char** argv) {
         constexpr uint32_t tile_bytes = 32 * 32 * 2;  // one bf16 tile
 
         for (const auto& f : fidelities) {
+            if (("," + fidelity_filter + ",").find("," + std::string(f.variant) + ",") == std::string::npos) {
+                printf("phase B [%s]: skipped (--fidelities %s)\n", f.variant, fidelity_filter.c_str());
+                fflush(stdout);
+                continue;
+            }
             Program program = CreateProgram();
 
-            // Operand buffers are several pages deep so the feeder can run
-            // ahead of the compute loop; the output buffer holds one page per
-            // measurement point so nothing has to drain it mid-run.
-            constexpr uint32_t in_pages = 4;
+            // Operand buffers hold two blocks so the feeder can run a whole
+            // block ahead of the compute loop; the compute kernel waits on
+            // TTBENCH_MM_BLOCK pages at a time, so anything less than one block
+            // deadlocks. The output buffer holds one page per measurement point
+            // so nothing has to drain it mid-run.
+            constexpr uint32_t in_pages = 2 * TTBENCH_MM_BLOCK;
             CircularBufferConfig cb0 =
                 CircularBufferConfig(in_pages * tile_bytes, {{CBIndex::c_0, tt::DataFormat::Float16_b}})
                     .set_page_size(CBIndex::c_0, tile_bytes);
@@ -414,7 +475,14 @@ int main(int argc, char** argv) {
                 CloseDevice(device);
                 return 1;
             }
-            for (int t = 0; t < TTBENCH_MAX_THREADS; t++) {
+            // Threads 0 (unpack) and 1 (math) only. The pack thread's copy of
+            // the inner loop is empty by construction -- `cb_wait_front`,
+            // `cb_pop_front` and `matmul_tiles` all compile to nothing on
+            // TRISC2 -- so it measured ~1 cycle at every iteration count,
+            // failed linearity and monotonicity, and dragged an otherwise good
+            // run's verdict down with it. The kernel no longer times it and
+            // nothing is emitted for it.
+            for (int t = 0; t < TTBENCH_MM_TIMED_THREADS; t++) {
                 const uint32_t* slot = words.data() + TTBENCH_HDR_WORDS + t * TTBENCH_NUM_PROBES * TTBENCH_NUM_POINTS;
                 for (int k = 0; k < TTBENCH_MM_NUM_POINTS; k++) {
                     rows.push_back(Row{
@@ -453,7 +521,15 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     printf("\n%s\n", std::string(78, '=').c_str());
     printf("tensixbench summary [%s] -- slopes only, no absolute measurement is a cost\n", arch.c_str());
-    printf("%s\n\n", std::string(78, '=').c_str());
+    printf("%s\n", std::string(78, '=').c_str());
+    if (phases.find('a') != std::string::npos) {
+        printf(
+            "dvalid setup: %s -- %s\n",
+            dvalid_once ? "once" : "per-thread",
+            dvalid_once ? "one SETDVALID for the tile (X1, de-confounded)"
+                        : "one SETDVALID per ACTIVE thread (original, confounded)");
+    }
+    printf("\n");
     printf("%-14s %-7s %-6s %-4s %12s %10s %8s\n", "probe", "variant", "unit", "thr", "cyc/block", "cyc/instr", "R^2");
 
     struct Key {
@@ -491,6 +567,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Phase B slopes, kept so the fidelity deltas can be printed and read out
+    // below without refitting.
+    struct MMSlope {
+        std::string variant;
+        int thread;
+        double slope;
+    };
+    std::vector<MMSlope> mm_slopes;
+
     std::vector<std::string> emitted;
     for (const auto& r : rows) {
         const std::string tag = r.phase + "/" + r.variant + "/" + r.probe + "/" + std::to_string(r.thread);
@@ -518,6 +603,7 @@ int main(int argc, char** argv) {
             per_instr = (fit.slope - base) / (double)TTBENCH_UNROLL;
         } else {
             per_instr = fit.slope;  // cycles per matmul_tiles call
+            mm_slopes.push_back(MMSlope{r.variant, r.thread, fit.slope});
         }
         printf(
             "%-14s %-7s %-6s %-4d %12.2f %10.3f %8.4f%s\n",
@@ -530,7 +616,7 @@ int main(int argc, char** argv) {
             fit.r2,
             fit.r2 < 0.99 ? "  <-- NONLINEAR" : "");
         if (fit.r2 < 0.99) {
-            failures++;
+            (r.phase == "A" ? fail_a : fail_b)++;
         }
     }
 
@@ -542,16 +628,127 @@ int main(int argc, char** argv) {
             b.n > a.n && b.cycles <= a.cycles) {
             printf("  NOT MONOTONE: %s/%s/%s thread %d: n=%u -> %u cycles, n=%u -> %u cycles\n",
                    a.phase.c_str(), a.variant.c_str(), a.probe.c_str(), a.thread, a.n, a.cycles, b.n, b.cycles);
-            failures++;
+            (a.phase == "A" ? fail_a : fail_b)++;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase B, read out. The absolute slope is a confounded composite; the
+    // deltas are the result, and the unpack thread's slope next to them is what
+    // says whether the loop was math-bound at all.
+    //
+    // A null delta is NOT scored as a failure. The fidelity setting is known to
+    // reach the math thread -- the three JIT-built TRISC1 ELFs differ in exactly
+    // the MOP inner-loop count (1 / 2 / 4) and the ADDR_MOD_5 fidelity
+    // increment, while TRISC0 and TRISC2 are byte-identical across fidelities --
+    // so a zero delta means the MVMULs hid behind something slower, which is a
+    // finding about the hardware and not a broken measurement.
+    // -----------------------------------------------------------------------
+    auto mm_slope = [&](const char* variant, int thread, double* out_slope) {
+        for (const auto& s : mm_slopes) {
+            if (s.variant == variant && s.thread == thread) {
+                *out_slope = s.slope;
+                return true;
+            }
+        }
+        return false;
+    };
+    const struct {
+        const char* from;
+        const char* to;
+        double predicted;
+    } steps[] = {{"LoFi", "HiFi2", 16.0}, {"HiFi2", "HiFi4", 32.0}};
+    if (!mm_slopes.empty()) {
+        printf("\n%s\n", std::string(78, '-').c_str());
+        printf("phase B: fidelity deltas (math thread), and what bounded the loop\n");
+        printf("%s\n", std::string(78, '-').c_str());
+        double biggest_delta = 0;
+        int deltas = 0;
+        for (const auto& s : steps) {
+            double a = 0, b = 0;
+            if (!mm_slope(s.from, 1, &a) || !mm_slope(s.to, 1, &b)) {
+                continue;
+            }
+            deltas++;
+            const double d = b - a;
+            if (d > biggest_delta) {
+                biggest_delta = d;
+            }
+            printf(
+                "  %-6s -> %-6s  measured %+8.2f   predicted %+7.2f   residual %+8.2f\n",
+                s.from,
+                s.to,
+                d,
+                s.predicted,
+                d - s.predicted);
+        }
+        if (deltas == 0) {
+            printf(
+                "  fewer than two adjacent fidelities in this run -- nothing to\n"
+                "  difference, and the absolute numbers below are a confounded composite\n"
+                "  that is not a cost of anything.\n");
+        }
+        printf("  (predicted = 16 MVMULs per fidelity phase x 1 cycle each)\n\n");
+        printf("  %-8s %14s %14s\n", "fidelity", "math (thr 1)", "unpack (thr 0)");
+        for (const char* v : {"LoFi", "HiFi2", "HiFi4"}) {
+            double m = 0, u = 0;
+            if (mm_slope(v, 1, &m)) {
+                const bool have_u = mm_slope(v, 0, &u);
+                printf("  %-8s %14.2f", v, m);
+                if (have_u) {
+                    printf(" %14.2f", u);
+                }
+                printf("\n");
+            }
+        }
+        if (deltas > 0 && biggest_delta < 4.0) {
+            printf(
+                "\n  The fidelity slopes do not separate. The MVMULs are emitted by the\n"
+                "  Tensix MOP expander, so they only cost the math thread wall-clock time\n"
+                "  when the coprocessor back-pressures the issuing core. Compare the two\n"
+                "  columns above: if the unpack thread's slope is >= the math thread's and\n"
+                "  is flat across fidelities, this loop is UNPACK-BOUND and the fidelity\n"
+                "  arithmetic is untested rather than refuted. That is a result; it is not\n"
+                "  scored as a failure and it does not affect phase A.\n");
         }
     }
 
     printf("\nwrote %zu rows to %s\n", rows.size(), out_path.c_str());
-    if (failures == 0) {
+
+    // Per-phase verdicts. Report only the phases that actually ran.
+    bool ran_a = false, ran_b = false;
+    for (const auto& r : rows) {
+        (r.phase == "A" ? ran_a : ran_b) = true;
+    }
+    if (ran_a) {
+        if (fail_a == 0) {
+            printf("TTBENCH_VALID_A: yes\n");
+        } else {
+            printf("TTBENCH_VALID_A: no (%d checks failed in phase A)\n", fail_a);
+        }
+    }
+    if (ran_b) {
+        if (fail_b == 0) {
+            printf("TTBENCH_VALID_B: yes\n");
+        } else {
+            printf("TTBENCH_VALID_B: no (%d checks failed in phase B)\n", fail_b);
+        }
+    }
+    const bool a_ok = !ran_a || fail_a == 0;
+    const bool b_ok = !ran_b || fail_b == 0;
+    if (a_ok && b_ok) {
         printf("TTBENCH_VALID: yes\n");
         printf("Completed successfully on the device\n");
     } else {
-        printf("TTBENCH_VALID: no (%d checks failed -- do not use this run)\n", failures);
+        printf(
+            "TTBENCH_VALID: no -- but the verdict above is PER PHASE. Send the CSV\n"
+            "  regardless: the rows of a phase that passed are unaffected by one that\n"
+            "  did not, and %s.\n",
+            a_ok    ? "phase A is usable here"
+            : b_ok  ? "phase B is usable here"
+                    : "neither phase is usable here");
     }
-    return failures == 0 ? 0 : 1;
+    // Exit status is a bit mask so a wrapper can tell the phases apart:
+    // 1 = phase A failed, 2 = phase B failed, 3 = both, 0 = clean.
+    return (a_ok ? 0 : 1) | (b_ok ? 0 : 2);
 }

@@ -32,3 +32,21 @@
 // Phase B (matmul_tiles at a fixed math fidelity) reuses the same buffer with
 // probe slot 0 only.
 #define TTBENCH_MM_NUM_POINTS TTBENCH_NUM_POINTS
+
+// Phase B blocking factor: how many tile pairs are waited for, multiplied and
+// popped as one group. It exists to get the circular-buffer bookkeeping OUT of
+// the per-matmul cost. One `cb_wait_front`/`cb_pop_front` pair per operand now
+// covers TTBENCH_MM_BLOCK matmuls instead of one, so the RISC-V-side cost per
+// `matmul_tiles` falls by roughly that factor and the Tensix side (16 x phases
+// MVMULs, expanded by the MOP) gets a chance to become the limit. See the
+// header comment of kernels/compute/matmul_fidelity.cpp.
+//
+// Both circular buffers must hold at least this many pages; the host allocates
+// 2x so the feeder can run ahead by a whole block.
+#define TTBENCH_MM_BLOCK 8
+
+// Phase B times threads 0 (unpack) and 1 (math). Thread 2 (pack) has no
+// per-iteration work in a matmul inner loop -- `cb_wait_front`, `cb_pop_front`
+// and `matmul_tiles` are all UNPACK/MATH-only -- so its timed region is empty
+// and reads ~1 cycle whatever the iteration count. It is not measured.
+#define TTBENCH_MM_TIMED_THREADS 2

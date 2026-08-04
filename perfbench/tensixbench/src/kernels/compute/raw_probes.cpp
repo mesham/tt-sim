@@ -34,9 +34,30 @@
 // The probes are all state-free by construction. The SFPU ones touch LREGs
 // only, the ThCon ones touch high GPR indices only, RDCFG only reads. The three
 // MATH probes at the end are the exception: MVMUL/ELWADD/ELWMUL wait on the
-// SrcA/SrcB data-valid bits, so the kernel sets those once with SETDVALID and
-// issues every op with clear_dvalid = 0 so they stay set. They are last, and
-// gated by `probe_mask`, so a hang bisects.
+// SrcA/SrcB data-valid bits, so the kernel sets those with SETDVALID and issues
+// every op with clear_dvalid = 0 so they stay set. They are last, and gated by
+// `probe_mask`, so a hang bisects.
+//
+// HOW MANY SETDVALIDs -- experiment X1. That setup used to sit unguarded in
+// `kernel_main`, which every active thread runs, so the number of SETDVALIDs
+// executed was exactly the thread count and `active_threads` was perfectly
+// confounded with the SrcA/SrcB bank state the burst ran in. That matters: the
+// first Blackhole run measured MVMUL/ELWADD/ELWMUL at 6.1x and 12.1x per-thread
+// cost at two and three threads, against 2x/3x for every other unit, and the
+// confound is a complete alternative explanation -- on Blackhole SETDVALID is
+// `UnsupportedFunctionality` and leaves `ImpliedSrc{A,B}Fmt` `UnpredictableValue`,
+// and the third thread hands the FPU a bank it already owns, which the vendor
+// simulator asserts on as `NonContractualBehavior`.
+//
+// `dvalid_once` (runtime arg 5, the DEFAULT) issues exactly one SETDVALID, from
+// thread 1, and barriers after it, so every variant runs the burst in the same
+// Src state and only the thread count varies. This is sound because
+// `AllowedClient` and both bank pointers are single globals with no thread
+// dimension (`SrcASrcB.md`), so one SETDVALID satisfies every thread's Wait
+// Gate. Clearing it (`--dvalid-per-thread` on the host) reproduces the original
+// per-thread setup byte for byte, so the two can be run back to back and
+// diffed. The mode is recorded in the CSV header as `dvalid_setup=`.
+// Full argument: docs/plans/matrix-unit-thread-contention.md, experiment X1.
 //
 // Result buffer layout is in bench_layout.h, shared with the host.
 
@@ -129,6 +150,7 @@ void kernel_main() {
     const uint32_t base_blocks = get_arg_val<uint32_t>(2);
     const uint32_t probe_mask = get_arg_val<uint32_t>(3);
     const uint32_t active_mask = get_arg_val<uint32_t>(4);
+    const uint32_t dvalid_once = get_arg_val<uint32_t>(5);
 
 #if defined(TRISC_UNPACK)
     g_thread = 0;
@@ -193,10 +215,22 @@ void kernel_main() {
     RUN(15, TTI_SETRWC(0, 0, 0, 0, 0, 0););
     RUN(16, TTI_INCRWC(0, 0, 0, 0););
 
-    // MATH, the ops that do. SETDVALID once; every op below leaves the valid
-    // bits alone (clear_dvalid = 0) so they stay set for the whole burst.
+    // MATH, the ops that do. Every op below leaves the valid bits alone
+    // (clear_dvalid = 0) so they stay set for the whole burst, and
+    // MatrixUnit.SrcABank/SrcBBank therefore never move: no shared state changes
+    // inside any timed region, in either mode. See the X1 note in the header.
     if (probe_mask & ((1u << 17) | (1u << 18) | (1u << 19))) {
-        TTI_SETDVALID(3);
+        if (dvalid_once) {
+            // One SETDVALID for the whole tile, whatever the thread count, and
+            // a barrier so no thread starts probe 17 before it has landed.
+            if (g_thread == 1) {
+                TTI_SETDVALID(3);
+            }
+            bench_barrier();
+        } else {
+            // The original, confounded setup: one per active thread, unordered.
+            TTI_SETDVALID(3);
+        }
     }
     RUN(17, TTI_MVMUL(0, 0, 0, 0););
     RUN(18, TTI_ELWADD(0, 0, 0, 0, 0););

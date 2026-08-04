@@ -26,7 +26,9 @@ TT_METAL_HOME=/path/to/tt-metal ./perfbench/run.sh tensixbench -- --blocks 2 --i
 
 `TT_SIM_ARCH=wormhole` picks the other simulator, `TT_SIM_COST_MODEL=1` turns
 the cycle cost model on. Keep the burst sizes small — the simulator runs a few
-tens of thousands of cycles per second, where hardware runs a billion.
+tens of thousands of cycles per second, where hardware runs a billion. Run
+phase B one fidelity at a time (`--phase b --iters 1 --fidelities HiFi2`); two
+in the same process do not finish against the simulator.
 
 Every number these programs report is a **slope** over several instruction
 counts, so kernel launch, timer overhead and loop setup cancel exactly. No
