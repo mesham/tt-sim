@@ -304,6 +304,47 @@ units:
           which is named for issuing them inline and is the one shape that
           would pay the Wait-Gate figure.
 
+          NO DATA-FORMAT AXIS IS RESOLVABLE, measured rather than assumed.
+          This entry has never distinguished cost by source data format, and
+          until 2026-08-04 nothing had checked whether it should: the ISA docs
+          give the matrix unit 1 IPC with no format qualification, which is an
+          absence of a claim rather than a claim of independence. Experiment X2
+          ran the same phase A burst four times, changing only the format the
+          Matrix Unit decodes, and the three MATH probes are flat:
+
+            probe        bf16      fp32      fp16      tf32    spread
+            MVMUL       5.988     5.988     5.988     5.989     0.001
+            ELWADD      5.974     5.974     5.974     5.975     0.001
+            ELWMUL      5.973     5.973     5.973     5.974     0.001
+
+          0.001 cycles of spread against a fitted resolution of 0.036-0.052,
+          i.e. the instrument could have seen an effect ~40x smaller than the
+          smallest one it would have taken to matter, and saw none.
+
+          THE NULL CONTROL IS WHAT MAKES THAT A RESULT. bf16 and fp32 decode to
+          the same SrcAStyle (BF16) in the functional models, so they CANNOT
+          differ if those models are right; the sweep predicts it in advance and
+          labels the pair "as predicted: indistinguishable". They came out at
+          exactly 0.000 on all three probes. An instrument that shows no
+          difference anywhere might simply be blind; this one was asked a
+          question whose answer was known beforehand and got it right, so the
+          absence of a tf32/fp16 effect is evidence rather than silence.
+
+          TWO CAVEATS, AND NEITHER MAY BE DROPPED WHEN THIS IS QUOTED:
+          (1) it is the WAIT-GATE regime described above, ~6 cycles per
+          instruction, NOT the MOP-issued ~1 cycle this entry charges -- a
+          format effect confined to the MOP path would not appear here at all;
+          (2) one run per format, on one part.
+
+          FOUR RUNS, ON ONE PART, one per format, in
+          tt_sim/perf/datasets/, named tensixbench-blackhole-unpacr-nop-bf16,
+          -fp32, -tf32 and -fp16 (firmware bundle 19.6.0, KMD 2.9.0, --blocks
+          32 --phase a --dvalid-unpacr-nop --src-format <fmt> --variants t1).
+          They
+          replace SETDVALID with UNPACR_NOP + set_dvalid, which is what makes
+          the source format defined at all on Blackhole. Reproduce with
+          `python3 -m tt_sim.perf.tensix_bench_sweep --formats`.
+
           ONE RUN, ON ONE CARD:
           tt_sim/perf/datasets/tensixbench-blackhole.csv (firmware bundle
           19.6.0, KMD 2.9.0, --blocks 32 --iters 64 --dvalid-once), which holds

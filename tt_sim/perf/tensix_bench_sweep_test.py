@@ -440,6 +440,38 @@ def _format_dataset(path):
     return (str(path), rows, meta)
 
 
+def test_a_t1_only_run_is_a_complete_format_measurement(tmp_path):
+    """``--variants t1`` produces an analysable format comparison, on its own.
+
+    X2 asks a single-thread question -- how much does the format alone move the
+    number -- and the exclusion ladder drops ``active_threads > 1`` before any
+    residual is computed, so the t2/t3 launches contribute nothing to it. That
+    is not an incidental property: on Blackhole silicon the UNPACR_NOP setup
+    hangs the t2 launch, so a t1-only CSV is the only kind this experiment can
+    currently produce there. This pins that such a file is a first-class input
+    and that adding the other two variants leaves every number unchanged.
+    """
+    lean, full = [], []
+    for name, fmt in (("a.csv", "bf16"), ("b.csv", "tf32")):
+        lean.append(_format_csv(tmp_path, name, fmt, {"MVMUL": 6.0}))
+        # The same run, with t2 and t3 rows appended -- deliberately at a wildly
+        # different cost, so that any leakage into the comparison would show.
+        extra = "".join(
+            line
+            for v, t in (("t2", 2), ("t3", 3))
+            for line in _control(per_block=0, variant=v, threads=t)
+            + _phase_a("MVMUL", "MATH", 64 * 12, variant=v, threads=t)
+        )
+        path = tmp_path / f"full-{name}"
+        path.write_text(lean[-1].read_text() + extra)
+        full.append(path)
+
+    lean_values = sweep.format_report([_format_dataset(p) for p in lean], "blackhole")
+    full_values = sweep.format_report([_format_dataset(p) for p in full], "blackhole")
+    assert lean_values == full_values
+    assert lean_values[("MVMUL", "bf16")] == pytest.approx(6.0, abs=1e-6)
+
+
 def test_a_format_comparison_needs_the_sanctioned_dvalid_setup(tmp_path, capsys):
     """A ``SETDVALID`` run has no source format, whatever its header says.
 
@@ -699,6 +731,73 @@ def test_a_superlinear_thread_scaling_is_not_called_shared():
     )
     assert "SUPERLINEAR" in line
     assert "shared" not in line
+
+
+def test_the_format_datasets_are_a_set_and_are_never_swept_as_a_primary():
+    """Four files, one experiment.
+
+    The source format is programmed once per run rather than recorded per row,
+    so a single one of these carries no format information at all. Picking one
+    up as the default measurement would report a phase A run under a format
+    label that nothing in the report depends on -- the same class of mistake the
+    control-versus-primary split exists to prevent, one axis over.
+    """
+    tracked = sweep.format_datasets()
+    assert {p.name for p in tracked} == {
+        f"{sweep.FORMAT_DATASET_PREFIX}{fmt}.csv" for fmt in sweep.FORMAT_STYLE
+    }
+    assert sweep.default_measured_path().name == sweep.PRIMARY_DATASET
+    assert sweep.default_measured_path("blackhole").name == sweep.PRIMARY_DATASET
+    for path in tracked:
+        _, meta = sweep.read_csv(path)
+        assert meta["dvalid_setup"] == sweep.FORMAT_SETUP
+        assert meta["src_style"] == sweep.FORMAT_STYLE[meta["src_format"]], path.name
+        # A format run that quietly gained t2/t3 rows would be a different
+        # experiment; the ladder would drop them, but the header would stop
+        # describing the file.
+        assert meta["variants"] == "t1", path.name
+
+
+def test_the_format_axis_still_says_what_it_said():
+    """Experiment X2's measurement, pinned, in the same way the primary's is.
+
+    Not a test of the tables -- the MATH occupancies are 1 and this instrument
+    reads the ~6-cycle Wait-Gate regime, so these numbers are not comparable to
+    them and the sweep says so before printing any of them. What is pinned is
+    that the four runs agree with each other to a thousandth of a cycle, which
+    is the whole finding.
+    """
+    values = sweep.format_report(
+        [_format_dataset(p) for p in sweep.format_datasets()],
+        "blackhole",
+        out=io.StringIO(),
+    )
+    for probe, expected in (("MVMUL", 5.988), ("ELWADD", 5.974), ("ELWMUL", 5.973)):
+        cells = [values[(probe, fmt)] for fmt in sweep.FORMAT_STYLE]
+        assert cells == [pytest.approx(expected, abs=1.5e-3)] * 4, probe
+        assert max(cells) - min(cells) < 0.002, probe
+
+
+def test_the_format_null_control_came_out_exactly_null():
+    """bf16 and fp32 decode to the same SrcAStyle, so the functional models say
+    they CANNOT differ. That prediction is what makes the overall null a
+    confirmation rather than an instrument too blunt to see anything: a
+    difference here would have contradicted the model, and there is none at all
+    -- not "inside the resolution", but 0.000 on every probe.
+    """
+    assert sweep.FORMAT_STYLE["bf16"] == sweep.FORMAT_STYLE["fp32"]
+    out = io.StringIO()
+    values = sweep.format_report(
+        [_format_dataset(p) for p in sweep.format_datasets()], "blackhole", out=out
+    )
+    for probe in sweep.FORMAT_PROBES:
+        assert values[(probe, "bf16")] == values[(probe, "fp32")], probe
+    text = out.getvalue()
+    assert "as predicted: indistinguishable" in text
+    assert "no format effect this instrument can resolve" in text
+    # And the two caveats that must never be dropped from the verdict.
+    assert "Wait-Gate" in text
+    assert "one run per format, on one part" in text
 
 
 def test_the_blackhole_reference_scales_rdcfg_threefold_across_threads():

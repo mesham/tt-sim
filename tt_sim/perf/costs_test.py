@@ -246,6 +246,14 @@ CORROBORATED_ENTRIES = {
     # does) against ~6.0 when they are issued individually as .ttinsn words and
     # each pays the Wait Gate. The occupancy is unchanged; what the field adds
     # is which of the two numbers the table is.
+    #
+    # These three also carry experiment X2, which is a corroboration of a
+    # STRUCTURAL choice rather than of a number: the table has no data-format
+    # axis, and four silicon runs differing only in the format the Matrix Unit
+    # decodes are flat to 0.001 cycles. The bf16/fp32 pair is the axis's null
+    # control -- same SrcAStyle, so predicted identical, and exactly 0.000 --
+    # which is what makes the overall null a confirmed prediction rather than a
+    # blunt instrument. Both caveats travel with it and are pinned below.
     ("MATH", "MVMUL"),
     ("MATH", "ELWADD"),
     ("MATH", "ELWMUL"),
@@ -299,6 +307,27 @@ def test_a_corroboration_says_how_many_runs_on_how_many_parts():
             text = entry.corroboration
             assert RUNS_AND_PARTS.search(text), entry.name
             assert "tt_sim/perf/datasets/" in text, entry.name
+
+
+def test_the_math_format_corroboration_keeps_both_of_its_caveats():
+    """A null result is the easiest kind of finding to over-quote.
+
+    "No format effect was measured" is true and, on its own, misleading twice
+    over: the measurement is in the Wait-Gate regime rather than the MOP-issued
+    one this entry charges, so an effect confined to the MOP path is outside
+    what it could see at all; and it is one run per format on one part. Both
+    are in the text, and a future edit that trims the entry down to its headline
+    fails here rather than quietly widening the claim.
+    """
+    for arch in ARCHITECTURES:
+        for entry in load_costs(arch).corroborated():
+            if entry.unit != "MATH":
+                continue
+            text = entry.corroboration
+            assert "NO DATA-FORMAT AXIS IS RESOLVABLE" in text, entry.name
+            assert "WAIT-GATE regime" in text, entry.name
+            assert "one run per format, on one part" in text, entry.name
+            assert "null control" in text.lower(), entry.name
 
 
 def test_corroborated_extras_are_exactly_the_ones_we_expect():
@@ -770,6 +799,14 @@ EXPECTED_CONSUMERS = {
     # The sync unit: one cycle throughout; the real costs are wait-gate stalls,
     # which are not occupancy.
     "tt_sim/pe/tensix/backends/sync.py",
+    # The config unit, wired last and the only one that had to be wired twice.
+    # It charges nothing on Wormhole (all ones) and does charge on Blackhole,
+    # whose CFGSHIFTMASK is 2 cycles and runs 32 times in the `untilize` guard
+    # -- so it is the one unit whose wiring is a timing change on one arch and a
+    # no-op on the other, and it was gated as such. The reordering bug that kept
+    # it off this list is fixed in TensixBackendUnit.clock_tick; the divergence
+    # that bug exposed is merely unreachable, which config.py says out loud.
+    "tt_sim/pe/tensix/backends/config.py",
     # Only mentions the model in prose: the ``cost_model`` attribute and the
     # ``instruction_occupancy`` hook every unit inherits, whose default is now
     # the straight table lookup the five constant-cost units above rely on.
@@ -822,23 +859,6 @@ UNWIRED_UNITS = {
     # ">= 2" address phase plus a throttle-mode-dependent data phase), so it
     # wants more than the flat lookup the other units use.
     "UNPACK": "tt_sim/pe/tensix/backends/unpacker.py",
-    # Unwired because wiring it would MOVE A CYCLE COUNT, not because it would
-    # charge nothing. "Every entry is one cycle" holds on Wormhole and not on
-    # Blackhole, whose CFGSHIFTMASK is a 2-cycle occupancy (throughput_ipc 0.5)
-    # that the `untilize` guard executes 32 times -- so this unit owes the
-    # cost-model gate a re-run of its own rather than riding along with
-    # something else, which is why it is still on this list.
-    #
-    # The bug it used to be on this list for IS FIXED. RDCFG's occupancy read
-    # ">= 2" until 2026-08-04 (the documented *latency*, copied into the wrong
-    # field), and charging that made `matmulblock` compute a wrong answer:
-    # TensixBackendUnit.clock_tick armed its occupancy mid-batch and deferred
-    # the rest of the cycle's already-accepted instructions, so a SETC16 the
-    # issuing thread had been told was accepted was overtaken by that thread's
-    # own later MVMULs. The drain now completes the batch and holds the unit
-    # afterwards, and a regression test charges the unit two cycles to keep it
-    # that way. See the comment in config.py.
-    "CFG": "tt_sim/pe/tensix/backends/config.py",
     # XMOV's 1-cycle entry is the issue cost only; the transfer duration is
     # bandwidth-derived and lives in tt_sim/perf/unit_costs.yaml under
     # ``mover``, which nothing consumes yet.

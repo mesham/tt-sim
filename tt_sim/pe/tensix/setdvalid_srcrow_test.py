@@ -252,6 +252,57 @@ def test_unpacr_nop_setdvalid_takes_a_defined_format_from_config():
                     assert unpacker.srcBank == bank ^ 1
 
 
+def test_unpacr_nop_setdvalid_twice_deadlocks_the_unpacker():
+    """The Blackhole silicon hang, reproduced in the model.
+
+    ``UNPACR_NOP`` with ``set_dvalid`` and ``Unpack_Pop = UNP_ZEROSRC`` -- the
+    form ``_llk_unpack_set_srcb_dummy_valid_`` uses and the form
+    ``perfbench/tensixbench --dvalid-unpacr-nop`` copied -- is the ACQUIRE half
+    of the unpacker's handshake. It waits until the bank named by
+    ``MatrixUnit.SrcABank`` is no longer valid, then zeroes the unpacker's own
+    bank and hands it over. Issued twice with nothing releasing the first bank
+    in between, the second one waits for ever.
+
+    That is exactly what the benchmark does: every MATH probe issues
+    ``clear_dvalid = 0`` so the valid bits survive the whole burst, so a
+    completed run leaves ``SrcA[0]`` owned by the Matrix Unit. On silicon the
+    next execution of the setup -- the next launch in the same process, or the
+    first launch of the next process on the same card -- wedges, and only
+    ``tt-smi -r 0`` clears it. A bare ``SETDVALID`` has no wait half, which is
+    why ``--dvalid-once`` re-runs on the same card indefinitely.
+
+    Pinned here because the state machine is the finding: the two shots below
+    are the whole mechanism, and the second's ``blocked`` is the hang.
+    """
+    with _blackhole_backend() as backend:
+        unpacker = backend.unpacker_units[0]
+        word = _unpacr_nop_setdvalid(0, True)
+        info = TensixInstructionDecoder.getInstructionInfo(word)
+
+        unpacker.handle_unpacr_nop(info, 1, info["instr_args"])
+        assert not unpacker.blocked, "the first hand-over finds the bank free"
+        assert backend.getSrcA(0).getAllowedClient() is SrcRegister.SrcClient.MatrixUnit
+        assert unpacker.srcBank == 1, "the unpacker's bank pointer advanced"
+        assert backend.matrix_unit.srcABank == 0, "the Matrix Unit's did not"
+
+        # Nothing has cleared dvalid -- as in the benchmark, where every MVMUL
+        # carries clear_dvalid = 0 -- so the bank the Matrix Unit is pointing at
+        # is still valid, and the acquire cannot complete.
+        unpacker.handle_unpacr_nop(info, 1, info["instr_args"])
+        assert unpacker.blocked, "the second hand-over must wait, for ever"
+        assert unpacker.blocked_on() == (1, "UNPACR_NOP", "SrcA", 0)
+        # And the thread that issued it must not read as done: a unit holding an
+        # instruction that can never retire is what wedges the core on silicon.
+        assert unpacker.hasInflightInstructionsFromThread(1)
+        assert not unpacker.hasInflightInstructionsFromThread(0)
+
+        # Releasing the bank -- the half the benchmark omits -- unblocks it.
+        backend.getSrcA(0).setAllowedClient(SrcRegister.SrcClient.Unpackers)
+        unpacker.clock_tick(0)
+        assert not unpacker.blocked
+        assert not unpacker.hasInflightInstructionsFromThread(1)
+
+
 if __name__ == "__main__":  # pragma: no cover
     import pytest
 

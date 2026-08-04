@@ -265,6 +265,19 @@ that a report arrives up to `threshold / 8 + 64` cycles later than it used to
 | --- | --- |
 | `TT_SIM_DEADLOCK` | Set falsy (`0`/`false`/`no`/`off`) to disable the watchdog. On by default. |
 | `TT_SIM_DEADLOCK_THRESHOLD` | Cycles of no observable progress before a warning fires (default `50000`). Raise it if a long compute loop trips a false positive; lower it to surface stalls sooner — the sampling interval is a fixed fraction of it, so a low threshold also samples more often, down to every cycle. |
+| `TT_SIM_UNIT_STALL` | Set falsy to disable the per-unit stall check. On by default. |
+| `TT_SIM_UNIT_STALL_THRESHOLD` | Consecutive cycles one Tensix backend unit may stay blocked on a single latched instruction before a `[UNIT STALL …]` warning fires (default `10000`). |
+
+The second pair is a *different* check with a different question. The watchdog above
+asks "did anything change anywhere"; a wedged Tensix unit answers yes, because nothing
+back-pressures the baby RISC-V cores on Tensix instruction issue and the kernel behind
+the blocked unit runs to completion regardless (ROADMAP.md, "Unpacker dvalid deadlock").
+Any unit exposing `blocked_on()` — today the two unpackers — is picked up at the
+watchdog's sampling cadence and then counted **per cycle**, so what reaches the
+threshold is one unbroken run and not a loop that happened to be blocked at every
+sample point. The default of 10,000 is 2.8x the longest legitimate blocked run measured
+anywhere in the tree (3,528 cycles, Wormhole `sfpumath`, with and without the cost
+model); zero of the 41 in-tree workloads produce a report.
 
 ## NoC alignment checking
 

@@ -45,6 +45,7 @@ Run it
     python3 -m tt_sim.perf.tensix_bench_sweep --measured hw.csv
     python3 -m tt_sim.perf.tensix_bench_sweep --measured hw.csv --reference sim.csv
     python3 -m tt_sim.perf.tensix_bench_sweep --measured sim.csv --arch blackhole
+    python3 -m tt_sim.perf.tensix_bench_sweep --formats
     python3 -m tt_sim.perf.tensix_bench_sweep --formats bf16.csv fp32.csv tf32.csv
 
 With no ``--measured`` the sweep reads the **primary tracked reference
@@ -61,6 +62,14 @@ confounded dvalid setup, kept so that the artefact it produces can be pointed at
 rather than described. Its header says so in capitals and the sweep will never
 choose it for you.
 
+Nor is every tracked dataset a *standalone* result. The four
+``tensixbench-blackhole-unpacr-nop-*.csv`` files are one experiment in four
+parts: the format is a per-run configuration, so a single one of them carries no
+format information at all and none of them is ever swept as the primary. Two of
+the four -- ``bf16`` and ``fp32`` -- decode to the same ``SrcAStyle`` and are the
+axis's own **null control**, the pair whose indistinguishability was predicted
+before the run rather than observed after it.
+
 With ``--reference`` the report additionally diffs two runs of the same binary
 -- silicon against tt-sim -- which is the differential form ``optests/diff.sh``
 established for values, applied to cycles.
@@ -70,7 +79,9 @@ the same binary that differ only in the source data format the Matrix Unit
 decoded, and reports the MATH probes side by side. That is experiment X2 of
 ``docs/plans/matrix-unit-thread-contention.md``, and it needs several files
 because the format is a per-run configuration and not a column. See
-:data:`FORMAT_EXPECTATION` for what it predicts and why.
+:data:`FORMAT_EXPECTATION` for what it predicts and why. Given no files it reads
+the four tracked format datasets (:func:`format_datasets`), so X2 reproduces
+with no hardware exactly as the ordinary report does.
 
 If no dataset can be found the script prints where it looked and exits 0 -- the
 same "degrade gracefully" contract ``tt_sim/perf/noc_dataset_sweep.py`` uses for
@@ -112,6 +123,14 @@ DATASET_DIR = Path(__file__).resolve().parent / "datasets"
 #: as hardware behaviour is exactly the mistake it exists to prevent, so the
 #: default has to be a choice made here rather than whatever sorts first.
 PRIMARY_DATASET = "tensixbench-blackhole.csv"
+
+#: Filename prefix of the tracked experiment X2 runs. They are a *set*, not a
+#: list of peers and not candidates for :data:`PRIMARY_DATASET`: the source
+#: format is programmed once per run rather than recorded per row, so one of
+#: these files on its own is a phase A run with a format label and nothing to
+#: compare it to. Named by prefix so that adding a fifth format is dropping in a
+#: file rather than editing a list.
+FORMAT_DATASET_PREFIX = "tensixbench-blackhole-unpacr-nop-"
 
 #: Fraction of perfect N-fold scaling above which the unit is called ``shared``.
 #: Below it the growth is real but sub-proportional, i.e. ``partial``.
@@ -166,6 +185,17 @@ RESOLUTION_SIGMA = 2.0
 def reference_datasets():
     """Every tracked reference measurement, sorted by path."""
     return sorted(DATASET_DIR.glob("tensixbench-*.csv"))
+
+
+def format_datasets():
+    """Every tracked run of the format axis, sorted by path.
+
+    What ``--formats`` reads when given no files. The axis is the unit of
+    meaning here, so the default is the whole set rather than any one member --
+    the opposite of :func:`default_measured_path`, which has to *choose* between
+    files that each stand alone.
+    """
+    return sorted(DATASET_DIR.glob(f"{FORMAT_DATASET_PREFIX}*.csv"))
 
 
 def default_measured_path(arch=None):
@@ -1128,11 +1158,12 @@ def main(argv=None):
     )
     parser.add_argument(
         "--formats",
-        nargs="+",
+        nargs="*",
         metavar="CSV",
         help="two or more tensixbench CSVs differing only in --src-format, for "
         "experiment X2. Mutually exclusive with the ordinary report: the "
-        "format is a per-run configuration, so the comparison is across files",
+        "format is a per-run configuration, so the comparison is across files. "
+        "With no files, the tracked format datasets",
     )
     parser.add_argument(
         "--arch",
@@ -1141,9 +1172,22 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    if args.formats:
+    if args.formats is not None:
+        names = args.formats or [str(p) for p in format_datasets()]
+        if not names:
+            print(
+                "no --formats CSVs given, and no tracked format datasets to "
+                "fall back on.\n"
+                "\n"
+                f"looked in: {DATASET_DIR} for {FORMAT_DATASET_PREFIX}*.csv\n"
+                "\n"
+                "Produce them by running perfbench/tensixbench on silicon with\n"
+                "--dvalid-unpacr-nop --src-format <fmt>, once per format. See\n"
+                "perfbench/tensixbench/README.md."
+            )
+            return 0
         datasets, archs = [], set()
-        for name in args.formats:
+        for name in names:
             path = Path(name)
             if not path.exists():
                 print(f"no CSV at {path}.")

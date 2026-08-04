@@ -67,10 +67,40 @@ def _cfgshiftmask(
     )
 
 
+#: How many cycles :func:`_issue` will wait for the config unit to free itself.
+#: Three is enough for the one multi-cycle opcode in either arch's table; eight
+#: leaves room and still fails fast rather than spinning.
+_ISSUE_RETRY_LIMIT = 8
+
+
 def _issue(backend, instruction, thread=0):
-    """Issue through the backend and run the config unit for one cycle."""
-    assert backend.issueInstruction(instruction, thread)
-    backend.config_unit.clock_tick(0)
+    """Issue through the backend and tick the config unit until it retires.
+
+    The cycle number **advances**; it used to be pinned at 0. That was fine
+    while no Tensix unit could hold itself, and stopped being fine when the
+    config unit was wired to the cycle-cost tables: Blackhole's
+    ``CFGSHIFTMASK`` is a 2-cycle occupancy (``throughput_ipc: 0.5``, "requires
+    two cycles in stage 0"), so after one executes the unit refuses further
+    issues until ``busy_until`` — and a helper that always ran cycle 0 could
+    never let that deadline pass, which made the second ``CFGSHIFTMASK`` in a
+    test refused for ever under ``TT_SIM_COST_MODEL=1``.
+
+    Retrying on the next cycle is what the frontend's wait gate does on a real
+    run, and it is what the replay guards exercise. Nothing these tests assert
+    changes: the back-pressure is throughput, so the instruction still executes
+    and still has exactly the same effect, one or three cycles later.
+    """
+    cycle = getattr(backend, "_ops_test_cycle", 0)
+    for _ in range(_ISSUE_RETRY_LIMIT):
+        accepted = backend.issueInstruction(instruction, thread)
+        backend.config_unit.clock_tick(cycle)
+        cycle += 1
+        if accepted:
+            backend._ops_test_cycle = cycle
+            return
+    raise AssertionError(
+        f"config unit refused the instruction for {_ISSUE_RETRY_LIMIT} cycles"
+    )
 
 
 def _set_config(backend, state_id, key, value):

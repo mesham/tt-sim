@@ -1,6 +1,7 @@
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.util import TensixConfigurationConstants, TensixInstructionDecoder
+from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 
@@ -70,11 +71,25 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         super().__init__(
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
-        # NOT wired to the cycle-cost tables (Phase 5 of
-        # docs/plans/event-driven-pump.md), but no longer for the reason it
-        # used to be. THE ORDERING BUG THIS UNIT FOUND IS FIXED; what is left
-        # is that wiring it would move a cycle count, which owes its own guard
-        # run.
+        # Wired to the cycle-cost tables (Phase 5 of
+        # docs/plans/event-driven-pump.md) on 2026-08-04, last of the six
+        # units the plan named and the only one that had to be wired twice.
+        # ``None`` unless TT_SIM_COST_MODEL is set.
+        #
+        # ON WORMHOLE THIS CHARGES NOTHING: every entry in that arch's table is
+        # one cycle, and ``occupy_for`` no-ops at <= 1. ON BLACKHOLE IT DOES --
+        # CFGSHIFTMASK is a 2-cycle occupancy (throughput_ipc 0.5, "requires two
+        # cycles in stage 0") and the `untilize` guard executes it 32 times, so
+        # this is a real timing change and it was gated as one:
+        # driver/tests/cost_model_gate.py, RESULT: PASS, with every
+        # budget-dependent guard needing exactly the poll-budget multiplier it
+        # needed before.
+        self.cost_model = unit_cost_model(
+            "CFG", "blackhole" if blackhole else "wormhole"
+        )
+        #
+        # THE ORDERING BUG THIS UNIT FOUND IS FIXED, and it is the reason the
+        # wiring is safe rather than merely tested.
         #
         # The bug, for the record. Until 2026-08-04 RDCFG's *occupancy* in the
         # table read ">= 2": the Wormhole page's documented **latency**, copied
@@ -100,23 +115,32 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         # never letting a thread's next instruction start until this one's
         # side effects are committed. See backend_base.TensixBackendUnit.
         #
-        # What remains, and why this unit is still unwired: "every entry is one
-        # cycle, so wiring it would charge nothing" is FALSE on Blackhole.
-        # CFGSHIFTMASK is a 2-cycle occupancy there (throughput_ipc 0.5, "requires
-        # two cycles in stage 0") and the Blackhole `untilize` guard executes it
-        # 32 times, so wiring this unit is a real timing change needing the
-        # cost-model gate re-run -- not a no-op that can ride along with a bug
-        # fix. Wormhole's table really is all ones.
+        # THE DIVERGENCE THE BUG EXPOSED IS NOT FIXED, only made unreachable
+        # from these tables: nothing in tt-sim orders a config write against the
+        # units that read it, because tt-sim's config writes land instantly and
+        # nothing had ever made one late. With RDCFG corrected to 1 no table
+        # entry delays a *config write* any more -- CFGSHIFTMASK does hold the
+        # unit for two cycles, but only ever behind its own already-committed
+        # write. A future entry that delayed a SETC16 or a WRCFG would meet the
+        # same missing guarantee, and the failure would look like a wrong
+        # answer, not a slow one. That is why this paragraph outlives the fix.
         #
-        # The other reason this unit is a poor fit for a per-opcode occupancy:
-        # its real constraints are cross-thread. SETC16 is one per thread per
-        # cycle, RMWCIB needs neither RDCFG nor WRCFG issued in the previous
-        # cycle by *any* thread, and Blackhole folds everything but SETC16
-        # into one shared IPC group -- so a whole-unit ``busy_until`` also
-        # over-stalls SETC16, which the Blackhole page places outside that
-        # group. tt-sim models the first two in ``issueInstruction`` /
-        # ``prev_cycle_setc16_or_wrcfg``; none of them is expressible as a
-        # number attached to an opcode.
+        # WHAT THIS WIRING OVER-CHARGES, stated because it is the one place the
+        # unit's real constraints do not fit a per-opcode number, and it is an
+        # over-charge rather than the under-charge the cost model's bounds
+        # policy prefers. The unit's constraints are cross-thread: SETC16 is one
+        # per thread per cycle, RMWCIB needs neither RDCFG nor WRCFG issued in
+        # the previous cycle by *any* thread, and Blackhole folds everything but
+        # SETC16 into one shared IPC group. ``busy_until`` is a whole-unit hold,
+        # so a cycle in which CFGSHIFTMASK is charged 2 also refuses the next
+        # cycle's SETC16 -- which the Blackhole page places OUTSIDE that IPC
+        # group and would let through. Bounded and small: CFGSHIFTMASK is the
+        # only entry in either arch's table above one cycle, so this can only
+        # bite in the cycle after one, and only on Blackhole. Fixing it properly
+        # means a per-IPC-group occupancy rather than a per-unit one, which is a
+        # change to the mechanism and not to this table. tt-sim models the first
+        # two constraints in ``issueInstruction`` / ``prev_cycle_setc16_or_wrcfg``;
+        # none of the three is expressible as a number attached to an opcode.
 
     def is_clock_idle(self):
         # The override also clears prev_cycle_setc16_or_wrcfg, which is

@@ -1,0 +1,160 @@
+# tensixbench raw points -- see docs/plans/tensix-cost-benchmark.md
+#
+# THIS IS A REFERENCE MEASUREMENT, NOT RUN OUTPUT, and it is ONE POINT OF A
+# FOUR-POINT AXIS. The source data format is a per-run configuration rather
+# than a column in the CSV -- it is programmed into
+# THCON_SEC*_REG2_Out_data_format before the burst -- so the experiment only
+# exists across the four files together:
+#
+#   tensixbench-blackhole-unpacr-nop-bf16.csv    SrcAStyle BF16
+#   tensixbench-blackhole-unpacr-nop-fp32.csv    SrcAStyle BF16
+#   tensixbench-blackhole-unpacr-nop-tf32.csv    SrcAStyle TF32
+#   tensixbench-blackhole-unpacr-nop-fp16.csv    SrcAStyle FP16
+#
+# Read one on its own and it says nothing about a format axis. Read them with
+# `python3 -m tt_sim.perf.tensix_bench_sweep --formats <the four files>`, which
+# refuses any run whose header does not name a sanctioned dvalid setup and a
+# known format, and refuses two runs claiming the same format rather than
+# averaging them. The primary X1 dataset (tensixbench-blackhole.csv) is NOT a
+# fifth point: its dvalid setup leaves the format undefined, and the sweep
+# rejects it for exactly that reason.
+#
+# THIS FILE IS bf16, and with fp32 it is HALF OF THE NULL CONTROL. The
+# two decode to the same SrcAStyle (BF16), so the functional models say
+# they cannot differ; a difference between them would contradict the
+# model rather than merely be undocumented. They did not differ.
+#
+# device=blackhole-silicon simulator=no
+# firmware_bundle=19.6.0 kmd=2.9.0
+# flags: --blocks 32 --phase a --dvalid-unpacr-nop --src-format bf16 --variants t1
+# slow_dispatch=1 dvalid_probes=on
+# valid=yes rows=80 phases=A
+# collected=2026-08-04
+# host=unrecorded
+#
+# THIS IS EXPERIMENT X2 of docs/plans/matrix-unit-thread-contention.md, and it
+# is the first phase-A matrix probe whose source format is DEFINED AT ALL. The
+# X1 primary and control datasets both set up their Src banks with a bare
+# SETDVALID, which on Blackhole is UnsupportedFunctionality and leaves
+# ImpliedSrc{A,B}Fmt -- the very field the Matrix Unit decodes for the source
+# format -- an UnpredictableValue(). This setup replaces it with UNPACR_NOP +
+# set_dvalid, which copies THCON_SEC*_REG2_Out_data_format into the bank handed
+# to the FPU without a single datum being unpacked: six config writes and two
+# instructions, all outside the timed region, so the probe stays as
+# self-contained as every other one in phase A.
+#
+# WHAT THE FOUR SAY, TOGETHER: no format effect this instrument can resolve.
+# MVMUL reads 5.988 / 5.988 / 5.988 / 5.989 cycles per instruction across
+# bf16 / fp32 / fp16 / tf32; ELWADD and ELWMUL are flat to the same three
+# decimal places. The spread is 0.001 cycles against a fitted resolution of
+# 0.036-0.052, i.e. one thirty-sixth of what this instrument could have seen.
+#
+# THE NULL CONTROL IS THE PART THAT MATTERS. bf16 and fp32 share SrcAStyle
+# BF16, so they CANNOT differ if the functional model is right, and they came
+# out at exactly 0.000 on all three MATH probes -- the sweep labels those pairs
+# "as predicted: indistinguishable". That is what separates a confirmed
+# prediction from an accidental absence of an effect: an instrument that showed
+# no difference anywhere might simply be blind, but this one was asked a
+# question whose answer was known in advance and got it right.
+#
+# TWO CAVEATS TRAVEL WITH THE RESULT, and dropping either overstates it:
+#
+#   1. THIS IS THE WAIT-GATE REGIME. Phase A issues each op as an individual
+#      .ttinsn word, so every number here is the ~6 cycles/instruction an
+#      individually issued matrix op pays at the Wait Gate -- NOT the
+#      MOP-issued ~1 cycle the cost tables actually charge. A format effect
+#      confined to the MOP path would not appear here at all.
+#   2. ONE RUN, ON ONE CARD, per format, by one operator; the host machine name
+#      was not captured in what came back with the files. Four runs, four
+#      formats, one part, one power state, one day.
+#
+# T1 ONLY, AND THAT IS A COMPLETE MEASUREMENT rather than a truncated one. X2
+# asks a single-thread question, and the exclusion ladder drops
+# active_threads > 1 before any residual is computed, so the t2/t3 launches
+# would contribute nothing to this comparison. On this card the UNPACR_NOP
+# setup hangs the t2 launch, so a t1-only CSV is the only kind the experiment
+# can currently produce; tensix_bench_sweep_test pins that appending t2/t3 rows
+# leaves every number in the format report unchanged.
+#
+# arch=blackhole magic=0x7B10CE02 unroll=64 probe_mask=0xFFFFF dvalid_setup=unpacr-nop src_format=bf16 src_style=BF16 mm_block=8 variants=t1 fidelities=LoFi,HiFi2,HiFi4
+phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
+A,t1,0,loop_overhead,-,1,1,32,64,76
+A,t1,0,loop_overhead,-,1,1,64,64,140
+A,t1,0,loop_overhead,-,1,1,96,64,204
+A,t1,0,loop_overhead,-,1,1,128,64,268
+A,t1,1,NOP,NONE,1,1,32,64,2138
+A,t1,1,NOP,NONE,1,1,64,64,4235
+A,t1,1,NOP,NONE,1,1,96,64,6347
+A,t1,1,NOP,NONE,1,1,128,64,8459
+A,t1,2,DMANOP,TDMA,1,1,32,64,2138
+A,t1,2,DMANOP,TDMA,1,1,64,64,4235
+A,t1,2,DMANOP,TDMA,1,1,96,64,6347
+A,t1,2,DMANOP,TDMA,1,1,128,64,8459
+A,t1,3,SFPNOP,SFPU,1,1,32,64,2137
+A,t1,3,SFPNOP,SFPU,1,1,64,64,4235
+A,t1,3,SFPNOP,SFPU,1,1,96,64,6347
+A,t1,3,SFPNOP,SFPU,1,1,128,64,8459
+A,t1,4,SFPMOV,SFPU,1,1,32,64,2138
+A,t1,4,SFPMOV,SFPU,1,1,64,64,4235
+A,t1,4,SFPMOV,SFPU,1,1,96,64,6347
+A,t1,4,SFPMOV,SFPU,1,1,128,64,8459
+A,t1,5,SFPADD,SFPU,1,1,32,64,2138
+A,t1,5,SFPADD,SFPU,1,1,64,64,4235
+A,t1,5,SFPADD,SFPU,1,1,96,64,6347
+A,t1,5,SFPADD,SFPU,1,1,128,64,8459
+A,t1,6,SFPMUL,SFPU,1,1,32,64,2138
+A,t1,6,SFPMUL,SFPU,1,1,64,64,4235
+A,t1,6,SFPMUL,SFPU,1,1,96,64,6347
+A,t1,6,SFPMUL,SFPU,1,1,128,64,8459
+A,t1,7,SFPMAD,SFPU,1,1,32,64,2137
+A,t1,7,SFPMAD,SFPU,1,1,64,64,4235
+A,t1,7,SFPMAD,SFPU,1,1,96,64,6347
+A,t1,7,SFPMAD,SFPU,1,1,128,64,8459
+A,t1,8,SFPABS,SFPU,1,1,32,64,2138
+A,t1,8,SFPABS,SFPU,1,1,64,64,4235
+A,t1,8,SFPABS,SFPU,1,1,96,64,6347
+A,t1,8,SFPABS,SFPU,1,1,128,64,8459
+A,t1,9,SETDMAREG,THCON,1,1,32,64,2137
+A,t1,9,SETDMAREG,THCON,1,1,64,64,4235
+A,t1,9,SETDMAREG,THCON,1,1,96,64,6347
+A,t1,9,SETDMAREG,THCON,1,1,128,64,8459
+A,t1,10,ADDDMAREG,THCON,1,1,32,64,6058
+A,t1,10,ADDDMAREG,THCON,1,1,64,64,12227
+A,t1,10,ADDDMAREG,THCON,1,1,96,64,18375
+A,t1,10,ADDDMAREG,THCON,1,1,128,64,24519
+A,t1,11,MULDMAREG,THCON,1,1,32,64,6058
+A,t1,11,MULDMAREG,THCON,1,1,64,64,12227
+A,t1,11,MULDMAREG,THCON,1,1,96,64,18375
+A,t1,11,MULDMAREG,THCON,1,1,128,64,24519
+A,t1,12,SHIFTDMAREG,THCON,1,1,32,64,6058
+A,t1,12,SHIFTDMAREG,THCON,1,1,64,64,12227
+A,t1,12,SHIFTDMAREG,THCON,1,1,96,64,18375
+A,t1,12,SHIFTDMAREG,THCON,1,1,128,64,24519
+A,t1,13,CMPDMAREG,THCON,1,1,32,64,6058
+A,t1,13,CMPDMAREG,THCON,1,1,64,64,12227
+A,t1,13,CMPDMAREG,THCON,1,1,96,64,18375
+A,t1,13,CMPDMAREG,THCON,1,1,128,64,24519
+A,t1,14,RDCFG,CFG,1,1,32,64,2138
+A,t1,14,RDCFG,CFG,1,1,64,64,4235
+A,t1,14,RDCFG,CFG,1,1,96,64,6347
+A,t1,14,RDCFG,CFG,1,1,128,64,8459
+A,t1,15,SETRWC,MATH,1,1,32,64,2137
+A,t1,15,SETRWC,MATH,1,1,64,64,4235
+A,t1,15,SETRWC,MATH,1,1,96,64,6347
+A,t1,15,SETRWC,MATH,1,1,128,64,8459
+A,t1,16,INCRWC,MATH,1,1,32,64,2137
+A,t1,16,INCRWC,MATH,1,1,64,64,4235
+A,t1,16,INCRWC,MATH,1,1,96,64,6347
+A,t1,16,INCRWC,MATH,1,1,128,64,8459
+A,t1,17,MVMUL,MATH,1,1,32,64,12095
+A,t1,17,MVMUL,MATH,1,1,64,64,24509
+A,t1,17,MVMUL,MATH,1,1,96,64,36801
+A,t1,17,MVMUL,MATH,1,1,128,64,49088
+A,t1,18,ELWADD,MATH,1,1,32,64,12196
+A,t1,18,ELWADD,MATH,1,1,64,64,24515
+A,t1,18,ELWADD,MATH,1,1,96,64,36807
+A,t1,18,ELWADD,MATH,1,1,128,64,49095
+A,t1,19,ELWMUL,MATH,1,1,32,64,12200
+A,t1,19,ELWMUL,MATH,1,1,64,64,24515
+A,t1,19,ELWMUL,MATH,1,1,96,64,36807
+A,t1,19,ELWMUL,MATH,1,1,128,64,49095
