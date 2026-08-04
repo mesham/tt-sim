@@ -78,9 +78,13 @@ unset TT_METAL_SIMULATOR                 # make sure you are on the real card
 
 # Runs 3-6 -- the source data format sweep (experiment X2). Four separate
 # invocations, because the format is programmed once per run, not per probe.
-# Each writes its own file. About a minute each.
+# Each writes its own file. Seconds each.
+#
+# `--variants t1` runs the single-thread launch ONLY, and is required here:
+# X2 is a single-thread comparison across formats, and the t2 launch of this
+# setup HANGS on Blackhole silicon (see "If it hangs" below).
 for f in bf16 fp32 tf32 fp16; do
-  ./build/tensixbench --blocks 32 --phase a --dvalid-unpacr-nop --src-format $f
+  ./build/tensixbench --blocks 32 --phase a --variants t1 --dvalid-unpacr-nop --src-format $f
 done
 ```
 
@@ -208,6 +212,36 @@ actually decoded an unpredictable value would be worse than no CSV.
 
 ### If it hangs
 
+**Known, already reported: `--dvalid-unpacr-nop` hangs the `t2` launch on
+Blackhole silicon.** The `t1` launch completes and writes its rows; the run then
+stops with no further output:
+
+```
+phase A [t1]: done (1 issuing thread), 80 rows written to tensixbench-blackhole-unpacr-nop-bf16.csv
+<hangs>
+```
+
+`--variants t1` — which runs 3–6 above already pass — avoids the *second*
+launch, and costs the experiment nothing: X2 compares formats at one thread, and
+the analysis (`tensix_bench_sweep --formats`) drops every multi-thread series
+before it computes anything. A `t1`-only CSV is a complete X2 measurement, and
+its header records `variants=t1` so it can never be mistaken for a truncated
+full run. Runs 1–2 (`--dvalid-once` / `--dvalid-per-thread`) are unaffected and
+still run all three variants.
+
+**Run `tt-smi -r 0` between runs 3–6.** It is not the thread count that hangs —
+it is the *second* execution of the `UNPACR_NOP` setup on a card whose SrcA/SrcB
+dvalid is still set from the first, whether that is the t2 launch in the same
+process or the next process's t1. `UNPACR_NOP` with `UNP_ZEROSRC` waits until
+the bank `MatrixUnit.SrcABank` points at is no longer valid before it may zero
+and re-hand it over, and this benchmark holds the valid bits for the whole burst
+by design (`clear_dvalid = 0` on every probe), so nothing ever gives the bank
+back. `SETDVALID` has no wait at all, which is why runs 1–2 repeat happily on a
+dirty card. The state is device-resident and a board reset clears it — so also
+reset before running anything else on that card after runs 3–6.
+
+The other probes and the general case:
+
 Three probes (`MVMUL`, `ELWADD`, `ELWMUL`) need the matrix unit's SrcA/SrcB
 data-valid bits, which the benchmark sets with a bare `SETDVALID` in runs 1–2
 and with `UNPACR_NOP` in runs 3–6. That is the one thing here that depends on
@@ -247,8 +281,10 @@ phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
 ```
 
 with the run's configuration in a `#` header line (`arch=`, `probe_mask=`,
-`dvalid_setup=`, `src_format=`, `src_style=`, `mm_block=`), which is how the
-runs tell themselves apart.
+`dvalid_setup=`, `src_format=`, `src_style=`, `mm_block=`, `variants=`,
+`fidelities=`), which is how the runs tell themselves apart. `variants=` is what
+distinguishes a deliberately single-thread run from a full run that stopped
+early.
 
 If you ran with `--no-dvalid-probes`, or without slow dispatch, or the program
 exited non-zero — say which. All three change how the numbers are read.

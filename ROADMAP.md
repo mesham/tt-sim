@@ -214,35 +214,32 @@ for a shared module means `tt_sim/bridge/<x>.py`.
     offset for `kernel_config_msg_t.enables`), and a variant with the
     BRISC enable bit cleared to check a disabled core never leaves
     reset.
-- **Two `LaunchProgram`s in one process stall the simulator, for one
-  program shape.** Found by `perfbench/tensixbench` phase B, which
-  launches one program per math fidelity. Each launch on its own is
-  fine: LoFi alone completes in **~2 min**, HiFi2 alone in **~2 min**.
-  LoFi → HiFi2 **in the same host process** ran **25 minutes** on one
-  attempt and **18 minutes** on a second without the second launch ever
-  finishing, at **95 % CPU** throughout — so it is a live spin, not a
-  deadlock the watchdog would catch and not merely "phase B is slow".
-  **Phase A does three `LaunchProgram`s per process and is unaffected**,
-  which is what makes this a bug rather than a cost: the difference is
-  what the phase-B program leaves behind between launches. Phase B's
-  kernels are the only ones in the tree that combine a `matmul_tiles`
-  inner loop, two circular buffers fed by a separate dataflow kernel and
-  a math/unpack semaphore handshake, so the first suspects are Tensix
-  state that survives a program teardown (Src bank ownership /
-  `AllowedClient`, the MOP and replay-buffer configuration, the
-  ttsync/semaphore state) and circular-buffer read/write pointers in L1
-  that the second launch re-initialises but the first launch's
-  still-parked threads are waiting on. The practical consequence is
-  recorded in `docs/plans/tensix-cost-benchmark.md`: **the fidelity
-  difference — the entire point of phase B — cannot be self-checked
-  against tt-sim at any N**, because a difference needs two fidelities
-  and two fidelities need two launches. `--fidelities LoFi` runs one
-  per process and is the current workaround.
-  - *Test:* smallest reproducer is a host program calling
-    `detail::LaunchProgram` twice with the same compute kernel, under
-    the deadlock watchdog with a wall-clock bound; it belongs next to
-    `driver/blackhole/server/*_replay_test.py` once the launch that
-    hangs is narrowed to a single kernel feature.
+- **Two `LaunchProgram`s in one process stall the simulator.** *Fixed.*
+  Found by `perfbench/tensixbench` phase B, which launches one program
+  per math fidelity: either fidelity alone finished, LoFi → HiFi2 **in
+  the same host process** ran **25 minutes** on one attempt and **18
+  minutes** on a second without the second launch ever finishing, at
+  **95 % CPU** throughout. It was nothing phase B does. The Sync Unit
+  (`tt_sim/pe/tensix/backends/sync.py`) deleted granted waiters from
+  `blocked_mutex` only `if len(to_remove) > 1`, so a *lone* grant — one
+  mutex, one waiter, the common case — stayed queued for ever, and a
+  queued entry is re-granted on every later `clock_tick`. The mutex was
+  therefore pinned to that thread for the rest of the device's life,
+  silently re-acquired the cycle after each `ATRELM`. Nothing failed
+  while no other thread wanted it, which is why one launch was always
+  fine and why phase A's three launches never tripped it; the first
+  cross-thread `ATGETM` after the first contention blocked for ever. The
+  stale entry also kept `is_clock_idle` false, so the tile never went
+  dormant — hence the live spin rather than a quiet stall.
+  `--fidelities LoFi,HiFi2` now completes end-to-end in **~9 s**, and the
+  fidelity difference phase B exists to measure can be self-checked
+  against tt-sim again.
+  - *Test:* `tt_sim/pe/tensix/sync_mutex_queue_test.py` pins the queue
+    behaviour at the unit (a granted waiter leaves the queue; a released
+    mutex is really free; the unit goes idle again), and
+    `driver/blackhole/server/twolaunch_replay_test.py` replays a captured
+    two-launch phase-B conversation and requires **both** launches to
+    reach `RUN_MSG_DONE`. Both fail before the fix.
 - **`START` (cmd=4) handler.** `tt_sim/bridge/transport.py::_handle`
   log-and-skips it. Never observed in any captured trace; revisit if a
   future tt-metal release sends it.
@@ -349,6 +346,83 @@ have been dropped where they had already drifted; grep for
 `NotImplementedError` in the named file instead.
 
 ### Frontend / decode pipeline
+- ★ **A permanently stalled backend unit cannot wedge the issuing core, so
+  tt-sim runs to completion where Blackhole silicon deadlocks.** Named because
+  it was measured on a card, not inferred.
+
+  `perfbench/tensixbench --dvalid-unpacr-nop` issues the Blackhole-sanctioned
+  dvalid setup — `UNPACR_NOP` with `set_dvalid` and `Unpack_Pop = UNP_ZEROSRC`,
+  copied verbatim from `tt_llk_blackhole/llk_lib/llk_unpack_common.h`'s
+  `_llk_unpack_set_srcb_dummy_valid_` — and then deliberately never clears
+  dvalid, because holding the valid bits for the whole burst is what the
+  measurement needs. That form has two halves: it first **waits until the Src
+  bank named by `MatrixUnit.Src{A,B}Bank` is no longer valid** (ttsim
+  `src/tensix.cpp`, `TENSIX_EXECUTE_UNPACR_NOP`, Blackhole branch:
+  `wait_bank = stall_clr_cntrl ? unpack_bank : matrix_bank; if (src_valid &
+  (1 << wait_bank)) return false;`), and only then zeroes the bank and hands it
+  over. So the setup **acquires without releasing**: the first run leaves
+  `SrcA[0]`/`SrcB[0]` owned by the Matrix Unit, and the *next* execution of the
+  same setup waits for ever — the next program launch in the same process, or
+  the first launch of the next process on the same card. Only `tt-smi -r 0`
+  clears it. Plain `SETDVALID` has no wait half at all, which is why
+  `--dvalid-once` re-runs indefinitely on the same card; that is the entire
+  difference between the two setups.
+
+  tt-sim models the stall condition itself correctly and reaches the *identical*
+  blocked state — instrumented, the t2 launch's `UNPACR_NOP` blocks on
+  `wait_bank=0 matrix=0 client=MatrixUnit` and re-runs 17,329 times — and then
+  reports the launch **done** anyway. Two reasons, and only the first is fixed:
+  - `UnPackerUnit.hasInflightInstructionsFromThread` did not count a blocked
+    unit's latched instruction, so `CoprocessorDoneCheck` (the PC-buffer drain
+    and the deadlock watchdog's signature) saw the thread as idle. **Fixed**,
+    with the wait reason now named in the watchdog's report.
+  - The remaining half: **nothing back-pressures the baby RISC-V on Tensix
+    instruction issue.** On silicon the thread's instruction FIFO fills behind
+    the stalled unpacker instruction and the core stalls on its next `.ttinsn`
+    store; tt-sim's core issues regardless, so a kernel with no drain point
+    (`raw_probes.cpp` has none) finishes with a wedged unit behind it. This is
+    the same missing mechanism as "the cost model is invisible to a device-side
+    clock" in `docs/plans/tensix-cost-benchmark.md`.
+  - ~~*Next step, and deliberately not a wedge:* a per-unit **blocked-cycle
+    counter**, needing a false-positive survey first.~~ **Landed** as
+    `TT_SIM_UNIT_STALL` / `TT_SIM_UNIT_STALL_THRESHOLD` in
+    `tt_sim/device/deadlock.py`: any unit exposing `blocked_on()` is picked up
+    at the watchdog's sampling cadence and then counted **per cycle**, and a
+    `[UNIT STALL …]` block naming thread, opcode, Src register and bank fires
+    where the global watchdog cannot, because the rest of the device is still
+    making progress.
+    - *The survey it was gated on.* Every replay guard, example and
+      differential op test in the tree (41 workloads, Wormhole and Blackhole)
+      was instrumented for the longest run of consecutive cycles each backend
+      unit spent blocked while the device progressed, with and without
+      `TT_SIM_COST_MODEL`. The unpacker is the only unit that meaningfully
+      blocks at all: worst case **3,528 cycles** (WH `sfpumath`, unpacker 1's
+      `UNPACR_NOP` waiting for the SFPU to hand SrcB back), then 3,007 (the BH
+      run of the same workload), 944 (BH `matmulblock`), 925 (BH `sfpuchain`);
+      nothing else exceeds 300. Sync's mutex queue peaks at 13 cycles; ThCon,
+      matrix, SFPU, packer, misc and mover never block. No unit ended any
+      workload still blocked. The threshold is 10,000 — 2.8x the worst measured
+      legitimate wait, and inside the lifetime of every workload (the longest
+      runs 27,499 cycles end to end). Zero of the 41 produce a report.
+    - *Two findings that shaped it.* **(a)** A *sampled* counter is a false
+      positive generator and was rejected on the data: a kernel is a loop, so a
+      unit that legitimately blocks once per tile on the same instruction is
+      blocked at consecutive sample points — `sfpumath`'s unpacker is blocked
+      for 4,721 of ~20,000 cycles across 9 runs — and sampling cannot tell that
+      apart from never having moved. Hence the per-cycle confirmation, which
+      costs nothing while nothing is blocked. **(b)** It **warns rather than
+      raises**, against the wanted behaviour above. The measured separation is
+      clean, but the legitimate bound is *architecturally* the downstream
+      pipeline's stall, not a constant: an unpacker waits for the math thread,
+      which waits for Dst / output CB space, which waits on the packer, the
+      writer core and — in a multi-core tt-metal pipeline — a remote consumer.
+      No in-tree workload pipelines core-to-core, so that case is not in the
+      numbers, and aborting a correct kernel on an extrapolation is the trade
+      declined for the `SETDVALID` `NonContractualBehavior` guard. Promote it
+      to a raise once a core-to-core pipelined workload has been surveyed.
+  - *Test:* `tt_sim/pe/tensix/setdvalid_srcrow_test.py` already pins the
+    instruction word and the hand-over; the missing one issues the setup twice
+    with no intervening clear and asserts the second blocks.
 - **Wait-gate stalls** on srcA/srcB availability not fully enforced.
   - *Test:* no example needed — exercised indirectly by every Tensix
     compute kernel; targeted regression would be a perf-model task.
@@ -912,6 +986,32 @@ fix would mislead).
     watchdog test in `tt_sim/device/deadlock_test.py` parametrised over
     both architectures. The remaining deliberate asymmetry is
     Wormhole's ethernet tiles (§F).
+- ~~**The deadlock watchdog cannot see a *spinning* wedge.**~~ **Fixed.**
+  It was built to catch a device that had gone quiet, and every real
+  wedge found so far is the opposite: cores retiring instructions in a
+  poll loop at full speed, no forward progress, 95 % CPU. The progress
+  signature used each core's *instantaneous* PC bucket, which any spin
+  loop straddling a 64-byte boundary defeats — consecutive samples land
+  either side of it, the signature "changes", and the stall window
+  re-baselines for ever. That is what a wedged tt-metal firmware looks
+  like (the go-message wait loop spans two buckets), and it is why the
+  two-`LaunchProgram` hang (§A) ran for 25 minutes with the watchdog
+  enabled and silent. The signature now carries each core's *code
+  footprint* — the set of PC buckets in its recent-PC window — beside its
+  **register file**, and the per-cycle confirmation pass asks whether any
+  core reached a bucket it had not already been in rather than whether
+  its PC moved (a spinning PC moves every cycle). The register component
+  is what stops the footprint rule firing on a small loop that is
+  genuinely computing: a working loop moves a register every iteration, a
+  poll loop re-loads the same value for ever. Verified quiet across all
+  37 replay guards and the cost-model gate. The remaining limit, stated
+  in the module docstring: a loop longer than the confirmation window
+  keeps reaching new buckets to the end of the burst and still reads as
+  progress.
+  - *Test:* `tt_sim/device/deadlock_test.py` —
+    `test_fires_on_a_spinning_wedge_that_straddles_a_pc_bucket` against
+    `test_quiet_on_a_tight_loop_that_is_making_progress`, the same loop
+    shape with and without register motion.
 - ~~**The deadlock watchdog cannot see a fully dormant device.**~~
   **Fixed.** Making the watchdog sampled rather than per-cycle (§L) left
   it dependent on the Phase 4 pump *visiting* a cycle, and a device every
@@ -1282,11 +1382,11 @@ status there:
   allowed to skip)** is the live one, and Phases 4–5 do **not** depend on
   Phase 3. Judge them on whether a cost table can be expressed and a
   stall attributed, not on wall-clock factors.
-- **Phase 5 — landed for five of the nine Tensix backend units**
-  (2026-08-03). The matrix, vector (SFPU), scalar (ThCon), packer and
-  sync units each charge an op the occupancy
-  `tensix_instruction_costs.yaml` gives it, behind the opt-in
-  `TT_SIM_COST_MODEL`; the config unit, the unpacker, the mover and
+- **Phase 5 — landed for six of the nine Tensix backend units**
+  (2026-08-03; the config unit 2026-08-04). The matrix, vector (SFPU),
+  scalar (ThCon), packer, sync and config units each charge an op the
+  occupancy `tensix_instruction_costs.yaml` gives it, behind the opt-in
+  `TT_SIM_COST_MODEL`; the unpacker, the mover and
   everything outside the coprocessor still retire in the tick they were
   issued. The matrix unit's fidelity-phase cost is computed from the
   table rather than looked up, and comes out at 1 cycle per `MVMUL` at
@@ -1303,11 +1403,16 @@ status there:
   from the FPU's 15 % — and of the 416 ticks ThCon spent occupied,
   *none* had an instruction waiting. The units are never contended,
   because the constraint is the un-modelled RISC-V front end.
-  The **config unit** is the exception and the interesting result:
-  charging `RDCFG`'s documented ">= 2" delays nine config writes by one
-  cycle each and makes `matmulblock` compute a wrong answer, so tt-sim
-  has a missing ordering guarantee between a config write and its
-  readers. Left uncosted rather than papered over. The config unit, the
+  The **config unit** was the exception and the interesting result:
+  charging `RDCFG`'s documented ">= 2" delayed nine config writes by one
+  cycle each and made `matmulblock` compute a wrong answer, so tt-sim
+  had a missing ordering guarantee between a config write and its
+  readers. Left uncosted rather than papered over — then fixed
+  (2026-08-04, the batch-drain bullet below) and **wired**, since
+  Blackhole's `CFGSHIFTMASK` is a 2-cycle occupancy the `untilize` guard
+  executes 32 times, so it is not the no-op it was assumed to be. The
+  cost-model gate passes with every poll-budget multiplier unchanged and
+  not one simulated cycle moves. The
   unpacker and mover, NoC bandwidth/contention and DRAM latency are the
   rest of this section.
 - **Phase 5, second half — the baby RISC-V load/store path** (2026-08-03),
@@ -1495,14 +1600,24 @@ status there:
 - **Rung 3 of the calibration ladder — the Tensix instruction costs,
   measured on Blackhole silicon** (2026-08-04). `perfbench/tensixbench`
   ran on a real card for the first time, and its output is now the only
-  hardware-measured data in the tree. **Two datasets are tracked and
+  hardware-measured data in the tree. **Six datasets are tracked and
   they are not peers**:
   `tt_sim/perf/datasets/tensixbench-blackhole.csv` is the **primary**,
   504 raw points, `--blocks 32 --iters 64 --dvalid-once`, phases A *and*
   B, firmware bundle 19.6.0, KMD 2.9.0;
   `tensixbench-blackhole-dvalid-per-thread.csv` is a **control**, kept
   because it reproduces a known-bad probe setup and demonstrates the
-  artefact that setup produces. Provenance lives in each file's own `#`
+  artefact that setup produces; and the four
+  `tensixbench-blackhole-unpacr-nop-{bf16,fp32,tf32,fp16}.csv` are
+  **experiment X2**, one measurement in four files — the source data
+  format is a per-run configuration, so no one of them says anything
+  alone. They report **no resolvable format effect** on the MATH probes
+  (spread 0.001 cycles against a resolution of 0.036–0.052), with the
+  `bf16`/`fp32` pair — same decoded `SrcAStyle`, predicted identical
+  before the run — coming out at exactly 0.000. Caveats that travel with
+  it: this is the Wait-Gate regime, not the MOP-issued cost the tables
+  charge, and it is one run per format on one part.
+  Provenance lives in each file's own `#`
   header so it cannot be separated from the numbers.
   `python3 -m tt_sim.perf.tensix_bench_sweep` reads the primary with no
   arguments — a *named* default now, not "the only file present" — and
@@ -1570,12 +1685,14 @@ status there:
   visible before any hardware existed. Occupancy is now 1 (`isa_doc`),
   the `>= 2` latency is unchanged and still untested by anything — the
   slope method runs no dependent chain and structurally cannot see a
-  latency. The config unit is unwired, so **no simulated cycle moves**;
+  latency. The config unit was unwired at the time, so **no simulated
+  cycle moved** (it is wired now, and still none does);
   what does move is that the `matmulblock` divergence the old 2 provoked
   (a missing ordering guarantee between a config write and its readers)
   is no longer *reachable* from the tables, and `config.py`,
   `costs_test.py` and the plan doc now say so rather than letting a bug
-  go quiet.
+  go quiet. (Not reachable is not fixed; it was fixed the next day — see
+  the bullet below.)
   **No `measured` provenance rank was added, deliberately**, with the
   argument written into `tensix_instruction_costs.yaml`: a document and
   a measurement are usually not the same quantity (this case exactly), a
@@ -1608,6 +1725,40 @@ status there:
   over-charged when 18 were fractions of a cycle inside its own
   resolution, and now names one. The admitted cost: it cannot detect an
   over-charge below ~0.03 cycles/instruction.
+- **The config-write ordering bug is fixed** (2026-08-04) — the one the
+  `RDCFG` table entry above made unreachable without making untrue. The
+  fault was in `TensixBackendUnit.clock_tick`, not in the config unit:
+  a unit that accepts several instructions in one cycle (config: up to
+  three `SETC16`, one per thread, plus one shared-IPC-group op; sync:
+  three mutex ops; misc: one per thread) armed its occupancy *mid-batch*
+  and returned, leaving the rest of that cycle's already-accepted
+  instructions queued for later. The issuing threads had been told those
+  instructions were accepted and had moved on, so with `RDCFG` charged 2
+  the math thread's `SETC16` of `DEST_TARGET_REG_CFG_MATH_Offset` landed
+  two cycles late — **behind two of that same thread's own `MVMUL`s**,
+  which then accumulated into the wrong half of Dst and made
+  `matmulblock` print 608.0 for C[0][0] against a golden of 1120.0. So
+  it was an intra-thread reordering after all, of a kind `is_occupied`'s
+  refusal cannot prevent because the instruction had already been
+  accepted. The drain now retires the whole batch and holds the unit
+  afterwards, for the longest cost in it: **occupancy is throughput
+  back-pressure on the next instruction to enter a unit, never a delay
+  of one already inside it**, which is what both arches' Configuration
+  Unit pages describe (Blackhole names the pipeline stages, −4..+1) and
+  what the vendor reference simulator enforces absolutely, by never
+  starting a pipe's next instruction until this one's side effects are
+  committed. Regression-tested with the config unit charged more than
+  one cycle, at the unit and end-to-end on `matmulblock`, via a local
+  stand-in cost model — **the tables are untouched**, because that
+  `RDCFG` 1 is a silicon measurement. **No cycle count moves**: nothing
+  arms an occupancy mid-batch today, so every guard is byte-identical.
+  What did *not* survive is the second reason the config unit is
+  unwired: "every entry is one cycle, so wiring it would charge
+  nothing" is true on Wormhole and **false on Blackhole**, whose
+  `CFGSHIFTMASK` is a 2-cycle occupancy that the `untilize` guard
+  executes 32 times. Wiring the unit is therefore a real timing change
+  owing its own cost-model-gate run, and it stays unwired until it gets
+  one.
 
 - **Per-unit cycle-cost tables.** Today every RV instruction, Tensix
   op, NoC request, and Mover transfer completes in the same tick it

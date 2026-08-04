@@ -1,7 +1,11 @@
 from abc import ABC
 
 from tt_sim.device.clock import MultiTileClock, TileClock
-from tt_sim.device.deadlock import DeadlockDetector, deadlock_config_from_env
+from tt_sim.device.deadlock import (
+    DeadlockDetector,
+    deadlock_config_from_env,
+    unit_stall_config_from_env,
+)
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
@@ -155,11 +159,14 @@ class TT_Device(Device):
         # Wormhole-only for a long time, which meant a wedged Blackhole kernel
         # hung silently with no ``[DEADLOCK]`` diagnostic at all.
         enabled, threshold = deadlock_config_from_env()
+        unit_stall_enabled, unit_stall_threshold = unit_stall_config_from_env()
         self.deadlock_detector = DeadlockDetector(
             threshold,
             enabled,
             self.tensix_tiles,
             self.dram_tiles,
+            unit_stall_enabled=unit_stall_enabled,
+            unit_stall_threshold=unit_stall_threshold,
         )
         # Left unwired when disabled, so TT_SIM_DEADLOCK=0 costs literally
         # nothing per cycle rather than a call that returns immediately.

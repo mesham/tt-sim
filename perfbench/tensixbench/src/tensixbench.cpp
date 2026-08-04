@@ -208,6 +208,13 @@ std::string src_format_names() {
     return out;
 }
 
+// Is `name` one of the comma-separated entries of `list`? Used for both the
+// phase A variant filter and the phase B fidelity filter, so the two selectors
+// accept exactly the same spelling.
+bool selected(const std::string& list, const std::string& name) {
+    return ("," + list + ",").find("," + name + ",") != std::string::npos;
+}
+
 // The three dvalid setups, in the order their numeric values take. The name is
 // what goes into the CSV header's `dvalid_setup=` token and is how a dataset
 // tells itself apart from the others.
@@ -240,6 +247,14 @@ int main(int argc, char** argv) {
     // completed, so being able to ask for one is the difference between phase B
     // being checkable at all and not.
     std::string fidelity_filter = "LoFi,HiFi2,HiFi4";
+    // Which phase A thread sets to launch, same shape as --fidelities and for
+    // the same reason: a run that only needs one of them should not have to run
+    // -- or survive -- the others. Experiment X2's measurement is a t1
+    // comparison ACROSS FORMATS, so it needs t1 and nothing else, and on
+    // Blackhole silicon the UNPACR_NOP setup hangs the t2 launch (see
+    // "The UNPACR_NOP setup hangs at t2 on silicon" in the README). Selecting
+    // the variants makes the measurement reachable without touching the hang.
+    std::string variant_filter = "t1,t2,t3";
 
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -273,12 +288,15 @@ int main(int argc, char** argv) {
             phases = next();
         } else if (a == "--fidelities") {
             fidelity_filter = next();
+        } else if (a == "--variants") {
+            variant_filter = next();
         } else if (a == "--out") {
             out_path = next();
         } else if (a == "-h" || a == "--help") {
             printf(
                 "usage: tensixbench [--blocks N] [--iters N] [--probes 0xMASK]\n"
-                "                   [--no-dvalid-probes] [--phase a|b|ab] [--out FILE]\n"
+                "                   [--no-dvalid-probes] [--phase a|b|ab] [--variants LIST]\n"
+                "                   [--fidelities LIST] [--out FILE]\n"
                 "                   [--dvalid-once | --dvalid-per-thread |\n"
                 "                    --dvalid-unpacr-nop [--src-format NAME]]\n"
                 "\n"
@@ -313,6 +331,14 @@ int main(int argc, char** argv) {
                 "                        nothing well defined to vary. Each format gets\n"
                 "                        its own default CSV name.\n"
                 "  --phase a|b|ab        which phases to run (default ab)\n"
+                "  --variants LIST       comma-separated subset of t1,t2,t3 for phase A\n"
+                "                        (default all three), i.e. how many TRISCs issue\n"
+                "                        the identical burst. Each is a separate program\n"
+                "                        launch, so dropping one drops its launch entirely.\n"
+                "                        `--variants t1` is what experiment X2 needs: a\n"
+                "                        format comparison is a SINGLE-thread quantity, and\n"
+                "                        the t2/t3 launches of --dvalid-unpacr-nop are known\n"
+                "                        to hang on Blackhole silicon (see the README).\n"
                 "  --fidelities LIST     comma-separated subset of LoFi,HiFi2,HiFi4 for\n"
                 "                        phase B (default all three). For the simulator,\n"
                 "                        where one fidelity is minutes; on hardware leave\n"
@@ -329,6 +355,12 @@ int main(int argc, char** argv) {
     }
     if (base_blocks == 0 || base_iters == 0) {
         fprintf(stderr, "--blocks and --iters must be >= 1\n");
+        return 2;
+    }
+    // A typo in --variants must not quietly run nothing, or -- worse -- write a
+    // CSV whose header claims a selection the data does not contain.
+    if (!selected(variant_filter, "t1") && !selected(variant_filter, "t2") && !selected(variant_filter, "t3")) {
+        fprintf(stderr, "--variants %s selects none of t1,t2,t3\n", variant_filter.c_str());
         return 2;
     }
     // A format is only a *measurable* axis under the UNPACR_NOP setup. Refusing
@@ -410,7 +442,7 @@ int main(int argc, char** argv) {
         fprintf(
             csv,
             "# arch=%s magic=0x%08X unroll=%u probe_mask=0x%X dvalid_setup=%s "
-            "src_format=%s src_style=%s mm_block=%u fidelities=%s\n",
+            "src_format=%s src_style=%s mm_block=%u variants=%s fidelities=%s\n",
             arch.c_str(),
             TTBENCH_MAGIC,
             TTBENCH_UNROLL,
@@ -419,6 +451,7 @@ int main(int argc, char** argv) {
             src_format ? src_format->name : "undefined",
             src_format ? src_format->style : "undefined",
             TTBENCH_MM_BLOCK,
+            variant_filter.c_str(),
             fidelity_filter.c_str());
         fprintf(csv, "phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles\n");
         for (const auto& r : rows) {
@@ -459,6 +492,11 @@ int main(int argc, char** argv) {
         };
 
         for (const auto& ts : thread_sets) {
+            if (!selected(variant_filter, ts.variant)) {
+                printf("phase A [%s]: skipped (--variants %s)\n", ts.variant, variant_filter.c_str());
+                fflush(stdout);
+                continue;
+            }
             Program program = CreateProgram();
 
             // A compute kernel needs at least one circular buffer for the
@@ -552,7 +590,7 @@ int main(int argc, char** argv) {
         constexpr uint32_t tile_bytes = 32 * 32 * 2;  // one bf16 tile
 
         for (const auto& f : fidelities) {
-            if (("," + fidelity_filter + ",").find("," + std::string(f.variant) + ",") == std::string::npos) {
+            if (!selected(fidelity_filter, f.variant)) {
                 printf("phase B [%s]: skipped (--fidelities %s)\n", f.variant, fidelity_filter.c_str());
                 fflush(stdout);
                 continue;

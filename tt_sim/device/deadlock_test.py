@@ -23,14 +23,19 @@ import re
 
 import pytest
 
+from tt_sim.arch import WORMHOLE_PROFILE
 from tt_sim.device.blackhole import Blackhole
 from tt_sim.device.deadlock import (
     _CONFIRM_TICKS,
+    DEFAULT_UNIT_STALL_THRESHOLD,
     DeadlockDetector,
     deadlock_config_from_env,
+    unit_stall_config_from_env,
 )
 from tt_sim.device.wormhole import Wormhole
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
+from tt_sim.pe.tensix.tensix import TensixCoProcessor
+from tt_sim.pe.tensix.util import TensixInstructionDecoder
 
 # BRISC boots at L1 offset 0 on both architectures.
 BRISC_START = 0x0
@@ -325,6 +330,205 @@ def test_disabled_detector_never_samples():
     for cycle in range(1000):
         detector.tick(cycle)
     assert scanned == []
+
+
+class _FakeBlockedUnit:
+    """Stands in for an unpacker: ``blocked_on()`` and a switch to unblock it.
+
+    The real thing needs a compute kernel to reach the blocking site, and what
+    is under test here is the detector's counting rule, not the unpacker's.
+    ``tt_sim/pe/tensix/setdvalid_srcrow_test`` pins the unpacker end.
+    """
+
+    def __init__(self, waiting=(0, "UNPACR_NOP", "SrcB", 0)):
+        self.waiting = waiting
+        self.blocked = True
+
+    def blocked_on(self):
+        return self.waiting if self.blocked else None
+
+
+def _watch(detector, unit, name="Unpacker 1", coord=(1, 1)):
+    detector.stallable_units.append((coord, name, unit))
+
+
+UNIT_STALL_THRESHOLD = 500
+
+
+def _detector_with_unit_stall_check(threshold=UNIT_STALL_THRESHOLD):
+    """A detector with no tiles: the global watchdog has nothing to say."""
+    return DeadlockDetector(THRESHOLD, True, [], [], unit_stall_threshold=threshold)
+
+
+def _pump(detector, cycles):
+    for cycle in range(cycles):
+        detector.tick(cycle)
+
+
+def test_reports_a_unit_blocked_past_the_threshold(capsys):
+    detector = _detector_with_unit_stall_check()
+    _watch(detector, _FakeBlockedUnit())
+
+    _pump(detector, 2 * UNIT_STALL_THRESHOLD)
+
+    err = capsys.readouterr().err
+    assert "[UNIT STALL" in err, err
+    assert "Unpacker 1" in err
+    assert "UNPACR_NOP from thread 0" in err
+    assert "waiting for SrcB bank 0" in err
+    assert "TT_SIM_UNIT_STALL=0" in err
+
+
+def test_unit_stall_report_is_late_by_at_most_one_sample_interval(capsys):
+    """The unit is picked up at the sampling cadence, then counted per cycle."""
+    detector = _detector_with_unit_stall_check()
+    _watch(detector, _FakeBlockedUnit())
+
+    _pump(detector, 3 * UNIT_STALL_THRESHOLD)
+
+    first = int(re.findall(r"\[UNIT STALL cycle=(\d+)\]", capsys.readouterr().err)[0])
+    assert (
+        UNIT_STALL_THRESHOLD
+        <= first
+        <= UNIT_STALL_THRESHOLD + detector.sample_interval + 1
+    )
+
+
+def test_quiet_on_a_unit_that_unblocks_between_samples(capsys):
+    """The false positive that made a sampled counter unusable.
+
+    A kernel is a loop, so an unpacker that legitimately waits for the math
+    thread blocks on *the same instruction* once per tile — and is therefore
+    blocked at consecutive sample points. Counting samples cannot tell that
+    apart from never having moved; counting cycles can, and this is the case
+    that says so. The unit here is blocked at every sample point and never for
+    more than a fraction of the threshold at a time.
+    """
+    detector = _detector_with_unit_stall_check()
+    unit = _FakeBlockedUnit()
+    _watch(detector, unit)
+    period = detector.sample_interval
+
+    for cycle in range(20 * UNIT_STALL_THRESHOLD):
+        # Blocked across every sample point, clear in between.
+        unit.blocked = (cycle % period) < period // 2
+        detector.tick(cycle)
+
+    assert "[UNIT STALL" not in capsys.readouterr().err
+
+
+def test_quiet_on_a_unit_that_moves_to_a_different_instruction(capsys):
+    detector = _detector_with_unit_stall_check()
+    unit = _FakeBlockedUnit()
+    _watch(detector, unit)
+
+    for cycle in range(20 * UNIT_STALL_THRESHOLD):
+        unit.waiting = (0, "UNPACR", "SrcB", cycle // (UNIT_STALL_THRESHOLD // 4) % 2)
+        detector.tick(cycle)
+
+    assert "[UNIT STALL" not in capsys.readouterr().err
+
+
+def test_unit_stall_survives_every_core_going_back_into_reset(capsys):
+    """The state the global watchdog rebaselines on, and this must not.
+
+    A launch ends with every baby core back in soft reset. That is the exact
+    moment a wedged unit becomes invisible to the progress signature — and the
+    moment the real Blackhole ``UNPACR_NOP`` deadlock was left standing in.
+    """
+    device, _coord, detector = _device_with_watchdog()
+    detector.unit_stall_threshold = UNIT_STALL_THRESHOLD
+    _watch(detector, _FakeBlockedUnit())
+
+    device.run(3 * UNIT_STALL_THRESHOLD)
+
+    assert "[UNIT STALL" in capsys.readouterr().err
+
+
+def test_unit_stall_check_can_be_disabled(capsys):
+    detector = DeadlockDetector(
+        THRESHOLD,
+        True,
+        [],
+        [],
+        unit_stall_enabled=False,
+        unit_stall_threshold=UNIT_STALL_THRESHOLD,
+    )
+    _watch(detector, _FakeBlockedUnit())
+
+    _pump(detector, 20 * UNIT_STALL_THRESHOLD)
+
+    assert "[UNIT STALL" not in capsys.readouterr().err
+
+
+@DEVICES
+def test_every_unpacker_is_registered_for_the_stall_check(device_class):
+    """Guards the wiring: a device's own detector watches its own unpackers."""
+    device = device_class()
+    device.reset()
+    detector = device.deadlock_detector
+    assert detector.unit_stall_enabled
+    assert detector.unit_stall_threshold == DEFAULT_UNIT_STALL_THRESHOLD
+    names = {name for _coord, name, _unit in detector.stallable_units}
+    assert names == {"Unpacker 0", "Unpacker 1"}
+    assert len(detector.stallable_units) == 2 * len(detector.tile_cores)
+
+
+def _wedged_unpacker():
+    """A really-blocked unpacker, reached the way the Blackhole bug reaches it.
+
+    ``UNPACR_NOP`` in its give-Src-to-the-Matrix-Unit form hands SrcB over; the
+    zero-Src form issued straight after waits for that same bank to come back,
+    and nothing here ever clears dvalid. That is the acquire-without-release
+    shape of ``perfbench/tensixbench --dvalid-unpacr-nop`` (ROADMAP.md,
+    "Unpacker dvalid deadlock"), with no device and no kernel around it.
+    """
+    backend = TensixCoProcessor(
+        None,
+        WORMHOLE_PROFILE.tensix_cfg_state_size,
+        WORMHOLE_PROFILE.tensix_thd_state_size,
+    ).getBackend()
+    unpacker = backend.unpacker_units[1]
+    unpacr_nop = 0x43 << 24 | 1 << 23  # opcode, unpacker_select = SrcB
+    for noop_mode in (0x7, 0x1):  # give SrcB to the FPU, then wait for it back
+        info = TensixInstructionDecoder.getInstructionInfo(unpacr_nop | noop_mode)
+        unpacker.handle_unpacr_nop(info, 0, info["instr_args"])
+    assert unpacker.blocked_on() == (0, "UNPACR_NOP", "SrcB", 0)
+    return unpacker
+
+
+def test_reports_a_really_wedged_unpacker(capsys):
+    """End to end on the real unit, not the stand-in above."""
+    detector = _detector_with_unit_stall_check()
+    unpacker = _wedged_unpacker()
+    _watch(detector, unpacker)
+
+    for cycle in range(2 * UNIT_STALL_THRESHOLD):
+        unpacker.clock_tick(cycle)  # re-runs the latched instruction, as the tile does
+        detector.tick(cycle)
+
+    err = capsys.readouterr().err
+    assert "[UNIT STALL" in err, err
+    assert "UNPACR_NOP from thread 0" in err
+    assert "waiting for SrcB bank 0" in err
+
+
+def test_unit_stall_config_from_env():
+    enabled, threshold = unit_stall_config_from_env({})
+    assert enabled
+    assert threshold == DEFAULT_UNIT_STALL_THRESHOLD
+    enabled, threshold = unit_stall_config_from_env(
+        {"TT_SIM_UNIT_STALL": "0", "TT_SIM_UNIT_STALL_THRESHOLD": "1234"}
+    )
+    assert not enabled
+    assert threshold == 1234
+    # Independent of the no-progress window: shrinking that one to surface
+    # stalls sooner must not drag this one through the measured legitimate
+    # maximum (3,528 cycles) and start warning about correct kernels.
+    _enabled, threshold = unit_stall_config_from_env(
+        {"TT_SIM_DEADLOCK_THRESHOLD": "100"}
+    )
+    assert threshold == DEFAULT_UNIT_STALL_THRESHOLD
 
 
 def test_sample_interval_follows_the_threshold():

@@ -85,6 +85,58 @@ Configured via two env vars, read in :func:`deadlock_config_from_env`:
 
 * ``TT_SIM_DEADLOCK`` — falsy disables the detector. Default on.
 * ``TT_SIM_DEADLOCK_THRESHOLD`` — cycle count between reports. Default 50000.
+
+**Per-unit stalls, which the global signature cannot see.** Everything above
+asks "did *anything* change". A Tensix backend unit can be wedged for ever
+while the answer stays yes: nothing back-pressures the baby RISC-V cores on
+Tensix instruction issue, so the thread that issued the blocked instruction
+carries on, the kernel runs to the end, and the rest of the device keeps
+making progress right past a unit that will never retire. That is the second
+half of the Blackhole ``UNPACR_NOP``/``UNP_ZEROSRC`` deadlock (ROADMAP.md,
+"Unpacker dvalid deadlock"): the unpacker re-ran its latched instruction
+17,329 times and the launch still reported done.
+
+:meth:`DeadlockDetector._watch_unit_stalls` closes that. Any unit exposing
+``blocked_on()`` — today the two unpackers — is watched, and a unit blocked on
+the *same* latched instruction for ``TT_SIM_UNIT_STALL_THRESHOLD`` consecutive
+cycles is reported, naming the thread, the opcode and the resource waited on.
+
+Two things make it trustworthy rather than merely available:
+
+* **The count is exact, not sampled.** A blocked unit is picked up at the
+  ordinary sampling cadence, and from then on it is re-checked *every cycle*
+  until it clears; the run restarts from zero if it does. Counting at the
+  sample cadence instead would have been a false-positive generator, because a
+  kernel is a loop: an unpacker that legitimately blocks once per tile, on the
+  same instruction each time, is blocked at consecutive sample points and a
+  sampled counter cannot tell that apart from never having moved. The cost of
+  exactness is bounded — the per-cycle re-check runs only while some unit is
+  actually blocked, and only over those units — and the ordinary full
+  signature scan keeps its own cadence throughout, so nothing above this
+  paragraph changes.
+* **The threshold is measured, not guessed.** Every replay guard, example and
+  differential op test in the tree was instrumented for the longest run of
+  consecutive cycles any backend unit spent blocked while the device as a
+  whole progressed, with and without ``TT_SIM_COST_MODEL``. The worst
+  legitimate case is **3,528 cycles** — Wormhole ``sfpumath``, unpacker 1's
+  ``UNPACR_NOP`` waiting for the SFPU to finish a tile and hand SrcB back.
+  Second is 3,007 (the Blackhole run of the same workload); no other workload
+  in either timing mode exceeds 944. The default is 10,000: **2.8x** the worst
+  measured legitimate wait, and small enough to fire well inside a workload's
+  lifetime (the longest in-tree one runs 27,499 cycles end to end).
+
+It is a **warning, not a raise**, and deliberately so. The measured separation
+is clean, but the legitimate bound is *architecturally* the downstream
+pipeline's stall, not a constant: an unpacker waits for the math thread, which
+waits for Dst / output CB space, which waits on the packer, the writer core
+and — in a multi-core tt-metal pipeline — a remote consumer. No in-tree
+workload pipelines core-to-core, so none of this is in the numbers above, and
+aborting a correct kernel on an extrapolation is the trade this project has
+declined three times. A named report on stderr costs nothing if it is wrong.
+
+* ``TT_SIM_UNIT_STALL`` — falsy disables the per-unit check. Default on.
+* ``TT_SIM_UNIT_STALL_THRESHOLD`` — consecutive blocked cycles before a
+  report. Default 10000.
 """
 
 import os
@@ -96,6 +148,11 @@ from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
 DEFAULT_THRESHOLD = 50000
+# Consecutive cycles one backend unit may stay blocked on a single latched
+# instruction before it is reported. See the module docstring for the survey
+# this comes out of: 2.8x the worst legitimate wait measured anywhere in the
+# tree (3,528 cycles, Wormhole ``sfpumath``).
+DEFAULT_UNIT_STALL_THRESHOLD = 10000
 # Window of recent PCs kept per active core for the diagnostic report.
 _RECENT_PC_WINDOW = 8
 # 64-byte bucket for the change-detection signature: tight spin loops live
@@ -125,28 +182,74 @@ def _truthy(val):
     return val is not None and val.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def deadlock_config_from_env(env=None):
-    """Return ``(enabled, threshold)`` from environment variables."""
+def _config_from_env(env, enable_var, threshold_var, default_threshold):
     if env is None:
         env = os.environ
-    enabled_raw = env.get("TT_SIM_DEADLOCK")
+    enabled_raw = env.get(enable_var)
     enabled = True if enabled_raw is None else _truthy(enabled_raw)
-    threshold_raw = env.get("TT_SIM_DEADLOCK_THRESHOLD")
+    threshold_raw = env.get(threshold_var)
     try:
         threshold = (
-            int(threshold_raw) if threshold_raw is not None else DEFAULT_THRESHOLD
+            int(threshold_raw) if threshold_raw is not None else default_threshold
         )
     except ValueError:
-        threshold = DEFAULT_THRESHOLD
+        threshold = default_threshold
     if threshold <= 0:
-        threshold = DEFAULT_THRESHOLD
+        threshold = default_threshold
     return enabled, threshold
 
 
+def deadlock_config_from_env(env=None):
+    """Return ``(enabled, threshold)`` from environment variables."""
+    return _config_from_env(
+        env, "TT_SIM_DEADLOCK", "TT_SIM_DEADLOCK_THRESHOLD", DEFAULT_THRESHOLD
+    )
+
+
+def unit_stall_config_from_env(env=None):
+    """Return ``(enabled, threshold)`` for the per-unit stall check.
+
+    Deliberately its own pair of variables rather than a share of
+    ``TT_SIM_DEADLOCK_THRESHOLD``: that one is a *no-progress window* and a
+    user who shrinks it to surface stalls sooner would otherwise drag this
+    threshold down through the measured legitimate maximum and start warning
+    about correct kernels.
+    """
+    return _config_from_env(
+        env,
+        "TT_SIM_UNIT_STALL",
+        "TT_SIM_UNIT_STALL_THRESHOLD",
+        DEFAULT_UNIT_STALL_THRESHOLD,
+    )
+
+
 class DeadlockDetector:
-    def __init__(self, threshold, enabled, tensix_tiles, dram_tiles):
+    def __init__(
+        self,
+        threshold,
+        enabled,
+        tensix_tiles,
+        dram_tiles,
+        unit_stall_enabled=True,
+        unit_stall_threshold=DEFAULT_UNIT_STALL_THRESHOLD,
+    ):
         self.threshold = threshold
         self.enabled = enabled
+        #: Per-unit stall check — see the module docstring. Independent of the
+        #: global signature in every respect: its own threshold, its own
+        #: bookkeeping, and it is deliberately *not* cleared by
+        #: :meth:`_rebaseline`, because the state that re-baselines the global
+        #: window (every core back in soft reset at the end of a launch) is
+        #: exactly the state a wedged unit survives into.
+        self.unit_stall_enabled = unit_stall_enabled
+        self.unit_stall_threshold = unit_stall_threshold
+        #: ``(coord, unit_id) -> [unit, blocked_on tuple, cycle it was armed]``
+        #: for every unit currently under per-cycle watch. Empty on a device
+        #: with nothing blocked, which is the common case and the one the
+        #: sampling cadence is preserved for.
+        self._stall_watch = {}
+        #: Units exposing ``blocked_on()``, resolved once per tile.
+        self.stallable_units = []
         #: Cycles between signature samples. One when the threshold is small
         #: enough that per-cycle sampling is what the user asked for.
         self.sample_interval = max(1, threshold // _SAMPLES_PER_WINDOW)
@@ -196,6 +299,10 @@ class DeadlockDetector:
         self.tile_cores.append((coord, tile, cores))
         self.nuis.append((coord, 0, tile.get_noc_nui(0)))
         self.nuis.append((coord, 1, tile.get_noc_nui(1)))
+        for unpacker in tile.tensix_coprocessor.getBackend().unpacker_units:
+            self.stallable_units.append(
+                (coord, f"Unpacker {unpacker.unpacker_id}", unpacker)
+            )
         for core in cores:
             self.recent_pcs[(coord, core.core_type)] = deque(maxlen=_RECENT_PC_WINDOW)
             self.pc_windows[(coord, core.core_type)] = deque(maxlen=_RECENT_PC_WINDOW)
@@ -211,13 +318,18 @@ class DeadlockDetector:
         self._rebaseline(getattr(self, "stall_since", 0))
 
     def _rebaseline(self, cycle):
-        """Forget the current window; nothing is stalled until re-observed."""
+        """Forget the current window; nothing is stalled until re-observed.
+
+        Touches the *global* signature only. ``_stall_watch`` survives on
+        purpose — see :attr:`unit_stall_enabled`.
+        """
         self.last_signature = None
         self.stall_since = cycle
         self._confirm_left = None
         self._confirm_seen = {}
         self._confirm_quiet = 0
-        self._next_sample_cycle = cycle if self.enabled else float("inf")
+        self._next_full_sample = cycle if self.enabled else float("inf")
+        self._next_sample_cycle = self._next_full_sample
 
     def _read_soft_reset(self, tile):
         return conv_to_uint32(tile.tile_ctrl.RISCV_DEBUG_REG_SOFT_RESET_0)
@@ -241,16 +353,41 @@ class DeadlockDetector:
     def tick(self, cycle):
         # Hot path: one comparison per pumped cycle. ``_next_sample_cycle`` is
         # the whole gate — the sampling interval, the confirmation phase (which
-        # sets it to the next cycle) and ``enabled`` all express themselves
-        # through it, so nothing else is read on the common path.
+        # sets it to the next cycle), the per-unit stall watch (likewise) and
+        # ``enabled`` all express themselves through it, so nothing else is
+        # read on the common path.
         if cycle < self._next_sample_cycle:
             return
         self._sample(cycle)
+
+    def _schedule(self, cycle, next_full_sample):
+        """Arm the next full signature scan, keeping any stall watch per-cycle.
+
+        The full scan's cadence is what it always was; the watch just borrows
+        the same wake-up so :meth:`tick` stays a single comparison.
+        """
+        self._next_full_sample = next_full_sample
+        self._next_sample_cycle = cycle + 1 if self._stall_watch else next_full_sample
 
     def _sample(self, cycle):
         if not self.enabled:
             self._next_sample_cycle = float("inf")
             return
+
+        # --- per-unit stall check, independent of the global signature ---
+        # Runs ahead of everything below, including the ``not active`` early
+        # return: "every core back in soft reset" ends a launch and rebaselines
+        # the global window, and a unit wedged at that point is precisely the
+        # case this exists for.
+        if self._stall_watch:
+            self._watch_unit_stalls(cycle)
+        if self.unit_stall_enabled and cycle >= self._next_full_sample:
+            self._arm_unit_stall_watch(cycle)
+        if self._stall_watch and cycle < self._next_full_sample:
+            # Watching per cycle, but the full scan is not due yet.
+            self._next_sample_cycle = cycle + 1
+            return
+
         if cycle < self.stall_since:
             # The clock rewound (device reset); re-baseline rather than
             # measuring a negative window.
@@ -286,7 +423,7 @@ class DeadlockDetector:
 
         if not active:
             self._rebaseline(cycle)
-            self._next_sample_cycle = cycle + self.sample_interval
+            self._schedule(cycle, cycle + self.sample_interval)
             return
 
         # A core's *code footprint* over the recent-PC window, not the single PC
@@ -341,7 +478,7 @@ class DeadlockDetector:
             self.last_signature = signature
             self.stall_since = cycle
             self._confirm_left = None
-            self._next_sample_cycle = cycle + self.sample_interval
+            self._schedule(cycle, cycle + self.sample_interval)
             return
 
         if confirming:
@@ -353,7 +490,7 @@ class DeadlockDetector:
             self._confirm_left -= 1
             self._confirm_quiet = 0 if footprint_grew else self._confirm_quiet + 1
             if self._confirm_left > 0:
-                self._next_sample_cycle = cycle + 1
+                self._schedule(cycle, cycle + 1)
                 return
             settled = self._confirm_quiet >= _CONFIRM_SETTLE_TICKS
             self._confirm_left = None
@@ -363,12 +500,12 @@ class DeadlockDetector:
                 # Still reaching new code: sampling had aliased, and this is a
                 # working device. Start the window again.
                 self.stall_since = cycle
-                self._next_sample_cycle = cycle + self.sample_interval
+                self._schedule(cycle, cycle + self.sample_interval)
                 return
             self._report(cycle, active)
             # Re-arm: one report per window, as before.
             self.stall_since = cycle
-            self._next_sample_cycle = cycle + self.sample_interval
+            self._schedule(cycle, cycle + self.sample_interval)
             return
 
         if cycle - self.stall_since >= self.threshold:
@@ -377,9 +514,74 @@ class DeadlockDetector:
             self._confirm_left = _CONFIRM_TICKS
             self._confirm_seen = {}
             self._confirm_quiet = 0
-            self._next_sample_cycle = cycle + 1
+            self._schedule(cycle, cycle + 1)
         else:
-            self._next_sample_cycle = cycle + self.sample_interval
+            self._schedule(cycle, cycle + self.sample_interval)
+
+    def _arm_unit_stall_watch(self, cycle):
+        """Put every currently-blocked unit under per-cycle watch.
+
+        Runs at the ordinary sample cadence, so it is one ``blocked_on()`` call
+        per unit per sample on a healthy device — and ``blocked_on()`` reads a
+        boolean and returns ``None``. The count deliberately starts at zero
+        here rather than trying to reconstruct how long the unit had already
+        been blocked: undercounting by up to one sample interval delays a true
+        report and can never manufacture a false one.
+        """
+        watch = self._stall_watch
+        for coord, name, unit in self.stallable_units:
+            key = (coord, name)
+            # Never re-arm a unit already under watch: that would reset its
+            # count once per sample interval and the threshold would be
+            # unreachable.
+            if key in watch:
+                continue
+            waiting = unit.blocked_on()
+            if waiting is not None:
+                watch[key] = [unit, waiting, cycle]
+
+    def _watch_unit_stalls(self, cycle):
+        """Per-cycle re-check of the watched units. Exact by construction.
+
+        A unit drops out the moment it is no longer blocked on the same latched
+        instruction, so what survives to the threshold really is one unbroken
+        run of blocked cycles — which is the whole reason this is not folded
+        into the sampled signature above.
+        """
+        for key, entry in list(self._stall_watch.items()):
+            unit, waiting, since = entry
+            now = unit.blocked_on()
+            if now is None or now != waiting:
+                del self._stall_watch[key]
+                continue
+            if cycle - since >= self.unit_stall_threshold:
+                self._report_unit_stall(key, waiting, cycle - since, cycle)
+                # Re-arm rather than drop: one report per window, as the global
+                # watchdog does, so a wedge keeps saying so.
+                entry[2] = cycle
+
+    def _report_unit_stall(self, key, waiting, blocked_cycles, cycle):
+        coord, name = key
+        thread, opcode, which, bank = waiting
+        tile_label = f"tile={coord} " if len(self.tile_cores) > 1 else ""
+        print(
+            "\n".join(
+                [
+                    f"[UNIT STALL cycle={cycle}] {tile_label}{name} has been "
+                    f"blocked for {blocked_cycles} cycles while the rest of the "
+                    f"device kept running",
+                    f"  {opcode} from thread {thread}: waiting for {which} bank "
+                    f"{bank} to be given back by the Matrix Unit (dvalid was set "
+                    f"and never cleared)",
+                    "  Nothing back-pressures the baby RISC-V cores on Tensix "
+                    "instruction issue, so the kernel behind this unit can still "
+                    'report done. See ROADMAP.md, "Unpacker dvalid deadlock".',
+                    "  (TT_SIM_UNIT_STALL=0 to disable, "
+                    "TT_SIM_UNIT_STALL_THRESHOLD=N to tune)",
+                ]
+            ),
+            file=sys.stderr,
+        )
 
     def _report(self, cycle, active):
         lines = [
@@ -431,6 +633,24 @@ class DeadlockDetector:
                         f"  {tile_label}Tensix thread {t}: "
                         f"frontend inflight={inflight}, backend busy={not_done}"
                     )
+            # "backend busy" is a symptom. A blocked unpacker names its own
+            # cause exactly -- it is waiting for a Src bank the Matrix Unit has
+            # not given back -- and that is the shape of every dvalid deadlock,
+            # including the one perfbench/tensixbench hit on Blackhole silicon
+            # (ROADMAP, "Unpacker dvalid deadlock"). Say it rather than making
+            # the reader infer it.
+            for unpacker in tile.tensix_coprocessor.getBackend().unpacker_units:
+                waiting = unpacker.blocked_on()
+                if waiting is None:
+                    continue
+                thread, opcode, which, bank = waiting
+                tile_label = f"tile={coord} " if len(self.tile_cores) > 1 else ""
+                lines.append(
+                    f"  {tile_label}Unpacker {unpacker.unpacker_id} blocked on "
+                    f"{opcode} from thread {thread}: waiting for {which} bank "
+                    f"{bank} to be given back by the Matrix Unit (dvalid was "
+                    f"set and never cleared)"
+                )
 
         lines.append(
             "  (TT_SIM_DEADLOCK=0 to disable, "

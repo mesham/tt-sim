@@ -36,6 +36,7 @@ class UnPackerUnit(TensixBackendUnit):
         self.srcBank = 0
         self.srcRow = [0] * 3
         self.blocked = False
+        self.blocked_wait_bank = None
         self.repeat_instruction = None
         self.pending_unpack = None
         self.setRegBase = 0
@@ -52,6 +53,52 @@ class UnPackerUnit(TensixBackendUnit):
         # A blocked unpacker re-runs its latched instruction every cycle until
         # the Src bank it is waiting on frees up.
         return not self.next_instruction and not self.blocked
+
+    def hasInflightInstructionsFromThread(self, from_thread):
+        """A blocked unpacker is holding an instruction that has NOT retired.
+
+        All three blocking sites here wait for a Src bank's ``AllowedClient`` to
+        come back to the unpackers, and re-run the latched instruction every
+        cycle until it does. The base implementation only looks at
+        ``next_instruction``, which the issue queue has already drained by the
+        time the handler blocks, so a blocked unpacker used to report the thread
+        as *done* -- and a unit that can never make progress became invisible to
+        both consumers of this predicate: the PC-buffer drain
+        (``TTSync``/``CoprocessorDoneCheck``, i.e. what a kernel's end-of-thread
+        sync reads) and the deadlock watchdog.
+
+        That is not a cosmetic gap. ``perfbench/tensixbench
+        --dvalid-unpacr-nop`` issues ``UNPACR_NOP``+``set_dvalid`` and then
+        deliberately never clears dvalid, so the Src bank is never handed back;
+        on Blackhole silicon the *next* execution of that setup -- the next
+        program launch in the same process, or the first launch of the next
+        process on the same card -- waits at the unpacker for ever and only a
+        board reset clears it. tt-sim reached the identical blocked state and
+        ran to completion anyway. See ROADMAP.md, "Unpacker dvalid deadlock".
+        """
+        if (
+            self.blocked
+            and self.repeat_instruction is not None
+            and self.repeat_instruction[1] == from_thread
+        ):
+            return True
+        return super().hasInflightInstructionsFromThread(from_thread)
+
+    def blocked_on(self):
+        """``(thread, opcode, which_src, bank)`` while blocked, else ``None``.
+
+        For the deadlock watchdog: "backend busy" is a symptom, and the thing a
+        reader needs is which Src bank the unpacker is waiting to be given back.
+        """
+        if not self.blocked or self.repeat_instruction is None:
+            return None
+        instruction_info, issue_thread = self.repeat_instruction
+        which = "SrcB" if self.unpacker_id == 1 else "SrcA"
+        # The bank waited on is not always the unpacker's own: the Blackhole
+        # ZEROSRC form waits on the MATRIX unit's bank unless `stall_clr_cntrl`
+        # says otherwise, and confusing the two is what makes this deadlock hard
+        # to read, so report the one actually latched at the blocking site.
+        return (issue_thread, instruction_info["name"], which, self.blocked_wait_bank)
 
     def clock_tick(self, cycle_num):
         if self.blocked:
@@ -131,9 +178,11 @@ class UnPackerUnit(TensixBackendUnit):
         # Stall until the matrix unit has released the bank we wait on.
         if get_src(wait_bank).getAllowedClient() != SrcRegister.SrcClient.Unpackers:
             self.blocked = True
+            self.blocked_wait_bank = wait_bank
             self.repeat_instruction = (instruction_info, issue_thread)
             return
         self.blocked = False
+        self.blocked_wait_bank = None
         self.repeat_instruction = None
 
         # Clear the unpack bank (0, or SrcA "negative inf" 0xFFFFE000 when asked).
@@ -226,6 +275,7 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
+                self.blocked_wait_bank = srcBank
                 self.repeat_instruction = (instruction_info, issue_thread)
                 return
         else:
@@ -238,10 +288,12 @@ class UnPackerUnit(TensixBackendUnit):
                 != SrcRegister.SrcClient.Unpackers
             ):
                 self.blocked = True
+                self.blocked_wait_bank = srcBank
                 self.repeat_instruction = (instruction_info, issue_thread)
                 return
 
         self.blocked = False
+        self.blocked_wait_bank = None
         self.repeat_instruction = None
 
         for bank in range(2):
@@ -1304,10 +1356,12 @@ class UnPackerUnit(TensixBackendUnit):
         src = self.backend.getSrcA if self.unpacker_id == 0 else self.backend.getSrcB
         if src(self.srcBank).getAllowedClient() != SrcRegister.SrcClient.Unpackers:
             self.blocked = True
+            self.blocked_wait_bank = self.srcBank
             self.repeat_instruction = (instruction_info, issue_thread)
             return
 
         self.blocked = False
+        self.blocked_wait_bank = None
         self.repeat_instruction = None
         state = self.pending_unpack
         self.pending_unpack = None

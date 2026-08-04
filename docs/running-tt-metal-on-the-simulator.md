@@ -280,6 +280,26 @@ On by default; warns (does not stop) after N cycles of no observable progress.
 | `TT_SIM_DEADLOCK` | set falsy (`0/false/no/off`) to disable |
 | `TT_SIM_DEADLOCK_THRESHOLD` | cycles of no progress before a `[DEADLOCK …]` warning (default `50000`); lower it to surface stalls sooner |
 
+A wedged **Tensix backend unit** does not show up there, because the rest of the
+device carries on: nothing back-pressures the baby RISC-V cores on Tensix
+instruction issue, so the kernel behind a blocked unpacker runs to the end and
+reports done. A second, independent check reports that one — a
+`[UNIT STALL cycle=…]` block naming the unit, the thread, the opcode and the Src
+bank it is waiting for.
+
+| Variable | Effect |
+| --- | --- |
+| `TT_SIM_UNIT_STALL` | set falsy to disable the per-unit check |
+| `TT_SIM_UNIT_STALL_THRESHOLD` | consecutive cycles one unit may stay blocked on a single instruction (default `10000`) |
+
+The default is measured, not guessed: every replay guard, example and
+differential op test in the tree was instrumented for the longest legitimate
+blocked run, with and without `TT_SIM_COST_MODEL`, and the worst case is 3,528
+cycles (Wormhole `sfpumath`, unpacker 1 waiting for the SFPU to hand SrcB back).
+Raise it if a kernel with a much longer per-tile compute than anything in-tree
+trips it; the count is of *consecutive* blocked cycles, so a unit that waits
+repeatedly but briefly never accumulates.
+
 ---
 
 ## 5. Limitations to expect

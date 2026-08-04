@@ -1,5 +1,6 @@
 from tt_sim.memory.memory import MemoryStall
 from tt_sim.pe.pe import ProcessingElement
+from tt_sim.pe.rv import breakpoint as breakpoint_trap
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
 from tt_sim.util.conversion import conv_to_bytes, conv_to_int32, conv_to_uint32
 
@@ -610,17 +611,15 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_i_misc(cls, instr, register_file, memory_space, snoop):
-        if snoop:
-            type_val = RV_ISA.get_int(instr, 12, 14)
-            if type_val == 0x0:
-                # ecall or ebreak
-                is_ebreak = RV_ISA.get_int(instr, 20, 20) == 1
-                if is_ebreak:
-                    RV_ISA.print_snoop(snoop, "ebreak", "ignored")
-                else:
-                    RV_ISA.print_snoop(snoop, "ecall", "ignored")
-            elif type_val == 0x1:
-                pass
+        type_val = RV_ISA.get_int(instr, 12, 14)
+        is_ebreak = type_val == 0x0 and RV_ISA.get_int(instr, 20, 20) == 1
+        if is_ebreak and breakpoint_trap.trapping_enabled():
+            # A kernel asserting on itself: see tt_sim/pe/rv/breakpoint.py.
+            if snoop:
+                RV_ISA.print_snoop(snoop, "ebreak", "trap")
+            raise breakpoint_trap.RiscvBreakpoint(memory_space)
+        if snoop and type_val == 0x0:
+            RV_ISA.print_snoop(snoop, "ebreak" if is_ebreak else "ecall", "ignored")
         return True
 
     @classmethod

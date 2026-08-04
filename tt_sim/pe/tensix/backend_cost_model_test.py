@@ -117,15 +117,12 @@ def _backend(cost_model):
 
 #: The units this test covers, by their ``ex_resource`` name — which is also
 #: their key in both ``tensix_instructions.yaml`` and the cost table.
-WIRED = ("SFPU", "THCON", "PACK", "SYNC")
+WIRED = ("SFPU", "THCON", "PACK", "SYNC", "CFG")
 
-#: ``MATH`` is wired too, in ``matrix_cost_model_test.py``. ``UNPACK``,
-#: ``XMOV`` and ``CFG`` are not: ``UNPACK``'s cost is the one genuinely
-#: non-constant entry in the file (a ">= 2" address phase plus a
-#: throttle-mode-dependent data phase), ``XMOV``'s published 1 is issue cost
-#: only, and ``CFG`` would move a cycle count (Blackhole's ``CFGSHIFTMASK`` is
-#: 2) so it owes its own guard run — see
-#: ``test_the_config_unit_is_left_uncosted_pending_its_own_guard_run``.
+#: ``MATH`` is wired too, in ``matrix_cost_model_test.py``. ``UNPACK`` and
+#: ``XMOV`` are not: ``UNPACK``'s cost is the one genuinely non-constant entry
+#: in the file (a ">= 2" address phase plus a throttle-mode-dependent data
+#: phase), and ``XMOV``'s published 1 is issue cost only.
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +133,7 @@ WIRED = ("SFPU", "THCON", "PACK", "SYNC")
 def test_without_the_env_var_no_unit_has_a_cost_model():
     with _backend(False) as backend:
         units = [backend.backend_units[name] for name in WIRED]
-        units += [backend.backend_units[name] for name in ("MATH", "XMOV", "CFG")]
+        units += [backend.backend_units[name] for name in ("MATH", "XMOV")]
         units += backend.unpacker_units
         for unit in units:
             assert unit.cost_model is None, unit.unit_name
@@ -356,7 +353,7 @@ def test_the_units_left_unwired_still_have_no_opinion():
     unit is costed". The unpackers and the mover keep the same-cycle retire
     even with ``TT_SIM_COST_MODEL`` set."""
     with _backend(True) as backend:
-        units = [backend.backend_units[n] for n in ("XMOV", "CFG", "TDMA")]
+        units = [backend.backend_units[n] for n in ("XMOV", "TDMA")]
         units += list(backend.unpacker_units)
         for unit in units:
             assert unit.cost_model is None, unit.unit_name
@@ -380,34 +377,57 @@ def test_the_packer_charges_the_issue_cost_and_not_a_guessed_drain():
         assert packer.cost_model.occupancy("TBUFCMD") is None
 
 
-def test_the_config_unit_is_left_uncosted_pending_its_own_guard_run():
-    """The one unit whose table is fully published and still not wired.
+def test_the_config_unit_charges_nothing_on_wormhole():
+    """Wired 2026-08-04, last of the six — and on Wormhole it is a true no-op.
 
-    It got here the interesting way. Until 2026-08-04 ``RDCFG``'s occupancy
-    read ">= 2" — the Wormhole page's documented *latency*, copied into the
-    occupancy field — and charging that made the ``matmulblock`` guards compute
-    a **wrong answer**. Blackhole silicon then measured ``RDCFG`` at 1.0 cycles
-    of occupancy and the table was corrected to the throughput row the docs do
-    give it, which put that divergence out of the tables' reach without fixing
-    what it had exposed.
+    Every entry in that arch's table is one cycle, and ``occupy_for`` no-ops at
+    <= 1, so the unit can never hold itself. That half is worth its own test
+    because it is what makes the wiring a one-arch timing change: no Wormhole
+    guard can move, whatever the Blackhole ones do.
 
-    Both halves of that have since moved:
-
-    * **The ordering bug is fixed** (see
-      ``test_a_multi_cycle_config_op_does_not_delay_the_batch_beside_it``, and
-      ``TensixBackendUnit.clock_tick``), so a multi-cycle occupancy anywhere in
-      this unit no longer reorders a thread's program.
-    * **"Every entry is one cycle" was never true of both arches.** Blackhole's
-      ``CFGSHIFTMASK`` is a 2-cycle occupancy — ``throughput_ipc: 0.5``, "requires
-      two cycles in stage 0" — so wiring this unit *would* charge something and
-      *would* move a cycle count, which is a timing change owing its own guard
-      run rather than a no-op that can ride along with a bug fix.
+    It got here the interesting way. Until 2026-08-04 ``RDCFG``'s occupancy read
+    ">= 2" — the Wormhole page's documented *latency*, copied into the occupancy
+    field — and charging that made the ``matmulblock`` guards compute a **wrong
+    answer**. Blackhole silicon then measured ``RDCFG`` at 1.0 cycles of
+    occupancy, and the ordering bug that made a late config write corrupt a
+    matmul was found and fixed in ``TensixBackendUnit.clock_tick`` (see
+    ``test_a_multi_cycle_config_op_does_not_delay_the_batch_beside_it``).
     """
     with _backend(True) as backend:
         config = backend.backend_units["CFG"]
-        assert config.cost_model is None
-        assert config.instruction_occupancy("RDCFG", 0) is None
-        assert config.instruction_occupancy("SETC16", 0) is None
+        assert config.cost_model is not None
+        assert config.cost_model.arch == "wormhole"
+        for name in ("RDCFG", "SETC16", "WRCFG", "RMWCIB0"):
+            assert config.instruction_occupancy(name, 0) == 1, name
+        # Nothing in the Wormhole table can arm the hold.
+        config.setConfig(0, RDCFG_SOURCE_INDEX, RDCFG_SOURCE_VALUE)
+        for cycle in range(3):
+            assert config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
+            config.clock_tick(cycle)
+            assert config.busy_until is None
+
+
+def test_the_config_unit_charges_blackholes_two_cycle_shift_mask():
+    """``CFGSHIFTMASK`` is the only entry above one cycle in either arch's
+    config table, and the whole reason wiring this unit was a timing change
+    rather than a formality: ``throughput_ipc: 0.5``, "requires two cycles in
+    stage 0", and the Blackhole ``untilize`` guard really executes it."""
+    previous = os.environ.get("TT_SIM_COST_MODEL")
+    os.environ["TT_SIM_COST_MODEL"] = "1"
+    try:
+        backend = TensixCoProcessor(None, blackhole=True).getBackend()
+        config = backend.backend_units["CFG"]
+        assert config.cost_model.arch == "blackhole"
+        assert config.instruction_occupancy("CFGSHIFTMASK", 0) == 2
+        # Every other opcode this unit implements is still one cycle, on this
+        # arch too — so the hold is reachable from exactly one instruction.
+        for name in ("RDCFG", "SETC16", "WRCFG", "STREAMWRCFG"):
+            assert config.instruction_occupancy(name, 0) == 1, name
+    finally:
+        if previous is None:
+            os.environ.pop("TT_SIM_COST_MODEL", None)
+        else:
+            os.environ["TT_SIM_COST_MODEL"] = previous
 
 
 def test_a_multi_cycle_config_op_does_not_delay_the_batch_beside_it():
