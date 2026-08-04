@@ -128,11 +128,23 @@ class TensixBackendUnit(Clockable, ABC):
         """Declare this unit busy for ``cycles`` cycles starting at ``cycle_num``.
 
         The Phase 5 entry point (``docs/plans/event-driven-pump.md``): a
-        per-unit cost table calls this at issue with the opcode's cost, and
-        the unit then retires at ``cycle_num + cycles`` instead of in the tick
-        it was handed the instruction. ``cycles <= 1`` is the status quo (a
-        same-cycle retire) and is a no-op, so a table that has no entry for an
-        opcode costs nothing.
+        per-unit cost table calls this once the cycle's issue batch has
+        retired, with the longest cost in it, and the unit then refuses
+        further work until ``cycle_num + cycles``. ``cycles <= 1`` is the
+        status quo and is a no-op, so a table that has no entry for an opcode
+        costs nothing.
+
+        **Occupancy is back-pressure on the next instruction, never a delay of
+        this one.** That is the distinction :meth:`clock_tick` turns on and it
+        is what both architectures' Configuration Unit pages describe: the unit
+        is a pipeline (Blackhole names the stages, -4..+1) whose throughput
+        limits how fast instructions may *enter*, while each instruction's own
+        write commits at its documented *latency* — 1 cycle for ``SETC16``,
+        2 for ``WRCFG`` — regardless of what else the unit is doing. An
+        instruction the unit has already accepted must therefore still take
+        effect in the cycle it was accepted for; anything else reorders it
+        behind instructions its own thread issued later, which is the bug this
+        method's caller used to have. See the comment in ``config.py``.
 
         Two things fall out of setting :attr:`busy_until`, both handled here
         and in :meth:`next_wake_cycle`: ``clock_tick`` stops draining the
@@ -168,9 +180,13 @@ class TensixBackendUnit(Clockable, ABC):
         theoretical hazard: it was found while charging the config unit's
         documented ">= 2" for ``RDCFG``, which delays five ``SETC16``s on the
         math thread and four ``WRCFG``s on the pack thread by a cycle each.
-        (Refusing did *not* fix that particular failure — see the comment in
-        ``config.py`` for what it turned out to be — but the reordering it
-        removes is real and would have bitten the next unit instead.)
+
+        Refusing is necessary and was not sufficient. It cannot reach an
+        instruction the unit has *already accepted*, and that was the other
+        half of the same failure: the config unit takes a whole batch in one
+        cycle, so the ``SETC16`` beside the ``RDCFG`` had been accepted before
+        there was anything to refuse. :meth:`clock_tick` is where that half is
+        handled — the batch retires, and only then is the unit held.
 
         Refusing is also the closer reading of the ISA docs, which say of the
         Scalar Unit that the issuing thread "is unable to start any further
@@ -216,12 +232,41 @@ class TensixBackendUnit(Clockable, ABC):
         return None if self.is_clock_idle() else cycle_num + 1
 
     def clock_tick(self, cycle_num):
+        """Retire this cycle's issue batch, then charge the unit for it.
+
+        ``next_instruction`` holds exactly the instructions accepted *for this
+        cycle* — ``issueInstruction`` refuses everything while
+        :meth:`is_occupied`, and an unoccupied tick empties the queue — so the
+        whole batch belongs to one cycle and every member of it retires in that
+        cycle. A unit that accepts more than one per cycle (config: up to three
+        ``SETC16`` plus one of the shared-IPC-group ops; sync: three mutex ops;
+        misc: one per thread) is modelling parallel hardware paths, and a cost
+        charged to one of them does not push the others out.
+
+        Hence :attr:`busy_until` is armed *after* the drain, from the longest
+        occupancy in the batch, rather than mid-loop. Arming it mid-loop and
+        returning left the rest of the batch queued for a later cycle — and
+        because the issuing threads had already been told those instructions
+        were accepted, they had moved on and their *later* instructions
+        retired first, in other units. That reordered a single thread's
+        program: charging ``RDCFG`` two cycles pushed the math thread's
+        ``SETC16`` of ``DEST_TARGET_REG_CFG_MATH_Offset`` behind two of its own
+        ``MVMUL``s, which then accumulated into the wrong half of Dst and made
+        ``matmul_block`` compute a wrong answer. See ``config.py`` and
+        :meth:`occupy_for`.
+        """
         busy_until = self.busy_until
         if busy_until is not None:
             if cycle_num < busy_until:
-                # Occupied by a multi-cycle instruction; nothing retires yet.
+                # Occupied by a multi-cycle instruction; nothing new is
+                # accepted and nothing is left over to retire.
                 return
             self.busy_until = None
+        # The longest occupancy charged across this cycle's batch. The unit is
+        # held by whichever of its parallel paths is slowest, so ``max``; the
+        # batch is nearly always one instruction, in which case this is just
+        # that instruction's cost.
+        batch_occupancy = 0
         # next_instruction is all instructions to process in this cycle,
         # is often one but for some units might be more
         while len(self.next_instruction) > 0:
@@ -257,16 +302,14 @@ class TensixBackendUnit(Clockable, ABC):
                             duration=occupancy or 0,
                         )
                     )
-                if occupancy is not None:
-                    self.occupy_for(cycle_num, occupancy)
-                    if self.busy_until is not None:
-                        # Occupied past this cycle: whatever else is queued
-                        # waits for the deadline rather than retiring now.
-                        return
+                if occupancy is not None and occupancy > batch_occupancy:
+                    batch_occupancy = occupancy
             else:
                 raise NotImplementedError(
                     f"{self.unit_name} unit can not handle instruction '{instruction_info['name']}'"
                 )
+        if batch_occupancy:
+            self.occupy_for(cycle_num, batch_occupancy)
 
     def getThreadConfigValue(self, issue_thread, key):
         return self.backend.getThreadConfigValue(issue_thread, key)

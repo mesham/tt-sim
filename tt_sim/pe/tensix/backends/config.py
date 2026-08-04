@@ -71,39 +71,52 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
         # NOT wired to the cycle-cost tables (Phase 5 of
-        # docs/plans/event-driven-pump.md). Every entry in this unit's table is
-        # one cycle, so wiring it would charge nothing -- but READ THE NEXT
-        # PARAGRAPH before concluding that makes it uninteresting.
+        # docs/plans/event-driven-pump.md), but no longer for the reason it
+        # used to be. THE ORDERING BUG THIS UNIT FOUND IS FIXED; what is left
+        # is that wiring it would move a cycle count, which owes its own guard
+        # run.
         #
-        # Until 2026-08-04 RDCFG's *occupancy* in the table read ">= 2": the
-        # Wormhole page's documented **latency**, copied into the occupancy
-        # field because no separate throughput figure had been found for it.
-        # Charging that 2 makes `matmulblock` compute the WRONG ANSWER -- the
-        # occupancy delays five SETC16s on the math thread and four WRCFGs on
-        # the pack thread by one cycle each, and something downstream reads
-        # config that has not landed yet. Refusing the issue outright
-        # (TensixBackendUnit.is_occupied) rather than deferring it does not fix
-        # it either, so this is not the frontend reordering one thread's
-        # stream -- it is A MISSING ORDERING GUARANTEE between a config write
-        # and the units that read it, of the kind the ISA docs'
-        # config-visibility rules and the LLK's "WRCFG takes 2 cycles" padding
-        # both exist to express.
+        # The bug, for the record. Until 2026-08-04 RDCFG's *occupancy* in the
+        # table read ">= 2": the Wormhole page's documented **latency**, copied
+        # into the occupancy field because no separate throughput figure had
+        # been found for it. Charging that 2 made `matmulblock` compute the
+        # WRONG ANSWER (608.0 where the golden is 1120.0). The mechanism was in
+        # TensixBackendUnit.clock_tick, not here: this unit accepts a whole
+        # *batch* per cycle -- up to three SETC16, one per thread, alongside one
+        # shared-IPC-group op -- and the old drain armed ``busy_until``
+        # mid-batch and returned, leaving the rest of the batch queued for a
+        # later cycle. The threads had already been told those instructions
+        # were accepted and had moved on, so the math thread's SETC16 of
+        # DEST_TARGET_REG_CFG_MATH_Offset landed two cycles late, behind two of
+        # that same thread's MVMULs, which accumulated into the wrong half of
+        # Dst. An already-accepted write being overtaken by its own thread's
+        # later instructions is the missing ordering guarantee, and the fix is
+        # to retire the batch and only then hold the unit -- occupancy is
+        # throughput back-pressure on the *next* instruction, while each
+        # accepted instruction commits at its own documented latency, which is
+        # what both arches' Configuration Unit pages describe (Blackhole names
+        # the pipeline stages, -4..+1) and what the vendor reference simulator
+        # (ttsim, libttsim.cpp's per-pipe issue loop) enforces absolutely by
+        # never letting a thread's next instruction start until this one's
+        # side effects are committed. See backend_base.TensixBackendUnit.
         #
-        # That bug is still here. Blackhole silicon measured RDCFG at 1.0
-        # cycles of occupancy (perfbench/tensixbench, see
-        # docs/plans/tensix-cost-benchmark.md), the table was corrected to the
-        # throughput row the docs do give it, and the divergence stopped being
-        # reachable from these tables -- it did not stop existing. The next
-        # multi-cycle occupancy anywhere near a config write will find it
-        # again.
+        # What remains, and why this unit is still unwired: "every entry is one
+        # cycle, so wiring it would charge nothing" is FALSE on Blackhole.
+        # CFGSHIFTMASK is a 2-cycle occupancy there (throughput_ipc 0.5, "requires
+        # two cycles in stage 0") and the Blackhole `untilize` guard executes it
+        # 32 times, so wiring this unit is a real timing change needing the
+        # cost-model gate re-run -- not a no-op that can ride along with a bug
+        # fix. Wormhole's table really is all ones.
         #
         # The other reason this unit is a poor fit for a per-opcode occupancy:
         # its real constraints are cross-thread. SETC16 is one per thread per
         # cycle, RMWCIB needs neither RDCFG nor WRCFG issued in the previous
         # cycle by *any* thread, and Blackhole folds everything but SETC16
-        # into one shared IPC group. tt-sim models the first two in
-        # ``issueInstruction`` / ``prev_cycle_setc16_or_wrcfg``; none of them
-        # is expressible as a number attached to an opcode.
+        # into one shared IPC group -- so a whole-unit ``busy_until`` also
+        # over-stalls SETC16, which the Blackhole page places outside that
+        # group. tt-sim models the first two in ``issueInstruction`` /
+        # ``prev_cycle_setc16_or_wrcfg``; none of them is expressible as a
+        # number attached to an opcode.
 
     def is_clock_idle(self):
         # The override also clears prev_cycle_setc16_or_wrcfg, which is

@@ -46,6 +46,47 @@ ADDDMAREG_G2_EQ_G0_PLUS_1 = (88 << 24) | (1 << 23) | (2 << 12) | (1 << 6) | 0
 #: ``SFPNOP``, which takes no arguments at all.
 SFPNOP = 143 << 24
 
+#: ``RDCFG GPR[5] = CFG[12]``. Opcode 177; ``CfgReg`` at bit 0, ``GprAddress``
+#: at bit 16.
+RDCFG_G5_FROM_CFG12 = (177 << 24) | (5 << 16) | 12
+
+#: The config register ``RDCFG_G5_FROM_CFG12`` reads, and a recognisable value
+#: to put in it.
+RDCFG_SOURCE_INDEX = 12
+RDCFG_SOURCE_VALUE = 0xABCD1234
+
+
+def setc16_math_offset(value):
+    """``SETC16 DEST_TARGET_REG_CFG_MATH_Offset = value``.
+
+    Thread-config register 1 on Wormhole, and the write at the centre of the
+    ordering bug: the matrix unit reads it to place every ``MVMUL``'s Dst
+    accumulation, and the math thread flips it between the two halves of Dst
+    (0 / 0x200) between blocks. Opcode 178; value at bit 0, register at 16.
+    """
+    return (178 << 24) | (1 << 16) | value
+
+
+class _ForcedOccupancy:
+    """A stand-in for a :class:`~tt_sim.perf.model.UnitCostModel`.
+
+    Charges what the ``dict`` says and one cycle otherwise, so a test can put a
+    multi-cycle cost on the config unit **without touching the cost tables** —
+    which matters, because ``RDCFG``'s 1-cycle occupancy there is a silicon
+    measurement corroborated by two hardware runs and must not be edited to
+    make a test reach a code path.
+    """
+
+    def __init__(self, charges):
+        self.charges = charges
+
+    def occupancy(self, instruction_name):
+        return self.charges.get(instruction_name, 1)
+
+    def is_exact(self, instruction_name):
+        return True
+
+
 #: SFPU opcodes the backend implements but ``load_costs("wormhole")`` drops,
 #: because the cost table marks them ``arch: blackhole``. The handler map is
 #: shared across arches (Blackhole's Tensix ISA is a strict superset); the cost
@@ -82,8 +123,9 @@ WIRED = ("SFPU", "THCON", "PACK", "SYNC")
 #: ``XMOV`` and ``CFG`` are not: ``UNPACK``'s cost is the one genuinely
 #: non-constant entry in the file (a ">= 2" address phase plus a
 #: throttle-mode-dependent data phase), ``XMOV``'s published 1 is issue cost
-#: only, and ``CFG`` is the finding — see
-#: ``test_the_config_unit_is_left_uncosted_and_that_is_a_finding``.
+#: only, and ``CFG`` would move a cycle count (Blackhole's ``CFGSHIFTMASK`` is
+#: 2) so it owes its own guard run — see
+#: ``test_the_config_unit_is_left_uncosted_pending_its_own_guard_run``.
 
 
 # ---------------------------------------------------------------------------
@@ -338,31 +380,115 @@ def test_the_packer_charges_the_issue_cost_and_not_a_guessed_drain():
         assert packer.cost_model.occupancy("TBUFCMD") is None
 
 
-def test_the_config_unit_is_left_uncosted_and_that_is_a_finding():
+def test_the_config_unit_is_left_uncosted_pending_its_own_guard_run():
     """The one unit whose table is fully published and still not wired.
 
-    Every entry in it is now a 1-cycle occupancy, so wiring it would charge
-    nothing. It got there the interesting way. Until 2026-08-04 ``RDCFG``'s
-    occupancy read ">= 2" — the Wormhole page's documented *latency*, copied
-    into the occupancy field — and charging that made the ``matmulblock``
-    Blackhole guard compute a **wrong answer**: five ``SETC16`` on the math
-    thread and four ``WRCFG`` on the pack thread land one cycle late, and
-    something downstream reads config that has not arrived. Refusing the issue
-    rather than deferring it does not fix it, so this is not the frontend
-    reordering one thread's stream; it is a missing ordering guarantee between
-    a config write and its readers.
+    It got here the interesting way. Until 2026-08-04 ``RDCFG``'s occupancy
+    read ">= 2" — the Wormhole page's documented *latency*, copied into the
+    occupancy field — and charging that made the ``matmulblock`` guards compute
+    a **wrong answer**. Blackhole silicon then measured ``RDCFG`` at 1.0 cycles
+    of occupancy and the table was corrected to the throughput row the docs do
+    give it, which put that divergence out of the tables' reach without fixing
+    what it had exposed.
 
-    Blackhole silicon then measured ``RDCFG`` at 1.0 cycles of occupancy and
-    the table was corrected to the throughput row the docs do give it — which
-    puts the divergence out of these tables' reach without fixing it. It is
-    still there for the next multi-cycle cost that lands near a config write,
-    and the unit stays uncosted so that nothing implies otherwise.
+    Both halves of that have since moved:
+
+    * **The ordering bug is fixed** (see
+      ``test_a_multi_cycle_config_op_does_not_delay_the_batch_beside_it``, and
+      ``TensixBackendUnit.clock_tick``), so a multi-cycle occupancy anywhere in
+      this unit no longer reorders a thread's program.
+    * **"Every entry is one cycle" was never true of both arches.** Blackhole's
+      ``CFGSHIFTMASK`` is a 2-cycle occupancy — ``throughput_ipc: 0.5``, "requires
+      two cycles in stage 0" — so wiring this unit *would* charge something and
+      *would* move a cycle count, which is a timing change owing its own guard
+      run rather than a no-op that can ride along with a bug fix.
     """
     with _backend(True) as backend:
         config = backend.backend_units["CFG"]
         assert config.cost_model is None
         assert config.instruction_occupancy("RDCFG", 0) is None
         assert config.instruction_occupancy("SETC16", 0) is None
+
+
+def test_a_multi_cycle_config_op_does_not_delay_the_batch_beside_it():
+    """The regression test for the ordering bug, at the cycle it happens in.
+
+    The config unit accepts a whole *batch* per cycle — up to three ``SETC16``,
+    one per thread, alongside one of the shared-IPC-group ops — because those
+    are parallel paths in the hardware, and the issuing threads are told the
+    instructions are accepted and move on in the same cycle. Charging the first
+    member of that batch a multi-cycle occupancy used to leave the rest of it
+    queued for a later cycle, which is a *reordering of an already-accepted
+    write behind instructions its own thread issued afterwards*: with ``RDCFG``
+    at 2 cycles the math thread's ``SETC16`` of
+    ``DEST_TARGET_REG_CFG_MATH_Offset`` landed two cycles late, after two of the
+    same thread's ``MVMUL``s had already read the stale offset and accumulated
+    into the wrong half of Dst, and ``matmul_block`` came out wrong.
+
+    What the hardware provides, and what this pins: occupancy is throughput
+    back-pressure on the *next* instruction to enter the unit, while each
+    accepted instruction commits at its own documented latency. So the batch
+    retires, and only then is the unit held.
+
+    Note what is deliberately *not* done here: the table's ``RDCFG`` occupancy
+    is not edited. That 1 is a silicon measurement corroborated by two hardware
+    runs; the multi-cycle cost comes from a local stand-in cost model instead.
+    """
+    with _backend(True) as backend:
+        config = backend.backend_units["CFG"]
+        config.cost_model = _ForcedOccupancy({"RDCFG": 2})
+        config.setConfig(0, RDCFG_SOURCE_INDEX, RDCFG_SOURCE_VALUE)
+
+        # One cycle's batch, in the order the matmulblock trace issues it: the
+        # unpack thread's RDCFG, then the math thread's SETC16.
+        assert config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
+        assert config.issueInstruction(setc16_math_offset(0x200), 1)
+        config.clock_tick(0)
+
+        # Both members of the batch took effect in the cycle they were accepted
+        # for. The SETC16 is the one that used to be left behind.
+        assert backend.gpr.getRegisters(0)[5] == RDCFG_SOURCE_VALUE
+        assert (
+            backend.getThreadConfigValue(1, "DEST_TARGET_REG_CFG_MATH_Offset") == 0x200
+        )
+        assert not config.next_instruction
+
+        # The cost is still charged: the unit is held for the two cycles, and
+        # the back-pressure lands where it belongs — on the *next* instruction,
+        # which the wait gate then retries, keeping each thread in order.
+        assert config.busy_until == 2
+        assert not config.issueInstruction(setc16_math_offset(0), 1)
+        config.clock_tick(1)
+        assert (
+            backend.getThreadConfigValue(1, "DEST_TARGET_REG_CFG_MATH_Offset") == 0x200
+        )
+        config.clock_tick(2)
+        assert config.busy_until is None
+        assert config.issueInstruction(setc16_math_offset(0), 1)
+        config.clock_tick(3)
+        assert backend.getThreadConfigValue(1, "DEST_TARGET_REG_CFG_MATH_Offset") == 0
+
+
+def test_a_batch_is_held_for_the_longest_cost_in_it():
+    """A unit with parallel paths is busy until the slowest of them is done, so
+    the deadline comes from the whole batch rather than from whichever member
+    happened to retire last."""
+    with _backend(True) as backend:
+        config = backend.backend_units["CFG"]
+        config.cost_model = _ForcedOccupancy({"RDCFG": 4})
+        assert config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
+        assert config.issueInstruction(setc16_math_offset(0x200), 1)
+        assert config.issueInstruction(setc16_math_offset(0x200), 2)
+        config.clock_tick(0)
+        # The 1-cycle SETC16s do not shorten the RDCFG's hold...
+        assert config.busy_until == 4
+        # ...and none of them was pushed past it.
+        assert not config.next_instruction
+        for thread in (1, 2):
+            assert (
+                backend.getThreadConfigValue(thread, "DEST_TARGET_REG_CFG_MATH_Offset")
+                == 0x200
+            )
 
 
 def test_the_sync_unit_charges_one_cycle_throughout():

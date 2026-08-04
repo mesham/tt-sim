@@ -822,19 +822,22 @@ UNWIRED_UNITS = {
     # ">= 2" address phase plus a throttle-mode-dependent data phase), so it
     # wants more than the flat lookup the other units use.
     "UNPACK": "tt_sim/pe/tensix/backends/unpacker.py",
-    # Every entry in this unit's table is now one cycle, so wiring it would
-    # charge nothing -- the same reason TDMA is on this list. It arrived here
-    # by a different road: RDCFG's occupancy read ">= 2" until 2026-08-04
-    # (the documented *latency*, copied into the wrong field), and charging
-    # that made `matmulblock` compute a wrong answer, because a config write
-    # landed one cycle late and something read it stale. Blackhole silicon
-    # then measured RDCFG at 1.0 and the table was corrected to the throughput
-    # row the docs actually give it.
+    # Unwired because wiring it would MOVE A CYCLE COUNT, not because it would
+    # charge nothing. "Every entry is one cycle" holds on Wormhole and not on
+    # Blackhole, whose CFGSHIFTMASK is a 2-cycle occupancy (throughput_ipc 0.5)
+    # that the `untilize` guard executes 32 times -- so this unit owes the
+    # cost-model gate a re-run of its own rather than riding along with
+    # something else, which is why it is still on this list.
     #
-    # THE TT-SIM BUG THAT FOUND IS STILL REAL AND STILL UNFIXED: nothing
-    # orders a config write against the units that read it, so any future
-    # multi-cycle occupancy in this unit will surface it again. It is simply
-    # no longer reachable from these tables. See the comment in config.py.
+    # The bug it used to be on this list for IS FIXED. RDCFG's occupancy read
+    # ">= 2" until 2026-08-04 (the documented *latency*, copied into the wrong
+    # field), and charging that made `matmulblock` compute a wrong answer:
+    # TensixBackendUnit.clock_tick armed its occupancy mid-batch and deferred
+    # the rest of the cycle's already-accepted instructions, so a SETC16 the
+    # issuing thread had been told was accepted was overtaken by that thread's
+    # own later MVMULs. The drain now completes the batch and holds the unit
+    # afterwards, and a regression test charges the unit two cycles to keep it
+    # that way. See the comment in config.py.
     "CFG": "tt_sim/pe/tensix/backends/config.py",
     # XMOV's 1-cycle entry is the issue cost only; the transfer duration is
     # bandwidth-derived and lives in tt_sim/perf/unit_costs.yaml under

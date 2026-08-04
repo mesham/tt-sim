@@ -31,6 +31,11 @@ times under the three interesting shapes, covering both sides of the LLK's
 All 12288 bf16 elements must match. (``diff.sh`` reports 6144: it assumes 8 hex
 chars per element, which halves the count for a bfloat16 program.)
 
+This program is also the tree's sensor for **config-write ordering**, which is
+why ``test_matmulblock_replay_with_a_multi_cycle_config_unit`` runs it a second
+time with the Tensix config unit charged more than one cycle. See
+``_ForcedConfigOccupancy`` for what that is guarding.
+
 Run:  python3 -m driver.wormhole.server.matmulblock_replay_test
       (or under pytest, as ``test_matmulblock_replay``)
 """
@@ -88,7 +93,37 @@ GOLDEN = {
 }
 
 
-def _build_fabric():
+class _ForcedConfigOccupancy:
+    """A stand-in cost model that charges the Tensix config unit ``cycles``.
+
+    Stands in for a unit cost model (``tt_sim/perf/model.py``) so that the
+    *ordering* guarantee around a config write can be exercised without editing
+    the cost tables — deliberately a stand-in and not the real thing, so this
+    guard stays outside the allow-list of modules that read those tables. Every
+    entry the config unit has on Wormhole is a 1-cycle occupancy, and
+    ``RDCFG``'s 1 in particular is a Blackhole-silicon measurement corroborated
+    by two hardware runs, so it must not be nudged upwards to reach a code path.
+
+    ``RDCFG`` is the opcode charged because it is the one that found the bug: a
+    2-cycle occupancy on it used to defer the math thread's ``SETC16`` of
+    ``DEST_TARGET_REG_CFG_MATH_Offset`` — accepted in the same cycle, so the
+    thread had already moved on — past two of that thread's own ``MVMUL``s,
+    which then accumulated into the wrong half of Dst and made this program
+    print 608.0 where it should print 1120.0. See
+    ``TensixBackendUnit.clock_tick``.
+    """
+
+    def __init__(self, cycles):
+        self.cycles = cycles
+
+    def occupancy(self, instruction_name):
+        return self.cycles if instruction_name == "RDCFG" else 1
+
+    def is_exact(self, instruction_name):
+        return True
+
+
+def _build_fabric(config_unit_occupancy=None):
     device = make_device()
     fabric = Fabric()
     for translated, unified in DRAM_COORD_MAP.items():
@@ -98,6 +133,12 @@ def _build_fabric():
     for physical in TENSIX_POOL:
         device.ensure_tensix_tile(physical)
         fabric.register(physical, TensixCore(device, TENSIX_COORD_MAP[physical]))
+    if config_unit_occupancy is not None:
+        for tile in device.tt_device.tensix_tiles:
+            backend = tile.tensix_coprocessor.getBackend()
+            backend.config_unit.cost_model = _ForcedConfigOccupancy(
+                config_unit_occupancy
+            )
     return device, fabric
 
 
@@ -116,12 +157,12 @@ def _bf16(raw, offset):
     return sign * (mantissa + (1 << 23)) * 2.0 ** (exponent - 150)
 
 
-def main():
+def main(config_unit_occupancy=None):
     if not TRACE.exists():
         print(f"skipped: {TRACE} not present", file=sys.stderr)
         return 0
 
-    device, fabric = _build_fabric()
+    device, fabric = _build_fabric(config_unit_occupancy)
     transport = Transport(addr=None)
 
     n_msgs = 0
@@ -170,16 +211,39 @@ def main():
                         f"expected {expected}"
                     )
             tile += 1
+    charged = (
+        ""
+        if config_unit_occupancy is None
+        else f"; config unit charged {config_unit_occupancy} cycles"
+    )
     print(
         f"wormhole matmulblock_replay test OK ({n_msgs} messages; all "
         f"{NUM_TILES * TILE_ELEMS} bf16 elements match across the three "
-        f"matmul_block shapes {[shape for shape, _ in SHAPES]})"
+        f"matmul_block shapes {[shape for shape, _ in SHAPES]}{charged})"
     )
     return 0
 
 
 def test_matmulblock_replay():
     assert main() == 0
+
+
+def test_matmulblock_replay_with_a_multi_cycle_config_unit():
+    """The same program, with the config unit held for more than one cycle.
+
+    The regression test for tt-sim's config-write ordering, run end to end
+    rather than at the unit (``tt_sim/pe/tensix/backend_cost_model_test.py``
+    pins the same invariant one cycle at a time). Charging ``RDCFG`` two cycles
+    used to make this program print 608.0 for C[0][0] instead of 1120.0, because
+    a ``SETC16`` the config unit had already accepted was pushed behind two of
+    the issuing thread's own later instructions.
+
+    The occupancy must reach the unit *without* changing the cost tables, so it
+    arrives as ``_ForcedConfigOccupancy``. Nothing about this run is a claim
+    that ``RDCFG`` costs two cycles — silicon says it costs one — only that the
+    simulator stays correct if some future entry in this unit costs more.
+    """
+    assert main(config_unit_occupancy=2) == 0
 
 
 if __name__ == "__main__":
