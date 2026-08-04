@@ -78,11 +78,11 @@ unset TT_METAL_SIMULATOR                 # make sure you are on the real card
 
 # Runs 3-6 -- the source data format sweep (experiment X2). Four separate
 # invocations, because the format is programmed once per run, not per probe.
-# Each writes its own file. Seconds each.
+# Each writes its own file. Seconds each. No board reset between them.
 #
-# `--variants t1` runs the single-thread launch ONLY, and is required here:
-# X2 is a single-thread comparison across formats, and the t2 launch of this
-# setup HANGS on Blackhole silicon (see "If it hangs" below).
+# `--variants t1` runs the single-thread launch ONLY. X2 is a single-thread
+# comparison across formats, so this costs the experiment nothing; it is no
+# longer a workaround for anything (see "If it hangs" below).
 for f in bf16 fp32 tf32 fp16; do
   ./build/tensixbench --blocks 32 --phase a --variants t1 --dvalid-unpacr-nop --src-format $f
 done
@@ -212,33 +212,45 @@ actually decoded an unpredictable value would be worse than no CSV.
 
 ### If it hangs
 
-**Known, already reported: `--dvalid-unpacr-nop` hangs the `t2` launch on
-Blackhole silicon.** The `t1` launch completes and writes its rows; the run then
-stops with no further output:
+**Fixed: `--dvalid-unpacr-nop` used to poison the card, and no longer should.
+No `tt-smi -r 0` is needed between any of the runs above.**
 
+The old failure was worth understanding, because it is why the fix looks the way
+it does. `UNPACR_NOP` with `UNP_ZEROSRC` is the *acquire* half of a handshake: it
+waits until the bank `MatrixUnit.SrcABank` points at is no longer valid before it
+may zero and re-hand it over. This benchmark holds the valid bits for the whole
+burst **by design** (`clear_dvalid = 0` on every probe is what makes the burst
+measurable), so nothing performed the *release* half and a **successful** run
+left the banks owned by the Matrix Unit. The next execution of the setup then
+waited for ever — the `t2` launch in the same process, or the first launch of the
+next process on the same card. Two experiments on a card confirmed it: `t2` alone
+on a reset card completed, and `t1` twice with no reset in between hung the
+second time. Thread count was never the variable; leftover state was.
+
+The kernel now issues the counterpart — one `CLEARDVALID` from one thread, after
+the last probe has written its last result word, outside every timed region — so
+a completed run hands the banks back and the next run finds them free. Phase A's
+numbers are unchanged: the before/after data rows are byte-identical.
+`--dvalid-once` and `--dvalid-per-thread` are untouched, because `SETDVALID` has
+no wait half and never wedged.
+
+**The one-line check, if you want to confirm the card is clean.** Run the same
+single-thread command twice with **no reset between**. Before the fix the second
+invocation hung; now both must print `TTBENCH_VALID_A: yes` and exit 0:
+
+```bash
+./build/tensixbench --blocks 32 --phase a --variants t1 --dvalid-unpacr-nop --src-format bf16 && \
+./build/tensixbench --blocks 32 --phase a --variants t1 --dvalid-unpacr-nop --src-format bf16
+echo "exit=$?"    # 0 means the card was left clean by the first run
 ```
-phase A [t1]: done (1 issuing thread), 80 rows written to tensixbench-blackhole-unpacr-nop-bf16.csv
-<hangs>
-```
 
-`--variants t1` — which runs 3–6 above already pass — avoids the *second*
-launch, and costs the experiment nothing: X2 compares formats at one thread, and
-the analysis (`tensix_bench_sweep --formats`) drops every multi-thread series
-before it computes anything. A `t1`-only CSV is a complete X2 measurement, and
-its header records `variants=t1` so it can never be mistaken for a truncated
-full run. Runs 1–2 (`--dvalid-once` / `--dvalid-per-thread`) are unaffected and
-still run all three variants.
-
-**Run `tt-smi -r 0` between runs 3–6.** It is not the thread count that hangs —
-it is the *second* execution of the `UNPACR_NOP` setup on a card whose SrcA/SrcB
-dvalid is still set from the first, whether that is the t2 launch in the same
-process or the next process's t1. `UNPACR_NOP` with `UNP_ZEROSRC` waits until
-the bank `MatrixUnit.SrcABank` points at is no longer valid before it may zero
-and re-hand it over, and this benchmark holds the valid bits for the whole burst
-by design (`clear_dvalid = 0` on every probe), so nothing ever gives the bank
-back. `SETDVALID` has no wait at all, which is why runs 1–2 repeat happily on a
-dirty card. The state is device-resident and a board reset clears it — so also
-reset before running anything else on that card after runs 3–6.
+`--variants t1` is still what X2 wants — it is a single-thread comparison across
+formats, and the analysis (`tensix_bench_sweep --formats`) drops every
+multi-thread series before it computes anything — but it is no longer avoiding
+anything. If you have the time, `--variants t1,t2,t3` on this setup is now worth
+one run purely as a check that the multi-thread launches survive too; **it has
+never been run on silicon with the release in place**, so if it hangs, that is a
+result and we want it.
 
 The other probes and the general case:
 
@@ -290,10 +302,11 @@ If you ran with `--no-dvalid-probes`, or without slow dispatch, or the program
 exited non-zero — say which. All three change how the numbers are read.
 
 **If runs 3–6 hang or fail and runs 1–2 do not, say so and send runs 1–2
-anyway.** The `UNPACR_NOP` setup is the one thing in this benchmark that has
-never touched silicon: it has been exercised only against the simulator, where
-nothing back-pressures the issuing core, so a hardware-only failure mode would
-not have shown up. That is a result about the setup, not a wasted run.
+anyway.** The `UNPACR_NOP` setup has already produced exactly one hardware-only
+failure mode this way — it left the card wedged for the *next* run — and its
+release is the newest code here. Only the simulator has exercised that release,
+and nothing there back-pressures the issuing core, so a second hardware-only
+failure is entirely possible. That is a result about the setup, not a wasted run.
 
 ---
 

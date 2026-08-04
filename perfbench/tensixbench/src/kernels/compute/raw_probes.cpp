@@ -103,6 +103,32 @@
 // (predicted null by construction) is measured alongside a pair that at least
 // moves the decode.
 //
+// LEAVING THE CARD CLEAN -- why the UNPACR_NOP setup, and only it, has a
+// release at the end. `UNPACR_NOP` with `Unpack_Pop = UNP_ZEROSRC` is the
+// ACQUIRE half of the unpacker's handshake: before it may zero its bank and
+// hand it to the Matrix Unit it waits until the bank named by
+// `MatrixUnit.Src{A,B}Bank` is no longer valid. Every MATH probe below issues
+// `clear_dvalid = 0` -- which is exactly what makes the burst measurable -- so
+// nothing in the timed region ever performs the release half, and a completed
+// run used to leave `SrcA[0]`/`SrcB[0]` owned by the Matrix Unit. The NEXT
+// execution of the setup then waited for that release for ever: the t2 launch
+// in the same process, or the first launch of the next process on the same
+// card. Only `tt-smi -r 0` cleared it, so a *successful* run poisoned the card
+// for the following one -- confirmed on Blackhole silicon, twice, by
+// experiments that could each have refuted it (see
+// docs/plans/matrix-unit-thread-contention.md, "X2 on silicon").
+//
+// So the release is issued once, from thread 1, AFTER the last probe has
+// written its last result word. It is outside every timed region by
+// construction: `clear_dvalid = 0` on the probes is untouched, and phase A's
+// data rows are byte-identical to before it existed.
+//
+// `SETDVALID` has no wait half -- it sets the bits and flips the pointer
+// unconditionally -- so `--dvalid-once` and `--dvalid-per-thread` re-run on a
+// dirty card indefinitely and get no release. That is deliberate: they cannot
+// wedge, their datasets are already banked, and a release they do not need is
+// a change to a measurement for nothing.
+//
 // Result buffer layout is in bench_layout.h, shared with the host.
 
 #include <cstdint>
@@ -214,6 +240,26 @@ inline void give_both_srcs_to_fpu() {
     TTI_UNPACR_NOP(0, ckernel::p_unpacr_nop::UNP_SET_DVALID);
     TTI_UNPACR_NOP(1, ckernel::p_unpacr_nop::UNP_SET_DVALID);
 #endif
+}
+
+// The other half of `give_both_srcs_to_fpu`: hand SrcA and SrcB back to the
+// unpackers. See "LEAVING THE CARD CLEAN" in the header comment for why only
+// the UNPACR_NOP setup needs this and why it is safe here and nowhere earlier.
+//
+// `CLEARDVALID` is a Matrix Unit instruction (`ckernel_ops.h`:
+// `TT_OP_CLEARDVALID(cleardvalid, reset)`, opcode 0x36, `cleardvalid` at bit 22,
+// bit 0 = SrcA and bit 1 = SrcB), and it is what the Blackhole LLKs use whenever
+// a math op did not carry `clear_dvalid` itself -- `llk_math_reduce.h` issues
+// `TTI_CLEARDVALID(clear_mode, 0)` after a `ckernel_template::run()` of MVMULs
+// for exactly that reason, and `llk_math_eltwise_unary_datacopy.h` and
+// `experimental/llk_math_mul_reduce_scalar.h` do the same. `reset` is 0: the
+// vendor reference simulator rejects `reset & 1` outright ("unsafe and drops
+// SrcA/B banks", tt-metal issue 22383), and `reset & 2` would suppress the bank
+// flip, which is the half that makes the sequence repeatable -- clearing bank
+// `MatrixUnit.Src{A,B}Bank` *and* advancing the pointer is what leaves the unit
+// pointing at the bank the next `UNPACR_NOP` will fill.
+inline void take_both_srcs_back_from_fpu() {
+    TTI_CLEARDVALID(ckernel::p_setrwc::CLR_AB, 0);
 }
 
 }  // namespace
@@ -351,4 +397,37 @@ void kernel_main() {
     RUN(17, TTI_MVMUL(0, 0, 0, 0););
     RUN(18, TTI_ELWADD(0, 0, 0, 0, 0););
     RUN(19, TTI_ELWMUL(0, 0, 0, 0, 0););
+
+    // Give the Src banks back. OUTSIDE every timed region -- the last PROBE has
+    // written its last result word before this runs -- so the measurement is
+    // untouched; see "LEAVING THE CARD CLEAN" in the header comment.
+    //
+    // Only the UNPACR_NOP setup: it is the only one with a wait half, so it is
+    // the only one a dirty card can wedge. Adding a release to the SETDVALID
+    // paths would perturb two datasets that are already banked and buy nothing.
+    if (probe_mask & ((1u << 17) | (1u << 18) | (1u << 19))) {
+        if (dvalid_mode == TTBENCH_DVALID_UNPACR_NOP) {
+            // Ordering, in two steps, because the release is issued by ONE
+            // thread and the burst was issued by all of them:
+            //   tensix_sync()   -- blocks this RISC-V core until its own Tensix
+            //                      instruction pipe has drained, so every MATH
+            //                      probe this thread issued has passed the Wait
+            //                      Gate. (An op past the gate cannot stall on
+            //                      dvalid; only an undispatched one can.)
+            //   bench_barrier() -- and now the same is true of every other
+            //                      active thread.
+            // Without both, thread 1's CLEARDVALID could overtake a still-queued
+            // MVMUL on thread 0 or 2 and hang the run it was added to prevent.
+            ckernel::tensix_sync();
+            bench_barrier();
+            if (g_thread == 1) {
+                take_both_srcs_back_from_fpu();
+                // ...and do not return until it has RETIRED, not merely been
+                // issued. The launch ends with the TRISCs going back into soft
+                // reset; a release still sitting in the instruction FIFO at
+                // that point would be exactly as lost as never issuing it.
+                ckernel::tensix_sync();
+            }
+        }
+    }
 }
