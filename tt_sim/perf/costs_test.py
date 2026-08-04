@@ -246,6 +246,36 @@ def test_the_dram_latency_is_exactly_its_own_derivation():
     assert units["dram"]["access_latency"]["provenance"] == "unknown"
 
 
+def test_the_dram_channel_rate_is_exactly_its_own_derivation():
+    """The second derived DRAM number, and a much cheaper one than the first:
+    the channel's bytes per cycle is the published per-channel GB/s at the
+    published clock, which is a unit conversion and nothing else. Both inputs
+    are ``isa_doc``, so the result is ``isa_doc_derived`` — not
+    ``vendor_source_derived``, and emphatically not fitted: 24 GB/s was in this
+    file, unconsumed, long before rung 2 measured a DRAM read plateauing at
+    24.38 B/cycle.
+
+    The Blackhole half is the one worth having a test for. Its override says
+    ``unknown``, but the overrides *deep-merge*, so Wormhole's 24 is still
+    physically present under it — and a consumer that read the number without
+    checking the provenance beside it would launder one architecture's
+    published figure into another's gap. That is the exact failure the
+    convention exists to prevent, and it is invisible from the raw YAML."""
+    _, units = _load_raw()
+    gb_per_s = units["dram"]["bandwidth"]["per_channel_gb_per_s"]
+    ghz = units["clock"]["wormhole"]["frequency_mhz"] / 1000
+    assert units["dram"]["channel_serialisation"]["bytes_per_cycle"] == gb_per_s / ghz
+    # Blackhole: the override carries no number of its own...
+    override = units["arch_overrides"]["blackhole"]["dram"]["channel_serialisation"]
+    assert override["provenance"] == "unknown"
+    assert "bytes_per_cycle" not in override
+    # ...but the merged view still shows Wormhole's, so provenance is the only
+    # thing standing between a consumer and the wrong architecture's number.
+    merged = load_costs("blackhole").sections["dram"]["channel_serialisation"]
+    assert merged["bytes_per_cycle"] == 24
+    assert merged["provenance"] == "unknown"
+
+
 def test_no_entry_is_an_uncalibrated_guess_without_saying_so():
     """There should be no ``estimated`` entries at all right now: everything in
     the tables is either published or explicitly absent. If one is added, this

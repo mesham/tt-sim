@@ -145,6 +145,11 @@ def _closed_form(arch, memory, same_axis, size):
     the last one's tail -- the packet's own size paid once, because the NoC is
     wormhole-routed. The trailing ``+ 1`` is the polling loop's off-by-one (it
     pumps before it looks), not a cost.
+
+    A DRAM row picks up one more term, the channel's excess over the link
+    rate for the same bytes. It is written for the single-chunk case only,
+    which is every DRAM row there is: the sweep drops DRAM sizes above 8 KiB
+    as unmeasured fill, and 8 KiB is one burst chunk on both arches.
     """
     profile = _PROFILES[arch]
     grid = (profile.noc_grid_x, profile.noc_grid_y)
@@ -172,6 +177,8 @@ def _closed_form(arch, memory, same_axis, size):
     serialisation = (chunks - 1) * noc.serialisation_cycles(full) + noc.tail_cycles(
         last
     )
+    if service and chunks == 1:
+        service += dram.channel_excess_cycles(size, noc.serialisation_cycles(size))
     return flight + service + serialisation + 1
 
 
@@ -188,14 +195,22 @@ def test_a_real_l1_round_trip_costs_what_the_tables_compose_to(arch, same_axis, 
 @pytest.mark.parametrize("size", [64, 8192])
 def test_a_real_dram_round_trip_adds_the_service_window(arch, size):
     """A DRAM row costs the same round trip as a different-axis L1 row (both
-    are ``grid_x + grid_y`` hops) plus the endpoint's own service time, and
-    nothing else. If an arch sourced no ``access_latency`` the difference would
-    be zero, which is what an unsourced arch is *meant* to look like."""
+    are ``grid_x + grid_y`` hops) plus the endpoint's own two terms, and
+    nothing else: the flat service time, and the channel's *excess* over the
+    NoC link for these bytes. If an arch sourced neither the difference would
+    be zero, which is what an unsourced arch is *meant* to look like — and
+    Blackhole, which publishes no per-channel bandwidth, really does contribute
+    only the first of the two at both sizes."""
     with _cost_model_on():
         dram = sweep.predict_cycles(arch, sweep.MEMORY_DRAM_SHARDED, True, False, size)
         l1 = sweep.predict_cycles(arch, sweep.MEMORY_L1, True, False, size)
         model = dram_cost_model(arch)
-    assert dram - l1 == (0 if model is None else model.service_cycles)
+    if model is None:
+        assert dram - l1 == 0
+        return
+    with _cost_model_on():
+        link = noc_cost_model(arch).serialisation_cycles(size)
+    assert dram - l1 == model.service_cycles + model.channel_excess_cycles(size, link)
 
 
 @pytest.mark.parametrize("arch", ["wormhole", "blackhole"])

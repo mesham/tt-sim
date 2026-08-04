@@ -550,11 +550,22 @@ class NocCostModel:
 
         At least one, because a packet with no payload — a read request, a
         write ACK, an atomic whose operand rides in the header — is still a
-        packet and still occupies the link for a cycle. The header flit itself
-        is **not** counted on top: the docs' flit accounting does not say how
-        many flits a header takes, and inventing one would be a number with no
-        source. That is the under-charging direction, like every other bound in
-        these tables.
+        packet and still occupies the link for a cycle.
+
+        The header flit is **not** counted on top, and the reason has changed.
+        It used to be that the docs' flit accounting did not say how many flits
+        a header takes. It does, in the first sentence of the NoC page: "Each
+        packet consists of one or more flits (exactly one header flit, followed
+        by up to 256 data flits)" (``wh_noc``/``bh_noc``), and the same page
+        adds that "the amount of *useful* throughput depends on the ratio of
+        header flits to data flits". So the number exists and is 1, at
+        ``isa_doc``. What has not happened is the change: adding it costs every
+        packet in the tree a cycle, which **doubles** the modelled link
+        occupancy of a 32-byte semaphore poke while adding 0.39 % to a 64 KiB
+        transfer, and it is a whole-tree timing perturbation for a term rung 2
+        measured as 3–6 % of the bandwidth gap it was hoped to explain. It
+        wants its own change and its own guard run. See ``docs/plans/
+        cost-model.md``, "Is the L1 read shortfall sourceable?".
         """
         if self.flit_bytes is None:
             return None
@@ -667,10 +678,24 @@ def noc_cost_model(arch):
 #   services the first, so this adds latency and no contention. The
 #   under-charging direction, like every other bound in these files.
 #
-# Nor is it size-dependent. DRAM *bandwidth* is well sourced (24 GB/s per
-# channel, isa_doc) and deliberately unconsumed: turning a byte count into
-# cycles is the same physical serialisation the NoC's per-link bandwidth term
-# describes, so it belongs in one place, once, not in two that add up.
+# Size dependence is the *fifth* shape and arrives with the same class, as of
+# 2026-08-04. It used to be argued away: DRAM bandwidth is well sourced
+# (24 GB/s per channel, isa_doc) and was deliberately unconsumed on the ground
+# that turning a byte count into cycles is the same physical serialisation the
+# NoC's per-link bandwidth term already describes, so it belonged in one place,
+# once, not in two that add up. That argument confused two queues for one. The
+# NoC link and the GDDR6 channel are separate hardware at separate rates -- 32
+# B/cycle against 24 on Wormhole -- in series, and a transfer streaming through
+# both runs at the slower. Charging the *sum* would indeed double-bill; what
+# :meth:`DramCostModel.channel_excess_cycles` returns is the **excess** of the
+# channel's serialisation over the link's, so the round trip's size-dependent
+# cost is the slower of the two exactly once.
+#
+# Rung 2 is what settled it: tt-metal's measured dataset has a Wormhole DRAM
+# read sustaining 24.38 B/cycle against a modelled 32, and 24.38 is not a
+# fraction of 32 -- it is ``dram.bandwidth.per_channel_gb_per_s`` to within
+# 2 %. Nothing was fitted: the number was already in the table at ``isa_doc``,
+# and all this consumes is a unit conversion into bytes per cycle.
 
 
 class DramCostModel:
@@ -691,11 +716,19 @@ class DramCostModel:
     file's only ``vendor_source_derived`` entries, arithmetic on two vendor
     measurements — weaker than a published number and stronger than a guess.
     :attr:`provenance` keeps it reachable so a report can say so.
+
+    Plus one term that is not a latency at all:
+
+    * :attr:`channel_bytes_per_cycle` -- the GDDR6 channel's own rate, 24 on
+      Wormhole and ``None`` on Blackhole, which publishes no per-channel
+      bandwidth. Spent through :meth:`channel_excess_cycles`, never as an
+      absolute serialisation, because the NoC link has already charged its own.
     """
 
     def __init__(self, sections, arch):
         self.arch = arch
-        entry = (sections.get("dram") or {}).get("access_latency") or {}
+        dram = sections.get("dram") or {}
+        entry = dram.get("access_latency") or {}
         self.provenance = entry.get("provenance")
         # An ``unknown`` entry carries no ``cycles`` at all — the convention
         # guarantees it and a test enforces it — so an unsourced arch lands on
@@ -712,6 +745,55 @@ class DramCostModel:
         self.bank_conflicts_modelled = False
         self.refresh_modelled = False
         self.occupancy_modelled = False
+        #: Bytes the DRAM channel moves per cycle, or ``None``. Provenance is
+        #: checked rather than assumed, and that check is load-bearing: the
+        #: arch overrides deep-merge, so Wormhole's 24 is still *present* under
+        #: Blackhole's ``unknown`` override and reading it without looking
+        #: would launder one arch's published figure into another's gap.
+        channel = dram.get("channel_serialisation") or {}
+        self.channel_bytes_per_cycle = (
+            channel.get("bytes_per_cycle")
+            if channel.get("provenance") in SOURCED_PROVENANCE
+            else None
+        )
+
+    def channel_serialisation_cycles(self, payload_bytes):
+        """Cycles the channel itself needs to move ``payload_bytes``, or ``None``.
+
+        The raw ``ceil(N / rate)``. Nothing charges this directly — see
+        :meth:`channel_excess_cycles` for why — but it is the quantity the
+        derivation in the table is about, so it is reachable on its own.
+        """
+        rate = self.channel_bytes_per_cycle
+        if not rate:
+            return None
+        return int(math.ceil(payload_bytes / rate))
+
+    def channel_excess_cycles(self, payload_bytes, link_cycles):
+        """How much slower the channel is than the link, for these bytes.
+
+        The whole of the size term, and the reason it is a *difference*: the
+        channel and the NoC link are two stages in series, so a transfer
+        streaming through both is limited by the slower one, not by their sum.
+        The link's serialisation (``link_cycles``, what
+        :meth:`NocCostModel.serialisation_cycles` already charged the packet)
+        is therefore subtracted out, leaving ``max(0, channel - link)`` and a
+        round trip whose size-dependent cost is ``ceil(N / rate)`` exactly
+        once.
+
+        Zero — never negative — when the link is the slower of the two, which
+        is what makes this safe to add unconditionally: an architecture whose
+        NoC is slower than its DRAM gets no charge from here at all, rather
+        than a refund it did not earn.
+
+        ``None`` for ``link_cycles`` means the NoC bandwidth term is not
+        modelled either, so there is nothing to be the excess *of* and the
+        honest answer is to charge nothing.
+        """
+        channel = self.channel_serialisation_cycles(payload_bytes)
+        if channel is None or link_cycles is None:
+            return 0
+        return max(0, channel - link_cycles)
 
     @property
     def is_exact(self):

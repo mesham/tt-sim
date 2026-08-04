@@ -24,10 +24,20 @@ So the properties worth pinning divide in three:
    round trip while being wrong about everything else: it would double-count
    against the derivation, and it would charge a response.
 
+Since 2026-08-04 the endpoint charges a second, unrelated thing: the DRAM
+channel's bandwidth, which is a *rate* rather than a latency and which
+``dram.bandwidth`` sourced at ``isa_doc`` long before anything consumed it. The
+properties worth pinning there are the derivation (24 GB/s at 1 GHz is 24 B/cycle
+and nothing else), the shape (the **excess** over what the NoC link already
+charged, so two queues in series cost the slower and not the sum), and the
+refusal — Blackhole publishes no per-channel bandwidth, and the deep-merged
+overrides mean declining Wormhole's number takes an explicit provenance check.
+
 Runs standalone (``python3 -m tt_sim.device.dram_cost_model_test``) or under
 pytest.
 """
 
+import math
 import os
 from contextlib import contextmanager
 
@@ -141,6 +151,52 @@ def test_blackhole_is_the_same_subtraction_on_the_same_table():
             assert tile.noc0_router.service_cycles == 529 - 403
 
 
+def test_the_channel_rate_is_the_published_bandwidth_at_the_published_clock():
+    """24 GB/s per channel (isa_doc) at 1 GHz (isa_doc) is 24 bytes per cycle,
+    and that is the whole derivation — a unit conversion on two published
+    numbers, neither of which was chosen by looking at a measurement. That the
+    two inputs still say 24 and 1000 is checked where the raw table is
+    legitimately readable (``costs_test.test_the_dram_channel_rate_is_exactly_
+    its_own_derivation``), so this side asserts only the charged number."""
+    with _env("1"):
+        assert dram_cost_model("wormhole").channel_bytes_per_cycle == 24
+
+
+def test_blackhole_gets_no_channel_rate_because_none_is_published():
+    """BlackholeA0 has no DRAMTile directory in the ISA docs, so its
+    ``dram.bandwidth`` — and with it ``channel_serialisation`` — is
+    ``provenance: unknown``, and a Blackhole DRAM transfer pays the NoC link's
+    serialisation and no second one. The check that matters is that the *deep
+    merge* does not launder Wormhole's 24 into it: the number is physically
+    present under Blackhole's override (``costs_test`` asserts exactly that)
+    and the model must decline to read it."""
+    with _env("1"):
+        model = dram_cost_model("blackhole")
+    assert model.channel_bytes_per_cycle is None
+    assert model.channel_serialisation_cycles(8192) is None
+    assert model.channel_excess_cycles(8192, 128) == 0
+
+
+def test_the_channel_is_charged_as_an_excess_over_the_link_not_as_a_second_bill():
+    """The whole shape of the term. Two queues in series at two rates means the
+    transfer runs at the slower one, so the endpoint charges
+    ``ceil(N/24) - ceil(N/32)`` and the round trip's size cost comes to
+    ``ceil(N/24)`` once — not ``ceil(N/24) + ceil(N/32)``, which is the
+    double-billing that (wrongly) kept this section unconsumed until rung 2."""
+    with _env("1"):
+        model = dram_cost_model("wormhole")
+    for size in (32, 64, 256, 1024, 4096, 8192):
+        link = math.ceil(size / 32)
+        assert model.channel_serialisation_cycles(size) == math.ceil(size / 24)
+        assert model.channel_excess_cycles(size, link) == math.ceil(size / 24) - link
+    # Never negative: an arch whose link were the slower gets nothing from
+    # here rather than a refund.
+    assert model.channel_excess_cycles(8192, 1000) == 0
+    # And nothing at all when the NoC bandwidth term is not modelled, because
+    # then there is nothing for this to be the excess *of*.
+    assert model.channel_excess_cycles(8192, None) == 0
+
+
 def test_the_gaps_are_named_rather_than_implied():
     """ROADMAP §I asks for bank-conflict and refresh-window costs by name. No
     source quantifies either, and there is no DRAM bank model in tt-sim at all,
@@ -196,12 +252,18 @@ def _flight(src, dst):
 def test_a_dram_read_costs_the_flight_plus_the_devices_own_service_time():
     """The whole thing on a real device: out, serviced, back. The service term
     is added once and only on the outbound leg, which is what distinguishes
-    this model from one that simply made the DRAM further away."""
+    this model from one that simply made the DRAM further away.
+
+    ``excess`` is the channel term — one cycle at this 32-byte payload, since
+    the channel needs two cycles for it and the link one."""
     with _env("1"):
         device = Wormhole()
         tile = device.tensix_tiles[0]
         dram = device.dram_tiles[0]
-        service = dram_cost_model("wormhole").service_cycles
+        model = dram_cost_model("wormhole")
+    service = model.service_cycles
+    excess = model.channel_excess_cycles(len(_PAYLOAD), math.ceil(len(_PAYLOAD) / 32))
+    assert excess == 1
     src = tile.noc0_router.id_pair
     dst = dram.noc0_router.id_pair
     device.write(dram.get_coord_pair(), 0x1000, _PAYLOAD)
@@ -209,7 +271,31 @@ def test_a_dram_read_costs_the_flight_plus_the_devices_own_service_time():
     landed = _cycles_until_landed(device, tile, initiator, _PAYLOAD, budget=4000)
     # The trailing +1 is the counting loop's own off-by-one (it pumps before it
     # looks), the same one ``noc_cost_model_test`` carries.
-    assert landed == _flight(src, dst) + service + _flight(dst, src) + 1
+    assert landed == _flight(src, dst) + service + excess + _flight(dst, src) + 1
+
+
+def test_a_large_dram_read_ends_up_limited_by_the_channel_and_not_the_link():
+    """The point of the whole term, measured on a real device rather than
+    asserted from the model: grow the transfer and the round trip should grow
+    at the *channel's* 24 B/cycle, not the NoC link's 32. Two sizes an exact
+    KiB apart, so the difference is the rate."""
+    big, small = 4096, 2048
+    landed = {}
+    for size in (small, big):
+        with _env("1"):
+            device = Wormhole()
+            tile = device.tensix_tiles[0]
+            dram = device.dram_tiles[0]
+        payload = bytes((i * 7) & 0xFF for i in range(size))
+        device.write(dram.get_coord_pair(), 0x1000, payload)
+        initiator = _read_from_dram(tile, dram.noc0_router.id_pair)
+        initiator.at_len_be = size
+        landed[size] = _cycles_until_landed(
+            device, tile, initiator, payload, budget=8000
+        )
+    grew = landed[big] - landed[small]
+    assert grew == math.ceil(big / 24) - math.ceil(small / 24)
+    assert (big - small) / grew == pytest.approx(24, abs=0.1)
 
 
 def test_the_untimed_dram_still_answers_in_two_cycles():
@@ -250,7 +336,10 @@ def test_the_tile_sleeps_through_the_service_window():
         device = Wormhole()
         tile = device.tensix_tiles[0]
         dram = device.dram_tiles[0]
-        service = dram_cost_model("wormhole").service_cycles
+        model = dram_cost_model("wormhole")
+    service = model.service_cycles + model.channel_excess_cycles(
+        len(_PAYLOAD), math.ceil(len(_PAYLOAD) / 32)
+    )
     src = tile.noc0_router.id_pair
     dst = dram.noc0_router.id_pair
     device.write(dram.get_coord_pair(), 0x1000, _PAYLOAD)

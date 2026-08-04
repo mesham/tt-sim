@@ -33,9 +33,17 @@
 #     what lets the number be derived without double-counting the hops.
 #     Derived on **both** arches now (99 Wormhole, 126 Blackhole); Blackhole's
 #     was a gap until the two things blocking it were chased down and both
-#     turned out not to be about Blackhole's DRAM. Everything else under
-#     ``dram`` -- both bandwidth blocks and the end-to-end reference -- is
-#     still unconsumed.
+#     turned out not to be about Blackhole's DRAM.
+#
+#   * ``dram.channel_serialisation`` -> the same consumer, since 2026-08-04,
+#     as the *second* serialisation a DRAM transfer pays: the GDDR6 channel is
+#     a different queue from the NoC link and a slower one (24 B/cycle against
+#     32 on Wormhole), so the endpoint charges the excess of the channel's
+#     time over the link's and the transfer ends up limited by the slower of
+#     the two. Wormhole only; Blackhole publishes no per-channel bandwidth and
+#     its override says ``unknown``. Everything else under ``dram`` -- the
+#     GB/s ``bandwidth`` block itself, ``chip_level_bandwidth`` and the
+#     end-to-end reference -- is still unconsumed.
 #
 # The ``mover`` and ``l1`` sections have no consumer at all.
 # See docs/plans/cost-model.md for the schema, the provenance convention, and
@@ -61,6 +69,7 @@ schema_version: 1
 documents:
   repo: https://github.com/tenstorrent/tt-isa-documentation
   wh_noc: WormholeB0/NoC/README.md
+  wh_noc_memmap: WormholeB0/NoC/MemoryMap.md
   wh_dram: WormholeB0/DRAMTile/README.md
   wh_l1: WormholeB0/TensixTile/L1.md
   wh_riscv: WormholeB0/TensixTile/BabyRISCV/README.md
@@ -221,6 +230,67 @@ noc:
       source: wh_noc#performance
   flit_bits: 256
   link_bandwidth_gb_per_s: 32
+  packet_framing:
+    header_flits: 1
+    max_data_flits: 256
+    provenance: isa_doc
+    source: wh_noc
+    note: >
+      "Each NoC transaction consists of one or more packets. Each packet
+      consists of one or more flits (exactly one header flit, followed by up to
+      256 data flits)." The same page adds the sentence that makes this a cost
+      rather than a curiosity: "The amount of *useful* throughput depends on
+      the ratio of header flits to data flits; very short packets can use just
+      a single header flit to transport 4 bytes of data, whereas very long
+      packets use one header flit and 256 data flits to transport 8192 bytes of
+      data." Identical on Blackhole with 512-bit flits and a 16 KiB maximum.
+
+      RECORDED 2026-08-04 and DELIBERATELY UNCONSUMED, which is a different
+      statement from the one this file used to make. ``NocCostModel.
+      packet_flits`` declined to count a header on the ground that the docs did
+      not say how many flits one takes. They do, they say exactly one, and that
+      docstring was wrong. What stopped it being wired is the size of the
+      change against the size of the term:
+
+        * it is a **whole-tree timing perturbation**. A 32-byte semaphore poke
+          is one data flit today and would become two, so its modelled link
+          occupancy doubles; that is the most common packet in every workload
+          in the tree.
+        * it is worth 1 cycle per packet, i.e. per ``ceil(N / 8192)`` bytes on
+          Wormhole = 0.125 cycles/KiB, against a measured L1 bandwidth
+          shortfall of 3.94 cycles/KiB reading and 2.65 writing. It closes
+          **3 % of the read gap and 6 % of the write gap**, and being
+          direction-symmetric it explains none of the asymmetry between them.
+
+      So it is a real, sourced, small term that belongs in its own change with
+      its own guard run, not a ride-along on a DRAM instalment. See
+      docs/plans/cost-model.md, "Is the ~10% L1 read shortfall sourceable?",
+      for the rest of that arithmetic and for what the docs positively rule
+      out (there is no credit-based flow control described anywhere in either
+      NoC tree, and no "in practice ~X% of theoretical" caveat for the NoC of
+      the kind ``dram.bandwidth`` carries).
+  request_packet_flits:
+    read_request: 1
+    write_ack: 1
+    inline_write_request: 1
+    atomic_request: 1
+    atomic_response: 1
+    provenance: isa_doc
+    source: wh_noc_memmap#noc_cmd_ctrl
+    note: >
+      The request/response shapes, from the ``NOC_CMD_CTRL`` table: "A read
+      request packet consisting of a single flit travels from the initiating
+      NIU to NOC_TARG_ADDR, and then a read response packet (consisting of
+      multiple flits) containing the data travels back to NOC_RET_ADDR"; a
+      write's acknowledgement is likewise "a write acknowledgement packet
+      consisting of a single flit"; atomics are single-flit in both directions.
+
+      Unconsumed for the same reason as ``packet_framing`` and with a smaller
+      claim on anybody's attention: these packets travel on the *opposite*
+      link from the one carrying the bytes, so they cost a large transfer
+      nothing at all. Recorded because "does the request leg's framing explain
+      the read-versus-write asymmetry?" is a question this file should be able
+      to answer with a number, and the number is no.
   l1_ports:
     read_connections: 2
     write_connections: 2
@@ -282,6 +352,51 @@ dram:
       VC) showing 22.2-22.3 GB/s for reads, and a dramatic 21.9 -> 7.6 GB/s
       collapse for 12-tile writes with dynamic VC allocation -- worth reading
       before trusting any single bandwidth number.
+  channel_serialisation:
+    bytes_per_cycle: 24
+    provenance: isa_doc_derived
+    source: wh_dram#performance
+    derivation: >
+      bytes_per_cycle = bandwidth.per_channel_gb_per_s / (clock.wormhole.frequency_mhz / 1000)
+                      = 24 GB/s / 1 GHz
+                      = 24e9 bytes/second / 1e9 cycles/second
+                      = 24 bytes per cycle.
+
+      Both inputs are ``isa_doc``: the 24 GB/s is the DRAM tile page's
+      "each GDDR6 channel is theoretically capable of reading at 24 GB/s or
+      writing at 24 GB/s" (12 GT/s, decimal GB, so 24e9 B/s), and the 1 GHz is
+      the ``clock`` section's, restated by two separate ISA doc pages. The
+      whole derivation is a unit conversion; no measurement enters it.
+
+      This is the *same shape* as ``noc.link_bandwidth_gb_per_s: 32`` being
+      256 bits/cycle at the same clock -- one fact recorded twice, in the two
+      forms the two consumers want -- and a test asserts the two forms agree.
+    note: >
+      CONSUMED since 2026-08-04 by tt_sim/device/tiles.py, as the *second*
+      serialisation a DRAM transfer pays. It exists because the ``noc``
+      section's per-link bandwidth and this one are two different queues at two
+      different rates -- 32 B/cycle on the wire, 24 B/cycle at the channel --
+      and a DRAM transfer is limited by the slower.
+
+      What the endpoint charges is the **excess**, not the whole thing:
+
+        extra = max(0, ceil(N / 24) - ceil(N / link_bytes_per_cycle))
+
+      so the size-dependent cost of a DRAM transfer over the round trip is
+      ceil(N / 24) once, never the sum of the two. Charging the whole channel
+      time on top of the link's would be exactly the double-billing that the
+      ``access_latency`` note below used to (wrongly) fear from consuming this
+      section at all; charging the excess is the standard two-stage-pipeline
+      result, where a stream through two stages in series runs at the
+      bottleneck rate and the faster stage contributes only its fill, which is
+      a constant and is already inside ``access_latency``.
+
+      Not modelled, and unchanged by this: channel *occupancy* (a second
+      request is still not queued behind the first), bank conflicts, refresh
+      windows, read/write turnaround, and the docs' own 92% achievable
+      fraction -- which is a statement about sustained software behaviour, not
+      about one transfer, and folding it in here would be an efficiency fudge
+      of exactly the kind these tables refuse.
   access_latency:
     provenance: unknown
     note: >
@@ -636,12 +751,25 @@ arch_overrides:
           at all), read/write turnaround, and *occupancy* -- a second request
           arriving during the first's service window is not queued behind it,
           so this term adds latency and no contention. Nor is transfer time:
-          a 32-byte poke and an 8 KiB burst are charged the same 99. Size
-          dependence is a bandwidth term, and it is the *same physical
-          serialisation* that ``noc.flit_bits`` already charges a packet on
-          the wire, so charging it here as well would bill one queue twice.
-          ``dram.bandwidth`` above is well sourced (isa_doc, 24 GB/s per
-          channel) and deliberately stays unconsumed for that reason.
+          a 32-byte poke and an 8 KiB burst are charged the same 99.
+
+          **This note used to end by arguing that size dependence therefore
+          belonged nowhere near DRAM, and that argument was wrong.** It read:
+          size dependence is a bandwidth term, it is the *same physical
+          serialisation* ``noc.flit_bits`` already charges a packet on the
+          wire, so charging it here as well would bill one queue twice --
+          hence ``dram.bandwidth`` stayed deliberately unconsumed. The NoC
+          link and the GDDR6 channel are not one queue. They are two, in
+          series, at two different rates (32 B/cycle against 24), and a
+          transfer streaming through both runs at the slower. Rung 2's sweep
+          measured a Wormhole DRAM read sustaining 24.38 B/cycle against a
+          modelled 32, and 24.38 is not a fraction of 32 -- it is
+          ``bandwidth.per_channel_gb_per_s`` to within 2%. The double-billing
+          the old argument feared is real only if the two times are *added*;
+          ``channel_serialisation`` above charges the excess of one over the
+          other, so they are not. The size term now lives in
+          ``dram.channel_serialisation`` and this entry stays exactly what it
+          was: a flat per-request device latency.
   blackhole:
     noc:
       flit_bits: 512
@@ -732,6 +860,27 @@ arch_overrides:
           24 DRAM tiles exposing 32 GiB of GDDR6 (BlackholeA0/README.md), and
           tt-metal quotes 512 GB/s chip-level -- see ``chip_level_bandwidth``,
           which is vendor_source and applies to both arches.
+      channel_serialisation:
+        provenance: unknown
+        note: >
+          Follows ``bandwidth`` straight down: with no published per-channel
+          GB/s for Blackhole there is nothing to convert, so a Blackhole DRAM
+          transfer pays the NoC link's serialisation and no second one. Note
+          that the arch overrides are *deep-merged*, so Wormhole's 24 is still
+          physically present under this key on Blackhole -- the consumer
+          checks this ``provenance`` before reading any number, which is the
+          same guard ``noc_dataset_sweep._sourced_bandwidths`` applies for the
+          same reason.
+
+          Not a gap that wants closing by scaling Wormhole's figure, either.
+          Rung 2's sweep puts Blackhole's measured DRAM at 47.1 B/cycle
+          reading and 59.4 writing, against a 64 B/cycle link -- 74% and 93%.
+          Wormhole's two directions agree with each other (24.38 / 24.53,
+          both 76-77% of its link) which is what a single channel rate looks
+          like; Blackhole's differ by 26%, which is not. So there is no one
+          number to infer here even informally, and inferring one would be an
+          ``estimated`` entry fitted to the same measurement it would then be
+          checked against.
     riscv:
       pipeline:
         stages: [frontend, ex1, ex2, load_store_unit, retire_unit]

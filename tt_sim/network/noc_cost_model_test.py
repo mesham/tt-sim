@@ -246,10 +246,15 @@ def test_a_dram_read_lands_on_the_cycle_the_hop_model_predicts():
     landed = _cycles_until_landed(device, tile, initiator, _PAYLOAD, budget=2000)
     # The DRAM endpoint's own service time is deliberately *not* part of the
     # flight (see ``tt_sim/device/tiles.py``), so it is added here rather than
-    # folded into either leg — a round trip is what the two models sum to.
+    # folded into either leg — a round trip is what the two models sum to. The
+    # channel term rides with it: one cycle at this 32-byte payload, which the
+    # 24 B/cycle channel needs two cycles for and the 32 B/cycle link one.
     with _env("1"):
-        service = dram_cost_model("wormhole").service_cycles
-    assert landed == (10 + 9 * there) + service + (10 + 9 * back) + 1
+        model = dram_cost_model("wormhole")
+    service = model.service_cycles
+    channel = model.channel_excess_cycles(len(_PAYLOAD), len(_PAYLOAD) // 32)
+    assert channel == 1
+    assert landed == (10 + 9 * there) + service + channel + (10 + 9 * back) + 1
 
 
 def test_the_untimed_noc_still_answers_in_two_cycles():
@@ -357,8 +362,12 @@ def test_a_packet_pays_for_its_own_size_once_and_not_once_per_hop():
 def test_a_semaphore_poke_no_longer_costs_what_a_tile_read_costs():
     """The headline, end to end and on a real device: two DRAM reads over the
     same path, 32 bytes and 2 KiB (a bf16 32x32 tile). Under the hop model
-    alone they landed on the same cycle. They now differ by exactly the tile's
-    serialisation — ``2048 / 32 - 1`` cycles on Wormhole's 256-bit flit."""
+    alone they landed on the same cycle. They now differ by the tile's
+    serialisation — ``2048 / 32 - 1`` cycles on Wormhole's 256-bit flit — plus
+    the DRAM channel's *excess* over that link rate, since 2026-08-04. The two
+    are added here rather than pinned as one number because they are two
+    different queues and the second one is Wormhole-only; on a path with no
+    DRAM in it the first term is the whole story."""
     small = _PAYLOAD
     large = bytes((i * 7) & 0xFF for i in range(2048))
     with _env("1"):
@@ -375,7 +384,15 @@ def test_a_semaphore_poke_no_longer_costs_what_a_tile_read_costs():
         initiator.at_len_be = len(large)
         large_cycles = _cycles_until_landed(device, tile, initiator, large, budget=4000)
 
-    assert large_cycles - small_cycles == len(large) // 32 - 1 == 63
+    with _env("1"):
+        dram_model = dram_cost_model("wormhole")
+    link = len(large) // 32 - 1
+    channel = dram_model.channel_excess_cycles(
+        len(large), len(large) // 32
+    ) - dram_model.channel_excess_cycles(len(small), len(small) // 32)
+    assert link == 63
+    assert channel == 22 - 1
+    assert large_cycles - small_cycles == link + channel
 
 
 def test_the_injection_port_is_held_for_the_whole_packet():

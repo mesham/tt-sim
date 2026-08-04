@@ -39,6 +39,18 @@ class DRAMEndpointNUI(NUI):
     (``dram.access_latency``'s derivation subtracts one end-to-end measurement
     from another so that the NoC term cancels).
 
+    Two terms, since 2026-08-04, and the second is a *rate* rather than a
+    latency. A DRAM transfer crosses two queues in series at two different
+    rates — the NoC link at ``noc.flit_bits / 8`` bytes per cycle, and the
+    GDDR6 channel at ``dram.channel_serialisation.bytes_per_cycle`` — so it
+    runs at the slower of them. The link's share is already charged, once, by
+    ``NUI._bandwidth_delay`` when the packet carrying the bytes is injected;
+    what is added here is the **excess** of the channel's time over the link's,
+    so the round trip pays ``ceil(N / channel_rate)`` and not the sum. Charging
+    the sum is the double-billing that (wrongly) kept ``dram.bandwidth``
+    unconsumed until rung 2 measured a Wormhole DRAM read plateauing at 24.38
+    B/cycle — the channel's published 24, not a fraction of the link's 32.
+
     Modelled by holding the *request* rather than delaying the response, which
     is both the more faithful ordering — the data really is not read until the
     device has got to it, so a write becomes visible late and its ACK later
@@ -69,13 +81,38 @@ class DRAMEndpointNUI(NUI):
         }
     )
 
-    def __init__(self, *args, service_cycles=None, **kwargs):
+    def __init__(self, *args, service_cycles=None, dram_cost=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.service_cycles = service_cycles
+        #: The :class:`~tt_sim.perf.model.DramCostModel`, or ``None``. Only its
+        #: channel rate is read here; the service time is unpacked above so the
+        #: hot path is one attribute read rather than a method call.
+        self.dram_cost = dram_cost
+
+    def _channel_excess(self, data_request):
+        """Cycles the channel is slower than the link, for this request's bytes.
+
+        ``data_length_bytes`` rather than what is on the wire: it is the
+        transaction size on *both* legs of a read, and the array is read (or
+        written) once whichever leg carries the payload. So a read's bytes are
+        charged when its request lands and a write's when its data does, which
+        is the same total either way and needs no second hook on the response.
+        """
+        model = self.dram_cost
+        if model is None or model.channel_bytes_per_cycle is None:
+            return 0
+        noc = self.noc_latency
+        link = (
+            None
+            if noc is None
+            else noc.serialisation_cycles(data_request.data_length_bytes)
+        )
+        return model.channel_excess_cycles(data_request.data_length_bytes, link)
 
     def transmit(self, data_request, delay=None):
         service = self.service_cycles
         if service is not None and data_request.action in self._SERVICED_ACTIONS:
+            service += self._channel_excess(data_request)
             delay = service if delay is None else delay + service
         NUI.transmit(self, data_request, delay)
 
@@ -112,8 +149,9 @@ class DRAMTile(TTDeviceTile):
         self.dram_memory = TileMemory(dram_tile_mem_map, safe, snoop_addresses)
 
         # The DRAM device's own service time, or None with the cost model off
-        # (and on Blackhole, whose figure is not derivable from a set the
-        # sources agree on — see ``dram.access_latency``).
+        # (and on any arch whose table sources no latency — both shipped ones
+        # now do; see ``dram.access_latency``). The same model carries the
+        # channel rate the endpoint charges on top, which is Wormhole-only.
         latency = dram_cost_model(profile.name)
         service_cycles = None if latency is None else latency.service_cycles
 
@@ -126,6 +164,7 @@ class DRAMTile(TTDeviceTile):
             self.dram_memory,
             tile_kind="D",
             service_cycles=service_cycles,
+            dram_cost=latency,
             **profile.noc_kwargs,
         )
         r1 = DRAMEndpointNUI(
@@ -135,6 +174,7 @@ class DRAMTile(TTDeviceTile):
             self.dram_memory,
             tile_kind="D",
             service_cycles=service_cycles,
+            dram_cost=latency,
             **profile.noc_kwargs,
         )
 
