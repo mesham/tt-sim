@@ -206,3 +206,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# perfbench result files (send these to whoever asked for the run; do not commit)
+perfbench/*/src/tensixbench-*.csv
