@@ -122,6 +122,18 @@ class _ForcedConfigOccupancy:
     def is_exact(self, instruction_name):
         return True
 
+    #: No IPC groups, which is the *Wormhole* config unit's real answer: that
+    #: arch's page states its throughput limits as prose and publishes no "IPC
+    #: group" column, so occupancy there is a whole-unit hold. (Blackhole's page
+    #: does publish one, and its entries carry ``ipc_group``.) Stated rather
+    #: than omitted because it is what keeps this guard testing the thing it was
+    #: written for: with no groups, the ``RDCFG`` hold below refuses every
+    #: opcode of every thread, exactly as it did before groups existed.
+    has_ipc_groups = False
+
+    def ipc_group(self, instruction_name):
+        return None
+
 
 def _build_fabric(config_unit_occupancy=None):
     device = make_device()

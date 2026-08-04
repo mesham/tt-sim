@@ -148,6 +148,12 @@ class CostEntry:
     latency: CycleCost | None = None
     occupancy: CycleCost | None = None
     throughput_ipc: float | None = None
+    #: The throughput group ``occupancy`` is charged against, when the source
+    #: publishes one. ``None`` means whole-unit, which is what everything but
+    #: Blackhole's Configuration Unit gets — see the ``ipc_group`` note at the
+    #: top of ``tensix_instruction_costs.yaml`` for why a grouping is only ever
+    #: transcribed from a column and never read out of prose.
+    ipc_group: str | None = None
     source: str | None = None
     derivation: str | None = None
     scales_with: str | None = None
@@ -190,6 +196,7 @@ class CostEntry:
             latency=CycleCost.parse(raw.get("latency")),
             occupancy=CycleCost.parse(raw.get("occupancy")),
             throughput_ipc=raw.get("throughput_ipc"),
+            ipc_group=raw.get("ipc_group"),
             source=raw.get("source"),
             derivation=raw.get("derivation"),
             scales_with=raw.get("scales_with"),
@@ -229,6 +236,7 @@ ENTRY_KEYS = frozenset(
         "latency",
         "occupancy",
         "throughput_ipc",
+        "ipc_group",
         "source",
         "derivation",
         "scales_with",

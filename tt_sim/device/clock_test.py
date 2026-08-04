@@ -248,21 +248,32 @@ def test_a_tile_clock_reports_when_it_next_needs_attention():
     assert clock.next_event_cycle(0) == 1
 
 
-def test_backend_unit_occupancy_defers_retire_and_arms_the_pump():
-    """A unit says "I am busy for N cycles" and both halves follow."""
+def test_backend_unit_occupancy_refuses_issue_and_arms_the_pump():
+    """A unit says "I am busy for N cycles" and both halves follow.
+
+    The refusal, not a deferral: occupancy is back-pressure on the *next*
+    instruction to enter the unit, never a delay of one already inside it (see
+    ``TensixBackendUnit.occupy_for``). This test used to hand-place an
+    instruction in the queue of an occupied unit and assert it stayed there,
+    which pinned the old whole-unit drain guard — but that state cannot arise,
+    because a unit refuses at issue exactly what it would have had to defer,
+    and once occupancy became per-IPC-group the guard had to go: a held unit
+    accepts into its *free* groups and that work must retire in the cycle it
+    was accepted for.
+    """
     unit = TensixBackendUnit(None, {}, "matrix")
-    unit.next_instruction.append(("instruction", 0))
 
     unit.occupy_for(100, 8)
     assert unit.busy_until == 108
 
     for cycle in range(100, 108):
+        # Occupied: nothing new is accepted, so nothing is ever left to
+        # retire, and the pump is told to skip to 108.
+        assert not unit.issueInstruction("instruction", 0)
         unit.clock_tick(cycle)
-        # Occupied: nothing retires, and the pump is told to skip to 108.
-        assert len(unit.next_instruction) == 1
+        assert not unit.next_instruction
         assert unit.next_wake_cycle(cycle) == 108
 
-    unit.next_instruction.clear()
     unit.clock_tick(108)
     assert unit.busy_until is None
     assert unit.next_wake_cycle(108) is None

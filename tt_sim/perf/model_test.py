@@ -52,6 +52,12 @@ def _math_model(arch="wormhole"):
     return UnitCostModel(load_costs(arch).unit("MATH"), arch)
 
 
+def unit_cost_model_for(unit_name, arch):
+    """A model for any unit on any arch, built directly rather than through
+    ``unit_cost_model`` so it does not depend on the env var being set."""
+    return UnitCostModel(load_costs(arch).unit(unit_name), arch)
+
+
 # ---------------------------------------------------------------------------
 # 1. Opt-in.
 # ---------------------------------------------------------------------------
@@ -125,6 +131,49 @@ def test_untabulated_and_unknown_opcodes_are_charged_nothing():
     assert math.occupancy("SETASHRMH") is None
     # Not an instruction at all.
     assert math.occupancy("NOT_AN_OPCODE") is None
+
+
+# ---------------------------------------------------------------------------
+# 3b. IPC groups -- occupancy is charged per group where a source names them.
+# ---------------------------------------------------------------------------
+
+
+def test_only_blackholes_config_unit_publishes_ipc_groups():
+    """Exactly one unit on one arch, and the test says so by exhaustion.
+
+    A grouping is back-pressure the simulator *does not apply*, so inventing
+    one lets an instruction through that the hardware would stall. Blackhole's
+    Configuration Unit page is the only Tensix page with an "IPC group" column;
+    every other unit's table has Latency and Throughput and nothing else, and
+    Wormhole's own Configuration Unit page states the same partition as prose
+    without tabulating it. So this is the whole list, and growing it means
+    finding another published column.
+    """
+    grouped = {
+        (arch, name)
+        for arch in ("wormhole", "blackhole")
+        for name in load_costs(arch).units
+        if unit_cost_model_for(name, arch).has_ipc_groups
+    }
+    assert grouped == {("blackhole", "CFG")}
+
+
+def test_the_config_groups_are_the_columns_two_values():
+    """``SETC16`` alone in ``ThreadConfig``; everything else in ``Config``."""
+    cfg = unit_cost_model_for("CFG", "blackhole")
+    assert cfg.ipc_group("SETC16") == "ThreadConfig"
+    for name in ("WRCFG", "RDCFG", "CFGSHIFTMASK", "STREAMWRCFG", "RMWCIB0"):
+        assert cfg.ipc_group(name) == "Config", name
+    # An opcode the table does not carry gets no group, which the mechanism
+    # reads as the whole-unit hold — the conservative answer, never a guess.
+    assert cfg.ipc_group("NOT_AN_OPCODE") is None
+
+
+def test_an_ungrouped_unit_answers_none_for_everything():
+    math = _math_model()
+    assert not math.has_ipc_groups
+    for name in ("MVMUL", "SHIFTXB", "ELWADD"):
+        assert math.ipc_group(name) is None, name
 
 
 # ---------------------------------------------------------------------------

@@ -79,7 +79,16 @@ class TensixBackendUnit(Clockable, ABC):
         # clock_tick's guard is a single dict lookup rather than an MRO walk;
         # this is read once per unit per cycle on the hot path. See
         # ``occupy_for``.
+        #
+        # The LATEST deadline across every occupied IPC group, or None when the
+        # unit is entirely free. That makes it the cheap "is anything armed at
+        # all?" test every hot path starts with, and it keeps meaning exactly
+        # what it meant before groups existed for the units that have none.
         self.busy_until = None
+        # Deadline per IPC group: ``{group_name: cycle}``, with ``None`` as the
+        # group name for a unit whose published limit is whole-unit. The
+        # authority :meth:`is_occupied` consults; :attr:`busy_until` is its max.
+        self.busy_groups = {}
         # A ``tt_sim.perf.model.UnitCostModel`` once a unit opts into the
         # cycle-cost tables *and* ``TT_SIM_COST_MODEL`` is set; ``None``
         # otherwise, which is the default and keeps every existing cycle count
@@ -90,7 +99,13 @@ class TensixBackendUnit(Clockable, ABC):
         # The default issuing of instructions here, which applies to most
         # units, is one instruction per cycle. Can override for specific
         # units with more complex behaviour
-        if self.is_occupied():
+        #
+        # ``busy_until is not None`` first: with the cost model off (the
+        # default) nothing is ever armed, so this is one attribute read and the
+        # group is never even looked up.
+        if self.busy_until is not None and self.is_occupied(
+            self.issue_group(instruction)
+        ):
             return False
         if len(self.next_instruction) == 0:
             self.next_instruction.append(
@@ -124,15 +139,39 @@ class TensixBackendUnit(Clockable, ABC):
         """
         return not self.next_instruction
 
-    def occupy_for(self, cycle_num, cycles):
-        """Declare this unit busy for ``cycles`` cycles starting at ``cycle_num``.
+    def occupy_for(self, cycle_num, cycles, group=None):
+        """Declare ``group`` busy for ``cycles`` cycles starting at ``cycle_num``.
 
         The Phase 5 entry point (``docs/plans/event-driven-pump.md``): a
         per-unit cost table calls this once the cycle's issue batch has
-        retired, with the longest cost in it, and the unit then refuses
-        further work until ``cycle_num + cycles``. ``cycles <= 1`` is the
-        status quo and is a no-op, so a table that has no entry for an opcode
-        costs nothing.
+        retired, with the longest cost charged to each group in it, and the
+        unit then refuses further work *of that group* until
+        ``cycle_num + cycles``. ``cycles <= 1`` is the status quo and is a
+        no-op, so a table that has no entry for an opcode costs nothing.
+
+        **The hold is per IPC group, not per unit**, because that is the shape
+        the only source that publishes one gives it. Blackhole's Configuration
+        Unit page tabulates an "IPC group" column: ``SETC16`` alone is
+        ``ThreadConfig``, everything else is ``Config``, and "sustained
+        throughput across the entire group is limited to one instruction per
+        cycle (or half an instruction per cycle if ``CFGSHIFTMASK`` is used)".
+        A whole-unit hold charged ``CFGSHIFTMASK``'s two cycles against the
+        ``SETC16`` path as well, refusing an instruction the hardware issues
+        from a different group in the same cycle. ``group=None`` — the default,
+        and what every other unit passes — is the whole-unit hold unchanged;
+        it is also what a *grouped* unit charges an opcode the table gives no
+        group for, since refusing more is the safe direction.
+
+        Only one unit on one architecture has groups today, and the check for
+        whether any other needed it was made against the documents rather than
+        assumed: the Matrix Unit and Scalar Unit tables have no group column
+        (the Scalar Unit is explicitly "executing at most one instruction at a
+        time, and has no internal pipelining", so whole-unit is not an
+        approximation there but the stated behaviour), and while the Sync Unit
+        does describe two throughput classes in prose — mutex ops "up to three
+        per cycle, provided they refer to different mutexes" against the
+        semaphore ops' shared one — every Sync Unit entry costs one cycle, so
+        nothing ever arms and the distinction is unobservable.
 
         **Occupancy is back-pressure on the next instruction, never a delay of
         this one.** That is the distinction :meth:`clock_tick` turns on and it
@@ -161,14 +200,39 @@ class TensixBackendUnit(Clockable, ABC):
         else, not retiring the instruction it was issued.
         """
         if cycles > 1:
-            self.busy_until = cycle_num + cycles
+            deadline = cycle_num + cycles
+            if deadline > self.busy_groups.get(group, 0):
+                self.busy_groups[group] = deadline
+            if self.busy_until is None or deadline > self.busy_until:
+                self.busy_until = deadline
 
-    def is_occupied(self):
-        """True while a multi-cycle instruction still holds this unit.
+    def _release_expired(self, cycle_num):
+        """Drop every group whose deadline has arrived, and re-derive the max.
+
+        Called once at the top of :meth:`clock_tick`, which is the only place
+        occupancy is ever released — so a group stays occupied from the cycle
+        it is armed in right up to its deadline tick, exactly as the single
+        :attr:`busy_until` did.
+        """
+        groups = self.busy_groups
+        for group in [g for g, deadline in groups.items() if cycle_num >= deadline]:
+            del groups[group]
+        self.busy_until = max(groups.values()) if groups else None
+
+    def is_occupied(self, group=None):
+        """True while a multi-cycle instruction still holds ``group``.
 
         Always False with the cost model off, because nothing arms
         :attr:`busy_until` — so this costs one attribute read per issue and
         changes nothing.
+
+        ``group=None`` asks about the whole-unit hold, which for a unit with no
+        published IPC groups is the only hold there is: everything it charges
+        goes to the ``None`` key, and this reduces to the pre-group behaviour
+        exactly. For a grouped unit it asks only about the named group, which
+        is the point — Blackhole's ``CFGSHIFTMASK`` holds ``Config`` and leaves
+        ``ThreadConfig`` free, so the ``SETC16`` the hardware would accept in
+        the next cycle is accepted here too.
 
         Why issue is refused rather than queued, which is the whole reason this
         exists: tt-sim's frontend treats an instruction as *issued* the moment
@@ -195,7 +259,35 @@ class TensixBackendUnit(Clockable, ABC):
         *in this unit* — which is a floor on the stall, in the same direction
         as charging bounded costs at their low end.
         """
-        return self.busy_until is not None
+        return self.busy_until is not None and group in self.busy_groups
+
+    def instruction_group(self, instruction_name):
+        """The IPC group ``instruction_name`` contends for, or ``None``.
+
+        ``None`` means "charge this against the whole unit" and is the answer
+        for every instruction of every unit whose documentation publishes no
+        group column, so this reduces to the pre-group mechanism wherever the
+        sources do not say otherwise. See
+        :meth:`tt_sim.perf.model.UnitCostModel.ipc_group`.
+        """
+        model = self.cost_model
+        return None if model is None else model.ipc_group(instruction_name)
+
+    def issue_group(self, instruction):
+        """:meth:`instruction_group` for a still-encoded instruction word.
+
+        Split out because the issue path holds the raw word rather than a
+        decoded name, and decoding is not free. A unit with no IPC groups —
+        which is all of them but Blackhole's config unit — answers from
+        :attr:`~tt_sim.perf.model.UnitCostModel.has_ipc_groups` without
+        decoding anything. A unit that overrides ``issueInstruction`` and has
+        already decoded should call :meth:`instruction_group` directly instead.
+        """
+        model = self.cost_model
+        if model is None or not model.has_ipc_groups:
+            return None
+        instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+        return model.ipc_group(instruction_info["name"])
 
     def instruction_occupancy(self, instruction_name, issue_thread):
         """Cycles ``instruction_name`` occupies this unit, or ``None``.
@@ -223,50 +315,67 @@ class TensixBackendUnit(Clockable, ABC):
         return None if model is None else model.occupancy(instruction_name)
 
     def next_wake_cycle(self, cycle_num):
-        # Identical to Clockable's default; spelled out because this is the
-        # unit the cost tables attach to and the derivation should be readable
-        # next to clock_tick's matching guard.
+        # Clockable's default, extended for per-group occupancy; spelled out
+        # because this is the unit the cost tables attach to and the derivation
+        # should be readable next to clock_tick's matching guard.
         busy_until = self.busy_until
         if busy_until is not None and busy_until > cycle_num:
-            return busy_until
+            # A held unit may still have accepted work into a *free* group, and
+            # that work must retire in the cycle it was accepted for or it is
+            # reordered behind its own thread's later instructions. So the
+            # queue decides first; only an idle queue lets the pump stride to a
+            # deadline, and then to the soonest one, not the latest.
+            if self.next_instruction:
+                return cycle_num + 1
+            # ``_release_expired`` runs at the top of every tick, so after one
+            # no live deadline is in the past and this is always > cycle_num;
+            # ``max`` guards the case where a caller asks before the first
+            # tick, where the answer must still be "come back", never "never".
+            return max(min(self.busy_groups.values()), cycle_num + 1)
         return None if self.is_clock_idle() else cycle_num + 1
 
     def clock_tick(self, cycle_num):
         """Retire this cycle's issue batch, then charge the unit for it.
 
         ``next_instruction`` holds exactly the instructions accepted *for this
-        cycle* — ``issueInstruction`` refuses everything while
-        :meth:`is_occupied`, and an unoccupied tick empties the queue — so the
-        whole batch belongs to one cycle and every member of it retires in that
+        cycle* — ``issueInstruction`` refuses everything whose group
+        :meth:`is_occupied`, and every tick empties the queue — so the whole
+        batch belongs to one cycle and every member of it retires in that
         cycle. A unit that accepts more than one per cycle (config: up to three
         ``SETC16`` plus one of the shared-IPC-group ops; sync: three mutex ops;
         misc: one per thread) is modelling parallel hardware paths, and a cost
         charged to one of them does not push the others out.
 
-        Hence :attr:`busy_until` is armed *after* the drain, from the longest
-        occupancy in the batch, rather than mid-loop. Arming it mid-loop and
-        returning left the rest of the batch queued for a later cycle — and
-        because the issuing threads had already been told those instructions
-        were accepted, they had moved on and their *later* instructions
-        retired first, in other units. That reordered a single thread's
-        program: charging ``RDCFG`` two cycles pushed the math thread's
-        ``SETC16`` of ``DEST_TARGET_REG_CFG_MATH_Offset`` behind two of its own
-        ``MVMUL``s, which then accumulated into the wrong half of Dst and made
-        ``matmul_block`` compute a wrong answer. See ``config.py`` and
+        **The drain is unconditional**, which is what per-group occupancy costs
+        the mechanism and it is not optional. While the hold was whole-unit an
+        occupied unit could not have accepted anything, so returning early was
+        equivalent to draining an empty queue. With groups a held unit accepts
+        into its *free* groups, and skipping the drain would leave those
+        instructions queued for a later cycle after their threads had been told
+        they were accepted — which is precisely the reordering this method was
+        rewritten to stop.
+
+        Hence occupancy is armed *after* the drain, from the longest cost
+        charged to each group in the batch, rather than mid-loop. Arming it
+        mid-loop and returning left the rest of the batch queued for a later
+        cycle — and because the issuing threads had already been told those
+        instructions were accepted, they had moved on and their *later*
+        instructions retired first, in other units. That reordered a single
+        thread's program: charging ``RDCFG`` two cycles pushed the math
+        thread's ``SETC16`` of ``DEST_TARGET_REG_CFG_MATH_Offset`` behind two of
+        its own ``MVMUL``s, which then accumulated into the wrong half of Dst
+        and made ``matmul_block`` compute a wrong answer. See ``config.py`` and
         :meth:`occupy_for`.
         """
-        busy_until = self.busy_until
-        if busy_until is not None:
-            if cycle_num < busy_until:
-                # Occupied by a multi-cycle instruction; nothing new is
-                # accepted and nothing is left over to retire.
-                return
-            self.busy_until = None
-        # The longest occupancy charged across this cycle's batch. The unit is
-        # held by whichever of its parallel paths is slowest, so ``max``; the
-        # batch is nearly always one instruction, in which case this is just
-        # that instruction's cost.
-        batch_occupancy = 0
+        if self.busy_until is not None:
+            self._release_expired(cycle_num)
+        # The longest occupancy charged across this cycle's batch, per IPC
+        # group. Each group is held by whichever of its parallel paths is
+        # slowest, so ``max`` within a group; a unit with no published groups
+        # keys everything under ``None`` and this is the single whole-unit
+        # deadline it always was. Left as ``None`` until something is actually
+        # charged, which for every unit but Blackhole's config unit is never.
+        batch = None
         # next_instruction is all instructions to process in this cycle,
         # is often one but for some units might be more
         while len(self.next_instruction) > 0:
@@ -302,14 +411,23 @@ class TensixBackendUnit(Clockable, ABC):
                             duration=occupancy or 0,
                         )
                     )
-                if occupancy is not None and occupancy > batch_occupancy:
-                    batch_occupancy = occupancy
+                # ``> 1`` rather than ``is not None``: occupy_for no-ops at one
+                # cycle, so filtering here keeps the dict unallocated on every
+                # path that charges nothing, which is every path today outside
+                # Blackhole's CFGSHIFTMASK and ThCon's multi-cycle ops.
+                if occupancy is not None and occupancy > 1:
+                    group = self.instruction_group(instruction_name)
+                    if batch is None:
+                        batch = {group: occupancy}
+                    elif occupancy > batch.get(group, 0):
+                        batch[group] = occupancy
             else:
                 raise NotImplementedError(
                     f"{self.unit_name} unit can not handle instruction '{instruction_info['name']}'"
                 )
-        if batch_occupancy:
-            self.occupy_for(cycle_num, batch_occupancy)
+        if batch is not None:
+            for group, cycles in batch.items():
+                self.occupy_for(cycle_num, cycles, group)
 
     def getThreadConfigValue(self, issue_thread, key):
         return self.backend.getThreadConfigValue(issue_thread, key)

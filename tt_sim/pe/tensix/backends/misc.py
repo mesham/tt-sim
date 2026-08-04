@@ -29,9 +29,11 @@ class MiscellaneousUnit(TensixBackendUnit):
         super().__init__(backend, MiscellaneousUnit.OPCODE_TO_HANDLER, "Misc")
 
     def issueInstruction(self, instruction, from_thread):
-        # An occupied unit takes nothing; see TensixBackendUnit.is_occupied.
+        # An occupied IPC group takes nothing; see TensixBackendUnit.is_occupied.
         # This unit is not wired to the cost tables, so it never is.
-        if self.is_occupied():
+        if self.busy_until is not None and self.is_occupied(
+            self.issue_group(instruction)
+        ):
             return False
         # Accepts one per thread
         for _, thread_id in self.next_instruction:

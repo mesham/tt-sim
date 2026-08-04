@@ -66,6 +66,18 @@
 #                   the number Phase 5 of the pump plan needs: "busy until
 #                   cycle c + N".
 #   throughput_ipc  Instructions per cycle, as the ISA docs state it.
+#   ipc_group       The name of the throughput group ``occupancy`` is charged
+#                   against, when the source says the unit's limit is per-group
+#                   rather than whole-unit. Transcribed VERBATIM from an "IPC
+#                   group" column, never inferred: an occupancy is back-pressure
+#                   on the next instruction *of that group*, so a wrong grouping
+#                   lets an instruction through that the hardware would stall.
+#                   Absent means whole-unit, which is the only safe default and
+#                   is what every unit but Blackhole's Configuration Unit gets --
+#                   no other page publishes such a column (checked: the Matrix
+#                   Unit, Scalar Unit and Sync Unit tables have Latency and
+#                   Throughput columns and nothing else, and Wormhole's own
+#                   Configuration Unit page states its limits as prose).
 #   scales_with     A named multiplier the cost is repeated for, e.g.
 #                   ``fidelity_phases``. Recorded rather than folded in, since
 #                   the multiplier is a runtime property.
@@ -894,6 +906,17 @@ units:
       pipeline (stages -4..+1). The shared numbers happen to match, so the base
       table is Wormhole's and ``arch_overrides.blackhole`` carries the two
       Blackhole-only opcodes and the IPC-group note.
+
+      ONLY BLACKHOLE'S ENTRIES CARRY ``ipc_group``, and the asymmetry is
+      deliberate. Blackhole's table has a literal "IPC group" column whose two
+      values are transcribed below; Wormhole's table has no such column, and
+      although its prose partitions the unit the same way (SETC16 "one per
+      thread per cycle" against RMWCIB / RDCFG "at most one of these per
+      cycle"), reading a grouping out of prose is an inference and the
+      consequence of getting one wrong is an instruction let through that the
+      hardware would have stalled. Wormhole therefore keeps whole-unit
+      occupancy, which is inert there in any case: every entry in its table is
+      one cycle, so nothing ever holds the unit.
     instructions:
       SETC16:
         latency: 1
@@ -992,17 +1015,26 @@ units:
         latency: 2
         throughput_ipc: 0.5
         occupancy: 2
+        ipc_group: Config
         provenance: isa_doc_derived
         source: bh_config_unit
         derivation: occupancy = 1 / throughput_ipc
         note: >
           The only instruction that halves the Config IPC group's sustained
           throughput -- it "requires two cycles in stage 0".
+
+          It is also the only entry in either arch's whole file whose occupancy
+          exceeds one cycle *and* whose unit publishes IPC groups, so it is the
+          single reason ``ipc_group`` is read at all: its 2-cycle hold is
+          charged against ``Config`` and leaves ``ThreadConfig`` -- i.e.
+          SETC16 -- free, which is what the Blackhole table's group column says
+          and what a whole-unit hold got wrong.
       STREAMWRCFG:
         arch: blackhole
         latency: { cycles: 5, bound: at_least }
         throughput_ipc: 1
         occupancy: 1
+        ipc_group: Config
         provenance: isa_doc_derived
         source: bh_config_unit
         derivation: occupancy = 1 / throughput_ipc
@@ -1249,15 +1281,42 @@ arch_overrides:
           half an instruction per cycle if CFGSHIFTMASK is used)". SETC16 keeps
           IPC 3 (one per thread); every other instruction, plus RISCV and Mover
           requests, contends for a single shared cycle in pipeline stage 0.
+
+          The page's table has an "IPC group" column, and ``ipc_group`` on each
+          entry below is that column copied out: SETC16 alone is
+          ``ThreadConfig``, and STREAMWRCFG / WRCFG / CFGSHIFTMASK / RMWCIB /
+          RDCFG are all ``Config``. The two names are the doc's, not this
+          file's. That column is the whole reason the mechanism can charge
+          occupancy per group -- ``tt_sim/perf/model.py`` reads it and
+          ``TensixBackendUnit`` holds one deadline per group -- and it is the
+          only such column published for any Tensix unit.
         source: bh_config_unit
         instructions:
           SETC16:
             latency: 1
             occupancy: 1
             throughput_ipc: 3
+            ipc_group: ThreadConfig
             provenance: isa_doc
             source: bh_config_unit
             note: >
               Blackhole states the IPC as a number (3) where Wormhole states it
               as prose ("issue one per thread per cycle"). Same behaviour,
               recorded from the arch's own table.
+
+              The IPC group is the interesting half: SETC16 is the ONLY member
+              of ``ThreadConfig``, which is why a CFGSHIFTMASK holding the
+              ``Config`` group does not stall it.
+          # The rest of the unit's opcodes: the "Config" IPC group, verbatim
+          # from the same column. Costs are unchanged from the Wormhole base
+          # table above -- these overrides add the group and nothing else, and
+          # the deep merge keeps every other field.
+          WRCFG:
+            ipc_group: Config
+          RMWCIB0: &bh_cfg_group
+            ipc_group: Config
+          RMWCIB1: *bh_cfg_group
+          RMWCIB2: *bh_cfg_group
+          RMWCIB3: *bh_cfg_group
+          RDCFG:
+            ipc_group: Config

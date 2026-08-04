@@ -70,6 +70,15 @@ class _FixedCost:
     def occupancy(self, name):
         return self.cycles
 
+    #: The Matrix Unit publishes no "IPC group" column — its table has
+    #: Throughput and Latency and nothing else — so its occupancy is a
+    #: whole-unit hold and the stand-in says so explicitly rather than by
+    #: omission. See ``UnitCostModel.ipc_group``.
+    has_ipc_groups = False
+
+    def ipc_group(self, name):
+        return None
+
 
 # ---------------------------------------------------------------------------
 # 1. Off by default.

@@ -35,7 +35,9 @@ import os
 from contextlib import contextmanager
 
 from tt_sim.arch import WORMHOLE_PROFILE
+from tt_sim.arch.blackhole import BLACKHOLE_PROFILE
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
+from tt_sim.pe.tensix.util import TensixConfigurationConstants
 
 #: ``ADDDMAREG GPR[2] = GPR[0] + 1`` with ``OpBisConst``: the cheapest ThCon op
 #: with a visible side effect, so a test can tell a retired instruction from a
@@ -54,6 +56,16 @@ RDCFG_G5_FROM_CFG12 = (177 << 24) | (5 << 16) | 12
 #: to put in it.
 RDCFG_SOURCE_INDEX = 12
 RDCFG_SOURCE_VALUE = 0xABCD1234
+
+#: ``CFGSHIFTMASK CFG[41] += SCRATCH[0]`` — the Blackhole-only op, in the only
+#: mode tt-sim models (no circular shift, full-width mask, "old + scratch", no
+#: masking of the old value: see ``config.CFGSHIFTMASK_MODELLED_MODE``). Opcode
+#: 0xB8; fields per ``tensix_instructions.yaml``, matching ``blackhole_ops_test``.
+#: It is the only opcode in either arch's cost table that costs more than one
+#: cycle on a unit with IPC groups.
+CFGSHIFTMASK_CFG41_SCRATCH0 = (
+    (0xB8 << 24) | (1 << 23) | (3 << 20) | (31 << 15) | (0 << 10) | (0 << 8) | 41
+)
 
 
 def setc16_math_offset(value):
@@ -77,14 +89,27 @@ class _ForcedOccupancy:
     make a test reach a code path.
     """
 
-    def __init__(self, charges):
+    def __init__(self, charges, groups=None):
         self.charges = charges
+        self.groups = groups or {}
 
     def occupancy(self, instruction_name):
         return self.charges.get(instruction_name, 1)
 
     def is_exact(self, instruction_name):
         return True
+
+    @property
+    def has_ipc_groups(self):
+        return bool(self.groups)
+
+    def ipc_group(self, instruction_name):
+        """No groups unless a test asks for them, which is the Wormhole answer.
+
+        Wormhole's Configuration Unit page publishes no "IPC group" column, so
+        the real model returns ``None`` here too and the hold is whole-unit.
+        """
+        return self.groups.get(instruction_name)
 
 
 #: SFPU opcodes the backend implements but ``load_costs("wormhole")`` drops,
@@ -487,6 +512,100 @@ def test_a_multi_cycle_config_op_does_not_delay_the_batch_beside_it():
         assert config.issueInstruction(setc16_math_offset(0), 1)
         config.clock_tick(3)
         assert backend.getThreadConfigValue(1, "DEST_TARGET_REG_CFG_MATH_Offset") == 0
+
+
+def test_a_held_ipc_group_still_lets_a_different_group_through():
+    """The regression test for per-group occupancy, on the one unit that has it.
+
+    Blackhole's Configuration Unit page is the only Tensix page that publishes
+    an **"IPC group" column**: ``SETC16`` alone is ``ThreadConfig``, and
+    ``STREAMWRCFG`` / ``WRCFG`` / ``CFGSHIFTMASK`` / ``RMWCIB`` / ``RDCFG`` are
+    all ``Config``, whose "sustained throughput across the entire group is
+    limited to one instruction per cycle (or half an instruction per cycle if
+    ``CFGSHIFTMASK`` is used)". So a ``CFGSHIFTMASK``'s two cycles are two
+    cycles of the ``Config`` group and say nothing at all about ``SETC16``.
+
+    A whole-unit ``busy_until`` could not express that, and this test is the
+    difference: with the old mechanism the ``SETC16`` below is refused in the
+    cycle after the ``CFGSHIFTMASK``, which the hardware issues. The ``RDCFG``
+    beside it is the control — same cycle, same unit, and correctly refused,
+    because it *is* in the held group.
+
+    Uses the real Blackhole cost table rather than a stand-in: ``CFGSHIFTMASK``
+    is the only opcode in either arch's file whose occupancy exceeds one cycle
+    on a unit with groups, so it is the whole reason the mechanism exists and
+    there is nothing to be gained by faking it.
+    """
+    previous = os.environ.get("TT_SIM_COST_MODEL")
+    os.environ["TT_SIM_COST_MODEL"] = "1"
+    try:
+        backend = TensixCoProcessor(
+            None,
+            BLACKHOLE_PROFILE.tensix_cfg_state_size,
+            BLACKHOLE_PROFILE.tensix_thd_state_size,
+            blackhole=True,
+        ).getBackend()
+        config = backend.backend_units["CFG"]
+
+        # The groups, straight out of the table's column.
+        assert config.instruction_group("CFGSHIFTMASK") == "Config"
+        assert config.instruction_group("RDCFG") == "Config"
+        assert config.instruction_group("SETC16") == "ThreadConfig"
+
+        config.setConfig(0, RDCFG_SOURCE_INDEX, RDCFG_SOURCE_VALUE)
+        assert config.issueInstruction(CFGSHIFTMASK_CFG41_SCRATCH0, 0)
+        config.clock_tick(0)
+        # Two cycles, charged to Config and to Config only.
+        assert config.busy_groups == {"Config": 2}
+        assert config.busy_until == 2
+
+        # The cycle after. The Config group is held...
+        assert not config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
+        # ...and ThreadConfig is not. THIS is the assertion the whole-unit hold
+        # failed: SETC16 is outside the held group and the hardware takes it.
+        assert config.issueInstruction(setc16_math_offset(0x200), 1)
+        config.clock_tick(1)
+        assert config.get_threadConfig_entry(1, 1) == 0x200
+        # Retired in the cycle it was accepted for, and the Config hold stands.
+        assert not config.next_instruction
+        assert config.busy_groups == {"Config": 2}
+
+        # And the held group is released on schedule, not early.
+        config.clock_tick(2)
+        assert config.busy_groups == {}
+        assert config.busy_until is None
+        assert config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
+        config.clock_tick(3)
+        assert backend.gpr.getRegisters(0)[5] == RDCFG_SOURCE_VALUE
+    finally:
+        TensixConfigurationConstants.use_blackhole(False)
+        if previous is None:
+            os.environ.pop("TT_SIM_COST_MODEL", None)
+        else:
+            os.environ["TT_SIM_COST_MODEL"] = previous
+
+
+def test_an_ungrouped_unit_still_holds_the_whole_unit():
+    """The other half: no published groups means no groups invented.
+
+    Every unit but Blackhole's config unit keys its occupancy under ``None``,
+    so ``is_occupied()`` is the whole-unit question it always was. ThCon is the
+    one to check it on — its page says outright that the unit "is executing at
+    most one instruction at a time, and has no internal pipelining", so
+    whole-unit is not an approximation there but the stated behaviour.
+    """
+    with _backend(True) as backend:
+        thcon = backend.backend_units["THCON"]
+        assert thcon.cost_model is not None
+        assert not thcon.cost_model.has_ipc_groups
+        assert thcon.instruction_group("ATCAS") is None
+
+        assert thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0)
+        thcon.clock_tick(0)
+        assert thcon.busy_groups == {None: 3}
+        # Nothing at all gets in, from any thread, for the whole hold.
+        for thread in range(3):
+            assert not thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, thread)
 
 
 def test_a_batch_is_held_for_the_longest_cost_in_it():

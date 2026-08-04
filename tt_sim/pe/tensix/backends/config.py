@@ -125,22 +125,35 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         # same missing guarantee, and the failure would look like a wrong
         # answer, not a slow one. That is why this paragraph outlives the fix.
         #
-        # WHAT THIS WIRING OVER-CHARGES, stated because it is the one place the
-        # unit's real constraints do not fit a per-opcode number, and it is an
-        # over-charge rather than the under-charge the cost model's bounds
-        # policy prefers. The unit's constraints are cross-thread: SETC16 is one
+        # THE OVER-CHARGE THIS WIRING USED TO CARRY IS GONE, and the shape of
+        # the fix is worth keeping because it is the only per-group constraint
+        # in the tree. The unit's constraints are cross-thread: SETC16 is one
         # per thread per cycle, RMWCIB needs neither RDCFG nor WRCFG issued in
         # the previous cycle by *any* thread, and Blackhole folds everything but
-        # SETC16 into one shared IPC group. ``busy_until`` is a whole-unit hold,
-        # so a cycle in which CFGSHIFTMASK is charged 2 also refuses the next
-        # cycle's SETC16 -- which the Blackhole page places OUTSIDE that IPC
-        # group and would let through. Bounded and small: CFGSHIFTMASK is the
-        # only entry in either arch's table above one cycle, so this can only
-        # bite in the cycle after one, and only on Blackhole. Fixing it properly
-        # means a per-IPC-group occupancy rather than a per-unit one, which is a
-        # change to the mechanism and not to this table. tt-sim models the first
-        # two constraints in ``issueInstruction`` / ``prev_cycle_setc16_or_wrcfg``;
-        # none of the three is expressible as a number attached to an opcode.
+        # SETC16 into one shared IPC group. ``busy_until`` was a WHOLE-UNIT
+        # hold, so a cycle in which CFGSHIFTMASK was charged 2 also refused the
+        # next cycle's SETC16 -- which the Blackhole page places OUTSIDE that
+        # IPC group and lets through. Occupancy is now charged PER IPC GROUP
+        # (TensixBackendUnit.occupy_for / is_occupied, keyed by the ``ipc_group``
+        # column of the Blackhole table, which the cost YAML transcribes), so
+        # CFGSHIFTMASK holds ``Config`` and leaves ``ThreadConfig`` free.
+        #
+        # IT COST NOTHING TO CARRY AND NOTHING TO FIX. No in-tree guard ever
+        # had an issue refused by the whole-unit hold -- ``untilize``, the only
+        # workload in the tree that executes CFGSHIFTMASK at all, arms the hold
+        # 32 times and refuses zero -- so both the over-charge and its removal
+        # measure 12,189 cycles there. The fix is for the mechanism's
+        # correctness, not for a number that moved.
+        #
+        # WORMHOLE HAS NO GROUPS HERE and deliberately gets none: its page
+        # states the same partition as prose without a group column, and a
+        # grouping inferred from prose is exactly the kind of guess that lets
+        # an instruction through that the hardware would stall. It is inert
+        # either way -- every Wormhole entry is one cycle, so nothing arms.
+        #
+        # tt-sim models the first two constraints in ``issueInstruction`` /
+        # ``prev_cycle_setc16_or_wrcfg``; neither is expressible as a number
+        # attached to an opcode.
 
     def is_clock_idle(self):
         # The override also clears prev_cycle_setc16_or_wrcfg, which is
@@ -154,14 +167,24 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         super().clock_tick(cycle_num)
 
     def issueInstruction(self, instruction, from_thread):
-        # An occupied unit takes nothing, however many slots the per-opcode
+        # An occupied IPC GROUP takes nothing, however many slots the per-opcode
         # rules below would otherwise allow. See TensixBackendUnit.is_occupied
         # -- this is the unit where deferring instead of refusing was shown to
         # reorder a thread's program.
-        if self.is_occupied():
-            return False
+        #
+        # Per group rather than per unit because this is the one unit whose
+        # documentation publishes the groups: Blackhole's page tabulates an
+        # "IPC group" column, SETC16 alone in ThreadConfig and everything else
+        # in Config. A CFGSHIFTMASK therefore holds Config for its two cycles
+        # and leaves the next cycle's SETC16 free, which is what the hardware
+        # does and what the whole-unit hold got wrong. instruction_group is
+        # called rather than issue_group because the name is already decoded.
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         instruction_name = instruction_info["name"]
+        if self.busy_until is not None and self.is_occupied(
+            self.instruction_group(instruction_name)
+        ):
+            return False
         if instruction_name == "SETC16":
             if self.next_instruction.count("SETC16") < 3:
                 # Max one per thread per cycle allowed

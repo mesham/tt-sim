@@ -54,9 +54,17 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         self.blocked_mutex = []
 
     def issueInstruction(self, instruction, from_thread):
-        # An occupied unit takes nothing; see TensixBackendUnit.is_occupied.
+        # An occupied IPC group takes nothing; see TensixBackendUnit.is_occupied.
         # No Sync Unit op is costed above one cycle, so this never fires today.
-        if self.is_occupied():
+        # It also has no published IPC groups -- its page describes two
+        # throughput classes in prose (mutex ops "up to three per cycle,
+        # provided they refer to different mutexes" against the semaphore ops'
+        # shared one) but tabulates no group column, so ``issue_group`` returns
+        # None and the hold is whole-unit. Unobservable either way while every
+        # entry costs one cycle.
+        if self.busy_until is not None and self.is_occupied(
+            self.issue_group(instruction)
+        ):
             return False
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         instruction_name = instruction_info["name"]

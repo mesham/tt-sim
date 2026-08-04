@@ -108,6 +108,11 @@ class UnitCostModel:
         self._costs = unit_costs
         self._occupancy = {}
         self._inexact = set()
+        self._ipc_groups = {
+            name: entry.ipc_group
+            for name, entry in unit_costs.instructions.items()
+            if entry.ipc_group is not None
+        }
         for name, entry in unit_costs.instructions.items():
             if entry.provenance not in SOURCED_PROVENANCE:
                 # ``unknown`` / ``estimated`` carry no numbers worth charging.
@@ -133,6 +138,31 @@ class UnitCostModel:
     def is_exact(self, instruction_name):
         """False when the charged number came from a ``>=``, ``~`` or range."""
         return instruction_name not in self._inexact
+
+    @property
+    def has_ipc_groups(self):
+        """True when this unit's throughput limit is published per group.
+
+        False for every unit but Blackhole's Configuration Unit, and read on
+        the issue path so a unit without groups never pays for the concept:
+        one attribute read and the whole-unit hold as before.
+        """
+        return bool(self._ipc_groups)
+
+    def ipc_group(self, instruction_name):
+        """The throughput group ``instruction_name`` contends for, or ``None``.
+
+        ``None`` — the answer for every instruction of every ungrouped unit,
+        and for an untabulated opcode of a grouped one — means "charge this
+        against the whole unit", which is what
+        :meth:`~tt_sim.pe.tensix.backends.backend_base.TensixBackendUnit.occupy_for`
+        did unconditionally before groups existed and is the conservative
+        answer: a whole-unit hold refuses strictly more than a per-group one,
+        so an instruction whose group is unknown is never let through on a
+        guess. Grouping is only ever transcribed from a published "IPC group"
+        column — see the field's note in ``tensix_instruction_costs.yaml``.
+        """
+        return self._ipc_groups.get(instruction_name)
 
     def provenance_of(self, instruction_name):
         entry = self._costs.instructions.get(instruction_name)
