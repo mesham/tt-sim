@@ -34,6 +34,7 @@ from tt_sim.perf.costs import (
     PROVENANCE_REQUIRING_DERIVATION,
     PROVENANCE_REQUIRING_NOTE,
     PROVENANCE_REQUIRING_SOURCE,
+    SOURCED_PROVENANCE,
     CostTable,
     CycleCost,
     load_costs,
@@ -216,6 +217,145 @@ def test_vendor_derived_entries_are_exactly_the_ones_we_expect():
             if node["provenance"] == "vendor_source_derived":
                 found.add(".".join(path))
     assert found == expected
+
+
+# ---------------------------------------------------------------------------
+# Corroboration: a different axis from provenance, and it must stay one.
+# ---------------------------------------------------------------------------
+#
+# ``corroboration`` records that something independent has *checked* a number.
+# It is deliberately not a ``PROVENANCE_RANK`` kind — see the "WHY THERE IS NO
+# ``measured`` PROVENANCE" block at the top of ``tensix_instruction_costs.yaml``
+# — and these three tests are what stop it becoming one by drift.
+
+#: Entries that carry a ``corroboration``, and what checked them. Pinned for
+#: the same reason ``vendor_source_derived``'s list is: the field's whole value
+#: is that it is rare and specific, and a field that quietly spread to a dozen
+#: entries would say nothing.
+CORROBORATED_ENTRIES = {
+    # Blackhole silicon, 2026-08-04. Its occupancy of 1 is read from the ISA
+    # doc's throughput row; the measurement agrees with it and disagrees with
+    # the ">= 2" *latency* that used to be copied into the occupancy field.
+    # Reproduced across both tracked datasets, since the dvalid setup that
+    # confounded the MATH probes does not touch the config unit.
+    # See docs/plans/tensix-cost-benchmark.md.
+    ("CFG", "RDCFG"),
+    # The same run's phase B, and the finding is that these opcodes have TWO
+    # throughput regimes ~6x apart: ~1.07 cycles when the MOP expander replays
+    # them back to back (what the table's 1 means, and what every real LLK path
+    # does) against ~6.0 when they are issued individually as .ttinsn words and
+    # each pays the Wait Gate. The occupancy is unchanged; what the field adds
+    # is which of the two numbers the table is.
+    ("MATH", "MVMUL"),
+    ("MATH", "ELWADD"),
+    ("MATH", "ELWMUL"),
+}
+
+#: Corroborations that live in a unit's ``extras`` rather than on an
+#: instruction. Pinned for the same reason, and separately, because
+#: ``CostTable.entries()`` cannot see them.
+CORROBORATED_EXTRAS = {
+    # fidelity_phases.mvmuls_per_tile = 16, the most load-bearing derived
+    # number in the MATH table and, until this run, the one nothing had ever
+    # checked. Phase B's fidelity differences are 17.55 and 33.65 cycles
+    # against 16 and 32 predicted.
+    ("MATH", "fidelity_phases.mvmuls_per_tile"),
+}
+
+#: A silicon corroboration must say how many runs on how many parts. The phrase
+#: used to be pinned as the literal "ONE RUN, ON ONE CARD", which stopped being
+#: writable the moment a figure was reproduced across two datasets off the same
+#: card -- and forcing an honest entry to under-report is the opposite of what
+#: this discipline is for. The shape is pinned instead of the words.
+RUNS_AND_PARTS = re.compile(
+    r"\b(ONE|TWO|THREE|FOUR|FIVE|\d+) RUNS?, ON (ONE|TWO|THREE|\d+) (CARD|CARDS|PART|PARTS)\b"
+)
+
+
+def test_corroborated_entries_are_exactly_the_ones_we_expect():
+    for arch in ARCHITECTURES:
+        found = {
+            (e.unit, e.name) for e in load_costs(arch).entries() if e.is_corroborated
+        }
+        assert found == CORROBORATED_ENTRIES, arch
+
+
+def test_corroboration_never_stands_in_for_a_source():
+    """The failure this field could enable, refused: "somebody measured it" is
+    not a provenance, and an entry may not lean on a corroboration for its
+    authority. A corroborated entry must still be sourced, and must still carry
+    everything its own provenance rank demands."""
+    for arch in ARCHITECTURES:
+        for entry in load_costs(arch).corroborated():
+            assert entry.is_sourced, entry.name
+            assert entry.source, entry.name
+
+
+def test_a_corroboration_says_how_many_runs_on_how_many_parts():
+    """One run on one card is what a silicon corroboration usually is, and a
+    reader must be able to see that without leaving the entry."""
+    for arch in ARCHITECTURES:
+        for entry in load_costs(arch).corroborated():
+            text = entry.corroboration
+            assert RUNS_AND_PARTS.search(text), entry.name
+            assert "tt_sim/perf/datasets/" in text, entry.name
+
+
+def test_corroborated_extras_are_exactly_the_ones_we_expect():
+    """The same pinning for unit-level numbers.
+
+    ``CostTable.entries()`` walks instructions only, so a corroboration on
+    ``MATH.fidelity_phases.mvmuls_per_tile`` would otherwise be outside every
+    check above -- rare, specific and *unpoliced*, which is how a discipline
+    stops being one.
+    """
+    for arch in ARCHITECTURES:
+        found = {
+            (unit, path) for unit, path, _ in load_costs(arch).corroborated_extras()
+        }
+        assert found == CORROBORATED_EXTRAS, arch
+
+
+def test_an_extras_corroboration_is_held_to_the_same_rules():
+    for arch in ARCHITECTURES:
+        for unit, path, text in load_costs(arch).corroborated_extras():
+            assert RUNS_AND_PARTS.search(text), (unit, path)
+            assert "tt_sim/perf/datasets/" in text, (unit, path)
+
+
+def test_the_corroborated_extra_still_stands_on_its_own_source():
+    """A corroboration cannot be an extras block's authority either: the
+    fidelity count must still carry the sourced derivation it had before
+    anything measured it."""
+    for arch in ARCHITECTURES:
+        mvmuls = (
+            load_costs(arch).units["MATH"].extras["fidelity_phases"]["mvmuls_per_tile"]
+        )
+        assert mvmuls["count"] == 16
+        assert mvmuls["provenance"] in SOURCED_PROVENANCE
+        assert mvmuls["source"]
+        assert mvmuls["derivation"]
+
+
+def test_rdcfg_charges_the_throughput_row_and_not_the_latency():
+    """The entry the hardware run corrected, pinned in both directions.
+
+    Occupancy is 1 — the ISA docs' "issue at most one of these per cycle",
+    which is what silicon measured. Latency stays ">= 2", which is a different
+    quantity (time to the destination GPR) that the benchmark's slope method
+    structurally cannot observe. Copying the second into the first was the
+    original error, and this fails if anyone does it again — in either
+    direction."""
+    for arch in ARCHITECTURES:
+        rdcfg = load_costs(arch).instruction("CFG", "RDCFG")
+        assert rdcfg.occupancy.cycles == 1
+        assert rdcfg.occupancy.bound == "exact"
+        assert rdcfg.latency.cycles == 2
+        assert rdcfg.latency.bound == "at_least"
+        # WRCFG on the same page has the identical shape; RDCFG was the anomaly.
+        wrcfg = load_costs(arch).instruction("CFG", "WRCFG")
+        assert wrcfg.latency.cycles == 2
+        assert wrcfg.occupancy.cycles == 1
 
 
 def test_the_dram_latency_is_exactly_its_own_derivation():
@@ -682,12 +822,19 @@ UNWIRED_UNITS = {
     # ">= 2" address phase plus a throttle-mode-dependent data phase), so it
     # wants more than the flat lookup the other units use.
     "UNPACK": "tt_sim/pe/tensix/backends/unpacker.py",
-    # The one omission that is a finding rather than a scoping decision.
-    # RDCFG's documented ">= 2" is the only cost in this unit's table above one
-    # cycle, and charging it makes `matmulblock` compute a wrong answer -- a
-    # config write lands one cycle late and something reads it stale. See the
-    # comment in config.py; the divergence is tt-sim's, not the table's, and
-    # charging RDCFG a 1 the docs do not give it would only hide it.
+    # Every entry in this unit's table is now one cycle, so wiring it would
+    # charge nothing -- the same reason TDMA is on this list. It arrived here
+    # by a different road: RDCFG's occupancy read ">= 2" until 2026-08-04
+    # (the documented *latency*, copied into the wrong field), and charging
+    # that made `matmulblock` compute a wrong answer, because a config write
+    # landed one cycle late and something read it stale. Blackhole silicon
+    # then measured RDCFG at 1.0 and the table was corrected to the throughput
+    # row the docs actually give it.
+    #
+    # THE TT-SIM BUG THAT FOUND IS STILL REAL AND STILL UNFIXED: nothing
+    # orders a config write against the units that read it, so any future
+    # multi-cycle occupancy in this unit will surface it again. It is simply
+    # no longer reachable from these tables. See the comment in config.py.
     "CFG": "tt_sim/pe/tensix/backends/config.py",
     # XMOV's 1-cycle entry is the issue cost only; the transfer duration is
     # bandwidth-derived and lives in tt_sim/perf/unit_costs.yaml under

@@ -341,19 +341,22 @@ def test_the_packer_charges_the_issue_cost_and_not_a_guessed_drain():
 def test_the_config_unit_is_left_uncosted_and_that_is_a_finding():
     """The one unit whose table is fully published and still not wired.
 
-    Everything tt-sim implements in it is one cycle except ``RDCFG``, which the
-    Wormhole page gives ">= 2" — and charging that documented 2 makes the
-    ``matmulblock`` Blackhole guard compute a **wrong answer**: five ``SETC16``
-    on the math thread and four ``WRCFG`` on the pack thread land one cycle
-    late, and something downstream reads config that has not arrived. Refusing
-    the issue rather than deferring it does not fix it, so this is not the
-    frontend reordering one thread's stream; it is a missing ordering
-    guarantee between a config write and its readers.
+    Every entry in it is now a 1-cycle occupancy, so wiring it would charge
+    nothing. It got there the interesting way. Until 2026-08-04 ``RDCFG``'s
+    occupancy read ">= 2" — the Wormhole page's documented *latency*, copied
+    into the occupancy field — and charging that made the ``matmulblock``
+    Blackhole guard compute a **wrong answer**: five ``SETC16`` on the math
+    thread and four ``WRCFG`` on the pack thread land one cycle late, and
+    something downstream reads config that has not arrived. Refusing the issue
+    rather than deferring it does not fix it, so this is not the frontend
+    reordering one thread's stream; it is a missing ordering guarantee between
+    a config write and its readers.
 
-    The temptation is to charge ``RDCFG`` a 1 and move on. That would make the
-    guard pass by asserting a number the ISA docs do not give, which is exactly
-    the failure mode the provenance convention exists to prevent — so the unit
-    stays uncosted and the divergence stays visible.
+    Blackhole silicon then measured ``RDCFG`` at 1.0 cycles of occupancy and
+    the table was corrected to the throughput row the docs do give it — which
+    puts the divergence out of these tables' reach without fixing it. It is
+    still there for the next multi-cycle cost that lands near a config write,
+    and the unit stays uncosted so that nothing implies otherwise.
     """
     with _backend(True) as backend:
         config = backend.backend_units["CFG"]

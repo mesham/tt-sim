@@ -71,22 +71,31 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
             backend, TensixBackendConfigurationUnit.OPCODE_TO_HANDLER, "Config"
         )
         # NOT wired to the cycle-cost tables (Phase 5 of
-        # docs/plans/event-driven-pump.md), and this is the one unit whose
-        # omission is a finding rather than a scoping decision.
+        # docs/plans/event-driven-pump.md). Every entry in this unit's table is
+        # one cycle, so wiring it would charge nothing -- but READ THE NEXT
+        # PARAGRAPH before concluding that makes it uninteresting.
         #
-        # Both arches publish this unit's table in full, and everything tt-sim
-        # implements is one cycle except RDCFG, which the Wormhole page gives
-        # ">= 2". Charging that documented 2 makes `matmulblock` compute the
-        # wrong answer: the occupancy delays five SETC16s on the math thread
-        # and four WRCFGs on the pack thread by one cycle each, and something
-        # downstream reads config that has not landed yet. Refusing the issue
-        # outright (TensixBackendUnit.is_occupied) rather than deferring it
-        # does not fix it either, so this is not the frontend reordering one
-        # thread's stream -- it is a missing ordering guarantee between a
-        # config write and the units that read it, of the kind the ISA docs'
+        # Until 2026-08-04 RDCFG's *occupancy* in the table read ">= 2": the
+        # Wormhole page's documented **latency**, copied into the occupancy
+        # field because no separate throughput figure had been found for it.
+        # Charging that 2 makes `matmulblock` compute the WRONG ANSWER -- the
+        # occupancy delays five SETC16s on the math thread and four WRCFGs on
+        # the pack thread by one cycle each, and something downstream reads
+        # config that has not landed yet. Refusing the issue outright
+        # (TensixBackendUnit.is_occupied) rather than deferring it does not fix
+        # it either, so this is not the frontend reordering one thread's
+        # stream -- it is A MISSING ORDERING GUARANTEE between a config write
+        # and the units that read it, of the kind the ISA docs'
         # config-visibility rules and the LLK's "WRCFG takes 2 cycles" padding
-        # both exist to express. That is worth fixing on its own terms, and it
-        # is worth *not* hiding by charging RDCFG a 1 the docs do not give it.
+        # both exist to express.
+        #
+        # That bug is still here. Blackhole silicon measured RDCFG at 1.0
+        # cycles of occupancy (perfbench/tensixbench, see
+        # docs/plans/tensix-cost-benchmark.md), the table was corrected to the
+        # throughput row the docs do give it, and the divergence stopped being
+        # reachable from these tables -- it did not stop existing. The next
+        # multi-cycle occupancy anywhere near a config write will find it
+        # again.
         #
         # The other reason this unit is a poor fit for a per-opcode occupancy:
         # its real constraints are cross-thread. SETC16 is one per thread per

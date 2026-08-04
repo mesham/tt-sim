@@ -76,6 +76,44 @@
 #   isa_doc_name    Set when this file's key -- which follows
 #                   ``tensix_instructions.yaml`` -- differs from the name the
 #                   ISA docs use.
+#   corroboration   An INDEPENDENT OBSERVATION that agrees with the numbers
+#                   above -- a silicon measurement, a vendor comment, a second
+#                   derivation from different inputs. Deliberately NOT a
+#                   provenance rank: provenance answers "where did this number
+#                   come from", corroboration answers "has anything checked
+#                   it", and they are different axes. A corroboration can
+#                   never be an entry's authority, so it cannot launder a
+#                   guess into a fact, and ``PROVENANCE_RANK`` is untouched by
+#                   it. Where it records a measurement it must say how many
+#                   runs on how many parts, because one run on one card is
+#                   what it usually is.
+
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO ``measured`` PROVENANCE
+# ---------------------------------------------------------------------------
+# The obvious move, the first time silicon disagreed with a document, is to add
+# a ``measured`` rank at the top: a direct measurement of the hardware surely
+# outranks prose describing it. It is the wrong move, for three reasons, and
+# the reasons are recorded here because the question will come back.
+#
+# 1. THEY ARE USUALLY NOT THE SAME QUANTITY. The first real disagreement --
+#    RDCFG, see its entry -- was a documented *latency* being compared against
+#    a measured *occupancy*. Ranking them against each other would have picked
+#    a winner between two facts that were both true, and thrown one away.
+# 2. A DOCUMENT DESCRIBES EVERY PART; A RUN SAMPLES ONE. The measurement that
+#    prompted this was one run, on one card, at one clock state, through an
+#    instrument with two known systematic biases (see
+#    ``tensix_bench_sweep.FIT_RESOLUTION_NOTE``). That is weaker evidence about
+#    the architecture than a vendor statement, not stronger.
+# 3. A TOP RANK IS A LICENCE TO OVERWRITE. Provenance exists so that a number
+#    can be traced and improved. A rank that let one unreplicated run replace a
+#    published figure would turn the tables into a fit to whatever was last
+#    measured, which is the exact failure the calibration ladder in
+#    docs/plans/cost-model.md is built to avoid.
+#
+# So a measurement enters as ``corroboration`` (above) and never as authority.
+# When one genuinely contradicts a document about the same quantity, the honest
+# outcomes are: record both and say so, or drop to ``unknown``. Not substitute.
 #
 # A cost value is either a plain integer (meaning "exactly N cycles") or a
 # mapping with ``cycles`` plus a ``bound`` from {exact, at_least, at_most,
@@ -171,6 +209,38 @@ units:
           cycles_per_tile at LoFi -- and against tt-sim's own six replay
           (a 128^3 bf16 matmul), which issues 1024 MVMULs per fidelity phase
           for 64 tile matmuls.
+        corroboration: >
+          MEASURED ON SILICON, 2026-08-04, and this is the number the whole
+          MATH table leans on. Phase B of perfbench/tensixbench times a real
+          matmul_tiles inner loop on the math thread at three fidelities and
+          differences them, so the circular-buffer waits, the two tile unpacks
+          and the semaphore handshake cancel and only the extra MVMULs remain:
+
+            LoFi  -> HiFi2   17.55 cycles measured, 16 predicted (+1.55)
+            HiFi2 -> HiFi4   33.65 cycles measured, 32 predicted (+1.65)
+
+          16 and 32 are exactly ``count`` x one cycle per MVMUL per added
+          phase. The residual is +1.6 cycles on each step -- ~10 %, in the
+          direction of the MVMULs costing 1.05-1.10 cycles rather than 1.00 --
+          and it is a *step* residual, not a growing one, so nothing here
+          suggests the count is anything but 16. Had the count been wrong the
+          steps would have been wrong in proportion: a count of 8 predicts 8
+          and 16, a count of 32 predicts 32 and 64, and neither is within
+          twice the residual of what was measured.
+
+          THIS IS THE FIRST CHECK OF ANY KIND ON THIS NUMBER. It was derived
+          arithmetic until now, load-bearing on every simulated matmul, and
+          wrong by 2.5x on all of them if it had been wrong at all. The
+          confound the design named in advance -- a feeder-limited loop, in
+          which raising fidelity buys back slack and all three slopes come out
+          equal -- did not occur: the three separate cleanly (34.92, 52.47,
+          86.12 cycles per call).
+
+          ONE RUN, ON ONE CARD:
+          tt_sim/perf/datasets/tensixbench-blackhole.csv (firmware bundle
+          19.6.0, KMD 2.9.0, --blocks 32 --iters 64), phase B rows. It
+          corroborates the isa_doc_derived derivation above and does not
+          replace or re-rank it. See docs/plans/tensix-cost-benchmark.md.
       provenance: vendor_source
       source: tm_gemm_flops#L101
       note: >
@@ -201,6 +271,49 @@ units:
         provenance: isa_doc_derived
         source: wh_matrix_unit#instruction-latency-and-throughput
         derivation: occupancy = 1 / throughput_ipc
+        corroboration: &math_wait_gate_two_regimes >
+          THE OCCUPANCY OF 1 ABOVE IS THE MOP-ISSUED, BACK-TO-BACK RATE, and
+          that is the regime every real kernel is in. Blackhole silicon,
+          2026-08-04, measures it at ~1.07 cycles per MVMUL: phase B of
+          perfbench/tensixbench times a real matmul_tiles inner loop at three
+          fidelities and gets 34.92, 52.47 and 86.12 cycles per call for 16, 32
+          and 64 MVMULs, so the marginal cost is (86.12 - 34.92) / (64 - 16) =
+          1.07, and 1.10 and 1.05 from the two adjacent pairs. The MVMULs there
+          come out of a ttreplay buffer driven by the MOP expander, which feeds
+          the FPU one per cycle exactly as the ISA docs' throughput row says.
+
+          THERE IS A SECOND REGIME, ~6x SLOWER, and phase A can only ever
+          observe that one. An MVMUL/ELWADD/ELWMUL issued individually as a
+          .ttinsn word pays the Wait Gate's "SrcA[bank].AllowedClient !=
+          MatrixUnit" check per instruction, and measures 5.989 / 5.976 / 5.974
+          cycles from one thread, 12.01 / 11.97 / 11.97 from two and 18.04 /
+          17.97 / 17.97 from three -- a clean 3.0x, aggregate flat at ~6.0
+          cycles per instruction, i.e. ONE SHARED UNIT at ~6 cycles rather than
+          any kind of contention. ~6 is the documented latency of 5 plus one,
+          consistent with each individually issued op waiting for its
+          predecessor to retire instead of pipelining.
+
+          THE TABLE DELIBERATELY CARRIES THE FIRST NUMBER. Every non-
+          experimental LLK path that issues these opcodes records them into a
+          replay buffer and replays them from a MOP -- llk_math_matmul.h and
+          llk_math_reduce.h for MVMUL, llk_math_eltwise_binary.h via
+          ckernel_template for ELWADD/ELWMUL -- so a kernel tt-sim runs never
+          issues one individually. Charging 6 would mis-cost every real matmul
+          by ~6x. The exception is
+          tt_llk_blackhole/llk_lib/experimental/llk_math_matmul_custom_no_mop.h,
+          which is named for issuing them inline and is the one shape that
+          would pay the Wait-Gate figure.
+
+          ONE RUN, ON ONE CARD:
+          tt_sim/perf/datasets/tensixbench-blackhole.csv (firmware bundle
+          19.6.0, KMD 2.9.0, --blocks 32 --iters 64 --dvalid-once), which holds
+          both phases. Its predecessor's MATH rows were an artefact of an
+          illegal per-thread SETDVALID setup and are retained only as the
+          control tensixbench-blackhole-dvalid-per-thread.csv; do not read that
+          file's 0.998 as agreement with the 1 above. Corroboration only: it
+          does not change the provenance rank. See
+          docs/plans/tensix-cost-benchmark.md and
+          docs/plans/matrix-unit-thread-contention.md.
         note: >
           Footnote (dagger) on the throughput column: "If multiple fidelity
           phases are in use, then one instruction is required per fidelity
@@ -235,6 +348,7 @@ units:
         provenance: isa_doc_derived
         source: wh_matrix_unit#instruction-latency-and-throughput
         derivation: occupancy = 1 / throughput_ipc
+        corroboration: *math_wait_gate_two_regimes
       GMPOOL:
         latency: 5
         throughput_ipc: 1
@@ -252,6 +366,7 @@ units:
         provenance: isa_doc_derived
         source: wh_matrix_unit#instruction-latency-and-throughput
         derivation: occupancy = 1 / throughput_ipc
+        corroboration: *math_wait_gate_two_regimes
       ELWSUB:
         latency: 5
         throughput_ipc: 1
@@ -781,15 +896,56 @@ units:
       RMWCIB3: *cfg_rmwcib
       RDCFG:
         latency: { cycles: 2, bound: at_least }
-        occupancy: { cycles: 2, bound: at_least }
+        occupancy: 1
         provenance: isa_doc
         source: wh_config_unit
+        corroboration: >
+          Blackhole silicon, 2026-08-04, phase A of perfbench/tensixbench:
+          0.998 cycles per instruction from one issuing thread, 1.961 from
+          two and 2.952 from three -- 3.0x scaling, i.e. one shared unit
+          accepting one instruction per cycle across all three threads. That
+          is the "at most one of these per cycle" sentence measured instead of
+          read, and it is what a 1-cycle occupancy predicts and a 2-cycle one
+          does not.
+
+          TWO RUNS, ON ONE CARD. The primary dataset is
+          tt_sim/perf/datasets/tensixbench-blackhole.csv (firmware bundle
+          19.6.0, KMD 2.9.0, --blocks 32 --iters 64 --dvalid-once) and its
+          header carries the rest. The figures above survived a change of
+          benchmark configuration that invalidated the MATH probes entirely:
+          the tracked control run tensixbench-blackhole-dvalid-per-thread.csv
+          reads 0.998 / 1.957 / 2.950 for RDCFG, agreeing to three decimal
+          places, because the dvalid setup that confounded the matrix probes
+          touches nothing the config unit does. Two datasets, one card, one
+          operator, one clock state -- still not replication on a second part.
+          This field corroborates the isa_doc number above; it is not the
+          source of it and it does not change the provenance rank. See
+          docs/plans/tensix-cost-benchmark.md.
         note: >
-          Occupancy is set equal to the documented latency here because the
-          Wormhole page gives RDCFG no separate throughput figure -- it shares
-          the RMWCIB row's "at most one of these per cycle" constraint. On
-          Blackhole the same instruction "can potentially occupy stage 1 for
-          multiple cycles if there is GPR write contention".
+          LATENCY AND OCCUPANCY ARE DIFFERENT NUMBERS HERE, and conflating
+          them was this entry's original error. Until 2026-08-04 the occupancy
+          read ">= 2" -- set equal to the documented *latency* on the grounds
+          that the Wormhole page gives RDCFG no separate throughput figure. It
+          does give one: RDCFG shares the RMWCIB row's "issue at most one of
+          these per cycle", which is a 1-cycle occupancy, and Blackhole states
+          the same thing as a number ("everything other than SETC16 is part of
+          the same IPC group, and sustained throughput across the entire group
+          is limited to one instruction per cycle"). WRCFG two entries up has
+          the identical shape -- latency 2, occupancy 1 -- so this entry, not
+          that one, was the anomaly.
+
+          The ">= 2" LATENCY IS UNCHANGED AND STILL UNTESTED. It is the time
+          until the destination GPR holds the value; the benchmark that
+          produced the corroboration above measures issue occupancy only (it
+          runs no dependent chain, so no latency is observable to it at all).
+          The document and the silicon are not in conflict; they were being
+          read as answers to the same question and they are not.
+
+          Blackhole adds that the instruction "can potentially occupy stage 1
+          for multiple cycles if there is GPR write contention" -- an
+          occupancy that stretches under contention rather than a larger
+          constant, and not expressible as a per-op number. The measurement
+          above was uncontended.
       CFGSHIFTMASK:
         arch: blackhole
         latency: 2

@@ -41,17 +41,32 @@ Run it
 
 ::
 
+    python3 -m tt_sim.perf.tensix_bench_sweep
     python3 -m tt_sim.perf.tensix_bench_sweep --measured hw.csv
     python3 -m tt_sim.perf.tensix_bench_sweep --measured hw.csv --reference sim.csv
     python3 -m tt_sim.perf.tensix_bench_sweep --measured sim.csv --arch blackhole
+
+With no ``--measured`` the sweep reads the **primary tracked reference
+measurement** (:data:`PRIMARY_DATASET`) in ``tt_sim/perf/datasets/``, so the
+rung-3 comparison reproduces with no arguments and no hardware. That directory
+holds curated silicon datasets only; a local ``perfbench`` run writes next to
+its own binary and is gitignored, and has to be passed explicitly. Each
+dataset's ``#`` header carries its own provenance -- card, firmware, KMD,
+flags -- because a measurement separated from those is not a measurement.
+
+Not every tracked dataset is a result. ``tensixbench-blackhole-dvalid-per-thread
+.csv`` is a **control**: the same binary run with the benchmark's original,
+confounded dvalid setup, kept so that the artefact it produces can be pointed at
+rather than described. Its header says so in capitals and the sweep will never
+choose it for you.
 
 With ``--reference`` the report additionally diffs two runs of the same binary
 -- silicon against tt-sim -- which is the differential form ``optests/diff.sh``
 established for values, applied to cycles.
 
-The CSV lives outside this repo, so with no file the script prints where it
-looked and exits 0 -- the same "degrade gracefully" contract
-``tt_sim/perf/noc_dataset_sweep.py`` uses for its dataset.
+If no dataset can be found the script prints where it looked and exits 0 -- the
+same "degrade gracefully" contract ``tt_sim/perf/noc_dataset_sweep.py`` uses for
+its dataset.
 """
 
 from __future__ import annotations
@@ -74,6 +89,64 @@ CONTROL_PROBE = "loop_overhead"
 #: reports the same number and refuses the run; this is the second gate, for a
 #: CSV that arrives from somewhere else.
 MIN_R2 = 0.99
+
+#: Where tracked reference measurements live. Silicon only, each carrying its
+#: provenance in its own ``#`` header.
+DATASET_DIR = Path(__file__).resolve().parent / "datasets"
+
+#: The PRIMARY tracked dataset, read when ``--measured`` is omitted. Named
+#: rather than inferred because the directory now holds more than one file and
+#: they are not peers: ``tensixbench-blackhole-dvalid-per-thread.csv`` is a
+#: deliberate CONTROL reproducing a known-bad setup (one SETDVALID per active
+#: thread, which confounds thread count with SrcA/SrcB bank state and at three
+#: threads hands the Matrix Unit a bank it already owns). Its value is that it
+#: demonstrates the artefact; sweeping it by accident and reading its MATH rows
+#: as hardware behaviour is exactly the mistake it exists to prevent, so the
+#: default has to be a choice made here rather than whatever sorts first.
+PRIMARY_DATASET = "tensixbench-blackhole.csv"
+
+#: Fraction of perfect N-fold scaling above which the unit is called ``shared``.
+#: Below it the growth is real but sub-proportional, i.e. ``partial``.
+SHARED_LOWER = 0.75
+
+#: Fraction of perfect N-fold scaling ABOVE which "shared" stops being the right
+#: word. A shared 1-IPC unit is a *ceiling*: T threads each get 1/T of it, per
+#: thread cost grows T-fold and aggregate throughput is flat. It cannot grow
+#: faster than that, so a ratio materially above T is not sharing -- it is
+#: aggregate throughput FALLING as issuers are added, which no ISA document
+#: describes and which is either a real microarchitectural effect or a broken
+#: measurement. Either way it must not be printed under the same word as the
+#: normal case. At three threads this band starts at 3.45x; the run that forced
+#: it read 12.1x and was labelled ``shared (12.1x)``, which is how a
+#: benchmark-setup artefact came within one word of reading as documented
+#: behaviour. See docs/plans/matrix-unit-thread-contention.md.
+SUPERLINEAR_UPPER = 1.15
+
+#: How many standard errors of the fitted slope count as "the fit cannot tell".
+#: Two, i.e. ~95 %, which is the ordinary convention and is written here rather
+#: than inlined so that widening it is a visible edit.
+RESOLUTION_SIGMA = 2.0
+
+
+def reference_datasets():
+    """Every tracked reference measurement, sorted by path."""
+    return sorted(DATASET_DIR.glob("tensixbench-*.csv"))
+
+
+def default_measured_path(arch=None):
+    """The tracked dataset to sweep when ``--measured`` is not given.
+
+    With an ``--arch`` the name is determined by the architecture. Without one
+    it is :data:`PRIMARY_DATASET`, which is a named choice rather than "the
+    only file present": the directory also holds a control run whose MATH rows
+    are a known artefact, and picking between them by glob order would be
+    exactly the kind of silent choice this module exists not to make.
+    """
+    if arch is not None:
+        candidate = DATASET_DIR / f"tensixbench-{arch}.csv"
+        return candidate if candidate.exists() else None
+    primary = DATASET_DIR / PRIMARY_DATASET
+    return primary if primary.exists() else None
 
 
 def read_csv(path):
@@ -222,6 +295,54 @@ def linear_fit(xs, ys):
     return mean_y - slope * mean_x, slope, r2
 
 
+def slope_stderr(xs, ys, intercept, slope):
+    """Standard error of the fitted slope; 0.0 when the fit is exact.
+
+    R^2 does not answer the question this needs answering. Four points can sit
+    on a line to R^2 = 0.9999 and still leave the slope uncertain in the third
+    decimal, which is the size of the discrepancies this sweep is being asked
+    to adjudicate. The standard error is the quantity that says how far the
+    slope could move, so it is what the resolution below is built from.
+    """
+    n = len(xs)
+    if n < 3:
+        return 0.0
+    mean_x = sum(xs) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx == 0:
+        return 0.0
+    sse = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    return (sse / ((n - 2) * sxx)) ** 0.5
+
+
+#: Why a small negative residual is not evidence of anything.
+FIT_RESOLUTION_NOTE = """\
+A residual is only a finding if it is bigger than what the instrument can
+resolve, and this instrument has two known one-sided biases, both of which push
+the measured value DOWN. They are added per series and reported as `resol`:
+
+  1. CONTROL OVER-SUBTRACTION, worth up to slope(loop_overhead)/unroll. The
+     control's cycles are the RISC-V loop counter, compare and branch. Those
+     are additive only while the Tensix unit is IDLE waiting for the issuing
+     core; the moment the unit back-pressures, the loop's own instructions
+     issue underneath it and cost nothing. The subtraction is therefore exactly
+     right in the issue-limited regime and up to slope(control)/unroll too much
+     in the unit-limited one -- and which regime a probe is in is the thing
+     being measured, so the correction cannot be applied selectively.
+
+  2. FIT UNCERTAINTY, {sigma:.0f} standard errors of the fitted slope (plus the
+     control's, in quadrature), divided by unroll. Silicon's first burst is not
+     like its later ones -- cold i-cache, an unfilled Tensix instruction FIFO,
+     a DVFS transition -- and a warm-up offset on the smallest n tilts a
+     four-point least-squares fit.
+
+So: residual >= 0 confirms the floor; residual within `resol` of zero is BELOW
+the table but INSIDE the instrument, and is reported as such rather than as an
+over-charge; only a residual beyond `resol` is a claim about the hardware. The
+price is that this instrument cannot detect an over-charge smaller than
+`resol`, which is a fraction of a cycle."""
+
+
 def series_of(rows):
     """Collapse raw points into one fitted series per measurement.
 
@@ -252,6 +373,7 @@ def series_of(rows):
                 "intercept": intercept,
                 "slope": slope,
                 "r2": r2,
+                "stderr": slope_stderr(xs, ys, intercept, slope),
             }
         )
     out.sort(key=lambda s: (s["phase"], s["variant"], s["probe"], s["thread"]))
@@ -264,9 +386,13 @@ def apply_control(series):
     Adds ``measured``: cycles per instruction, for phase A only. The control is
     matched on ``(variant, thread)`` so a contended run is corrected by its own
     contended loop overhead.
+
+    Also adds ``resolution``: the size below which a negative residual says
+    nothing, built from the control subtraction's own one-sided bias and the
+    fit's standard error. See :data:`FIT_RESOLUTION_NOTE`.
     """
     control = {
-        (s["variant"], s["thread"]): s["slope"]
+        (s["variant"], s["thread"]): s
         for s in series
         if s["phase"] == "A" and s["probe"] == CONTROL_PROBE
     }
@@ -274,12 +400,20 @@ def apply_control(series):
         if s["phase"] != "A":
             s["measured"] = s["slope"]
             s["control"] = None
+            s["resolution"] = None
             continue
         base = control.get((s["variant"], s["thread"]))
-        s["control"] = base
-        s["measured"] = (
-            None if base is None else (s["slope"] - base) / float(s["unroll"])
-        )
+        s["control"] = None if base is None else base["slope"]
+        if base is None:
+            s["measured"] = None
+            s["resolution"] = None
+            continue
+        unroll = float(s["unroll"])
+        s["measured"] = (s["slope"] - base["slope"]) / unroll
+        se_diff = (s["stderr"] ** 2 + base["stderr"] ** 2) ** 0.5
+        s["resolution"] = (
+            base["slope"] + RESOLUTION_SIGMA * se_diff
+        ) / unroll  # bias + noise
     return series
 
 
@@ -361,8 +495,9 @@ def _grouped(rows, key_fn):
     return groups
 
 
-def report(rows, arch, out=sys.stdout, label="measured", reference=None):
+def report(rows, arch, out=None, label="measured", reference=None):
     """The whole sweep. Returns the retained per-instruction series."""
+    out = sys.stdout if out is None else out
 
     def emit(line=""):
         print(line, file=out)
@@ -393,15 +528,17 @@ def report(rows, arch, out=sys.stdout, label="measured", reference=None):
     emit("Per instruction: measured cycles/instruction vs the table's occupancy")
     emit("-" * 78)
     emit(
-        f"{'probe':<14}{'unit':<7}{'table':>10}{'bound':>10}"
-        f"{'measured':>10}{'residual':>10}  {'testable':<9}{'wired'}"
+        f"{'probe':<14}{'unit':<7}{'table':>8}{'bound':>10}"
+        f"{'measured':>10}{'residual':>10}{'resol':>8}  {'testable':<9}{'wired'}"
     )
     for s in sorted(kept, key=lambda s: (s["unit"], s["probe"])):
         s["residual"] = s["measured"] - s["table"]
         s["testable"] = s["table"] > 1.0
+        s["resolved"] = s["residual"] < -(s["resolution"] or 0.0)
         emit(
-            f"{s['probe']:<14}{s['unit']:<7}{s['table']:>10.2f}{s['bound'] or '':>10}"
-            f"{s['measured']:>10.3f}{s['residual']:>10.3f}  "
+            f"{s['probe']:<14}{s['unit']:<7}{s['table']:>8.2f}{s['bound'] or '':>10}"
+            f"{s['measured']:>10.3f}{s['residual']:>10.3f}"
+            f"{s['resolution'] or 0.0:>8.3f}  "
             f"{'yes' if s['testable'] else 'no':<9}"
             f"{'no' if s['unit'] in unwired else 'yes'}"
         )
@@ -417,18 +554,39 @@ def report(rows, arch, out=sys.stdout, label="measured", reference=None):
     emit("-" * 78)
     emit("Is the table a floor?")
     emit("-" * 78)
-    over = [s for s in kept if s["residual"] < -1e-9]
+    emit(FIT_RESOLUTION_NOTE.format(sigma=RESOLUTION_SIGMA))
+    emit()
+    at_or_above = [s for s in kept if s["residual"] >= -1e-9]
+    within = [s for s in kept if -1e-9 > s["residual"] and not s["resolved"]]
+    over = [s for s in kept if s["resolved"]]
+    if at_or_above:
+        emit(
+            f"  {len(at_or_above)} series at or above the table: "
+            f"{', '.join(sorted(s['probe'] for s in at_or_above))}"
+        )
+    if within:
+        stats = _summary([s["residual"] for s in within])
+        emit(
+            f"  {len(within)} series below the table but INSIDE the "
+            f"instrument's resolution\n"
+            f"  (worst {stats['min']:+.3f} cycles/instruction). Not an "
+            f"over-charge; not a finding:\n"
+            f"    {', '.join(sorted(s['probe'] for s in within))}"
+        )
+    emit()
     if not over:
         emit(
-            "  Yes: every residual is >= 0, which is the direction every bound\n"
-            "  in these tables is chosen to lean."
+            "  VERDICT: yes. No residual is below the table by more than the\n"
+            "  fit can resolve, which is the direction every bound in these\n"
+            "  tables is chosen to lean."
         )
     else:
-        emit("  NO. The table OVER-CHARGES these instructions:")
+        emit("  VERDICT: NO. The table OVER-CHARGES these, beyond the resolution:")
         for s in sorted(over, key=lambda s: s["residual"]):
             emit(
                 f"    {s['probe']:<14} table {s['table']:.2f}  measured "
-                f"{s['measured']:.3f}  ({s['residual']:+.3f})"
+                f"{s['measured']:.3f}  ({s['residual']:+.3f}, "
+                f"resolution {s['resolution']:.3f})"
             )
 
     testable = [s for s in kept if s["testable"]]
@@ -459,6 +617,10 @@ def report(rows, arch, out=sys.stdout, label="measured", reference=None):
             lambda s: "no" if s["unit"] in unwired else "yes",
         ),
         ("testable (table occupancy > 1)", lambda s: "yes" if s["testable"] else "no"),
+        (
+            "beyond the fit's resolution",
+            lambda s: "yes" if s["resolved"] else "no",
+        ),
     ):
         emit()
         emit(f"  {axis_name}")
@@ -504,6 +666,22 @@ def _issue_limit_check(series, emit):
     if len(variants) < 2:
         emit("  only one thread set in this run; nothing to compare.")
         return
+    # How many issuers each thread set actually ran, read from the data rather
+    # than from the number of columns: a run with only t1 and t3 has two
+    # variants and a three-fold issuer step, and calling that "expected 2"
+    # would make a perfectly shared unit read as faster-than-shared.
+    issuers = {
+        variant: max(
+            (
+                s["active_threads"]
+                for s in series
+                if s["phase"] == "A" and s["variant"] == variant
+            ),
+            default=1,
+        )
+        for variant in variants
+    }
+    expected = issuers[variants[-1]] / max(issuers[variants[0]], 1)
     emit(
         f"  {'probe':<14}{'unit':<7}"
         + "".join(f"{v:>10}" for v in variants)
@@ -528,8 +706,11 @@ def _issue_limit_check(series, emit):
         if any(c is None for c in cells) or not cells[0]:
             continue
         ratio = cells[-1] / cells[0]
-        expected = len(variants)  # t1 -> tN, so N-fold if the unit is shared
-        if ratio >= 0.75 * expected:
+        if ratio > SUPERLINEAR_UPPER * expected:
+            # Faster than a shared unit can possibly degrade; see
+            # SUPERLINEAR_UPPER. Named loudly rather than filed under "shared".
+            verdict = f"SUPERLINEAR ({ratio:.1f}x) -- INVESTIGATE"
+        elif ratio >= SHARED_LOWER * expected:
             verdict = f"shared ({ratio:.1f}x)"
         elif ratio <= 1.25:
             verdict = "no back-pressure"
@@ -546,7 +727,14 @@ def _issue_limit_check(series, emit):
         "  column really is its occupancy. 'no back-pressure' means adding\n"
         "  issuers cost nothing, so the unit either accepts one instruction\n"
         "  per thread per cycle or nothing in the issue path ever stalls --\n"
-        "  and the single-thread column is an upper bound only."
+        "  and the single-thread column is an upper bound only.\n"
+        "  'SUPERLINEAR' means per-thread cost grew by MORE than the thread\n"
+        "  count, i.e. the three threads together got LESS work done than one\n"
+        "  did. Sharing a 1-IPC unit cannot do that -- it is a ceiling, not a\n"
+        "  penalty -- so this is either an undocumented microarchitectural\n"
+        "  effect or, far more likely, a confounded probe setup. It is not a\n"
+        "  cost-table input until something has separated thread count from\n"
+        "  whatever else the thread sets changed."
     )
 
 
@@ -696,16 +884,24 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    if not args.measured:
-        print(
-            "no --measured CSV given.\n"
-            "\n"
-            "This sweep consumes a dataset that does not ship with any vendor\n"
-            "tree: it has to be produced by running perfbench/tensixbench, on\n"
-            "silicon or against tt-sim. See perfbench/tensixbench/README.md."
-        )
-        return 0
-    path = Path(args.measured)
+    if args.measured:
+        path = Path(args.measured)
+    else:
+        path = default_measured_path(args.arch)
+        if path is None:
+            tracked = reference_datasets()
+            print(
+                "no --measured CSV given, and no single tracked reference to "
+                "fall back on.\n"
+                "\n"
+                f"looked in: {DATASET_DIR}\n"
+                f"found: {', '.join(p.name for p in tracked) or 'nothing'}\n"
+                "\n"
+                "Pass --arch to pick one, or produce a new dataset by running\n"
+                "perfbench/tensixbench on silicon or against tt-sim. See\n"
+                "perfbench/tensixbench/README.md."
+            )
+            return 0
     if not path.exists():
         print(f"no CSV at {path}; nothing to sweep.")
         return 0

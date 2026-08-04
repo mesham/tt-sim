@@ -154,11 +154,24 @@ class CostEntry:
     isa_doc_name: str | None = None
     note: str | None = None
     arch: str | None = None
+    corroboration: str | None = None
 
     @property
     def is_sourced(self):
         """True when every number in this entry traces to a published one."""
         return self.provenance in SOURCED_PROVENANCE
+
+    @property
+    def is_corroborated(self):
+        """True when something independent has checked this entry's numbers.
+
+        A *different* question from :attr:`is_sourced`, and deliberately not
+        folded into :data:`PROVENANCE_RANK` — see the "WHY THERE IS NO
+        ``measured`` PROVENANCE" block at the top of
+        ``tensix_instruction_costs.yaml``. Provenance says where a number came
+        from; corroboration says whether anything has since agreed with it.
+        """
+        return bool(self.corroboration)
 
     @property
     def has_costs(self):
@@ -183,6 +196,7 @@ class CostEntry:
             isa_doc_name=raw.get("isa_doc_name"),
             note=raw.get("note"),
             arch=raw.get("arch"),
+            corroboration=raw.get("corroboration"),
         )
 
 
@@ -221,6 +235,7 @@ ENTRY_KEYS = frozenset(
         "isa_doc_name",
         "note",
         "arch",
+        "corroboration",
     }
 )
 _UNIT_META_KEYS = {
@@ -279,6 +294,42 @@ class CostTable:
         without a real cost needs to be able to enumerate them.
         """
         return tuple(e for e in self.entries() if not e.is_sourced)
+
+    def corroborated(self):
+        """Every Tensix entry something independent has since checked.
+
+        Enumerable for the same reason :meth:`unsourced` is: "which of these
+        numbers has anyone ever verified?" should be answerable from the data,
+        and the honest answer today is a very short list.
+        """
+        return tuple(e for e in self.entries() if e.is_corroborated)
+
+    def corroborated_extras(self):
+        """The same, for numbers that live in a unit's extras rather than in an
+        instruction entry.
+
+        ``MATH.fidelity_phases.mvmuls_per_tile`` is the reason this exists: it
+        carries its own ``provenance``, ``source`` and ``derivation`` exactly
+        as an instruction entry does, it is the most load-bearing derived
+        number in the MATH table, and silicon has now checked it. A
+        corroboration that :meth:`corroborated` could not see would be one the
+        discipline tests could not police, which would make the field mean less
+        wherever it appeared.
+
+        Yields ``(unit_name, dotted_path, text)``.
+        """
+        for unit_name, unit in self.units.items():
+            stack = [((), unit.extras or {})]
+            while stack:
+                path, node = stack.pop()
+                if not isinstance(node, dict):
+                    continue
+                text = node.get("corroboration")
+                if isinstance(text, str):
+                    yield unit_name, ".".join(path), text
+                for key, value in node.items():
+                    if isinstance(value, dict):
+                        stack.append((path + (key,), value))
 
     def weakest_provenance(self):
         return min(
