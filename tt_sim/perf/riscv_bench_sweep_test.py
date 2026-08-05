@@ -782,7 +782,8 @@ def test_the_tracked_datasets_carry_their_own_provenance():
     for path in sweep.reference_datasets():
         head = path.read_text()[:6000]
         assert "device=blackhole-silicon" in head, path.name
-        assert "firmware_bundle=" in head and "kmd=" in head, path.name
+        assert "firmware_bundle=" in head, path.name
+        assert "kmd=" in head, path.name
         assert "ONE RUN, ON ONE CARD" in head, path.name
         assert "valid:" in head, path.name
 

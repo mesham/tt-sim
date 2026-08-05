@@ -87,6 +87,16 @@ unset TT_METAL_SIMULATOR                 # make sure you are on the real card
 is sized for the simulator. Larger bursts push the fixed costs further into the
 noise; on silicon they cost milliseconds.
 
+> **Do not go below 32 for the primary run.** The 2026-08-05 Blackhole run
+> collected both, and at `--blocks 8` **every one of the five phases was refused
+> by the validity gate** — three of the failures being the `loop_overhead`
+> control itself fitting to R² < 0.99, and a control that does not fit is a
+> phase that cannot be read whatever the probes did. Its numbers agreed with the
+> `--blocks 32` run's to a few thousandths of a cycle anyway, which is a useful
+> reminder that agreement is not validity. Both are tracked in
+> `tt_sim/perf/datasets/` and the second one's header explains why it is kept.
+> The minimum usable block count is somewhere above 8 and at or below 32.
+
 The first run writes `riscvbench-<arch>.csv` next to the binary. It is rewritten
 after **every** program launch, so a run you have to kill part-way still leaves
 the phases that did finish on disk.
@@ -280,6 +290,10 @@ Back on a machine with this repo:
 ```bash
 export PYTHONPATH=/path/to/tt-sim
 python3 -m tt_sim.perf.riscv_bench_sweep --measured riscvbench-blackhole.csv
+
+# With no --measured it sweeps the tracked 2026-08-05 Blackhole run instead,
+# which is how to see what a good run looks like before comparing your own.
+python3 -m tt_sim.perf.riscv_bench_sweep
 ```
 
 and, to diff hardware against the simulator running the same binary:

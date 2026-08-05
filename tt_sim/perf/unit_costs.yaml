@@ -605,6 +605,95 @@ riscv:
       backend 4:1 for short bursts. Stated on the Blackhole page; the Wormhole
       page describes the same .ttinsn extension without the fusion claim.
 
+      THE NUMBERS ABOVE ARE UNCHANGED AND WILL STAY THAT WAY. Silicon now
+      disagrees with two of the three, and the disagreement is recorded in
+      ``contradiction`` below rather than resolved by editing the entry -- see
+      "WHY THERE IS NO ``measured`` PROVENANCE" at the top of
+      tensix_instruction_costs.yaml. Nothing consumes ``max_fused`` or
+      ``enqueue_per_thread_per_cycle``, so no simulated cycle depends on which
+      of the two is right; what depends on it is whether a future front-end
+      model may assume a sub-cycle push, and the answer is no.
+    corroboration: >
+      ``dequeue_per_thread_per_cycle: 1`` MEASURED ON BLACKHOLE SILICON,
+      2026-08-05, phase T of perfbench/riscvbench: sustained bursts of 64
+      back-to-back ``.ttinsn`` words read 0.996 (TTI_NOP, unit NONE), 0.998
+      (TTI_SFPNOP, SFPU) and 0.996 (TTI_SETDMAREG, ThCon) cycles per
+      instruction from one issuing thread. One per thread per cycle, on three
+      different backend units, is the drain rate read directly.
+
+      The same probes at two and three issuing threads read 1.968/2.973 and
+      1.964/2.972 for the SFPU and ThCon words while TTI_NOP -- whose unit is
+      NONE -- stays flat at 0.996-0.998. That is the clean control: what scales
+      is the shared backend, not the per-thread push path.
+
+      TWO RUNS, ON ONE CARD, one operator, one power state, one day.
+      tt_sim/perf/datasets/riscvbench-blackhole.csv is the primary
+      (``--blocks 32``, phase T valid); riscvbench-blackhole-blocks8.csv is the
+      companion whose own validity gate refused it and which agrees to within
+      0.012 cycles on every figure above. BLACKHOLE ONLY -- Wormhole's page
+      describes the same extension and nothing has measured it there.
+    contradiction: >
+      ``max_fused: 4`` AND ``enqueue_per_thread_per_cycle: 4`` ARE CONTRADICTED
+      BY MEASUREMENT OF THE SAME QUANTITY. Blackhole silicon, 2026-08-05, phase
+      T of perfbench/riscvbench. Two probes execute the identical twenty
+      instructions -- sixteen ``addi`` plus four ``TTI_NOP`` -- and differ only
+      in whether any two of the ``.ttinsn`` words are adjacent:
+
+        tt_pad      16 addi                            15.929 cycles/group
+        tt_fuse2     2 adjacent .ttinsn + 16 addi      17.901   (pad + 1.972)
+        tt_fuse4     4 adjacent .ttinsn + 16 addi      19.889   (pad + 3.960)
+        tt_spread4   4 .ttinsn, none adjacent, + 16    19.966   (pad + 4.037)
+
+      ``spread4 - fuse4`` is +0.077 cycles per group where four-way fusion
+      predicts +3.000. Every ``.ttinsn`` word costs its own issue slot, whether
+      or not its neighbours are ``.ttinsn`` words. Reproduced in all six
+      thread slots of the run (+0.077, -0.094, +0.002, +0.003, +0.002, +0.001)
+      and in the companion ``--blocks 8`` run (+0.314 at one thread).
+
+      THE "DIFFERENT QUANTITIES" ESCAPE WAS LOOKED FOR AND IS NOT THERE. That
+      escape is what resolved the one previous document/silicon conflict in
+      these tables (CFG.RDCFG, a documented latency against a measured
+      occupancy), so it was checked before this was written down:
+
+        * ADJACENCY SURVIVES THE COMPILER. Verified by disassembling the
+          kernel this run executed, not assumed: the phase T ELF contains
+          exactly 16 runs of four consecutive ``08000000`` (ttnop) words at
+          four-byte stride, 16 runs of two, 64 singletons and one run of 64 --
+          which is tt_fuse4, tt_fuse2, tt_spread4 and the sustained probe, with
+          no instruction of any kind interposed.
+        * IT IS NOT A FETCH-LINE STRADDLE. Fusion is attributed to the
+          instruction caches, which read 128 bits (four instructions) at a
+          time, so a run split across two reads might plausibly fuse less. All
+          16 of tt_fuse4's runs do straddle -- they start at address 8 mod 16 --
+          but that hypothesis predicts 2 fused slots and +2.000, not +0.077.
+          And it is refuted outright by tt_fuse2, ALL of whose pairs are
+          co-resident in a single 128-bit read (they start at 0 or 8 mod 16, so
+          both words are always inside one line) and which still costs its full
+          two cycles.
+        * IT IS NOT THE DEQUEUE CAP MASKING IT. That cap is the reason a
+          sustained burst cannot see fusion, and it is why these probes are
+          groups rather than bursts: sixteen ``addi`` follow each group, which
+          is sixteen cycles for a queue draining at one per cycle to swallow
+          four pushes. Fusion would have shown.
+        * THE MEASURED QUANTITY IS THE DOCUMENTED ONE. The page distinguishes
+          enqueue (four per cycle, via fusion) from dequeue (one per cycle),
+          and what these probes time is the ISSUING CORE, i.e. the enqueue
+          side. The entry's other field, dequeue, is corroborated above.
+
+      WHAT IS STILL OPEN, honestly. The doc attributes fusion to the
+      instruction CACHES; a core executing from local instruction RAM instead
+      would bypass that path. tt-metal built these kernels for execute-in-place
+      out of L1 (the cache carries a ``.xip.elf``), which is the cache path, but
+      that has not been confirmed at the hardware level. A Wormhole run would
+      settle nothing here either way: the fusion sentence is on the Blackhole
+      page only.
+
+      TWO RUNS, ON ONE CARD, one operator, one power state, one day; the
+      primary is tt_sim/perf/datasets/riscvbench-blackhole.csv with phase T
+      valid. This field records a disagreement; it does not resolve one, and it
+      changes neither a number above nor the provenance rank. See
+      docs/plans/riscv-front-end-benchmark.md and docs/bh_arch.md.
+
 # ---------------------------------------------------------------------------
 mover:
   note: >
@@ -882,6 +971,78 @@ arch_overrides:
           ``estimated`` entry fitted to the same measurement it would then be
           checked against.
     riscv:
+      # Every `corroboration` in this block is one silicon campaign:
+      # perfbench/riscvbench on a Blackhole card, 2026-08-05, banked as
+      # tt_sim/perf/datasets/riscvbench-blackhole.csv (--blocks 32, phases R,
+      # T, C and F valid, Q refused) with riscvbench-blackhole-blocks8.csv as
+      # the companion. They live under `arch_overrides.blackhole` rather than
+      # in the base section for the obvious reason: a Blackhole measurement is
+      # not evidence about Wormhole, and the base section is what Wormhole
+      # reads. Several of these rows differ between the two architectures --
+      # multiply, the mispredict bubble, the L0 d-cache, the coalescing store
+      # queue -- so none of it transfers. See docs/bh_arch.md.
+      issue:
+        corroboration: >
+          MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase R of
+          perfbench/riscvbench: independent and dependent ``addi`` chains and
+          independent multiplies all read 0.999 cycles per instruction from one
+          issuing thread, and the same at two and three (0.998). One RV32IM
+          instruction per cycle, and ``alu_forwarding`` with it -- the
+          dependent chain, in which every instruction reads the previous one's
+          result, is indistinguishable from the independent one.
+
+          This is a floor as well as a confirmation: no probe in the whole
+          benchmark can read below it, which is why a 1.000 anywhere else is
+          only readable next to the four probes that read above it.
+
+          TWO RUNS, ON ONE CARD, one operator, one power state, one day; the
+          primary is tt_sim/perf/datasets/riscvbench-blackhole.csv with phase R
+          valid. The companion --blocks 8 run reads 0.995 for the same probes,
+          the 0.004 being its shorter baseline rather than the device.
+      load_throughput:
+        corroboration: >
+          MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase R of
+          perfbench/riscvbench, and it is the one number here that comes out of
+          the docs' FORMULA rather than off a row. ``rv_load_indep`` -- four
+          rotating destination registers, so no load is read before the next
+          issues -- reads 1.742 cycles per load. With a load latency of 8 the
+          formula gives four loads every 8 - 1 cycles, i.e. 1.750. It agrees to
+          0.008 of a cycle.
+
+          It also corroborates the LATENCY from a second direction, which is
+          what makes it worth recording separately: 1.742 is what the formula
+          gives at N = 8 and nothing like what it gives at N = 2 (which would
+          be one per cycle, the ``one_per_cycle_if_latency_under: 5`` branch).
+          Two constructions that share no arithmetic agree that the latency in
+          force for these accesses is the L1 d-cache MISS row.
+
+          TWO RUNS, ON ONE CARD, one operator, one power state, one day;
+          tt_sim/perf/datasets/riscvbench-blackhole.csv, phase R valid. The
+          companion run reads 1.745.
+      instruction_fetch:
+        corroboration: >
+          MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase F of
+          perfbench/riscvbench: the same ``addi`` in loop bodies of 64, 128,
+          256, 512, 1024 and 2048 instructions reads 0.998, 0.998, 0.998,
+          0.998, 1.000 and 1.251 cycles per instruction. Flat to a thousandth
+          of a cycle across 256 bytes to 4 KiB of instruction text, which is
+          what "instruction fetches are expected to occur at most once every
+          four cycles" predicts while the loop is resident, and it holds
+          identically at one, two and three issuing threads -- so the fetch
+          path is per-core rather than shared, which this page does not say.
+
+          THE STEP AT 2048 IS NOT RECORDED IN THIS FILE AND DELIBERATELY SO.
+          A ~25 % penalty appearing between a 4 KiB and an 8 KiB loop body
+          locates an instruction-cache capacity, and this entry's own note says
+          the miss cost is not published; no cache SIZE is published either. A
+          number with no documentary source has no home in these tables under
+          the discipline they are kept to, so it is written down in
+          docs/bh_arch.md instead. That tension is real and is stated there.
+
+          TWO RUNS, ON ONE CARD, one operator, one power state, one day;
+          tt_sim/perf/datasets/riscvbench-blackhole.csv, phase F valid. The
+          companion --blocks 8 run reads 0.991-0.995 flat and 1.251 at 2048 --
+          the cliff to three decimal places.
       pipeline:
         stages: [frontend, ex1, ex2, load_store_unit, retire_unit]
         min_cycles_per_stage: 1
@@ -913,6 +1074,56 @@ arch_overrides:
           mispredicted branch causes a four cycle pipeline bubble, which from
           an external perspective looks like mispredicted branches occupy EX1
           for five cycles". Divide is unchanged.
+        corroboration: >
+          MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase R of
+          perfbench/riscvbench, cycles per instruction from one issuing thread:
+
+            multiply, independent operands   0.999   (occupancy 1)
+            multiply, dependent chain        1.985   (latency 1 + 1)
+            divu 0x12345678 / 3             33.001
+            branch, correctly predicted      0.999
+
+          THE MULTIPLY PAIR IS THE ARCHITECTURAL DISCRIMINATOR and it comes out
+          the Blackhole way. An occupancy of one and a latency of two is
+          exactly what "exactly one cycle in EX1, and then exactly one cycle in
+          EX2" means, and it is the one probe in this benchmark whose answer
+          differs between the two chips for a documented reason -- Wormhole's
+          multiply blocks the integer unit, so both readings would be 2.0
+          there. Nothing has run this on Wormhole.
+
+          THE DIVIDE LANDS AT THE TOP OF ITS RANGE, not the bottom. 33.001 is
+          the ``max`` of the documented 6-33, for one dividend/divisor pair
+          (0x12345678 / 3, recorded in the dataset header). ``tt_sim/perf/
+          model.py`` charges every bound at its low end, so it charges 6 where
+          this operand costs 33 -- an under-charge of 27 cycles per divide, in
+          the direction the cost model's stated policy asks for but by a factor
+          of five. The docs make the cost "dependent upon the magnitude of the
+          dividend"; one point is not the curve, and the benchmark sweeps no
+          others.
+
+          THE MISPREDICT BUBBLE IS NOT TESTED BY ANY OF THIS, and conflating
+          the two numbers is the mistake this paragraph exists to stop.
+          ``branch_mispredict_bubble: 4`` is the SIZE of one mispredict. What
+          phase C measures is how OFTEN one happens, and the answer is: not
+          measurably. A never-taken branch reads 0.999, an always-taken one
+          0.952, an alternating one 1.969 against 1.993 for its matched
+          never-taken control -- so ``taken - not taken`` is -0.047 and
+          ``alternating - not taken`` is -0.024, both NEGATIVE and both far
+          below one cycle, let alone four. Taken branches are marginally
+          CHEAPER than not-taken ones on this part. A four-cycle bubble
+          occurring on any appreciable fraction of these branches could not
+          hide in that. The size may be perfectly correct and untested; the
+          rate is what was measured, and it is why ``tt_sim/pe/rv/cost.py``
+          charging nothing for branches now has evidence behind it rather than
+          only an argument.
+
+          TWO RUNS, ON ONE CARD, one operator, one power state, one day;
+          tt_sim/perf/datasets/riscvbench-blackhole.csv, phases R and C valid.
+          The companion --blocks 8 run reads 33.004, 1.988 and 0.995, and its
+          phase C was refused by the benchmark's own gate -- for the taken
+          probes specifically, whose slope over that shorter baseline is barely
+          above the control's. Its branch deltas are larger (-0.158, -0.132)
+          and still negative.
       load_latency:
         core_local_data_ram: 2
         l1_dcache_hit: 2
@@ -932,6 +1143,33 @@ arch_overrides:
           the >= 4 group. Core-local data RAM gains a second, slow mapping
           (>= 8) reachable from any RISCV and over the NoC. The table does not
           repeat Wormhole's "Maximum loads in flight" column.
+        corroboration: >
+          MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase R of
+          perfbench/riscvbench, as pointer chases so that the body is one
+          instruction and the reading is a load-use LATENCY undivided:
+
+            L1, 64-node ring 16 bytes apart   8.098 cycles
+            the TRISC stack, at 0xFFB00F98    1.985 cycles
+
+          THE STACK ROW IS THE CLEAN ONE. 0xFFB00F98 is core-local data RAM --
+          classified by tt_sim/pe/rv/cost.classify_address, the simulator's own
+          classifier, so the prediction and the simulation cannot disagree --
+          and ``core_local_data_ram: 2`` is what it reads.
+
+          THE L1 ROW IS THE INTERESTING ONE: 8.098 is ``l1_dcache_miss``, not
+          ``l1_dcache_hit``. The probe chases a 1 KiB ring of 64 nodes for
+          thousands of iterations, so every node after the first pass is as warm
+          as a working set that size can be, and it still pays the miss
+          latency. The L0 data cache did not hold it. Whether that is a capacity
+          limit, a policy that declines to cache L1 pointer loads, or something
+          about the volatile access this probe issues, the benchmark cannot say
+          -- it can say that the 2-cycle row is not what a sustained L1 chase
+          gets. ``rv_load_indep`` agrees from a different construction: see
+          ``load_throughput`` above.
+
+          TWO RUNS, ON ONE CARD, one operator, one power state, one day;
+          tt_sim/perf/datasets/riscvbench-blackhole.csv, phase R valid. The
+          companion run reads 8.100 and 1.988.
       store_throughput:
         l1_period_cycles: 5
         l1_coalesced_period_cycles: 1
@@ -945,6 +1183,37 @@ arch_overrides:
           Coalescing requires the stores to target the same 16-byte aligned
           region of L1 with start addresses within +/-4 of each other, and
           never applies outside L1.
+        corroboration: >
+          MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase R of
+          perfbench/riscvbench, and this is the entry the benchmark was best
+          placed to test because its two rows are predicted FIVE TIMES apart on
+          this architecture and identical on the other:
+
+            stores to four different 16-byte blocks   5.217 cycles each
+            stores 4 bytes apart in ONE such block    0.999 cycles each
+            stores to the stack (core-local RAM)      0.999 cycles each
+
+          The coalescing predicate is documented as "the same 16-byte aligned
+          region of L1, with start addresses within +/-4", which is exactly
+          what the second probe does and exactly what the first one avoids, and
+          the two come out 5.2x apart. ``l1_coalesced_period_cycles: 1`` and
+          ``other_regions_period_cycles: 1`` both read 0.999.
+
+          The 5.217 is ABOVE the documented 5, by more than this instrument's
+          0.034-cycle resolution -- the only entry in the RISC-V section where
+          that happens. "At most one store every five cycles" is a floor and
+          the measurement respects it; what the extra 0.2 cycles is, this
+          cannot say. It is not the control over-subtraction, which biases the
+          other way.
+
+          BLACKHOLE ONLY, and pointedly so: Wormhole publishes no coalescing
+          store queue, so there the two probes are predicted identical. Running
+          this pair on a Wormhole card is the cheapest cross-architecture
+          discriminator the benchmark has, and nothing has done it.
+
+          TWO RUNS, ON ONE CARD, one operator, one power state, one day;
+          tt_sim/perf/datasets/riscvbench-blackhole.csv, phase R valid. The
+          companion run reads 5.217, 0.994 and 0.995.
       local_data_ram_reset_cycles:
         cycles: 2048
         provenance: isa_doc

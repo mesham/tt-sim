@@ -257,6 +257,14 @@ CORROBORATED_ENTRIES = {
     ("MATH", "MVMUL"),
     ("MATH", "ELWADD"),
     ("MATH", "ELWMUL"),
+    # The only entry in either file measured by TWO different benchmarks:
+    # tensixbench phase A (2.973 from one thread, 2026-08-04) and riscvbench
+    # phase T (2.972 / 5.987 / 8.995 across one, two and three, 2026-08-05),
+    # with riscvbench phase Q reaching 3.000 a third way off a drain-timed
+    # burst. It carries its own corroboration rather than the shared "3 or 4"
+    # anchor precisely so that its five siblings -- two of which nothing has
+    # ever measured -- do not inherit the claim.
+    ("THCON", "ADDDMAREG"),
 }
 
 #: Corroborations that live in a unit's ``extras`` rather than on an
@@ -350,6 +358,134 @@ def test_an_extras_corroboration_is_held_to_the_same_rules():
         for unit, path, text in load_costs(arch).corroborated_extras():
             assert RUNS_AND_PARTS.search(text), (unit, path)
             assert "tt_sim/perf/datasets/" in text, (unit, path)
+
+
+# ---------------------------------------------------------------------------
+# The same two axes, in ``unit_costs.yaml``. Its sections are not instruction
+# entries, so ``CostTable.entries()`` and every test above is blind to them --
+# which is exactly the gap ``CORROBORATED_EXTRAS`` was created to close for the
+# Tensix file, and the RISC-V measurement of 2026-08-05 opened it again here.
+# ---------------------------------------------------------------------------
+
+#: Dotted paths in ``unit_costs.yaml`` carrying a ``corroboration``. Pinned for
+#: the reason every other list in this file is: the field's value is that it is
+#: rare and specific. Note where they all live -- under
+#: ``arch_overrides.blackhole`` -- because a Blackhole measurement is not
+#: evidence about Wormhole, and the base sections are what Wormhole reads.
+CORROBORATED_SECTIONS = {
+    "riscv.ttinsn_fusion",
+    "arch_overrides.blackhole.riscv.issue",
+    "arch_overrides.blackhole.riscv.integer_unit",
+    "arch_overrides.blackhole.riscv.load_latency",
+    "arch_overrides.blackhole.riscv.load_throughput",
+    "arch_overrides.blackhole.riscv.store_throughput",
+    "arch_overrides.blackhole.riscv.instruction_fetch",
+}
+
+#: Paths carrying a ``contradiction``: an independent observation that
+#: DISAGREES with the entry, about the same quantity, after the "these are two
+#: different quantities" reading has been looked for and ruled out. It is a
+#: third axis, not a worse ``corroboration``, and it exists because the
+#: alternative was silence -- the "WHY THERE IS NO ``measured`` PROVENANCE"
+#: block says the honest outcomes are "record both and say so, or drop to
+#: ``unknown``. Not substitute", and until 2026-08-05 there was nowhere to
+#: record both.
+#:
+#: There is one, and one is the right number for it to be. If this set grows,
+#: the tables are drifting away from the documents they claim to transcribe and
+#: that should be a conversation rather than a diff.
+CONTRADICTED_SECTIONS = {"riscv.ttinsn_fusion"}
+
+
+def _sections_with(key):
+    """``{dotted path: text}`` for every mapping in unit_costs.yaml with ``key``."""
+    _, units = _load_raw()
+    found = {}
+    stack = [((), units)]
+    while stack:
+        path, node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        if isinstance(node.get(key), str):
+            found[".".join(path)] = node[key]
+        for name, value in node.items():
+            if isinstance(value, dict):
+                stack.append((path + (str(name),), value))
+    return found
+
+
+def test_unit_cost_corroborations_are_exactly_the_ones_we_expect():
+    assert set(_sections_with("corroboration")) == CORROBORATED_SECTIONS
+
+
+def test_a_section_corroboration_is_held_to_the_same_rules():
+    """Same bar as an instruction's: how many runs on how many parts, and a
+    tracked dataset a reader can go and look at."""
+    for path, text in _sections_with("corroboration").items():
+        assert RUNS_AND_PARTS.search(text), path
+        assert "tt_sim/perf/datasets/" in text, path
+
+
+def test_a_section_corroboration_never_stands_in_for_a_source():
+    """ "Somebody measured it" is not a provenance here either.
+
+    The corroborations added on 2026-08-05 live in ``arch_overrides.blackhole``
+    and are merge fragments carrying nothing but prose, so the check is on the
+    RESOLVED section: after the merge, every corroborated block must still
+    declare where its numbers came from and name a document.
+    """
+    riscv = load_costs("blackhole").section("riscv")
+    for path in CORROBORATED_SECTIONS:
+        block = riscv[path.rsplit(".", 1)[1]]
+        assert block.get("corroboration"), path
+        assert block.get("provenance") in SOURCED_PROVENANCE, path
+        assert block.get("source"), path
+
+
+def test_a_blackhole_corroboration_does_not_leak_into_wormhole():
+    """The reason these sit under ``arch_overrides`` rather than in the base
+    section. Multiply, the mispredict bubble, the L0 d-cache and the coalescing
+    store queue all differ between the two chips, so a Blackhole measurement
+    attached to a shared block would read as evidence about a part nobody ran
+    it on."""
+    wormhole = load_costs("wormhole").section("riscv")
+    for path in CORROBORATED_SECTIONS:
+        key = path.rsplit(".", 1)[1]
+        if not path.startswith("arch_overrides."):
+            continue
+        assert "corroboration" not in wormhole[key], key
+
+
+def test_contradictions_are_exactly_the_ones_we_expect():
+    assert set(_sections_with("contradiction")) == CONTRADICTED_SECTIONS
+
+
+def test_a_contradiction_records_rather_than_resolves():
+    """The property that makes this field safe to have at all.
+
+    A measurement that disagrees with a document may be written down; it may
+    not quietly become the number. So the contradicted entry must still carry
+    its documented values, its ``isa_doc`` provenance and its source -- and the
+    text must say what was checked before the disagreement was called one,
+    because the last document/silicon conflict in these tables (``CFG.RDCFG``)
+    turned out to be two true facts about different quantities.
+    """
+    _, units = _load_raw()
+    for path, text in _sections_with("contradiction").items():
+        node = units
+        for part in path.split("."):
+            node = node[part]
+        assert node["provenance"] in SOURCED_PROVENANCE, path
+        assert node["source"], path
+        assert RUNS_AND_PARTS.search(text), path
+        assert "tt_sim/perf/datasets/" in text, path
+        assert "DIFFERENT QUANTITIES" in text.upper(), path
+    # And specifically: the fusion claim's numbers are untouched by the run
+    # that disagrees with them.
+    fusion = units["riscv"]["ttinsn_fusion"]
+    assert fusion["max_fused"] == 4
+    assert fusion["enqueue_per_thread_per_cycle"] == 4
+    assert fusion["dequeue_per_thread_per_cycle"] == 1
 
 
 def test_the_corroborated_extra_still_stands_on_its_own_source():

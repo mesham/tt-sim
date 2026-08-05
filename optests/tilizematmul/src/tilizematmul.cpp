@@ -16,22 +16,33 @@
 //                  tilize phase, as tt-metal's own
 //                  tests/tt_metal/tt_metal/test_kernels/compute/matmul_large_block.cpp
 //                  does. This is what `optests/diff.sh tilizematmul` runs, and
-//                  it is the false-positive guard for tt-sim's unpack-mode
-//                  check: a correct tilize+matmul kernel must stay green.
-//   `buggy`        the reported bug. tt-sim raises a NotImplementedError naming
-//                  the unpacker mode; the vendor reference sim computes a
-//                  (wrong but quiet) answer; silicon deadlocks.
+//                  it is the false-positive guard: a correct tilize+matmul
+//                  kernel must stay green. Exit 0, exact, on both arches.
+//   `buggy`        the reported bug. tt-sim reaches the same wedge silicon
+//                  does: **wrong numbers** on Blackhole (1024/1024 elements
+//                  wrong, self-check fails, exit 1) and a **silent hang** on
+//                  Wormhole (no self-check line, timeout). The vendor
+//                  reference sim computes a (wrong but quiet) answer.
+//
+//                  There is deliberately *no* tt-sim check that names the
+//                  cause: "the unpacker is in tilize mode" is not expressible
+//                  against the hardware configuration registers, which are
+//                  byte-identical at the matmul's UNPACRs between the two
+//                  forms (measured; the difference is the leftover MOP/replay
+//                  template, which is code, not configuration). The
+//                  source-level invariant lives one level up, in the LLK
+//                  contract sanitizer -- see the upstream issue on
+//                  `llk_unpack_tilize.h` carrying no `llk::san`
+//                  instrumentation.
 //
 // Operands: A is the 32x32 identity and B is 1024 distinct exactly-representable
 // bfloat16 values, both delivered row-major and tilized on device. C = A @ B is
 // exactly B, so a mis-tilized operand or a mis-unpacked matmul operand is an
 // unmistakable wrong value rather than a rounding question.
 //
-// Note: `tilize_block` itself only runs under tt-sim on Wormhole today -- on
-// Blackhole the tilize pack MOP drives packers 2/3 off THCON_SEC1_REG1, which
-// tt-metal never writes, and tt-sim's packer raises (see optests/tilize). So
-// run this with TT_SIM_ARCH=wormhole. The modelling it exercises is
-// arch-agnostic.
+// Runs on both architectures. (It once needed `TT_SIM_ARCH=wormhole`, because
+// the Blackhole tilize pack MOP drives packers 2/3 off THCON_SEC1_REG1 and
+// tt-sim's packer raised on it; that is fixed -- see optests/tilize.)
 
 #include <bit>
 #include <cmath>

@@ -778,16 +778,63 @@ units:
           packers / mover it names, so its real occupancy is however long that
           takes. tt-sim already models the stall functionally
           (``ScalarUnit.stalled``); this entry is the floor, not the cost.
-      ADDDMAREG: &thcon_3_or_4
+      # The "3 or 4" family. CMPDMAREG holds the anchor rather than ADDDMAREG
+      # only so that ADDDMAREG can merge from it and add a corroboration of its
+      # own: attaching one to the shared node would have declared five opcodes
+      # corroborated on the strength of measuring one, which is the laundering
+      # this field exists to make impossible.
+      CMPDMAREG: &thcon_3_or_4
         occupancy: { cycles: 3, max: 4, bound: range }
         provenance: isa_doc
         source: wh_scalar_unit
         note: the doc says "3 or 4" without saying what selects between them.
-      CMPDMAREG: *thcon_3_or_4
       MULDMAREG: *thcon_3_or_4
       SUBDMAREG: *thcon_3_or_4
       BITWOPDMAREG: *thcon_3_or_4
       SHIFTDMAREG: *thcon_3_or_4
+      ADDDMAREG:
+        <<: *thcon_3_or_4
+        corroboration: >
+          MEASURED ON BLACKHOLE SILICON BY TWO DIFFERENT BENCHMARKS, and it is
+          the only entry in either cost file of which that is true.
+
+          perfbench/tensixbench, 2026-08-04, phase A: 2.973 cycles per
+          instruction from one issuing thread, in an unrolled burst of TTI_*
+          words timed on the math thread. That is the low end of the documented
+          3-4 range, and above 1.0 -- so the RISC-V front end is not the
+          constraint and the number is the unit refusing instructions.
+
+          perfbench/riscvbench, 2026-08-05, phase T: 2.972 from one thread,
+          5.987 from two and 8.995 from three -- a clean 3.0x, i.e. one shared
+          unit whose aggregate throughput stays at ~3 cycles per instruction
+          however many TRISCs feed it. Its phase Q reaches the same number a
+          third way, from a construction that shares nothing with either: a
+          burst of ADDDMAREGs with ckernel::tensix_sync() inside the timed
+          region, so it cannot return until the pipe has drained, gives exactly
+          3.000 / 5.920 / 9.000 cycles per instruction per thread over
+          n = 16..128.
+
+          A DIFFERENT INSTRUMENT, NOT A REPEAT. The two benchmarks are separate
+          programs with separate kernels, separate probe tables and separate
+          analysis harnesses; they share the method (a slope, with an
+          empty-body control subtracted) and the device-side clock register.
+          Agreement to 0.001 cycles across that is worth more than two runs of
+          one of them.
+
+          WHICH OPCODES THIS COVERS. tensixbench also read CMPDMAREG,
+          MULDMAREG and SHIFTDMAREG at 2.973 -- they share this entry's
+          occupancy and agree with it. SUBDMAREG and BITWOPDMAREG share it too
+          and have NEVER been measured. The field is on ADDDMAREG because it is
+          the one both instruments touched.
+
+          The "or 4" is untested by all of this: nothing observed selects
+          between 3 and 4, and every reading above is the low end. THREE RUNS,
+          ON ONE CARD, one operator, two days: tt_sim/perf/datasets/
+          tensixbench-blackhole.csv (KMD 2.9.0) and riscvbench-blackhole.csv
+          plus riscvbench-blackhole-blocks8.csv (KMD 2.10.0). One part, so
+          nothing here speaks to part-to-part variation, and Wormhole is
+          untested -- though this page is the Wormhole one and no Blackhole
+          ScalarUnit.md exists to differ from it.
       STOREIND: &thcon_ge3
         occupancy: { cycles: 3, bound: at_least }
         provenance: isa_doc
