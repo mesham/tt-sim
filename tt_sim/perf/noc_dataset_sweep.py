@@ -48,6 +48,26 @@ wrong and none of them is documented:
   affect anything here, because a *round trip* on a directional torus costs the
   same number of hops on either NoC.
 
+What it says about congestion, which is the largest ``unknown`` left
+--------------------------------------------------------------------
+
+Six entries per architecture are retained and ~340 are dropped, most of them
+because they contain multi-party traffic that ``noc.congestion``
+(``provenance: unknown``) does not model. The obvious question is whether the
+dropped rows could *supply* that model. They cannot, and :data:`CONGESTION_VERDICT`
+sets out why with the arithmetic: the file never separates the number of
+concurrent flows from the geometry (both are changed by resizing one grid), it
+records no core coordinates, and its one scalar per key already contains the
+issuing core's loop and the endpoint's L1 ports. A coefficient fitted through
+that would be ``provenance: estimated``, which this cost model does not have.
+
+So the sweep now *reports* the dropped rows rather than only counting them --
+what is in them, how many rules each one fails, how much closing any single gap
+would actually unlock, and the measured size of the term that is missing. The
+last of those is the useful half of a null result: the dataset bounds congestion
+even though it cannot model it, which is exactly the "validate, not derive" role
+``docs/plans/cost-model.md`` gave rung 2.
+
 Run it
 ------
 
@@ -99,7 +119,25 @@ KEY_DEFAULTS = {
 
 ARCH_IDS = {"wormhole": 2, "blackhole": 3}
 PATTERN_READ, PATTERN_WRITE = 0, 1
+PATTERN_ALL_TO_ALL = 4
 MEMORY_L1, MEMORY_DRAM_INTERLEAVED, MEMORY_DRAM_SHARDED = 0, 1, 2
+
+#: ``types.hpp``'s ``NocPattern`` and ``NocMechanism``, in declaration order,
+#: so the report can name what it drops instead of printing an enum value.
+#: Note ``ONE_FROM_*`` is a read and ``ONE_TO_*`` a write.
+PATTERN_NAMES = (
+    "ONE_FROM_ONE",
+    "ONE_TO_ONE",
+    "ONE_FROM_ALL",
+    "ONE_TO_ALL",
+    "ALL_TO_ALL",
+    "ALL_FROM_ALL",
+    "ONE_TO_ROW",
+    "ROW_TO_ROW",
+    "ONE_TO_COLUMN",
+    "COLUMN_TO_COLUMN",
+)
+MECHANISM_NAMES = ("UNICAST", "MULTICAST", "MULTICAST_LINKED")
 
 #: Largest transaction the DRAM sweep actually issues. ``dram_accessor_sweep``
 #: caps at ``max_pages_per_txn = 256`` pages of ``obtain_page_size_bytes`` = 32
@@ -160,6 +198,92 @@ one issuing-core path, the same in every row, independent of transaction size,
 of geometry, of memory type and of direction. Its value is not predicted; its
 constancy is exactly what the assembled model claims. Any structure in the
 residual along one of those four axes is model error, and names which term."""
+
+
+CONGESTION_VERDICT = """\
+CAN A CONGESTION MODEL BE DERIVED FROM THIS DATASET? No -- and the reason is
+identifiability rather than coarseness, which is a sharper claim than the one
+`docs/plans/cost-model.md` recorded ("too coarse ... it folds everything into
+one number"). Three specifics, all checkable from the table printed above:
+
+1. CONCURRENCY AND GEOMETRY ARE NEVER SEPARATED. Every multi-party row varies
+   the number of concurrent flows by changing the GRID SIZE -- the sweep runs
+   2x2, 3x3, 5x5, 8x8 and the full device grid, all anchored at logical (0, 0)
+   (`test_noc_estimator.cpp`, `run_all_to_all`). So the flow count, the path
+   lengths and the number of links each path shares all move together, in four
+   or five steps, and no two rows hold any one of them fixed. A per-hop
+   congestion coefficient is a slope against "flows sharing this link"; there
+   is no such axis in the file.
+
+2. THE FILE RECORDS NO COORDINATES. `num_subordinates` is the only geometric
+   field on a multi-party row. Per-flow distances are recoverable only by
+   re-deriving the grid from the test source, and even then the file holds ONE
+   aggregate cycle count per key -- so a fitted term would have to explain a
+   whole grid's barrier through a single scalar.
+
+3. THAT SCALAR ALREADY CONTAINS TWO OTHER UNMODELLED TERMS. The retained rows
+   leave a residual of order 100 cycles, which is the issuing core's own path,
+   and a multi-party row pays that once per transaction issued. The per-
+   transaction line printed above is the check: at the smallest transaction
+   size the all-to-all rows cost a small fraction of one round trip each, so
+   they are pipelined and what sets them is the ISSUE LOOP, not the network.
+   Endpoint L1 port arbitration (`noc.l1_ports`: two 128-bit read and two
+   128-bit write connections, shared by every flow arriving at a core) is
+   folded into the same number. One equation, three unknowns, and every extra
+   configuration in the file moves all three at once.
+
+Fitting a coefficient anyway would produce a number no document prints and no
+arithmetic on vendor numbers yields -- `provenance: estimated`, which this cost
+model does not have and will not gain here. `vendor_source_derived` is not
+available either: it requires arithmetic on published vendor numbers (as
+`dram.access_latency` does), and there is no arithmetic that isolates
+congestion from the two terms above.
+
+WHAT THE DATASET *CAN* DO, and it is worth having: it bounds the size of the
+missing term, and it is a validation target. The all-to-all series above is a
+measured saturation curve -- aggregate bandwidth rising far slower than the
+core count while the per-core share collapses -- and any congestion model tt-sim
+ever gains must reproduce it. That is exactly the role rung 2 was climbed for.
+
+WHAT WOULD DERIVE ONE, on a card, from tt-metal's own microbenchmarks in
+`tests/tt_metal/tt_metal/data_movement/` (which expose the coordinates the
+shipped YAML drops, and write per-core profiler CSVs):
+
+  a. `one_to_one` / `one_from_one` (test IDs 4, 5, 50, 51), sweeping
+     `master_core_coord` x `subordinate_core_coord` across the grid. Gives
+     latency against a KNOWN hop count -- the dataset only has the same-axis /
+     different-axis pair -- and pins the uncongested line everything else is
+     differenced against.
+  b. `all_to_all` / `all_from_all` (300-308, 310-318) with `sub_grid_size`
+     PINNED to 1x1 and `mst_grid_size` swept 1x1, 2x1, 2x2, 4x2, 4x4 at a
+     fixed `mst_logical_start_coord`. N flows into one endpoint at a fixed
+     distance: the endpoint-contention curve with geometry held still, which
+     is the axis (1) says the shipped dataset lacks.
+  c. The same pair with N FIXED at 2 and the two masters slid so their routes
+     share 0, 1, 2 ... k links (same row -> maximal overlap, different rows ->
+     none). The slope of latency against shared links IS the per-hop
+     congestion coefficient, measured with everything else constant.
+  d. `core_bidirectional` (140-148) with `write_vc` swept 0-3, which isolates
+     virtual-channel arbitration -- the one congestion mechanism the ISA docs
+     name ("if the two packets have the same virtual circuit number, then one
+     packet will wait for the other") -- from distance and from endpoint ports.
+
+(a) and (c) together are the minimum: an intercept and a slope, both measured
+with the confounds held fixed rather than fitted out. Neither needs anything
+tt-sim can supply, and neither can be substituted by more of this file.
+
+THAT LIST IS NOW A HARNESS, and one correction to it is worth stating here
+because it changes what (a) can deliver. The data_movement suite CANNOT be
+parameterised: every coordinate, grid size and virtual channel in it is a
+compile-time literal in a gtest body, and the one test whose name promises
+otherwise (`TensixDataMovementOneToOneCustom`) is GTEST_SKIPped. So the harness
+is a tt-metal program of this repository's own -- `perfbench/nocbench`, planned
+by `tt_sim.perf.noc_congestion_plan` and read back by
+`tt_sim.perf.noc_congestion_sweep`. It also corrects (a): sweeping master x
+subordinate does NOT give a fine-grained hop sweep, because on a directional
+torus a round trip costs grid_x, grid_y or grid_x + grid_y hops and nothing
+else, whatever the coordinates. What (a) actually yields is a three-level line
+plus a flatness test that would catch the routing model being wrong."""
 
 
 def _exclusions(arch_id):
@@ -227,6 +351,131 @@ def retained(entries, arch_id):
         ladder.append((name, len(kept) - len(nxt), len(nxt)))
         kept = nxt
     return kept, ladder
+
+
+#: What tt-sim would have to gain before a rule could be retired, one line per
+#: ladder rule. The rules' own ``reason`` strings say why an entry is dropped;
+#: this says what closing it would take, which is the question a reader of the
+#: ladder actually has. Keyed by rule name and pinned to the ladder by a test,
+#: so a new rule cannot be added without answering the question.
+MISSING_TERM = {
+    "arch": "nothing -- run the sweep again with --arch",
+    "mechanism != UNICAST": (
+        "router-level multicast fan-out: one packet replicated by the routers "
+        "rather than N packets injected, and an arbitration policy between the "
+        "copies"
+    ),
+    "pattern not in {ONE_FROM_ONE, ONE_TO_ONE}": (
+        "a congestion term (`noc.congestion`, provenance: unknown) AND the "
+        "per-core geometry of the grid, which the dataset does not record"
+    ),
+    "num_transactions per barrier != 1": (
+        "the initiator's outstanding-transaction credit limit, and a cost for "
+        "the issuing core's per-transaction NIU register writes"
+    ),
+    "stateful": "a per-transaction NoC command-register configuration cost",
+    "loopback": "the multicast fan-out above, of which this is a flag",
+    "memory == DRAM_INTERLEAVED": (
+        "more than one DRAM tile, and the interleaver's page-to-channel map"
+    ),
+}
+
+
+def exclusion_multiplicity(entries, arch_id):
+    """``(by_count, sole_cause)`` for the non-arch rules.
+
+    ``by_count[k]`` is how many of this architecture's entries are excluded by
+    exactly ``k`` rules; ``sole_cause[rule]`` is how many are excluded by that
+    rule **and no other**.
+
+    The second one is the number the ladder cannot show and that a reader
+    invariably wants. A rule reported as "removes 150" reads like 150 entries
+    waiting on one missing term; ``sole_cause`` is how many would actually
+    become answerable if that term arrived and nothing else did. The two are
+    wildly different here, and pretending otherwise would over-sell every gap
+    in the model at once.
+    """
+    rules = _exclusions(arch_id)[1:]  # the arch rule is a selection, not a gap
+    by_count, sole_cause = {}, {name: 0 for name, _r, _k in rules}
+    for key, _latencies in entries:
+        if key["arch"] != arch_id:
+            continue
+        failed = [name for name, _r, keep in rules if not keep(key)]
+        by_count[len(failed)] = by_count.get(len(failed), 0) + 1
+        if len(failed) == 1:
+            sole_cause[failed[0]] += 1
+    return by_count, sole_cause
+
+
+def dropped_by_shape(entries, arch_id):
+    """``{(mechanism, pattern): count}`` over the entries the ladder drops."""
+    rules = _exclusions(arch_id)[1:]
+    shape = {}
+    for key, _latencies in entries:
+        if key["arch"] != arch_id:
+            continue
+        if all(keep(key) for _n, _r, keep in rules):
+            continue
+        name = (MECHANISM_NAMES[key["mechanism"]], PATTERN_NAMES[key["pattern"]])
+        shape[name] = shape.get(name, 0) + 1
+    return shape
+
+
+def concurrency_series(entries, sizes, arch_id, size):
+    """The dataset's own answer to "what does concurrency cost?", per arch.
+
+    ``[(cores, cycles, aggregate B/cycle, per-core B/cycle), ...]`` over the
+    all-to-all rows carrying exactly **one transaction per (master, subordinate)
+    pair per barrier** -- the only shape in the file where the number of
+    concurrent flows is the only thing that changes between rows of the same
+    pattern. ``num_transactions`` equals ``num_subordinates`` there, which is
+    how those rows are found.
+
+    This is the most this dataset can say about congestion, and saying it is
+    not the same as modelling it: see :data:`CONGESTION_VERDICT`.
+    """
+    if size not in sizes:
+        return []
+    column = sizes.index(size)
+    rows = []
+    for key, latencies in entries:
+        if key["arch"] != arch_id or key["memory"] != MEMORY_L1:
+            continue
+        if key["pattern"] != PATTERN_ALL_TO_ALL or key["mechanism"] != 0:
+            continue
+        cores = key["num_subordinates"]
+        if cores < 2 or key["num_transactions"] != cores:
+            continue
+        cycles = latencies[column]
+        if cycles <= 0:
+            continue
+        # N masters x N subordinates, one transaction each per barrier.
+        moved = cores * cores * size
+        rows.append((cores, cycles, moved / cycles, moved / cycles / cores))
+    return sorted(rows)
+
+
+def single_transaction_baseline(entries, sizes, arch_id, size, same_axis=False):
+    """One ``size``-byte write, one transaction, no contention -- or ``None``.
+
+    The row every multi-party number is worth comparing against, and the same
+    row the primary sweep retains, so the comparison is between a measurement
+    the model predicts and one it does not.
+    """
+    if size not in sizes:
+        return None
+    column = sizes.index(size)
+    for key, latencies in entries:
+        if key["arch"] != arch_id or key["memory"] != MEMORY_L1:
+            continue
+        if key["pattern"] != PATTERN_WRITE or key["mechanism"] != 0:
+            continue
+        if key["num_transactions"] != 1 or key["stateful"]:
+            continue
+        if bool(key["same_axis"]) != same_axis:
+            continue
+        return latencies[column]
+    return None
 
 
 def point_is_measured(key, size):
@@ -619,7 +868,109 @@ def report(entries, sizes, arch, out=sys.stdout):
         emit(f"      {label:<40} {value}")
 
     _bandwidth_ceiling_check(entries, sizes, arch_id, emit)
+    _dropped_readout(entries, sizes, arch_id, emit)
     return rows
+
+
+def _dropped_readout(entries, sizes, arch_id, emit):
+    """What is in the entries the ladder drops, and what would consume them.
+
+    The ladder says "removes 150" and nothing about what the 150 are, which
+    makes every gap in the model look the same size. It is not: on both
+    architectures the *sole* cause of exclusion for all but a handful of
+    entries is more than one missing term at once, so closing any single one
+    unlocks almost nothing. That is a fact about the model's distance from this
+    dataset and it belongs in the report rather than in a reader's head.
+    """
+    by_count, sole_cause = exclusion_multiplicity(entries, arch_id)
+    shape = dropped_by_shape(entries, arch_id)
+    if not shape:
+        return
+    emit()
+    emit("-" * 78)
+    emit("What is in the rows the ladder drops")
+    emit("-" * 78)
+    emit(
+        "  The ladder above counts entries as it removes them, in order, so a rule's\n"
+        "  number depends on where it sits. This section does not: every count below\n"
+        "  is over ALL of this architecture's entries, against every rule at once."
+    )
+    emit()
+    emit("  Entries by how many rules exclude them:")
+    for count in sorted(by_count):
+        label = "retained" if count == 0 else f"{count} rule{'s' if count > 1 else ''}"
+        emit(f"    {label:<12} {by_count[count]:>4}")
+    emit()
+    emit(
+        "  SOLE CAUSE -- entries that ONE rule alone keeps out, i.e. what would become\n"
+        "  answerable if that term arrived and nothing else did:"
+    )
+    for name, count in sorted(sole_cause.items(), key=lambda kv: (-kv[1], kv[0])):
+        emit(f"    {count:>4}  {name}")
+        emit(f"          needs: {MISSING_TERM.get(name, '?')}")
+    emit()
+    emit(
+        "  Read that column before reading the ladder as a to-do list. The rule that\n"
+        "  removes the most entries is not the one that would unlock the most: a\n"
+        "  multi-party row is typically ALSO a multi-transaction row, and a multicast\n"
+        "  row is typically both. Congestion is never the only thing in the way."
+    )
+    emit()
+    emit("  The dropped set, by mechanism and pattern:")
+    emit(f"    {'mechanism':<18}{'pattern':<16}{'entries':>8}")
+    for (mechanism, pattern), count in sorted(shape.items()):
+        emit(f"    {mechanism:<18}{pattern:<16}{count:>8}")
+
+    biggest = max(sizes)
+    series = concurrency_series(entries, sizes, arch_id, biggest)
+    if series:
+        emit()
+        emit(
+            f"  The size of the missing term, measured. All-to-all over an N-core grid,\n"
+            f"  one {biggest} B transaction per (master, subordinate) pair per barrier -- the\n"
+            "  only shape in the file where the flow count is the only thing that changes:"
+        )
+        emit(
+            f"    {'cores':>6}{'cycles':>12}{'aggregate B/cyc':>18}{'per core B/cyc':>16}"
+        )
+        for cores, cycles, aggregate, per_core in series:
+            emit(f"    {cores:>6}{cycles:>12.0f}{aggregate:>18.1f}{per_core:>16.2f}")
+        first, last = series[0], series[-1]
+        core_ratio = last[0] / first[0]
+        emit(
+            f"    -> {core_ratio:.0f}x the cores buys {last[2] / first[2]:.1f}x the aggregate "
+            f"bandwidth, so the\n       per-core share falls {first[3] / last[3]:.1f}x. "
+            "Whatever that is -- link queueing, L1\n       port arbitration, the issue loop -- "
+            "tt-sim charges none of it, and this is\n       the scale of what it is not charging."
+        )
+    # The same rows at the SMALLEST size, which is where the third claim of
+    # CONGESTION_VERDICT is checkable rather than asserted: divide the barrier
+    # by the transactions each master issued into it and compare against one
+    # transaction's whole round trip.
+    smallest = min(sizes)
+    small = concurrency_series(entries, sizes, arch_id, smallest)
+    baseline = single_transaction_baseline(entries, sizes, arch_id, smallest)
+    if small and baseline:
+        emit()
+        emit(
+            f"  The same rows at {smallest} B, per transaction ISSUED (barrier cycles over the\n"
+            "  transactions one master put into it):"
+        )
+        emit(
+            "    "
+            + "  ".join(
+                f"N={cores} {cycles / cores:.0f}" for cores, cycles, _a, _p in small
+            )
+        )
+        emit(
+            f"    against {baseline:.0f} cycles for ONE {smallest} B round trip on its own "
+            "(ONE_TO_ONE,\n    different axis). A transaction inside the grid costs a fraction "
+            "of a round trip,\n    so these rows are pipelined and what governs them is the "
+            "per-transaction ISSUE\n    cost -- which is the same term the retained rows leave "
+            "in the residual, not\n    congestion. That is claim 3 below, in numbers."
+        )
+    emit()
+    emit(CONGESTION_VERDICT)
 
 
 def _sourced_bandwidths(arch):

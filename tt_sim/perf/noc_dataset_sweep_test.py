@@ -317,5 +317,122 @@ def test_the_hop_term_explains_the_geometry_difference_out_of_sample(arch):
     assert abs(sum(same) / len(same) - sum(diff) / len(diff)) < 10
 
 
+# ---------------------------------------------------------------------------
+# 3. What the sweep says about the rows it drops. The ladder reports a count
+#    per rule; these pin the claims the report makes ON TOP of that count,
+#    because "removes 150" read as "150 rows waiting on one missing term" is
+#    exactly the misreading the extra section exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+def test_every_rule_says_what_closing_it_would_take():
+    """A rule that names no missing term is a rule nobody can act on. Pinned
+    against the ladder itself, so adding a rule without answering the question
+    fails here rather than printing a ``?`` in the report."""
+    for arch_id in sweep.ARCH_IDS.values():
+        names = {name for name, _reason, _keep in sweep._exclusions(arch_id)}
+        assert names == set(sweep.MISSING_TERM)
+    assert all(len(v) > 20 for v in sweep.MISSING_TERM.values())
+
+
+def test_sole_cause_counts_are_a_subset_of_the_ladder_counts():
+    """The two ways of counting an exclusion, and the relationship between
+    them. ``sole_cause`` can never exceed what the ladder removes -- an entry
+    only one rule excludes is an entry that rule removes wherever it sits in
+    the order -- and the point of reporting it is that it is usually far
+    smaller."""
+    entries = [
+        ({**sweep.KEY_DEFAULTS, "arch": 2}, [1.0]),  # retained
+        ({**sweep.KEY_DEFAULTS, "arch": 2, "pattern": 4}, [1.0]),  # pattern only
+        # pattern AND num_transactions: no single term unlocks it
+        ({**sweep.KEY_DEFAULTS, "arch": 2, "pattern": 4, "num_transactions": 8}, [1.0]),
+        ({**sweep.KEY_DEFAULTS, "arch": 3, "pattern": 4}, [1.0]),  # other arch
+    ]
+    by_count, sole = sweep.exclusion_multiplicity(entries, 2)
+    assert by_count == {0: 1, 1: 1, 2: 1}
+    assert sole["pattern not in {ONE_FROM_ONE, ONE_TO_ONE}"] == 1
+    assert sole["num_transactions per barrier != 1"] == 0
+    _kept, ladder = sweep.retained(entries, 2)
+    removed = dict((name, count) for name, count, _left in ladder)
+    for name, count in sole.items():
+        assert count <= removed[name]
+
+
+def test_the_concurrency_series_is_one_transaction_per_pair():
+    """The series the report calls "the only shape where the flow count is the
+    only thing that changes". That is only true of the rows whose transactions
+    per barrier equal their subordinate count -- one per (master, subordinate)
+    pair -- so a row with a longer burst must not be in it."""
+    sizes = [64]
+    entries = [
+        (
+            {
+                **sweep.KEY_DEFAULTS,
+                "arch": 2,
+                "pattern": 4,
+                "num_subordinates": 4,
+                "num_transactions": 4,
+            },
+            [100.0],
+        ),
+        # same grid, four transactions each: a burst, not more concurrency
+        (
+            {
+                **sweep.KEY_DEFAULTS,
+                "arch": 2,
+                "pattern": 4,
+                "num_subordinates": 4,
+                "num_transactions": 16,
+            },
+            [400.0],
+        ),
+    ]
+    series = sweep.concurrency_series(entries, sizes, 2, 64)
+    assert [row[0] for row in series] == [4]
+    cores, cycles, aggregate, per_core = series[0]
+    assert cycles == 100.0
+    # 4 masters x 4 subordinates x 64 B in 100 cycles.
+    assert aggregate == pytest.approx(4 * 4 * 64 / 100)
+    assert per_core == pytest.approx(aggregate / cores)
+
+
+@_needs_dataset
+@pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
+def test_closing_congestion_alone_would_unlock_almost_nothing(arch):
+    """The finding that makes the whole "report what you drop" section worth
+    printing, as an assertion. The pattern rule removes ~150 entries, but
+    almost every one of them ALSO carries a multi-transaction burst or a
+    multicast, so a perfect congestion model on its own would move the retained
+    set by a couple of entries. If that ever stops being true -- because the
+    dataset changed, or another rule was retired -- the report's headline claim
+    needs rewriting, and this is what says so."""
+    entries, _sizes = sweep.load_dataset(_dataset_path())
+    arch_id = sweep.ARCH_IDS[arch]
+    _by_count, sole = sweep.exclusion_multiplicity(entries, arch_id)
+    _kept, ladder = sweep.retained(entries, arch_id)
+    removed = dict((name, count) for name, count, _left in ladder)
+    rule = "pattern not in {ONE_FROM_ONE, ONE_TO_ONE}"
+    assert removed[rule] >= 100
+    assert sole[rule] <= 5
+
+
+@_needs_dataset
+@pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
+def test_the_dataset_bounds_congestion_even_though_it_cannot_model_it(arch):
+    """The useful half of the null result: per-core bandwidth falls as the
+    grid grows, monotonically, on both architectures. That curve is what any
+    future congestion term has to reproduce, and it is the only quantitative
+    statement about congestion this dataset supports."""
+    entries, sizes = sweep.load_dataset(_dataset_path())
+    series = sweep.concurrency_series(entries, sizes, sweep.ARCH_IDS[arch], 65536)
+    assert len(series) >= 4
+    per_core = [row[3] for row in series]
+    assert per_core == sorted(per_core, reverse=True)
+    # More cores always buys SOME aggregate bandwidth, and never proportionally.
+    aggregate = [row[2] for row in series]
+    assert aggregate == sorted(aggregate)
+    assert aggregate[-1] / aggregate[0] < series[-1][0] / series[0][0]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
