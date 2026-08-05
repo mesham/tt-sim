@@ -214,3 +214,4 @@ __marimo__/
 # harness that reads it; the rule below is deliberately scoped to the output
 # directory rather than to the filename so the two cannot be confused.
 perfbench/*/src/tensixbench-*.csv
+perfbench/*/src/riscvbench-*.csv
