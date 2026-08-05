@@ -1,0 +1,15 @@
+# nocbench plan -- built by tt_sim.perf.noc_congestion_plan
+# arch=blackhole grid_x=17 grid_y=12 coord_space=noc0
+# *_lx/_ly logical, *_nx/_ny the coordinate a kernel addresses, *_px/_py SoC-physical NoC 0
+# tt_sim_tensix_coords=1-2,2-2,2-4,3-2,5-3,6-2,6-4,7-4,10-4,15-2
+# shared: 4 points, 8 flows
+# measured by nocbench on arch=blackhole magic=0x4E4F4342
+run,exp,point,flow,n_flows,mst_lx,mst_ly,mst_nx,mst_ny,mst_px,mst_py,sub_lx,sub_ly,sub_nx,sub_ny,sub_px,sub_py,proc,noc,vc,direction,num_tx,tx_bytes,fwd_hops,rt_hops,shared_payload_links,shared_other_links,measured,cycles,t0,t1,rendezvous_cycles,kernel_node_x,kernel_node_y,kernel_noc
+0,shared,4096B/share0,0,2,0,0,1,2,1,2,4,1,5,3,5,3,0,0,1,0,32,4096,5,29,0,0,1,2404,8827,11231,6,1,2,0
+0,shared,4096B/share0,1,2,5,0,6,2,6,2,7,2,10,4,10,4,0,0,1,0,32,4096,6,29,0,0,1,2404,8877,11281,466,6,2,0
+1,shared,4096B/share1,0,2,0,0,1,2,1,2,4,1,5,3,5,3,0,0,1,0,32,4096,5,29,1,0,1,4132,13624,17756,6,1,2,0
+1,shared,4096B/share1,1,2,12,0,15,2,15,2,1,2,2,4,2,4,0,0,1,0,32,4096,6,29,1,0,1,4322,13754,18076,530,15,2,0
+2,shared,4096B/share2,0,2,0,0,1,2,1,2,4,1,5,3,5,3,0,0,1,0,32,4096,5,29,2,0,1,4388,20317,24705,6,1,2,0
+2,shared,4096B/share2,1,2,2,0,3,2,3,2,6,2,7,4,7,4,0,0,1,0,32,4096,6,29,2,0,1,4430,20340,24770,426,3,2,0
+3,shared,4096B/share3,0,2,0,0,1,2,1,2,4,1,5,3,5,3,0,0,1,0,32,4096,5,29,3,0,1,4388,27119,31507,6,1,2,0
+3,shared,4096B/share3,1,2,1,0,2,2,2,2,5,2,6,4,6,4,0,0,1,0,32,4096,6,29,3,0,1,4442,27130,31572,418,2,2,0

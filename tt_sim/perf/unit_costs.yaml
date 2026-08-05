@@ -199,12 +199,24 @@ noc:
     settles that Blackhole's NoC is modelled correctly, which is what the
     ``dram.access_latency`` note below needed to know.
 
-    Still unconsumed: ``l1_ports`` and ``router_buffering``, and with them
-    every form of *cross-packet* contention. Only the injecting NIU's own link
-    is occupied; the router-to-router links a packet crosses are not, because
-    waiting there means waiting behind another tile's traffic, which needs an
-    arbitration policy, which is the congestion term above that nothing
-    publishes. A saturated link still costs what an empty one does.
+    CONSUMED since 2026-08-05 in a THIRD place, and it is the same number a
+    third time rather than a new one: each router-to-router link a packet
+    crosses is held for the same N cycles, by ``NocLinkRegistry`` on the
+    device. So a packet waits behind ANOTHER TILE's traffic where their routes
+    cross, which is what makes two flows sharing one link each cost one extra
+    occupancy -- the effect measured on a Blackhole card and recorded under
+    ``congestion`` below and in ``arch_overrides.blackhole.noc``. It is inert
+    for a single flow, because that flow's packets already leave its injection
+    port one occupancy apart and so reach every link on their route one
+    occupancy apart. ``hops.router_to_router.throughput_flits_per_cycle: 1``
+    is the entry being spent, and it was already here at ``isa_doc``.
+
+    Still unconsumed: ``l1_ports`` and ``router_buffering``. With them goes the
+    part of cross-packet contention that is *arbitration* rather than
+    occupancy -- which virtual channel wins a link both packets want, and how
+    deep a router will buffer before it back-pressures. A link's bandwidth is
+    now divided between the packets crossing it; the order they cross it in is
+    still first-come, and nothing publishes what the real order is.
   hops:
     niu_to_router:
       latency: { cycles: 5, bound: approximate }
@@ -383,15 +395,26 @@ noc:
       would be `isa_doc_derived`, with the silicon above as corroboration -- see
       ``arch_overrides.blackhole.noc``.
 
-      IT IS STILL NOT WIRED, and the reason is now three named build items in
-      tt_sim/network/tt_noc.py rather than a missing quantity: there is no
-      per-link state anywhere (only ``NUI._tx_free_cycle``, one watermark per
-      NIU); the network layer knows a hop COUNT but has never committed to a hop
-      ORDER, which a link identity needs; and a multicast write is modelled as N
-      unicasts, so claiming a link per destination would invent serialisation on
-      the tree's most common packet -- the exact over-charge
-      ``claim_injection_port`` exists to avoid. See docs/plans/cost-model.md,
-      "Banked, 2026-08-05" and the size-sweep instalment after it.
+      WIRED, 2026-08-05, and NOT AS AN ENTRY HERE -- there is still no
+      congestion number in this file and this line still reads `unknown`. What
+      was wired is ``hops.router_to_router.throughput_flits_per_cycle``, on
+      each link rather than only at the injecting NIU; see the ``noc`` note
+      above for the mechanism and docs/plans/cost-model.md for the instalment.
+      The three build items that had blocked it were built: ``NocLinkRegistry``
+      holds one free-cycle watermark per link and lives on the DEVICE (a link
+      is crossed by every tile whose route passes through it, so it cannot be
+      NIU state); ``noc_route_links`` gives the network layer the hop ORDER a
+      link identity needs, and is literally the same function the experiment
+      planner names its links with; and a multicast claims the union of its
+      destinations' routes ONCE, so the fan-out is not serialised against
+      itself on the launch-message path.
+
+      What tt-sim then reproduces, run through the same harness as the card
+      (perfbench/nocbench/src/nocbench-blackhole-sim-links.report.txt): 0.0
+      cycles at 512 B, +59.4 at 4096 B against an occupancy of 64, the whole
+      effect at the FIRST shared link, and every uncontended figure in the file
+      -- the hop line, the size control, the readport control -- unchanged from
+      the same run before the term existed. No parameter was fitted.
 
       WHAT ``congestion`` STILL MEANS, now narrowed. The docs' one named
       mechanism is virtual-channel arbitration, and it has now been measured
@@ -961,11 +984,13 @@ arch_overrides:
         250.4 cycles at 2048 / 4096 / 8192 / 16384 bytes, against occupancies
         of 32 / 64 / 128 / 256 -- a ratio of 0.88, 0.99, 0.97, 0.98. At 64 and
         512 bytes the delta is zero, because a packet that holds the link for
-        1 or 8 cycles out of ~40 does not queue. THE SECOND READING IS NOT
-        CONSUMED; see ``noc.congestion`` for what it would take to consume it,
-        and note that it needs no new number -- only a place to spend
-        ``hops.router_to_router.throughput_flits_per_cycle``, which is already
-        ``isa_doc`` and already here.
+        1 or 8 cycles out of ~40 does not queue. BOTH READINGS ARE NOW
+        CONSUMED, as of 2026-08-05, and neither of them as a number: the
+        second one is the same ``throughput_flits_per_cycle`` as the first,
+        spent on each router-to-router link instead of only at the injecting
+        NIU. See ``noc.congestion``, and note that this stays a CORROBORATION
+        rather than becoming an entry -- what the card confirmed is where an
+        ``isa_doc`` figure belongs, not what it is.
 
         TWO RUNS, ON ONE CARD, one operator, one day, and they are not
         averaged: tt_sim/perf/datasets/nocbench-blackhole.csv is the run with

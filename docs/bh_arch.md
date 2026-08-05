@@ -1132,8 +1132,21 @@ impact latency" and quantify nothing. What *is* documented is the thing this
 turns out to be — `noc.hops.router_to_router.throughput_flits_per_cycle: 1`,
 "one flit (256 bits) per cycle per axis" — which is why the measurement is
 recorded as a `corroboration` on `arch_overrides.blackhole.noc` rather than as
-a number of its own. See [`docs/plans/cost-model.md`](plans/cost-model.md) for
-why it is nevertheless not yet charged.
+a number of its own.
+
+**And that is now what the simulator charges** (2026-08-05), which changes what
+this entry can claim in one specific way and in no other. tt-sim holds one
+free-cycle watermark per router-to-router link and charges each packet the
+occupancy of every link it crosses, so the same `isa_doc` flit rate is spent
+where the measurement says it is spent. Run through the same harness, the
+simulator now reads +59.4 cycles/tx at 4096 B against an occupancy of 64,
+0.0 at 512 B, and flat beyond the first shared link — the shape of the table
+above, on a machine with no fitted parameter in it. **What that does *not* do is
+turn the numbers above into sourced quantities.** They remain one part, one
+operator, one day, and the reason they are safe to have influenced anything is
+precisely that they did not: nothing here entered the tables, and the
+`corroboration` field is where they stayed. See
+[`docs/plans/cost-model.md`](plans/cost-model.md) for the build and its gate.
 
 **Two independent confirmations in the same file, by different routes.**
 

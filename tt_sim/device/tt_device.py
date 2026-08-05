@@ -8,6 +8,7 @@ from tt_sim.device.deadlock import (
 )
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
+from tt_sim.network.tt_noc import NocLinkRegistry
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.trace import enable_from_env
 from tt_sim.util.bits import clear_bit, set_bit
@@ -141,6 +142,16 @@ class TT_Device(Device):
         # ``add_tensix_tile`` extend them post-construction.
         self.noc_0_directory = {}
         self.noc_1_directory = {}
+        # One free-cycle watermark per router-to-router link, per NoC. Shared
+        # by reference across every NUI on that NoC, for the same reason the
+        # directories are and one stronger: an injection port belongs to one
+        # NIU, but a link is crossed by every tile whose route passes through
+        # it, so the state cannot live on either end of a transfer. Created
+        # before any tile is registered so ``_register_tile_internals`` — the
+        # single fan-out point, used by ``add_tensix_tile`` too — can hand each
+        # NUI its NoC's registry. Costs nothing with the cost model off: the
+        # NUIs never reach it, because ``claim_route_links`` returns early.
+        self.noc_link_registries = (NocLinkRegistry(), NocLinkRegistry())
 
         self.clocks = [MultiTileClock()]
         self.resets = [Reset([])]
@@ -260,6 +271,8 @@ class TT_Device(Device):
                 self.noc_1_directory[self._noc1_mirror(alias)] = nui1
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
+        nui0.noc_link_registry = self.noc_link_registries[0]
+        nui1.noc_link_registry = self.noc_link_registries[1]
         # Tensix tiles host the bulk of per-cycle work (5 baby RV cores +
         # the coprocessor); DRAM and eth tiles are mostly idle NUI traffic
         # so they should not pull the composite into threaded mode on

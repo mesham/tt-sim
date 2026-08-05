@@ -5,11 +5,15 @@ is ``perfbench/nocbench``. This is the third: it re-checks the plan's invariants
 against what actually came back, decides whether the run is valid at all, and
 only then reports a coefficient.
 
-That order matters. Against tt-sim every congestion experiment here is FORCED
-to read flat -- the model charges an NIU for its own injection port and nothing
-whatever for a router-to-router link, so two flows sharing links cannot
-interact. A harness that measured nothing would read flat too. So a verdict of
-"no congestion effect" is only issued when the positive controls moved:
+That order matters, and it mattered most while tt-sim's own answer was forced.
+Until 2026-08-05 the model charged an NIU for its own injection port and
+nothing whatever for a router-to-router link, so two flows sharing links could
+not interact and every congestion experiment here read flat against the
+simulator -- exactly as a harness that measured nothing would. It no longer
+does (``NocLinkRegistry``, one watermark per link), and the same plan now reads
+``SATURATING`` there at a saturating transaction size. The controls are what
+made that difference legible rather than a coincidence, so they are still the
+gate on any verdict:
 
 * ``size`` must rise with transaction size (tt-sim models link serialisation);
 * ``readport`` must rise when a second master reads from the same subordinate;
@@ -860,9 +864,10 @@ def sweep(rows, emit=print, min_overlap=0.5):
     if shapes == {"FLAT"}:
         emit(
             "  RESULT: NO CONGESTION EFFECT. The controls moved and the flows overlapped, so "
-            "this is a measurement and not a null harness. On tt-sim this is the FORCED "
-            "answer (no router-to-router link is modelled); on silicon it would be a real "
-            "and reportable result."
+            "this is a measurement and not a null harness. It used to be the FORCED answer "
+            "on tt-sim; since 2026-08-05 the model charges link occupancy, so a flat reading "
+            "there is now a reading like any other -- check the transaction size is above "
+            "the issue loop before believing it."
         )
         return {"verdict": "FLAT", "results": results}
     emit(f"  RESULT: CONGESTION MEASURED -- shapes {sorted(shapes)}")

@@ -1,0 +1,77 @@
+# nocbench plan -- built by tt_sim.perf.noc_congestion_plan
+# arch=blackhole grid_x=17 grid_y=12 coord_space=noc0
+# *_lx/_ly logical, *_nx/_ny the coordinate a kernel addresses, *_px/_py SoC-physical NoC 0
+# tt_sim_tensix_coords=1-2,1-3,1-4,2-2,2-3,2-11,3-2,3-3,3-4,3-10,4-4,5-4
+# hops: 6 points, 6 flows
+# size: 3 points, 3 flows
+# readport: 2 points, 3 flows
+# shared: 4 points, 8 flows
+# measured by nocbench on arch=blackhole magic=0x4E4F4342
+==============================================================================
+VALIDITY
+==============================================================================
+  flows in file           20
+  unmeasured (no stamp)   0
+  coordinate mismatches   0
+  invariant complaints    0
+  multi-flow runs         5, median timed-region overlap 0.97, 0 below 0.5
+
+==============================================================================
+HOPS
+==============================================================================
+  family        n   round-trip hops   cycles/region  (spread)
+  col           2   [12]                      716.0  (+/-0.0)
+  diag          2   [29]                      868.0  (+/-0.0)
+  row           2   [17]                      760.0  (+/-0.0)
+    col: cycles vs FORWARD hops -> slope +0.00, r2 1.00
+    diag: cycles vs FORWARD hops -> slope +0.00, r2 1.00
+    row: cycles vs FORWARD hops -> slope +0.00, r2 1.00
+    (a directional torus predicts slope 0 in every family: the reply travels the rest of the way round)
+  uncongested line over 3 round-trip levels: 608.3 + 8.95 * hops  (r2 1.00)
+    slope is the per-hop round-trip cost (ISA docs: ~9 cycles router to router); intercept is the issuing core's path plus the endpoint
+  NOISE FLOOR (row family spread): 0.0 cycles/tx -- the row family is predicted constant, so its spread is this harness's resolution, and every 'flat' claim below is read against it
+
+==============================================================================
+SIZE
+==============================================================================
+       64 B       69.2 cycles/tx
+      512 B       70.0 cycles/tx
+     4096 B      108.5 cycles/tx
+  slope +10.36 cycles per KiB, intercept 66.8, r2 0.99
+  CONTROL: PASS -- larger transactions must cost more
+
+==============================================================================
+READPORT
+==============================================================================
+  1flow        170.8 cycles/tx  (n=1)
+  2flows       251.9 cycles/tx  (n=2)
+  ratio 1.48x
+  (bar: +3.4 cycles/tx, from the noise floor and 2 % of the single-flow cost)
+  CONTROL: PASS -- two masters reading from one NIU must contend for its injection port
+  (this proves the flows contend; it does not say WHERE. Two response streams out of one tile share the first link out of it as well as the port, and on silicon those are one reading. Attribution is experiment 2's job.)
+
+==============================================================================
+SHARED
+==============================================================================
+  512 B:
+     0 shared links       70.0 cycles/tx
+     1 shared links       70.0 cycles/tx
+    slope +0.00 cycles per shared link, intercept 70.0, r2 1.00
+    span 0.0 cycles against a noise floor of 0.0
+    SHAPE: FLAT
+  4096 B:
+     0 shared links      108.5 cycles/tx
+     1 shared links      167.9 cycles/tx
+    slope +59.38 cycles per shared link, intercept 108.5, r2 1.00
+    span 59.4 cycles against a noise floor of 0.0
+    SHAPE: SATURATING
+
+==============================================================================
+VERDICT
+==============================================================================
+  size: passed
+  readport: passed
+  RESULT: CONGESTION MEASURED -- shapes ['FLAT', 'SATURATING']
+    512 B: +0.00 cycles per shared link (FLAT, r2 1.00)
+    4096 B: +59.38 cycles per shared link (SATURATING, r2 1.00)
+    NOTE: a coefficient fitted here is `vendor_source`-grade at best -- it is a measurement on one part, not a published number. See docs/plans/cost-model.md's provenance convention before it goes anywhere near unit_costs.yaml.

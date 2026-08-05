@@ -42,6 +42,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tt_sim.network.tt_noc import noc_route_links
+
 # ---------------------------------------------------------------------------
 # What each experiment would show, DECLARED BEFORE ANYTHING WAS RUN.
 # ---------------------------------------------------------------------------
@@ -140,7 +142,15 @@ POSITIVE CONTROL -- two masters READING from one subordinate, sharing that
   fine for a positive control, whose only job is to show the flows really
   contend; the attribution is experiment 2's job. On tt-sim they ARE
   distinguishable, because tt-sim charges nothing whatever for a
-  router-to-router link.""",
+  router-to-router link.
+
+  [ADDENDUM 2026-08-05: tt-sim now charges a router-to-router link its
+  occupancy, and the conclusion above survives with a different reason -- the
+  control still reads 1.48x, unchanged to the digit. Two response streams
+  leaving one NIU are already spaced one occupancy apart by its port, so they
+  reach the shared first link one occupancy apart and it is never busy. The
+  port and the link remain separable on tt-sim; they are still one reading on
+  a card.]""",
     "shared": """\
 EXPERIMENT 2 -- THE COEFFICIENT. Two flows, N FIXED AT 2, positioned so their
   payload paths share 0, 1, 2 ... k router-to-router links.
@@ -174,6 +184,14 @@ EXPERIMENT 2 -- THE COEFFICIENT. Two flows, N FIXED AT 2, positioned so their
     tt-sim it MUST be flat -- the model charges only the issuing NIU's own
     port, and nothing at all for a router-to-router link -- so a non-flat
     simulator reading means the plan is not holding what it claims.
+
+    [ADDENDUM 2026-08-05, and deliberately an addendum: the paragraphs above
+    were written before anything ran and are not edited. The final sentence
+    described tt-sim as it was, and tt-sim has since changed -- the model now
+    charges each router-to-router link its occupancy, so a non-flat simulator
+    reading at a saturating size is the expected one and no longer indicts the
+    plan. Everything above about the CARD is untouched, and the card's answer
+    was SATURATING before the model was built to match it.]
 
   The size axis is its own control: at 64 B a transaction occupies a link for
   one flit against ~90 cycles of issue loop, so the links are ~1 % busy and
@@ -431,24 +449,19 @@ def to_noc_space(coord, noc, grid_x, grid_y):
     return (grid_x - 1 - coord[0], grid_y - 1 - coord[1])
 
 
-def route_links(src, dst, grid_x, grid_y):
-    """The router-to-router links a packet crosses, in order.
-
-    Dimension-ordered X then Y on a directional torus: a packet only ever
-    travels in the increasing direction of its NoC's own coordinates, wrapping
-    past the edge rather than turning round. A link is named by the router it
-    leaves and the axis it leaves on, so ``("X", y, x)`` is the link from
-    ``(x, y)`` to ``((x + 1) % grid_x, y)``.
-    """
-    links = []
-    x, y = src
-    while x != dst[0]:
-        links.append(("X", y, x))
-        x = (x + 1) % grid_x
-    while y != dst[1]:
-        links.append(("Y", x, y))
-        y = (y + 1) % grid_y
-    return tuple(links)
+#: The router-to-router links a packet crosses, in order -- dimension-ordered X
+#: then Y on a directional torus, with a link named by the router it leaves and
+#: the axis it leaves on.
+#:
+#: **It is the simulator's own function**, not a copy of it. This module wrote
+#: its own for a while, because a hop *order* was something only an experiment
+#: planner needed: the network layer knew a hop count and charged a flight time,
+#: and no link had an identity to get wrong. Since ``NocLinkRegistry`` gave links
+#: identities the two have to agree exactly -- a shared-link count measured on
+#: silicon describes a different machine from the modelled one the moment the
+#: planner and the NoC disagree about which link is which -- so there is one
+#: implementation and this is a name for it.
+route_links = noc_route_links
 
 
 #: Direction codes, matching ``perfbench/nocbench/src/kernels/nocbench_layout.h``.

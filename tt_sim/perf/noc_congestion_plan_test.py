@@ -5,9 +5,13 @@ tested here is that it *does* refuse: a plan in which two of {flow count, path
 length, shared links} move together is the same unidentifiable thing tt-metal's
 shipped dataset is, and shipping one would be worse than shipping nothing.
 
-The routing model is cross-checked against ``tt_sim.network.tt_noc`` rather than
-re-derived, so a planner that drifted from the simulator's own hop counting
-fails here instead of quietly reporting agreement with itself.
+The routing model is not cross-checked against ``tt_sim.network.tt_noc`` any
+more, it **is** ``tt_sim.network.tt_noc``: since the simulator started charging
+link occupancy it needs link identities of its own, and a shared-link count
+measured against one naming scheme describes a different machine from a model
+that uses another. The tests below hold that down, and the properties they
+assert about the routing (dimension-ordered, wrapping, mirrored on NoC 1) are
+now assertions about the simulator's behaviour rather than a planner's.
 """
 
 import pathlib
@@ -15,7 +19,7 @@ import pathlib
 import pytest
 import yaml
 
-from tt_sim.network.tt_noc import noc_hop_count
+from tt_sim.network.tt_noc import noc_hop_count, noc_route_links
 from tt_sim.perf import noc_congestion_plan as plan
 
 
@@ -55,6 +59,16 @@ def grid(request, tmp_path):
 
 
 # --- routing ---------------------------------------------------------------
+
+
+def test_the_planner_routes_with_the_simulators_own_function():
+    """Not "agrees with", *is*. Two implementations of dimension-ordered
+    routing would agree on every test anyone thought to write and still be free
+    to disagree about which of two links a packet crossed first — and a link's
+    identity is now what the simulator's congestion model keys on, so the
+    planner's ``shared_payload_links`` column and the model's contention would
+    be counting different things. There is one implementation."""
+    assert plan.route_links is noc_route_links
 
 
 @pytest.mark.parametrize("arch", ["wormhole", "blackhole"])

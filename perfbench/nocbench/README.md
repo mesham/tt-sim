@@ -114,12 +114,17 @@ it is worth reading carefully: a saturating shape means the fitted slope is
 drawn through it. The report prints the per-shared-link means so the step is
 visible; do not lift the slope out of it.
 
-Against the **simulator** a flat shared-link reading is forced: tt-sim charges
-an NIU for its own injection port and nothing whatever for a router-to-router
-link, so two flows sharing links cannot interact. Running it there exercises
-everything except the effect being looked for, and the `readport` control does
-pass there, which is what makes that flat reading a null rather than a dead
-harness.
+Against the **simulator** a flat shared-link reading used to be forced: tt-sim
+charged an NIU for its own injection port and nothing whatever for a
+router-to-router link, so two flows sharing links could not interact, and
+running it there exercised everything except the effect being looked for.
+**Since 2026-08-05 it does model link occupancy** — one free-cycle watermark
+per router-to-router link, the same `isa_doc` flit rate the injection port
+already spent — so the same plan now reads `SATURATING` there too, at a
+transaction size above the issue loop. A flat simulator reading is therefore a
+reading like any other now; check the size before believing it. What has not
+changed is why the controls exist: `readport` passing is still what makes a
+flat reading a null rather than a dead harness.
 
 ### Why the control is a *read*, and why the previous one was withdrawn
 
@@ -480,11 +485,36 @@ four read alike and equal to the shared-link-1 point of experiment 2.
 
 ## What the simulator run shows
 
-tt-sim models no router-to-router congestion, so experiment 2 is forced flat
-there; the point of running it is that everything else is exercised. The
-archived run is `src/nocbench-blackhole-sim.csv` with its analysis in
-`src/nocbench-blackhole-sim.report.txt`, planned against
-`src/nocbench-grid-blackhole-sim.csv`. Reproduce with
+Three archived runs, all planned against `src/nocbench-grid-blackhole-sim.csv`
+and all reproducible with no hardware. The first predates the simulator's link
+model and is kept because it is the control for the other two:
+
+| run | analysis | shared-link verdict |
+| --- | --- | --- |
+| `src/nocbench-blackhole-sim.csv` | `…-sim.report.txt` | `NO CONGESTION EFFECT` — no link modelled |
+| `src/nocbench-blackhole-sim-links.csv` | `…-sim-links.report.txt` | `CONGESTION MEASURED`, `SATURATING` |
+| `src/nocbench-blackhole-sim-links-flat.csv` | `…-flat.report.txt` | the shared-link sweep; controls-free, so `INVALID` by construction |
+
+**The link model reproduces the card's shape, and moves nothing else.** The
+same plan before and after: the hop line `608.3 + 8.95 × hops` (r² 1.00), the
+`size` control at 69.2 / 70.0 / 108.5 cycles/tx and the `readport` control at
+1.48× are **byte-identical**, and the only figure that moves is the one the
+term is about — 4096 B at one shared link, 108.5 → 167.9 cycles/tx, which is
++59.4 against an occupancy of 64. At 512 B it is 70.0 → 70.0, exactly as on
+silicon. The third run sweeps the shared-link count at 32 transactions per
+flow: 75.1 / 132.1 / 137.8 / 138.0 at 0 / 1 / 2 / 3 shared links — a step, then
+flat, with a 1-to-3 span of 10 % of the step that shrinks as the ramp
+amortises (it is 20 % at 8 transactions per flow).
+
+`readport` staying at 1.48× is worth a sentence, because on silicon it is the
+one reading that cannot separate the two resources: two masters reading one
+subordinate contend for that tile's injection port *and* for the first link out
+of it. The model charges only the port — packets leaving one NIU are already
+spaced by it, so the link is never busy when they reach it — which is what
+makes the simulator able to say which resource it is spending where the card
+cannot.
+
+Reproduce with
 
 ```bash
 TT_METAL_HOME=... TT_SIM_TENSIX_COORDS="$(grep -o 'tt_sim_tensix_coords=[^ ]*' plan.csv | cut -d= -f2)" \
@@ -503,8 +533,8 @@ TT_METAL_HOME=... TT_SIM_TENSIX_COORDS="$(grep -o 'tt_sim_tensix_coords=[^ ]*' p
   entirely normal.
 * The `readport` control passes (1.48x) and fails when the mechanism it tests
   is deleted (1.00x). That is the ablation described above, and it is what
-  makes a flat shared-link reading on the simulator a null rather than a
-  non-reading.
+  made a flat shared-link reading on the simulator a null rather than a
+  non-reading back when that reading was forced.
 
 One incidental finding for anyone porting this: tt-sim answers 0 for
 `NOC_CFG(NOC_ID_LOGICAL)`, which is what tt-metal's firmware fills `my_x[]` /

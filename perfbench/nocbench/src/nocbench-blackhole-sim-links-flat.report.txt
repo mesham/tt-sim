@@ -1,0 +1,32 @@
+# nocbench plan -- built by tt_sim.perf.noc_congestion_plan
+# arch=blackhole grid_x=17 grid_y=12 coord_space=noc0
+# *_lx/_ly logical, *_nx/_ny the coordinate a kernel addresses, *_px/_py SoC-physical NoC 0
+# tt_sim_tensix_coords=1-2,2-2,2-4,3-2,5-3,6-2,6-4,7-4,10-4,15-2
+# shared: 4 points, 8 flows
+# measured by nocbench on arch=blackhole magic=0x4E4F4342
+==============================================================================
+VALIDITY
+==============================================================================
+  flows in file           8
+  unmeasured (no stamp)   0
+  coordinate mismatches   0
+  invariant complaints    0
+  multi-flow runs         4, median timed-region overlap 0.99, 0 below 0.5
+
+==============================================================================
+SHARED
+==============================================================================
+  4096 B:
+     0 shared links       75.1 cycles/tx
+     1 shared links      132.1 cycles/tx
+     2 shared links      137.8 cycles/tx
+     3 shared links      138.0 cycles/tx
+    slope +19.42 cycles per shared link, intercept 91.6, r2 0.67
+    SHAPE: SATURATING
+
+==============================================================================
+VERDICT
+==============================================================================
+  size: NOT RUN -- without it a flat congestion reading means nothing
+  readport: NOT RUN -- without it a flat congestion reading means nothing
+  RESULT: INVALID -- the controls did not move, so a flat congestion reading is indistinguishable from a harness that measured nothing

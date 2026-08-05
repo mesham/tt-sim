@@ -83,6 +83,119 @@ def noc_hop_count(src, dst, grid_x, grid_y):
     return (dst[0] - src[0]) % grid_x + (dst[1] - src[1]) % grid_y
 
 
+def noc_route_links(src, dst, grid_x, grid_y):
+    """The router-to-router links a packet crosses, **in order**.
+
+    :func:`noc_hop_count` is this function's length, and for a long time the
+    length was all the network layer committed to: a hop *count* decides a
+    flight time, and a flight time is all the model spent. A link's *identity*
+    needs an order as well, and this is where the network layer commits to one.
+
+    Dimension-ordered X then Y on a directional torus — the same routing the
+    hop count already assumes (it sums the two axes' forward distances, which
+    is only the distance travelled if the packet turns exactly once). A link is
+    named by the router it leaves and the axis it leaves on, so ``("X", y, x)``
+    is the link from ``(x, y)`` to ``((x + 1) % grid_x, y)`` and ``("Y", x, y)``
+    the link from ``(x, y)`` to ``(x, (y + 1) % grid_y)``. Two packets cross the
+    same link exactly when they produce the same tuple, which is what makes the
+    link a shareable resource rather than a per-packet fact.
+
+    Coords are in one NoC's own space, exactly as for :func:`noc_hop_count`, so
+    NoC 1's mirrored coords give NoC 1's (opposite) route with no special case.
+    ``tt_sim.perf.noc_congestion_plan.route_links`` **is** this function — the
+    experiment planner and the simulator have to name links identically or a
+    measured shared-link count describes a different machine from the modelled
+    one.
+    """
+    links = []
+    x, y = src
+    while x != dst[0]:
+        links.append(("X", y, x))
+        x = (x + 1) % grid_x
+    while y != dst[1]:
+        links.append(("Y", x, y))
+        y = (y + 1) % grid_y
+    return tuple(links)
+
+
+class NocLinkRegistry:
+    """One free-cycle watermark per router-to-router link, on one NoC.
+
+    The shared half of the bandwidth model. ``NUI._tx_free_cycle`` is the same
+    object one level up — "the cycle this link finishes injecting what is
+    already on it" — and the only structural difference is *ownership*: an
+    injection port belongs to one NIU, while a router-to-router link is crossed
+    by every tile whose route passes through it. So this lives on the **device**
+    (one instance per NoC, handed to every NUI as it is registered) rather than
+    on an NIU, because two NIUs contending on it is the entire point.
+
+    That is also the whole mechanism. No arbitration policy, no flow census, no
+    notion of which flows are "saturating": a packet takes the link when it is
+    free and waits when it is not, and a flow that under-uses a link simply
+    never finds it busy. That is why a 64-byte packet — one flit against a
+    ~40-cycle issue loop — measures zero effect on silicon and costs zero here,
+    with no threshold anybody had to choose.
+
+    Cross-thread safe because ``MultiTileClock`` can tick heavy tiles on worker
+    threads (opt-in; the default pump is sequential and therefore
+    deterministic). Under threading the *order* two tiles claim a link in is
+    the scheduler's, which is the same non-determinism inbound packet ordering
+    already has.
+    """
+
+    def __init__(self):
+        #: ``{link: cycle}`` — when each link finishes carrying what is on it.
+        #: Sparse: a link nothing has crossed has no entry and reads 0.
+        self._free_cycle = {}
+        self._lock = threading.Lock()
+        #: Links claimed, and how many of those found the link busy. Diagnostic
+        #: only — but ``waits == 0`` is the property that says "this workload
+        #: has no link contention", which is what makes the term's effect on a
+        #: single-flow workload checkable rather than assumed.
+        self.claims = 0
+        self.waits = 0
+        self.cycles_waited = 0
+
+    def free_cycle(self, link):
+        """The cycle ``link`` next comes free; 0 for one nothing has crossed."""
+        return self._free_cycle.get(link, 0)
+
+    def claim(self, links, start_cycle, occupancy):
+        """Push ``occupancy`` cycles of traffic along ``links`` from ``start_cycle``.
+
+        Returns the cycles the packet spent waiting for a busy link — the delay
+        to add to its arrival. The head flit walks the route in order, waiting
+        at each link until it is free and then holding it for the whole packet:
+
+        * the wait is **cumulative** along the route (a packet held up at the
+          first link reaches the second one later), which is what makes a
+          contended route cost the arrival, not just the link;
+        * each link is claimed **once per packet**, so a multicast that the
+          routers fan out must pass its whole (de-duplicated) tree here in one
+          call rather than one call per modelled destination.
+
+        Propagation between links is deliberately *not* added to the walk: the
+        per-hop latency is already charged, once, by ``NocCostModel``. Adding it
+        again here would double-count it, and it cannot change the steady-state
+        answer — which is a throughput, not a phase.
+        """
+        if occupancy is None or not links:
+            return 0
+        waited = 0
+        at = start_cycle
+        with self._lock:
+            for link in links:
+                free = self._free_cycle.get(link, 0)
+                if free > at:
+                    waited += free - at
+                    at = free
+                    self.waits += 1
+                self._free_cycle[link] = at + occupancy
+            self.claims += len(links)
+            self.cycles_waited += waited
+        return waited
+
+
 class NoCResponseError(RuntimeError):
     """A response arrived that no outstanding request accounts for.
 
@@ -685,10 +798,27 @@ class NUI(MemMapable, Clockable):
             # for the whole fan-out and every copy shares the wait. Charging
             # each modelled unicast its own injection time would invent
             # serialisation the hardware does not have.
-            queued = self.nui.claim_injection_port(len(data) if data else 0)
+            payload_bytes = len(data) if data else 0
+            queued = self.nui.claim_injection_port(payload_bytes)
 
-            for dest_coord in destinations:
-                destination = self.nui.resolve_destination(dest_coord)
+            # ...and the same argument, one level out, for every link on the
+            # way. A multicast crosses a *tree*: the union of the
+            # dimension-ordered routes to each destination, which is exactly
+            # what those routes' links de-duplicate to. Claiming a link once
+            # per destination instead would serialise the fan-out against
+            # itself on the launch-message path every tt-metal program uses --
+            # the same over-charge ``claim_injection_port`` exists to avoid,
+            # one resource further along. First-appearance order is kept so the
+            # tree is walked outwards from this NIU, as the packet does.
+            endpoints = [self.nui.resolve_destination(c) for c in destinations]
+            tree = dict.fromkeys(
+                link
+                for destination in endpoints
+                for link in self.nui.route_links_to(destination)
+            )
+            link_wait = self.nui.claim_route_links(tuple(tree), payload_bytes, queued)
+
+            for destination in endpoints:
                 seq = self.nui.next_request_seq()
                 write_req = NUI.NoCDataRequest(
                     self.ret_addr_low,
@@ -710,7 +840,9 @@ class NUI(MemMapable, Clockable):
                     (noc_cmd_wr_inline, noc_cmd_resp_marked),
                     seq,
                 )
-                self.nui.send_to(destination, write_req, queued=queued)
+                self.nui.send_to(
+                    destination, write_req, queued=queued, link_wait=link_wait
+                )
 
             if self.nui.snoop:
                 print(
@@ -1012,6 +1144,12 @@ class NUI(MemMapable, Clockable):
         #: point; never read without a latency model, so it stays 0 for every
         #: run with the cost model off.
         self._tx_free_cycle = 0
+        #: The device's :class:`NocLinkRegistry` for this NoC, or ``None``. Set
+        #: by ``TT_Device._register_tile_internals``; ``None`` for a directly
+        #: constructed NUI (unit tests, ``driver/simple``), which therefore
+        #: charges nothing for a router-to-router link — the same shape as
+        #: :attr:`noc_latency` being ``None``.
+        self.noc_link_registry = None
         # Guards cross-thread appends to noc_new_requests_to_handle from
         # source tiles' transmit() calls and the owning tile's per-cycle
         # swap in clock_tick(). The destination then drains
@@ -1467,7 +1605,7 @@ class NUI(MemMapable, Clockable):
                 self.noc_requests_to_handle.extend(self.delayed_arrivals.pop(c))
             self.next_arrival = min(self.delayed_arrivals, default=None)
 
-    def send_to(self, destination, packet, queued=None):
+    def send_to(self, destination, packet, queued=None, link_wait=None):
         """Send ``packet`` from this NIU to ``destination``, timing the flight.
 
         The one place a NoC packet's latency is decided, for requests and
@@ -1477,20 +1615,74 @@ class NUI(MemMapable, Clockable):
         confusion :meth:`send_response` exists to prevent.
 
         The size of the packet is charged here too, and it is a different shape
-        from the distance: see :meth:`_bandwidth_delay`. ``queued`` is a
-        pre-claimed injection-port delay, for the multicast fan-out — see
-        :meth:`claim_injection_port`.
+        from the distance: see :meth:`_bandwidth_delay`. ``queued`` and
+        ``link_wait`` are pre-claimed occupancies, for the multicast fan-out —
+        see :meth:`claim_injection_port` and :meth:`claim_route_links`.
         """
         model = self.noc_latency
         if model is None:
             destination.transmit(packet)
-        else:
-            destination.transmit(
-                packet,
-                self._bandwidth_delay(
-                    packet, self.flight_cycles_to(destination), queued
-                ),
+            return
+        payload = _payload_bytes(packet)
+        if queued is None:
+            queued = self.claim_injection_port(payload)
+        if link_wait is None:
+            link_wait = self.claim_route_links(
+                self.route_links_to(destination), payload, queued
             )
+        destination.transmit(
+            packet,
+            self._bandwidth_delay(
+                packet, self.flight_cycles_to(destination), queued, link_wait
+            ),
+        )
+
+    def route_links_to(self, destination):
+        """The router-to-router links a packet from here to ``destination``
+        crosses, in order — or ``()`` when nothing shares links.
+
+        Both coords are read in this NoC's own space, exactly as
+        :meth:`flight_cycles_to` reads them, so the route and the hop count it
+        is charged for are the same journey by construction.
+        """
+        if self.noc_link_registry is None or self.noc_latency is None:
+            return ()
+        return noc_route_links(
+            (self.x_coord, self.y_coord),
+            _endpoint_noc_coord(destination),
+            self.noc_grid_x,
+            self.noc_grid_y,
+        )
+
+    def claim_route_links(self, links, payload_bytes, queued=0):
+        """Hold each of ``links`` long enough to carry ``payload_bytes``.
+
+        The router-to-router half of what :meth:`claim_injection_port` does for
+        this NIU's own port, and the same number spent: one flit per cycle per
+        axis (``noc.hops.router_to_router.throughput_flits_per_cycle``,
+        ``isa_doc``), which the model already charges once at the injecting NIU
+        and now charges on each link the packet crosses.
+
+        ``queued`` is how long the packet waited for the injection port, which
+        is when its head actually reaches the first router — a packet held at
+        the port arrives at the link later and is correspondingly less likely
+        to find it busy. Returns the cycles it then waited for a busy link.
+
+        **This is inert for a single flow**, which is the property that keeps
+        it from being a second charge for the same thing: a flow's own packets
+        leave its port one occupancy apart, so they reach each link exactly one
+        occupancy apart and never queue behind themselves. Only *another
+        tile's* traffic on the same link costs anything, which is precisely the
+        resource the silicon measurement resolves.
+        """
+        registry = self.noc_link_registry
+        if registry is None or not links:
+            return 0
+        now = self._current_cycle()
+        if now is None:
+            return 0
+        occupancy = self.noc_latency.serialisation_cycles(payload_bytes)
+        return registry.claim(links, now + queued, occupancy)
 
     def claim_injection_port(self, payload_bytes):
         """Hold this NIU's outbound link long enough to inject ``payload_bytes``.
@@ -1519,7 +1711,7 @@ class NUI(MemMapable, Clockable):
         self._tx_free_cycle = now + queued + occupancy
         return queued
 
-    def _bandwidth_delay(self, packet, flight, queued=None):
+    def _bandwidth_delay(self, packet, flight, queued=None, link_wait=None):
         """Add the bandwidth terms to a packet's ``flight`` time.
 
         Bandwidth is not a per-packet latency, it is an **occupancy of a
@@ -1545,10 +1737,15 @@ class NUI(MemMapable, Clockable):
         (Two *different* destinations can still reorder — that is real, and
         :meth:`take_outstanding_noc_request` is what makes it safe.)
 
-        Only this NIU's own injection link is modelled. The router-to-router
-        links a packet crosses on the way are not, because a packet only waits
-        on those behind *other tiles'* traffic, which is arbitration, which is
-        the congestion term the ISA docs decline to quantify.
+        Since 2026-08-05 there is a **third** place the same occupancy is
+        spent, and it is not a third number: each router-to-router link the
+        packet crosses is held for the same N cycles, by
+        :meth:`claim_route_links`, and ``link_wait`` is how long this packet
+        waited for one of them to come free. That charge is zero for a single
+        flow — a flow's own packets are already one occupancy apart when they
+        leave the port — and non-zero only where another tile's traffic crosses
+        the same link, which is the resource the Blackhole measurement in
+        ``docs/bh_arch.md`` §4.2 resolves.
         """
         occupancy = self.noc_latency.serialisation_cycles(_payload_bytes(packet))
         if occupancy is None:
@@ -1559,7 +1756,9 @@ class NUI(MemMapable, Clockable):
             # up, and :meth:`claim_injection_port` answers 0 for it. The tail
             # is still charged; the queue is not.
             queued = self.claim_injection_port(_payload_bytes(packet))
-        return (0 if flight is None else flight) + queued + occupancy - 1
+        if link_wait is None:
+            link_wait = 0
+        return (0 if flight is None else flight) + queued + link_wait + occupancy - 1
 
     def tail_cycles_for(self, packet):
         """Cycles ``packet``'s last flit arrives after its first, or 0.

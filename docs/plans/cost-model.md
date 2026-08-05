@@ -4036,6 +4036,201 @@ EFFECT`, unchanged, which is the forced null it has always been.
 - **Zero changes to any cycle count, to `PROVENANCE_RANK`, or to the
   simulator.** Zero `estimated` entries, still.
 
+## The congestion step, wired: one number, spent a third time
+
+The previous instalment ended with "the quantity is measured, the number is
+already sourced, and the model now has somewhere to put it and does not yet
+have the plumbing to get it there", and named three build items. They are
+built. **No number entered any table**, `noc.congestion` is still
+`provenance: unknown`, and `PROVENANCE_RANK` is untouched — what changed is
+where `noc.hops.router_to_router.throughput_flits_per_cycle: 1` (`isa_doc`,
+in the table since the first instalment) is *spent*. It was charged once, at
+the injecting NIU. It is now charged on each router-to-router link a packet
+crosses, which is the same occupancy on the resource the silicon measurement
+resolves.
+
+### The three blockers, and what each turned into
+
+**1. There was no per-link state anywhere, and it could not go on an NIU.**
+`NocLinkRegistry` is one free-cycle watermark per link — structurally the same
+object `NUI._tx_free_cycle` already was, differing only in *ownership*. It
+lives on `TT_Device`, one instance per NoC, created before any tile is
+registered and handed to each NUI by `_register_tile_internals`. That is the
+single fan-out point, so a worker the wire bridge materialises later
+(`add_tensix_tile`) joins the same registry rather than quietly getting a
+private one and ceasing to contend with anything — which has its own test,
+because it is the failure mode that would look like the term simply not
+working.
+
+Two registries, not one: NoC 0 and NoC 1 are separate networks whose links are
+named by the same tuples, and a shared registry would have them arbitrating
+against each other.
+
+**2. The hop *order* is now the network layer's, and there is exactly one of
+it.** `noc_route_links` sits next to `noc_hop_count` — dimension-ordered X then
+Y on a directional torus, a link named by the router it leaves and the axis it
+leaves on. The planner's `route_links` **is** that function, by assignment, and
+`test_the_planner_routes_with_the_simulators_own_function` asserts the
+identity rather than the agreement. Two implementations of "dimension-ordered"
+would pass every test anyone thought to write and still be free to disagree
+about which of two links a packet crossed first; a `shared_payload_links`
+column counted one way against a model that contends the other way is a
+measurement of a different machine.
+
+This does make routing order load-bearing for every simulated cycle for the
+first time, and the honest statement about that is that the *count* has been
+load-bearing since the hop model landed and the order adds no new degree of
+freedom: `len(route_links(a, b)) == noc_hop_count(a, b)` on both architectures,
+pinned, and the flight time a packet is charged is computed from the same pair
+of coords in the same NoC's own space as its route.
+
+**3. The multicast claims a tree, once.** `handle_multicast_write_transfer`
+already claimed the injection port once for the whole fan-out; it now
+de-duplicates the routes to every destination into the union — which for
+dimension-ordered routing *is* the multicast tree — and claims that once, with
+first-appearance order preserved so the walk goes outwards from the NIU as the
+packet does. For the 4×3 rectangle in the test that is 12 links where twelve
+unicasts would have claimed 42, and the launch-message path every tt-metal
+program uses is the reason it had to be solved before the charge was turned on
+rather than after.
+
+### Inert for a single flow, which is why it may be turned on at all
+
+The property that stops this being a second charge for the same bytes: a
+flow's packets leave its injection port exactly one occupancy apart, so they
+reach every link on their route one occupancy apart and never queue behind
+themselves. Eight 2 KiB packets over a ten-hop route make eighty link claims
+and wait zero cycles. Only *another tile's* traffic costs anything.
+
+The wait is cumulative along the route — a packet held at one link reaches the
+next one later — because the delay has to reach the packet's *arrival*, not
+just the link. Propagation between links is deliberately not added to that
+walk: the per-hop latency is already charged once by `NocCostModel`, and adding
+it here would double-count a published number to no effect, since the
+steady-state answer is a throughput and not a phase.
+
+### Measured: the card's shape, twice, and no fitted parameter
+
+**At the NIU registers**, with a 40-cycle issue loop standing in for the
+benchmark's 39.8, two flows on Blackhole whose payload routes share one row-2
+link:
+
+| transaction | occupancy | 0 shared | 1 shared | delta | delta ÷ occupancy | card's ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| 64 B | 1 | 50.0 | 50.0 | 0.0 | — | — |
+| 512 B | 8 | 50.0 | 50.0 | 0.0 | — | — |
+| 2048 B | 32 | 52.5 | 75.0 | 22.5 | 0.70 | 0.88 |
+| 4096 B | 64 | 75.0 | 140.0 | 65.0 | **1.02** | 0.99 |
+| 8192 B | 128 | 140.0 | 267.5 | 127.5 | **1.00** | 0.97 |
+
+Same shape as `docs/bh_arch.md` §4.2: a step at the first shared link, sized
+like one transaction's occupancy, **exactly nothing below the issue loop**, and
+no threshold anybody chose — a flow that under-uses a link never finds it busy.
+
+**And end to end**, through `perfbench/nocbench` — a real tt-metal program, a
+real kernel, the wire bridge and the whole simulated NoC — against the archived
+run of the *same plan* from before the term existed:
+
+| | before | after |
+| --- | --- | --- |
+| hop line | `608.3 + 8.95 × hops` (r² 1.00) | identical |
+| `size` control | 69.2 / 70.0 / 108.5 cycles/tx | identical |
+| `readport` control | 1.48× | identical |
+| `shared`, 512 B | 70.0 → 70.0, `FLAT` | identical |
+| `shared`, 4096 B | 108.5 → 108.5, `FLAT` | 108.5 → **167.9**, `SATURATING` |
+| verdict | `NO CONGESTION EFFECT` | **`CONGESTION MEASURED`** |
+
++59.4 cycles per transaction against an occupancy of 64, and **every
+uncontended figure in the file byte-identical** — which is the inertness claim
+above, measured rather than argued. `readport` staying at 1.48× is the sharpest
+of those: two masters reading one subordinate contend on that tile's injection
+port *and* on the first link out of it, and the model charges only the port,
+because packets leaving one NIU are already spaced by it. On silicon those two
+resources are one reading; here they are separable, and this says which one
+tt-sim is spending.
+
+A second run at 32 transactions per flow sweeps the shared-link count:
+**75.1 / 132.1 / 137.8 / 138.0** cycles/tx at 0 / 1 / 2 / 3 shared links. The
+1-to-3 span is 6 cycles against a 57-cycle step — 10 %, converging as the ramp
+amortises (it was 22 at 8 transactions per flow) and the same order as the
+card's own 6 % residual over its seven points. **A step, not a slope.**
+
+The arithmetic check from the previous instalment survives contact:
+`max(2 × occupancy, floor)` predicts the contended column at 128 against 140
+measured at 4096 B and 256 against 267.5 at 8192 B, with the same per-packet
+overhead the uncontended column carries. Nothing was fitted; the 64 B/cycle is
+`flit_bits: 512` at `throughput_flits_per_cycle: 1`, both `isa_doc`.
+
+### The gate: PASS, and byte-identical, because the term never fires in-tree
+
+`driver/tests/cost_model_gate.py` → **`RESULT: PASS`**, 39 guards discovered,
+33 budget-independent guards run under the model, 6 budget-dependent ones
+proven, 1 excluded. Every proven guard came out clean at **the same poll-budget
+rung, with the same data-READ counts, as the unmodified tree** — checked by
+running the proof stage in a `git worktree` at `HEAD` and diffing, rather than
+against the table earlier in this file, which is two instalments old.
+
+`six` needs 8×, `one`/`three`/`four`/`four-fp`/`nine`/`loopback`/`wh offline`
+4×, the rest 2×, `bh dramtop` 1×. Not one of them moved.
+
+**The reason they did not is worth stating rather than being pleased about**:
+the term does not fire on any in-tree workload. Instrumenting the registries
+over `blackhole/six` — the heaviest multi-core guard in the tree — gives 3,960
+link claims and **zero waits**. Same for `matmulblock` on both architectures.
+These workloads' concurrent traffic is small packets spread thin; nothing in
+the tree puts two saturating flows across one link, which is exactly the
+configuration `nocbench` had to be written to create. So the gate's verdict
+here is "the term is value-safe and costs nothing where nothing is contended",
+and the evidence that it is not dead code is the nocbench run above, not the
+gate.
+
+With `TT_SIM_COST_MODEL` unset, **exactly nothing happens**: `send_to` takes
+the same `model is None` branch it always did, `route_links_to` returns `()`,
+and the registry is constructed and never touched. There is a test that asserts
+all three counters stay at zero.
+
+### What broke
+
+Three pieces of prose that were true when written and became false the moment
+the term was wired, all of them saying "against tt-sim a shared-link reading
+MUST be flat":
+
+- `noc_congestion_sweep`'s module docstring and its `NO CONGESTION EFFECT`
+  verdict text, both rewritten — a flat simulator reading is now a reading like
+  any other, and an operator being told it is forced would mis-file a real one.
+- `HYPOTHESES["shared"]` in `noc_congestion_plan`, which is a **pre-declared
+  prediction** and is therefore *not* edited. It gained a dated addendum
+  underneath saying which sentence was superseded and that the prediction about
+  the card is untouched. The card's answer was `SATURATING` before this model
+  was built to match it, and the ordering is the whole reason the pre-declaration
+  is kept in the source.
+- `perfbench/nocbench/README.md`'s two "forced flat" passages and its "What the
+  simulator run shows" section.
+
+Nothing else broke. 983 tests pass (967 before, 16 added), ruff is clean, and
+`unsourced()` still returns the same entries — `noc.congestion` among them.
+
+### What changed in the repository
+
+- `NocLinkRegistry` and `noc_route_links` in `tt_sim/network/tt_noc.py`;
+  `NUI.route_links_to` / `claim_route_links`; `send_to` and `_bandwidth_delay`
+  gained a `link_wait`; the multicast path claims its tree once.
+- `TT_Device.noc_link_registries`, handed out in `_register_tile_internals`.
+- `tt_sim/perf/noc_congestion_plan.route_links` is now the simulator's
+  function rather than a second copy of it.
+- `tt_sim/network/noc_link_congestion_test.py` — 16 tests: one per blocker,
+  the inertness property, the opt-in, the registry's own arithmetic, and the
+  three measurement shapes (step, absence below the issue loop, flatness
+  beyond the first link).
+- Two archived simulator runs in `perfbench/nocbench/src/`, both self-describing
+  and both reproducible with no hardware: `nocbench-blackhole-sim-links.csv`
+  (the certified plan, with controls) and `-flat.csv` (the shared-link sweep,
+  controls-free and `INVALID` by construction, like the card's own size sweep).
+- **Zero new numbers, zero `estimated` entries, `noc.congestion` still
+  `unknown`** — and it is still `unknown` *for* virtual-channel arbitration,
+  which §4.3 measured at one fiftieth of this effect and which nothing here
+  models.
+
 ## Using it, when the time comes
 
 ```python
