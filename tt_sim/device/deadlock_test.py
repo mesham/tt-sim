@@ -27,6 +27,7 @@ from tt_sim.arch import WORMHOLE_PROFILE
 from tt_sim.device.blackhole import Blackhole
 from tt_sim.device.deadlock import (
     _CONFIRM_TICKS,
+    _WEDGE_CONFIRM_CYCLES,
     DEFAULT_UNIT_STALL_THRESHOLD,
     DeadlockDetector,
     deadlock_config_from_env,
@@ -511,6 +512,146 @@ def test_reports_a_really_wedged_unpacker(capsys):
     assert "[UNIT STALL" in err, err
     assert "UNPACR_NOP from thread 0" in err
     assert "waiting for SrcB bank 0" in err
+
+
+def test_unit_stall_latency_does_not_depend_on_the_deadlock_window(capsys):
+    """The two thresholds are independent knobs, and must behave like it.
+
+    The arming pass used to ride the *global* watchdog's cadence, so end-to-end
+    latency was ``unit_stall_threshold + deadlock_threshold / 8`` and a user who
+    lowered ``TT_SIM_UNIT_STALL_THRESHOLD`` to catch a short wedge could not
+    make the report arrive any sooner — the fix that costs nothing while
+    nothing is blocked, because arming only walks units.
+    """
+    detector = DeadlockDetector(
+        1_000_000,  # a global window far larger than the unit-stall one
+        True,
+        [],
+        [],
+        unit_stall_threshold=UNIT_STALL_THRESHOLD,
+    )
+    _watch(detector, _FakeBlockedUnit())
+
+    _pump(detector, 3 * UNIT_STALL_THRESHOLD)
+
+    reported = re.findall(r"\[UNIT STALL cycle=(\d+)\]", capsys.readouterr().err)
+    assert reported, "no report at all — the arming pass is still coupled"
+    first = int(reported[0])
+    assert first <= UNIT_STALL_THRESHOLD + detector.unit_stall_arm_interval + 1
+
+
+class _FakeResetTile:
+    """A tile whose baby cores are all in soft reset, or all out of it."""
+
+    def __init__(self, in_reset):
+        self.in_reset = in_reset
+
+    def set(self, in_reset):
+        self.in_reset = in_reset
+
+
+def _detector_with_a_fake_tile(in_reset=False, threshold=UNIT_STALL_THRESHOLD):
+    detector = _detector_with_unit_stall_check(threshold)
+    state = _FakeResetTile(in_reset)
+    detector._tiles_by_coord[(1, 1)] = (state, [])
+    detector._tile_fully_in_reset = lambda coord: state.in_reset
+    return detector, state
+
+
+def test_reports_a_unit_left_blocked_when_the_whole_tile_goes_into_reset(capsys):
+    """The terminal condition, which needs no threshold to be trustworthy.
+
+    Handing a Src bank back takes an instruction and no thread can issue one
+    from reset, so a unit still blocked here can never be satisfied. That is a
+    proof rather than a heuristic, and it fires immediately — which is what
+    makes a *short* wedge reproduction (one that ends long before any cycle
+    threshold could elapse) visible at all.
+    """
+    detector, state = _detector_with_a_fake_tile(in_reset=False)
+    _watch(detector, _FakeBlockedUnit())
+
+    half = UNIT_STALL_THRESHOLD // 4  # far short of the cycle threshold
+    for cycle in range(half):
+        detector.tick(cycle)
+    assert "[UNIT WEDGED" not in capsys.readouterr().err
+    state.set(True)
+    for cycle in range(half, 2 * half):
+        detector.tick(cycle)
+
+    err = capsys.readouterr().err
+    assert "[UNIT WEDGED" in err, err
+    assert "every baby core on the tile in soft reset" in err
+    assert "UNPACR_NOP from thread 0" in err
+    assert "waiting for SrcB bank 0" in err
+
+
+def test_quiet_when_a_unit_clears_before_the_tile_settles_into_reset(capsys):
+    """The one way a *correct* workload could reach the terminal check.
+
+    A backend instruction already in flight when the reset lands can still hand
+    the bank back. The grace period covers that; a unit that clears inside it
+    must not be called wedged.
+    """
+    detector, state = _detector_with_a_fake_tile(in_reset=False)
+    unit = _FakeBlockedUnit()
+    _watch(detector, unit)
+
+    quarter = UNIT_STALL_THRESHOLD // 4
+    for cycle in range(quarter):
+        detector.tick(cycle)
+    state.set(True)
+    for cycle in range(quarter, quarter + 8):  # well inside the grace period
+        detector.tick(cycle)
+    unit.blocked = False
+    for cycle in range(quarter + 8, 2 * quarter):
+        detector.tick(cycle)
+
+    assert "[UNIT WEDGED" not in capsys.readouterr().err
+
+
+@DEVICES
+def test_a_really_wedged_unpacker_on_a_reset_tile_is_reported_at_once(
+    capsys, device_class
+):
+    """The whole path, on a real device: real unpacker, real soft-reset register.
+
+    A launch ends with every baby core back in soft reset, and the unpacker here
+    is in the acquire-without-release state the Blackhole ``UNPACR_NOP`` bug
+    leaves behind. Nothing can hand that Src bank back any more, so this is
+    reported inside the grace period — **far** short of the cycle threshold,
+    which is the point: a minimal reproduction of the bug finishes long before
+    any threshold could elapse, and that is exactly when someone is looking.
+    """
+    device, coord, detector = _device_with_watchdog(device_class)
+    detector.unit_stall_enabled = True
+    detector.unit_stall_threshold = UNIT_STALL_THRESHOLD
+    detector.unit_stall_arm_interval = UNIT_STALL_THRESHOLD // 8
+    _watch(detector, _wedged_unpacker(), coord=coord)
+
+    device.run(4 * _WEDGE_CONFIRM_CYCLES)  # << UNIT_STALL_THRESHOLD
+
+    err = capsys.readouterr().err
+    assert "[UNIT WEDGED" in err, err
+    assert "every baby core on the tile in soft reset" in err
+    assert "waiting for SrcB bank 0" in err
+    assert "[UNIT STALL" not in err  # the cycle threshold is nowhere near
+
+
+def test_wedge_report_is_disabled_with_the_unit_stall_check(capsys):
+    detector = DeadlockDetector(
+        THRESHOLD,
+        True,
+        [],
+        [],
+        unit_stall_enabled=False,
+        unit_stall_threshold=UNIT_STALL_THRESHOLD,
+    )
+    detector._tile_fully_in_reset = lambda coord: True
+    _watch(detector, _FakeBlockedUnit())
+
+    _pump(detector, 20 * UNIT_STALL_THRESHOLD)
+
+    assert "[UNIT WEDGED" not in capsys.readouterr().err
 
 
 def test_unit_stall_config_from_env():

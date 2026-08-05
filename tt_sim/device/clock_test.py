@@ -319,10 +319,15 @@ def test_a_fully_dormant_device_costs_nothing_per_cycle(monkeypatch):
     One tick per tile settles the dormancy decision and the remaining ~10^6
     cycles are strided over — except that the deadlock watchdog names a wake
     cycle of its own (``MultiTileClock.on_tick_wake``), so the pump also stops
-    once per sample interval. Without those stops a wedged-but-dormant device
-    would never be sampled at all; see ``tt_sim/device/deadlock.py``. It is
-    one visit per ``threshold // 8`` cycles, i.e. 160 over this run, so the
-    per-cycle cost is still nothing.
+    at the watchdog's cadence. Without those stops a wedged-but-dormant device
+    would never be sampled at all; see ``tt_sim/device/deadlock.py``.
+
+    The cadence is the *finer* of the detector's two: the global signature's
+    ``TT_SIM_DEADLOCK_THRESHOLD // 8`` and the per-unit check's own
+    ``TT_SIM_UNIT_STALL_THRESHOLD // 8``. The second has to be its own knob —
+    riding the first made detection latency depend on an unrelated threshold —
+    and with the shipped defaults it is the finer one, so this run stops 800
+    times rather than 160. Still 0.08 % of cycles, i.e. still nothing.
     """
     monkeypatch.setenv("TT_SIM_PUMP_STRIDE", "1")
     device = _blackhole_with_tensix()
@@ -330,9 +335,12 @@ def test_a_fully_dormant_device_costs_nothing_per_cycle(monkeypatch):
     device.run(1_000_000)
 
     pump = device.clocks[0]
+    detector = device.deadlock_detector
     assert pump.clock_tick_num == 1_000_000
-    samples = 1_000_000 // device.deadlock_detector.sample_interval
+    cadence = min(detector.sample_interval, detector.unit_stall_arm_interval)
+    samples = 1_000_000 // cadence
     assert pump.stride_skipped_cycles == 1_000_000 - samples
+    assert samples * 1000 < 1_000_000  # "nothing per cycle", stated as a bound
     for tile in device.tile_directory.values():
         assert tile.clock.dormant_cycles == 1_000_000 - 1
 

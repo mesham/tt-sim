@@ -32,13 +32,13 @@ TIMEOUT="${TT_SIM_EXAMPLE_TIMEOUT:-300}"
 SUCCESS="Completed successfully on the device"
 
 # example : Wormhole TT_SIM_TENSIX_COORDS (logical (x,y) -> physical (x+1,y+1);
-# "nine" bridges two tiles).
+# "nine" and "pipestall" bridge two tiles).
 declare -A COORDS=(
   [one]="1-1"   [two]="1-1"     [three]="1-1"  [four]="1-1"  [four-fp]="1-1"
   [five]="1-1"  [five-fp]="1-1" [six]="1-1"    [eight]="1-1" [loopback]="1-1"
-  [nine]="1-1,2-1"
+  [nine]="1-1,2-1" [pipestall]="1-1,2-1"
 )
-ORDER=(one two three four four-fp five five-fp six eight nine loopback)
+ORDER=(one two three four four-fp five five-fp six eight nine pipestall loopback)
 [ "$#" -gt 0 ] && ORDER=("$@")
 
 mkdir -p "$TRACES"

@@ -47,9 +47,10 @@ RUN_TIMEOUT = int(os.environ.get("TT_SIM_EXAMPLE_TIMEOUT", "260"))
 # (example directory, physical Tensix coords the program launches on). Coords
 # are PHYSICAL NoC coords (see docs/running-tt-metal-on-the-simulator.md);
 # logical (col,row) -> physical (col+1,row+1). Every example runs on the
-# default single tile "1-1" except ``nine``, which bridges a CB across two
-# tiles (logical (0,0)+(1,0) -> physical 1-1 and 2-1). The exact coords must be
-# materialised, so we pass TT_SIM_TENSIX_COORDS rather than a bare count.
+# default single tile "1-1" except ``nine`` and ``pipestall``, which bridge a CB
+# across two tiles (logical (0,0)+(1,0) -> physical 1-1 and 2-1). The exact
+# coords must be materialised, so we pass TT_SIM_TENSIX_COORDS rather than a
+# bare count.
 EXAMPLES = [
     ("one", "1-1"),
     ("two", "1-1"),
@@ -61,6 +62,7 @@ EXAMPLES = [
     ("six", "1-1"),
     ("eight", "1-1"),
     ("nine", "1-1,2-1"),
+    ("pipestall", "1-1,2-1"),
     ("loopback", "1-1"),
 ]
 

@@ -62,10 +62,10 @@ directory** (the host program refers to its kernels by the relative path
 
 **Worker coordinates differ per arch.** A program's logical core `(col,row)` maps
 to a physical NoC coord; that mapping is `+ (1,1)` on Wormhole and `+ (1,2)` on
-Blackhole. Every bundled example runs on the single default tile except `nine`,
-which bridges a CB across two tiles:
+Blackhole. Every bundled example runs on the single default tile except `nine`
+and `pipestall`, which bridge a CB across two tiles:
 
-| | single-tile examples | `nine` (two-tile) |
+| | single-tile examples | `nine` / `pipestall` (two-tile) |
 | --- | --- | --- |
 | **Wormhole** | `1-1` | `1-1,2-1` |
 | **Blackhole** | `1-2` | `1-2,2-2` |
@@ -143,6 +143,7 @@ Each `<name>/src/` is a host program (`<name>.cpp`), a `CMakeLists.txt`, and a
 * **six** — single-core 128³ bf16 matmul on the matrix unit, validated against a CPU golden by Pearson correlation (bf16 + HiFi4 isn't bit-exact).
 * **eight** — elementwise add on BRISC only, issuing its two DRAM reads with distinct NoC transaction IDs and barriering on them out of order.
 * **nine** — two-tile: a producer tile runs reader+compute+sender, a consumer tile runs the writer, with a CB bridged across tiles over the NoC (needs the two-tile coords above).
+* **pipestall** — two-tile, and the only example whose *point* is timing: `nine` plus a reverse credit semaphore, so the producer's Tensix backs up behind the consumer core. Three environment knobs (`PIPESTALL_DELAY`, `PIPESTALL_CREDITS`, `PIPESTALL_OUT_DEPTH`) set how long the producer's unpacker legitimately blocks. It is the workload the per-unit stall detector's threshold is calibrated against — see `tt_sim/device/deadlock.py`.
 * **loopback** — Int32 copy DRAM→DRAM through the TRISC/pack path (`copy_tile` → `pack_tile`), chunked.
 
 ## Writing a new example

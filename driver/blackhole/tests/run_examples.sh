@@ -49,13 +49,14 @@ export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 TIMEOUT="${TT_SIM_EXAMPLE_TIMEOUT:-300}"
 SUCCESS="Completed successfully on the device"
 
-# example : Blackhole TT_SIM_TENSIX_COORDS (WH (x,1) -> BH (x,2); "nine" is 2-tile)
+# example : Blackhole TT_SIM_TENSIX_COORDS (WH (x,1) -> BH (x,2); "nine" and
+# "pipestall" are 2-tile)
 declare -A COORDS=(
   [one]="1-2"   [two]="1-2"     [three]="1-2"  [four]="1-2"  [four-fp]="1-2"
   [five]="1-2"  [five-fp]="1-2" [six]="1-2"    [eight]="1-2" [loopback]="1-2"
-  [nine]="1-2,2-2"
+  [nine]="1-2,2-2" [pipestall]="1-2,2-2"
 )
-ORDER=(one two three four four-fp five five-fp six eight nine loopback)
+ORDER=(one two three four four-fp five five-fp six eight nine pipestall loopback)
 [ "${#SELECT[@]}" -gt 0 ] && ORDER=("${SELECT[@]}")
 [ "$RECORD" -eq 1 ] && mkdir -p "$TRACES"
 
