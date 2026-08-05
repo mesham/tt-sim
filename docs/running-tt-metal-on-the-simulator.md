@@ -121,6 +121,49 @@ to explicit `TT_SIM_TENSIX_COORDS` for off-origin placements. The two vars are
   pumped every cycle via the threaded clock). More tiles = slower wall-clock.
   Reach for the minimal set a program actually uses.
 
+#### 1.3.1 Sizing the grid override: the L1 bank count must be a power of 2
+
+`TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE` is **not** a core count — it is the
+*inclusive maximum logical `x,y`* of the compute-with-storage grid, so it
+selects a grid of `(x+1) × (y+1)` cores (`core_descriptor.cpp`,
+`compute_with_storage_end` override). tt-metal then gives **one L1 bank per
+compute-and-storage core** (`AllocatorImpl::init_compute_and_storage_l1_bank_manager`)
+and `validate_num_banks` rejects any count that is neither a power of 2 nor one
+of its hardcoded special cases (`7, 12, 20, 48, 56, 63, 70, …`):
+
+```
+Invalid number of memory banks 15 for L1 (must be power of 2 or have a
+dedicated modulo implementation)
+```
+
+So **choose the override so that `(x+1) × (y+1)` is a power of 2** (or one of
+the listed exceptions — which is why the 4×5 = 20 default override works).
+`3,4` → 20 ✓ (exception), `1,3` → 8 ✓, `3,1` → 8 ✓, `1,1` → 4 ✓, `3,3` → 16 ✓,
+but `2,4` → **15 ✗** and `2,2` → **9 ✗**.
+
+**Worked example — an 8-core 2×4 grid.** A program that asks for 8 cores out of
+`compute_with_storage_grid_size()` (e.g. via `num_cores_to_corerangeset(8, …)`)
+wants a compute grid of exactly 8, i.e. override `1,3` (logical `x∈{0,1}`,
+`y∈{0,1,2,3}`). Translating logical→physical (`+1` on each axis) gives the
+coords to materialise:
+
+```bash
+export TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=1,3     # 2 x 4 compute grid -> 8 L1 banks
+export TT_SIM_TENSIX_COORDS=1-1,1-2,1-3,1-4,2-1,2-2,2-3,2-4
+```
+
+Verify from the JIT compile line in the log — it carries the bank count the
+host actually derived:
+
+```
+-DNUM_L1_BANKS=8 -DLOG_BASE_2_OF_NUM_L1_BANKS=3
+```
+
+`TT_SIM_TENSIX_CORES=8` is **not** a substitute here: it fills column-major to
+the full column height, giving `1-1,1-2,1-3,1-4,1-5,2-1,2-2,2-3`, which is not
+the 2×4 block. Whenever the override's grid is not 5 rows tall, name the coords
+explicitly.
+
 ---
 
 ## 2. Running a program
