@@ -1,8 +1,10 @@
 # riscvbench — running it on real hardware
 
 **You have a Tenstorrent card. This page is everything you need; you do not need
-to know anything about tt-sim.** It asks you to build one program, run it twice,
-and send back two CSV files. Budget **20 minutes**, most of it the build.
+to know anything about tt-sim.** It asks you to build one program, run it four
+times, and send back four CSV files. Budget **20 minutes**, most of it the
+build: the two main runs are a minute or two each and the two extra phase G runs
+are seconds.
 
 If you want to know *why* the benchmark is shaped the way it is, and what its
 numbers can and cannot prove, read
@@ -20,8 +22,9 @@ which is how a baby core pushes an instruction to the Tensix coprocessor, and
 that is the number the whole exercise is for. Everything is run at four
 different burst lengths and reported as the **slope**, so kernel launch, timer
 overhead and loop setup cancel out exactly and never appear in a result. It
-finishes by asking three questions nothing has ever measured: how deep the
-Tensix instruction queue is, whether a taken branch costs more than a
+finishes by asking four questions nothing has ever measured: how deep the
+Tensix instruction queue is, **whether that queue is shared between the three
+baby cores or private to each**, whether a taken branch costs more than a
 not-taken one, and whether a loop stops running at one instruction per cycle
 once it gets big.
 
@@ -75,27 +78,48 @@ cd perfbench/riscvbench/src
 export TT_METAL_SLOW_DISPATCH_MODE=1     # see note below
 unset TT_METAL_SIMULATOR                 # make sure you are on the real card
 
-# Run 1 -- the main one. All five phases, one/two/three issuing TRISCs.
+# Run 1 -- the main one. All seven phases, one/two/three issuing TRISCs.
 ./build/riscvbench --blocks 32
 
 # Run 2 -- the same thing at a different burst size. Two minutes, and it is
 # worth it: see "Why the second run".
 ./build/riscvbench --blocks 8 --out riscvbench-$(uname -n)-blocks8.csv
+
+# Runs 3 and 4 -- phase G's other two footprint sets, seconds each. Run 1
+# already covered set 0. Phase G is a SEPARATE PHASE because phase F's kernel
+# is at tt-metal's size limit, and it is split into three compile-time sets
+# because its three bodies do not fit in one kernel either.
+./build/riscvbench --phase g --variants t1 --blocks 32 --gset 1 --out riscvbench-g1.csv
+./build/riscvbench --phase g --variants t1 --blocks 32 --gset 2 --out riscvbench-g2.csv
 ```
+
+Runs 1 and 2 include **phase S**, which is new and is the one that needs all
+three thread sets: its answer is a *ratio between thread counts* and a single
+variant produces no verdict at all. `--variants t1,t2,t3` is the default, so
+nothing extra is needed — but if you cut the run down, keep at least `t1,t2`.
 
 `--blocks 32` is the **hardware setting** — bigger than the default of 4, which
 is sized for the simulator. Larger bursts push the fixed costs further into the
 noise; on silicon they cost milliseconds.
 
-> **Do not go below 32 for the primary run.** The 2026-08-05 Blackhole run
-> collected both, and at `--blocks 8` **every one of the five phases was refused
-> by the validity gate** — three of the failures being the `loop_overhead`
+> **Do not go below 32 for the primary run.** The 2026-08-05 Blackhole runs
+> collected both, and at `--blocks 8` **six of the seven phases were refused by
+> the validity gate** — five of the seven R² failures being the `loop_overhead`
 > control itself fitting to R² < 0.99, and a control that does not fit is a
 > phase that cannot be read whatever the probes did. Its numbers agreed with the
 > `--blocks 32` run's to a few thousandths of a cycle anyway, which is a useful
 > reminder that agreement is not validity. Both are tracked in
 > `tt_sim/perf/datasets/` and the second one's header explains why it is kept.
 > The minimum usable block count is somewhere above 8 and at or below 32.
+>
+> **Phase Q is the exception and it matters.** `--blocks` sets the four fitted
+> points of the *slope* phases and nothing else: a phase-Q point is labelled
+> `n0 << k` (the burst index) where a slope point is `base_blocks * (k + 1)`,
+> and the kernel's `QPROBE`/`QLOOPPROBE` macros never read `base_blocks`. So a
+> phase-Q reading is independent of `--blocks`, and the two banked runs
+> reproduce every loop-form point to within two cycles at a quarter the block
+> count. A run whose slope phases are refused can still be read for phase Q —
+> and one of them is where the queue depth in §Q comes from.
 
 The first run writes `riscvbench-<arch>.csv` next to the binary. It is rewritten
 after **every** program launch, so a run you have to kill part-way still leaves
@@ -130,23 +154,32 @@ one happens anyway:
 - **Note which phase it hung in** (the program prints `phase <letter> [tN]:
   done` after each launch, so the hang is in the one after the last line
   printed) and say so. A hang is itself a result.
-- `--phase r` / `t` / `c` / `q` / `f` runs one phase, and `--variants t1` runs
-  only the single-thread launches. Between them any phase can be skipped.
+- `--phase r` / `t` / `c` / `q` / `f` / `s` / `g` runs one phase, and
+  `--variants t1` runs only the single-thread launches. Between them any phase
+  can be skipped. **Phase S is the exception to `--variants t1`**: its answer is
+  a comparison between thread counts, so cutting it to one variant produces no
+  verdict rather than a weaker one, and the program says so.
 - `--probes 0xMASK` enables probe `i` with bit `i`; the summary table prints
   the probes in slot order. **Probe 0 is the empty-loop control and every
   slope phase needs it** — clearing bit 0 makes those phases unreadable.
 
-Phase F builds a kernel with 8 KiB of instruction text in one loop body. If your
-tt-metal refuses to build or place it, run `--phase rtcq` and say so; the other
-four phases are unaffected.
+Phase F builds a kernel with 8 KiB of instruction text in one loop body, and it
+is **within a few hundred bytes of tt-metal's kernel config buffer** on the
+release this was written against. If yours refuses to build or place it, run
+`--phase rtcqsg` and say so; the other phases are unaffected. That ceiling is
+also why the footprints *between* 1024 and 2048 are phase G rather than three
+more phase F probes, and why phase G itself takes three runs — putting all three
+in one kernel aborts the launch with `Program size (125040) too large for kernel
+config buffer (70656)`, which is measured rather than predicted.
 
 ---
 
 ## What to send back
 
-**Both CSVs, plus the terminal output of each run if you have it** — the summary
-tables, the per-phase read-outs and the validity verdicts are in the terminal
-output and not in the CSV.
+**All four CSVs, plus the terminal output of each run if you have it** — the
+summary tables, the per-phase read-outs and the validity verdicts are in the
+terminal output and not in the CSV. The phase S verdict and the phase G step are
+*only* in the terminal output.
 
 Each CSV has one row per raw measurement and no derived numbers at all:
 
@@ -154,9 +187,10 @@ Each CSV has one row per raw measurement and no derived numbers at all:
 phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
 ```
 
-with the run's configuration in a `#` header line (`arch=`, `probe_mask=`,
-`phases=`, `variants=`, `base_blocks=`, `stack_addr=`, `scratch_addr=`,
-`div_dividend=`, `div_divisor=`). `stack_addr=` matters more than it looks:
+with the run's configuration in a `#` header line (`arch=`, `magic=`,
+`probe_mask=`, `phases=`, `variants=`, `base_blocks=`, `gset=`, `stack_addr=`,
+`scratch_addr=`, `div_dividend=`, `div_divisor=`). `gset=` matters for a phase G
+run and for nothing else: it says which intermediate footprint was compiled in. `stack_addr=` matters more than it looks:
 tt-metal chooses where a TRISC's stack lives, and the two candidate regions have
 load latencies six cycles apart on Wormhole, so the analysis classifies the
 address rather than assuming one.
@@ -177,14 +211,16 @@ TTRVBENCH_VALID_T: yes
 TTRVBENCH_VALID_C: yes
 TTRVBENCH_VALID_Q: yes
 TTRVBENCH_VALID_F: yes
+TTRVBENCH_VALID_S: yes
+TTRVBENCH_VALID_G: yes
 TTRVBENCH_VALID: yes
 Completed successfully on the device
 ```
 
 A failing phase names its failing checks, and the exit status is a bit mask
-(1 = R, 2 = T, 4 = C, 8 = Q, 16 = F, 0 = clean).
+(1 = R, 2 = T, 4 = C, 8 = Q, 16 = F, 32 = S, 64 = G, 0 = clean).
 
-**Send the CSV either way.** The verdict is per phase precisely because the five
+**Send the CSV either way.** The verdict is per phase precisely because the
 phases measure unrelated things: a phase F that measures nothing does not make
 the phase T rows in the same file any less good.
 
@@ -196,12 +232,25 @@ The checks are:
   start-up, or a thread that was descheduled mid-measurement.
 - **Monotonicity.** More instructions must take more cycles.
 
+**Phase S carries a measured tolerance on the monotonicity check, and only phase
+S.** Its reference burst is four instructions, so the step from n = 4 to n = 8 is
+worth ~12 cycles at one issuing thread — comparable to what one cold, once-only
+burst scatters by, which is exactly why phase Q's cascade failed 17 of these
+checks at n ≤ 16 on silicon. Rather than exempt the phase or pick a constant,
+`s_co_repeat` runs `s_co_plain` a **second time** and the largest disagreement
+between the two is what one raw point can be wrong by. A phase-S pair is flagged
+only when it falls by more than that. Every other phase keeps a tolerance of
+zero, unchanged.
+
 **Phase Q is deliberately not gated on linearity**, and that is not laziness. It
 sweeps *burst length* looking for a knee; a straight line through it would be
 the null result, not the healthy one, so requiring one would score the
-interesting outcome as a failure. Its own control probe `q_ctrl` is also exempt
-from the monotonicity check, because its cost is a step function of the burst
-*index* rather than of the burst length.
+interesting outcome as a failure. Its own control probe `q_ctrl` is exempt from
+the monotonicity check, and only that one: it runs the cascade with an **empty
+body**, so it has no burst to be monotone in, and on silicon its cost wobbles
+non-monotonically by 6–23 cycles with which branches happen to be taken. Every
+other phase-Q probe, including the three loop-form probes that carry the sweep
+out to n = 1024, must grow with the burst like everything else.
 
 ### The one check that matters most
 
@@ -259,14 +308,60 @@ RISC-V push cost is *below* one cycle per Tensix instruction, which no sustained
 measurement — this one's, or `tensixbench`'s — could ever have shown, because
 the same page caps the queue's drain rate at one per thread per cycle.
 
-**2. The phase Q knee.** Bursts of 1, 2, 4 … 128 `ADDDMAREG`s. Below the Tensix
-instruction queue's depth the core runs ahead and each extra instruction costs
+**2. The phase Q knee, now swept to a burst of 1024.** Below the Tensix
+instruction queue's depth the core runs ahead and each extra `ADDDMAREG` costs
 one cycle; above it the core is back-pressured and each costs the unit's
 occupancy, which `tensixbench` measured at 3.0 on Blackhole. **The burst length
 at which the marginal cost steps up is the queue depth, and nothing in either
-the ISA documentation or the vendor trees publishes one.** A flat 1.0 all the
-way to 128 is also a result: it means a kernel can queue at least 128 Tensix
-instructions before it is ever slowed down.
+the ISA documentation or the vendor trees publishes one.**
+
+The 2026-08-05 run swept to 128 and that was not far enough: at **one** issuing
+thread the core had still not stopped running ahead at the longest burst, so the
+backlog it had absorbed was still growing where it needed to have levelled off,
+and a depth *in entries* was not resolvable. The sweep now goes to **1024**, in
+two burst forms, and the read-out prints both:
+
+```
+cascade  n = 1..128     2^p `.ttinsn` words emitted straight-line, unchanged
+loop     n = 16..1024   n/16 iterations of one 16-instruction block
+```
+
+**Why two forms, which is the one thing to understand before reading this
+phase.** A 1024-word straight-line burst is 4 KiB of instruction text, and phase
+F of this same benchmark found a fetch cliff in exactly that octave. Every
+phase-Q burst runs *once*, cold, with its own instruction fetch inside the timed
+region — so a longer straight-line burst would have folded a fetch cost that
+*grows with n* into the one measurement whose entire question is whether cost per
+instruction grows with n. It would have looked like a queue knee. The loop form
+has a **64-byte body at every burst length**, so nothing in its column can be
+fetch, and `q_loop_addi` — the identical loop with `addi` bodies — measures what
+the form itself costs rather than assuming it. The two forms overlap at
+n = 16…128 and the read-out prints the comparison, so "did changing the form
+change the quantity" is measured too.
+
+What to look for, in the read-out's own words:
+
+- **`KNEE between n=A and n=B`** — the marginal cost of one more instruction has
+  reached the drained rate, so the core is back-pressured from there on.
+- **`the backlog FLATTENED at ~X cycles`** — the real prize. It means the burst
+  stopped absorbing, and `X / (drained rate)` is the queue's depth **in
+  entries**. On Blackhole, at one issuing thread, that read ~14–16 — **and it is
+  a lower bound that phase S has since corrected to a range of ~26–31**, because
+  this read-out drops the reference burst's own occupancy and phase S's does
+  not. Read the phase-S block and the reconciliation below it, not this line
+  alone.
+- **`BACKLOG STILL GROWING` / `NO KNEE up to n=1024`** — also a result, and an
+  honest one: the queue is deeper than this sweep reaches. Do not read a depth
+  off a backlog that is still growing; the program refuses to, and so should
+  you.
+- **`BACKLOG NEGATIVE` / `INSIDE THE NOISE FLOOR`** — the slot has no signal and
+  no depth is printed. The backlog is a difference of two differences of raw
+  single-shot points, so it has to clear **twice the `q_ctrl` spread this run
+  measured** before it can be divided by anything; below that the subtraction
+  can pass through zero, and work in flight cannot be negative. Expect this at
+  two and three issuing threads, where the drained rate is 2–3× higher and the
+  same queue's backlog is that many times smaller in cycles. It is a statement
+  about the instrument, not about the queue.
 
 **3. `taken - not taken`, in the phase C read-out.** Two probes execute the
 identical dynamic instruction sequence — a branch whose target is the address
@@ -276,10 +371,85 @@ how much one *costs*; how *often* one happens is undescribed, which is why
 tt-sim charges nothing for branches at all. A non-zero delta here would supply
 the missing half.
 
-**4. The phase F row.** Six loop bodies from 256 bytes to 8 KiB of instruction
-text, same instruction throughout. A flat row says instruction fetch is not the
-limit anywhere in that range. A cliff locates an instruction-cache capacity
-nothing publishes.
+**4. The phase F row, and phase G's three narrowing points.** Six loop bodies
+from 256 bytes to 8 KiB of instruction text, same instruction throughout. A flat
+row says instruction fetch is not the limit anywhere in that range. A step
+locates **a boundary in loop-body size** that nothing publishes — and the 2026-08-05
+Blackhole run found one, flat at 0.998 through a 4 KiB body and 1.251 at 8 KiB.
+
+Phase G narrows that octave. Each `--gset` compiles one intermediate — 1280,
+1536 or 1792 instructions, i.e. 5, 6 and 7 KiB — against a 1024-instruction body
+**in the same kernel**, and prints the step between them. Read the three runs
+together: they bracket the boundary between two footprints that were actually
+run, and that bracket is the whole claim.
+
+> **It is a boundary in loop-body size and narrowing it does not make it a cache
+> capacity.** No document in the ISA documentation or either vendor tree gives an
+> instruction-cache size or a miss cost. A prefetch window, a TLB-like structure
+> or an L1 access pattern would produce the same column, and nothing here
+> separates them. The step's ~0.25 cycles/instruction is also an *amortised*
+> figure over a body that is either entirely resident or entirely not, so it is
+> not a miss cost either.
+
+**5. The phase S verdict.** Phase Q resolved a queue depth at one issuing thread
+and could not resolve one at any other, which left open whether that queue is
+**shared between the three TRISCs or private to each** — the two are the same
+device seen from one thread. Phase S answers it as a ratio, and on 2026-08-05
+Blackhole silicon the answer was **PER-THREAD**, at 0.97×/0.95× with two issuers
+and 1.06×/1.07× with three across two runs:
+
+```
+D at k issuing threads / D at one  ==  1.00   ->  PER-THREAD
+                                   ==  1/k    ->  SHARED
+```
+
+The construction, and the two that look like they would work and do not, are
+worth knowing before reading the number:
+
+- **A second thread that only spins does not discriminate.** It pushes nothing,
+  so it holds no queue entry under either hypothesis. It is run anyway, as
+  `s_solo_plain`/`s_solo_sync`, because it is the control that separates
+  "another core is *awake*" — competing for instruction fetch out of the same L1
+  — from "another core is *issuing*". Both hypotheses predict it reads the same
+  depth at t1, t2 and t3, so a departure there is not queue sharing.
+- **A second thread issuing at a deliberately low rate does not either**, and
+  for a reason that has nothing to do with this benchmark: queue occupancy is
+  arrival rate times residence time, so a thread served faster than it arrives
+  holds ~0 entries however long it runs.
+- **Only a saturated second thread holds entries.** The price is that it also
+  takes backend bandwidth — which is why phase Q's multi-thread slots looked
+  hopeless — but that bandwidth is *measured in the same slot* by `s_co_sync`
+  and divided back out.
+
+The other half is the **reference burst**, which is `n = 4` here and `n = 16` in
+phase Q. The backlog subtracts its value at the smallest burst as
+`tensix_sync()`'s own cost, which is only true if the queue is empty there. It
+is not: a core pushing at 1/p instructions per cycle against a backend draining
+one every S leaves `n · (1 − p/S)` outstanding — ~10 entries at n = 16, and at
+two or three issuing threads a *shared* queue's per-thread share may be smaller
+than that, which makes phase Q's multi-thread backlogs structurally zero rather
+than merely small. At n = 4 the same term is ~2, so phase S reports
+
+```
+D = backlog / S  +  4 · (1 − p/S)
+```
+
+with every term measured in the slot. **A consequence that was checked when the
+numbers arrived, and it half-held:** phase Q's read-out drops that second term
+entirely, so at one thread phase S should read a depth *above* phase Q's by
+roughly the difference. It read 31 against phase Q's 16 — a lower bound
+confirmed in direction, but a gap of 15.3 entries where 8.0 was declared. The
+8.0 is exactly the reference-burst term; the remaining ~5–7 entries are a
+difference between the two burst *forms* that is reproducible to the cycle in
+four runs and is **not explained**. The sweep prints the whole reconciliation
+under `Do the two burst forms agree about the depth?`, and
+`docs/bh_arch.md` §1.10 banks a range rather than a number because of it.
+
+**If you are re-running this, the cheapest thing you can do for that residual**
+is add an untimed `ckernel::tensix_sync()` immediately before `t0` in
+`QLOOPPROBE` — phase S has one and phase Q does not, and a saturated backend
+never idles, so phase Q's `plain` may be carrying the previous burst point's
+residue forever. That is the leading candidate and it has not been tested.
 
 ---
 
@@ -323,15 +493,37 @@ exactly 1.000, including the four that are supposed to be the instrument's own
 control. Keep `--blocks` small: the simulator runs a few tens of thousands of
 cycles per second.
 
-A full run is fifteen program launches (five phases × three thread sets) and
-takes about fifteen minutes against the simulator. `--phase r --variants t1` is
-the cheap check that the plumbing works, and `--phase rt` is the pair that
-matters.
+A full run is twenty-one program launches (seven phases × three thread sets) and
+takes about twenty minutes against the simulator.
+`--phase r --variants t1` is the cheap check that the plumbing works, and
+`--phase rt` is the pair that matters. The two newest phases are cheap:
+`--phase s --variants t1,t2` is about a minute and `--phase g --variants t1
+--blocks 1` a couple.
 
-Against tt-sim the phase T, C, Q and F verdicts are **forced** and mean nothing
-about any hardware: tt-sim has no instruction cache, no branch predictor, and an
-unbounded Tensix instruction queue, so a null in each of those is guaranteed by
-its own construction. What the simulator run establishes is that the plumbing
+Against tt-sim the phase T, C, Q, F, S and G verdicts are **forced** and mean
+nothing about any hardware: tt-sim has no instruction cache, no branch
+predictor, and an unbounded Tensix instruction queue, so a null in each of those
+is guaranteed by its own construction. Specifically, and verified:
+
+- **Phase G** reads 1.001 cycles/instruction at 1024, 1280, 1536 and 1792 alike,
+  step `-0.000` in every `--gset`. Nothing models an instruction cache, so a
+  flat row is the only row available.
+- **Phase S** refuses a depth in every slot — the backlog is still growing at
+  n = 512 because `TensixFrontend.push_mop_instruction` is a list append — and
+  therefore prints **NO VERDICT** on the sharing question rather than a
+  plausible-looking "per-thread". A shared-versus-private answer from tt-sim
+  would be a bug in the read-out, not a finding.
+
+The "Did the new probes run at all?" section exists for exactly this: a probe
+that reads its forced null and a probe that never executed look identical in a
+summary table, and it names which is which before any verdict is read. Phase Q at `--phase q --variants t1` is the cheapest
+check that the n = 1024 extension is plumbed (one launch, about a minute): the
+simulator gives `NO KNEE up to n=1024` with the backlog doubling at every
+doubling of the burst — 690, 1426, 2898 cycles — which is the shape an infinite
+queue has to have, and `q_loop_addi` reads exactly the same 1.125 cycles per
+instruction as the `ADDDMAREG` burst does, i.e. nothing back-pressures anything.
+The point of running it is that the plumbing is exercised, not that the answer
+means anything. What the simulator run establishes is that the plumbing
 works end to end — the kernel builds, the probes run, the CSV and the sweep
 agree — and, with `TT_SIM_COST_MODEL=1`, that the instrument resolves a real
 per-instruction cost when there is one to resolve. The sweep says so in its own

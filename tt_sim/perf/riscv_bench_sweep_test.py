@@ -180,6 +180,28 @@ def test_predictions_come_from_the_tables_not_from_this_module():
         assert sweep.predictions("wormhole")["rv_div"].cycles == pytest.approx(base * 2)
     finally:
         costs.load_costs = real
+        # `doubled` mutates the CACHED table in place, so restoring the
+        # function is not enough -- every later test in the process would read
+        # a doubled divide. Drop the entry and let it reload from the YAML.
+        costs._CACHE.pop("wormhole", None)
+
+
+def test_the_divide_floor_is_kept_and_says_what_the_range_denotes():
+    """Reviewed on 2026-08-05 against silicon's 33.001 and deliberately kept.
+
+    6-33 is a DATA dependence -- "dependent upon the magnitude of the dividend"
+    -- not an uncertainty band, and the function relating the two is published
+    nowhere. So the low end stands, as it does for every other bound in these
+    files, and the note carries what the range means so that the 5.5x residual
+    is read as the benchmark's choice of dividend rather than as a table that
+    is wrong. If someone charges the max, or interpolates, this test is where
+    they have to argue for it.
+    """
+    for arch in ("wormhole", "blackhole"):
+        pred = sweep.predictions(arch)["rv_div"]
+        assert pred.cycles == 6
+        assert pred.bound == "range"
+        assert "magnitude of the dividend" in pred.note
 
 
 def test_wormhole_and_blackhole_disagree_about_multiply():
@@ -200,14 +222,69 @@ def test_wormhole_and_blackhole_disagree_about_multiply():
     assert "EX2" in bh["rv_mul_dep"].derivation
 
 
-def test_blackhole_l1_load_uses_the_dcache_hit_row():
-    """And it uses model.py's mapping, not a second copy of it."""
+def test_a_pointer_chase_is_predicted_against_the_dcache_MISS_row():
+    """The defect the silicon run exposed, and the rule that replaced it.
+
+    Until 2026-08-05 this probe was predicted off ``_LOAD_LATENCY_KEYS``, which
+    on Blackhole names ``l1_dcache_hit`` -- so a pointer chase over a 1 KiB ring
+    was compared against a 2-cycle hit and read out as a 6-cycle discrepancy
+    that was entirely the sweep's own. The chase's working set is sixteen times
+    the L0 data cache's published 64-byte capacity, so the miss row is the row
+    it reaches under any organisation of the cache. That is a documentary fact
+    (``bh_riscv#l0-data-cache``), which is why it may move a prediction.
+    """
     from tt_sim.perf.model import _LOAD_LATENCY_KEYS, RV_REGION_L1
 
     pred = sweep.predictions("blackhole")["rv_load_chase"]
-    assert pred.path.endswith(_LOAD_LATENCY_KEYS["blackhole"][RV_REGION_L1])
-    assert pred.cycles == 2
-    assert sweep.predictions("wormhole")["rv_load_chase"].cycles == 8
+    assert pred.path == "riscv.load_latency.l1_dcache_miss"
+    assert pred.cycles == 8
+    assert pred.bound == "at_least"
+    # ...and it is NOT the row the simulator charges, which is the whole point:
+    # the two answer different questions.
+    assert _LOAD_LATENCY_KEYS["blackhole"][RV_REGION_L1] == "l1_dcache_hit"
+    # Wormhole publishes no L0 cache and so has a single L1 row; nothing about
+    # the working set can change which row applies there.
+    wh = sweep.predictions("wormhole")["rv_load_chase"]
+    assert wh.path == "riscv.load_latency.l1"
+    assert wh.cycles == 8
+
+
+def test_the_row_is_chosen_by_working_set_against_the_published_capacity():
+    """Not hardcoded per probe: the capacity comes out of the YAML.
+
+    Below the capacity the table's default row stands; above it, the miss row.
+    Both directions are exercised so that a future probe with a small working
+    set is predicted against the row it would actually reach.
+    """
+    from tt_sim.perf.costs import load_costs
+
+    riscv = load_costs("blackhole").section("riscv")
+    capacity = riscv["l0_data_cache"]["capacity_bytes"]
+    assert capacity == 64
+    assert sweep._l1_load_row(riscv, "blackhole", capacity // 2)[0] == "l1_dcache_hit"
+    assert sweep._l1_load_row(riscv, "blackhole", capacity * 16)[0] == "l1_dcache_miss"
+    # No working set at all -- an unknown access pattern -- keeps the default.
+    assert sweep._l1_load_row(riscv, "blackhole", None)[0] == "l1_dcache_hit"
+    # And the probes' declared working sets are the kernel's, not invented.
+    assert sweep.L1_WORKING_SET_BYTES["rv_load_chase"] == 64 * 16
+    assert sweep.L1_WORKING_SET_BYTES["rv_load_indep"] == 4 * 16
+
+
+def test_a_working_set_exactly_at_the_capacity_is_not_moved():
+    """The boundary the documentation does not settle, and must not be fitted.
+
+    ``rv_load_indep`` touches exactly four 16-byte lines -- exactly the
+    published capacity. Silicon reads the MISS row's sustained rate (1.742
+    against the formula's 1.750 at N = 8), but the page publishes no
+    associativity, no replacement policy and a ~0.8 % periodic flush, so
+    nothing in it says a working set at the capacity misses. Moving the
+    prediction to match the measurement would be fitting the table to the
+    reading. The residual is left standing and the derivation says why.
+    """
+    pred = sweep.predictions("blackhole")["rv_load_indep"]
+    assert pred.cycles == pytest.approx(1.0)
+    assert "EXACTLY the" in pred.derivation
+    assert "l1_dcache_hit" in pred.derivation
 
 
 def test_sustained_load_throughput_is_derived_from_the_formula():
@@ -215,9 +292,6 @@ def test_sustained_load_throughput_is_derived_from_the_formula():
     pred = sweep.predictions("wormhole")["rv_load_indep"]
     assert pred.kind == "derived"
     assert pred.cycles == pytest.approx(1.75)
-    # Blackhole's d-cache hit is 2 cycles, under the threshold, so the docs'
-    # "one per cycle" branch applies instead.
-    assert sweep.predictions("blackhole")["rv_load_indep"].cycles == pytest.approx(1.0)
 
 
 def test_the_store_pair_is_a_cross_architecture_discriminator():
@@ -667,25 +741,507 @@ def test_queue_check_reports_every_thread_count(tmp_path):
     assert "3 issuing thread(s), thread 2" in text
 
 
-def test_fetch_check_reports_flatness_and_a_cliff(tmp_path):
-    def series(costs):
-        rows = _control(phase="f")
-        for k, c in costs.items():
-            rows += _slope_rows(
-                f"f_{k}", "RV_FETCH", 2 + int(k * c), phase="f", unroll=k
-            )
-        parsed, _ = sweep.read_csv(_csv(tmp_path, rows))
-        return sweep.attach_predictions(
-            sweep.apply_control(sweep.series_of(parsed)), "blackhole"
-        )
+# ---------------------------------------------------------------------------
+# Phase Q's LOOP form, and the refusal that governs it. The read-out may print
+# a depth in entries only when the backlog has both cleared the control's own
+# measured spread and stopped growing; the 2026-08-05 silicon run announced
+# "~1 instruction in flight" from an 8-cycle backlog and three NEGATIVE ones,
+# which is arithmetic run where there is no signal.
+# ---------------------------------------------------------------------------
 
+_LOOP_NS = (16, 32, 64, 128, 256, 512, 1024)
+
+
+def _loop_burst(probe, cycles, threads=1, thread=1, probe_id=39):
+    return [
+        f"q,t{threads},{probe_id},{probe},TTQUEUE,{threads},{thread},{n},1,{cycles[n]}\n"
+        for n in _LOOP_NS
+    ]
+
+
+def _loop_slot(backlog, rate=3, control=(6, 11, 20, 13, 21, 22, 13, 17)):
+    """A loop-form slot whose plain burst lags its drained one by `backlog(n)`.
+
+    The drained probe costs `rate` cycles an instruction throughout; the plain
+    one returns `backlog(n)` cycles early, which is the work still in flight.
+    The read-out subtracts the pair's difference at the smallest burst -- that
+    is `tensix_sync()`'s own cost -- so `backlog(16)` is the zero of the scale.
+    """
+    plain = {n: 100 + rate * n - backlog(n) for n in _LOOP_NS}
+    synced = {n: 100 + rate * n + 40 for n in _LOOP_NS}
+    return (
+        _wobbly_control(list(control))
+        + _loop_burst("q_loop_adddmareg", plain)
+        + _loop_burst("q_loop_adddmareg_sync", synced, probe_id=40)
+    )
+
+
+def _settling(n):
+    """A backlog that grows with the burst and then stops -- a real asymptote."""
+    return 0 if n == 16 else min(n, 150)
+
+
+def _forty(n):
+    """Settled at 40 cycles: above a quiet run's noise floor, under a noisy
+    one's. Which of the two it is, is the thing under test."""
+    return 0 if n == 16 else 40
+
+
+def _loop_text(tmp_path, rows):
+    parsed, _ = sweep.read_csv(_csv(tmp_path, rows))
     out = io.StringIO()
-    sweep._fetch_check(series({64: 1, 2048: 1}), lambda line="": print(line, file=out))
+    sweep._queue_check(parsed, lambda line="": print(line, file=out))
+    return out.getvalue()
+
+
+def test_loop_form_reports_a_depth_once_the_backlog_settles(tmp_path):
+    """A backlog that stops growing well clear of the noise floor is the one
+    case a depth in entries may be divided out of. 150 cycles at 3.0 each."""
+    text = _loop_text(tmp_path, _loop_slot(_settling))
+    assert "BACKLOG FLATTENED at ~150 cycles" in text
+    assert "~50 INSTRUCTIONS in flight" in text
+
+
+def test_loop_form_refuses_a_negative_backlog(tmp_path):
+    """Work in flight cannot be negative. Silicon produced -50, -10 and -45 at
+    three issuing threads and the read-out divided one of them by a rate."""
+    text = _loop_text(tmp_path, _loop_slot(lambda n: 0 if n == 16 else -20))
+    assert "BACKLOG NEGATIVE" in text
+    assert "INSTRUCTIONS in flight" not in text
+    assert "NO DEPTH IN ENTRIES IS REPORTED" in text
+
+
+def test_loop_form_refuses_a_backlog_inside_the_noise_floor(tmp_path):
+    """The failure this was built for: +8 cycles, printed as "~1 instruction".
+
+    The backlog is a difference of two differences of raw single-shot points,
+    so two `q_ctrl` spreads is the least it has to clear -- and the floor is
+    taken from the run's own measured spread, not from a constant.
+    """
+    text = _loop_text(tmp_path, _loop_slot(lambda n: 0 if n == 16 else 8))
+    assert "INSIDE THE NOISE FLOOR (32 = two" in text
+    assert "INSTRUCTIONS in flight" not in text
+
+
+def test_the_noise_floor_scales_with_the_measured_control(tmp_path):
+    """Same backlog, two runs whose controls scatter differently: the quiet one
+    resolves it and the noisy one refuses. A constant threshold could not."""
+    quiet = _loop_text(tmp_path, _loop_slot(_forty, control=(6, 7, 8, 9, 10, 11, 8, 7)))
+    noisy = _loop_text(
+        tmp_path, _loop_slot(_forty, control=(6, 40, 20, 13, 21, 22, 13, 9))
+    )
+    assert "~13 INSTRUCTIONS in flight" in quiet
+    assert "INSIDE THE NOISE FLOOR" in noisy
+
+
+def test_loop_form_refuses_a_backlog_that_is_still_growing(tmp_path):
+    """An unbounded queue absorbs the whole of every doubling, so its backlog
+    doubles too -- which is what tt-sim does and what a depth must not be read
+    off. It clears the noise floor and is still not an asymptote."""
+    text = _loop_text(tmp_path, _loop_slot(lambda n: n - 16))
+    assert "BACKLOG STILL GROWING" in text
+    assert "INSTRUCTIONS in flight" not in text
+
+
+def test_loop_form_measures_whether_the_burst_form_changed_the_quantity(tmp_path):
+    """The cascade and the loop overlap at n = 16..128, and that overlap is
+    what licenses reading the loop's longer bursts as the same quantity."""
+    rows = _loop_slot(_settling)
+    rows += _burst("q_adddmareg", 3, fixed=7)
+    text = _loop_text(tmp_path, rows)
+    assert "form check n=16..128" in text
+    assert "cascade 3.000" in text
+
+
+# ---------------------------------------------------------------------------
+# Phase S -- is the queue phase Q measured SHARED between the TRISCs or private
+# to each? Everything below is synthetic, and the point of the synthesis is
+# that the right answer is known: a slot is built to hold `depth` entries at
+# saturation, and the read-out has to recover that number.
+#
+# THE ARITHMETIC BEING PINNED, because it is the one thing here that could be
+# quietly wrong. A core pushing at 1/p instructions per cycle against a backend
+# draining one every S leaves `n * (1 - p/S)` outstanding, so the reference
+# burst is NOT empty and the depth is
+#
+#     D = backlog / S + n_ref * (1 - p/S)
+#
+# Phase Q's read-out drops that second term, which is why it reads a lower
+# bound. Making n_ref small (4, not 16) is what makes the term small.
+# ---------------------------------------------------------------------------
+
+_SHARE_NS = (4, 8, 16, 32, 64, 128, 256, 512)
+_SHARE_SLOTS = (
+    ("s_loop_addi", 41),
+    ("s_co_plain", 42),
+    ("s_co_repeat", 43),
+    ("s_co_sync", 44),
+    ("s_solo_plain", 45),
+    ("s_solo_sync", 46),
+)
+
+
+def _share_slot(
+    depth,
+    service,
+    issue=1.5,
+    threads=1,
+    thread=1,
+    solo_depth=None,
+    noise=0,
+    variant=None,
+):
+    """A phase-S slot whose queue holds `depth` entries at `service` cyc/instr."""
+    variant = variant or f"t{threads}"
+    solo_depth = depth if solo_depth is None else solo_depth
+
+    def outstanding(d, n):
+        return min(d, int(n * (1 - issue / service)))
+
+    values = {
+        "s_loop_addi": {n: 500 + int(n * issue) for n in _SHARE_NS},
+        "s_co_sync": {n: 1000 + service * n for n in _SHARE_NS},
+        "s_solo_sync": {n: 900 + service * n for n in _SHARE_NS},
+    }
+    values["s_co_plain"] = {
+        n: values["s_co_sync"][n] - service * outstanding(depth, n) for n in _SHARE_NS
+    }
+    values["s_co_repeat"] = {
+        n: values["s_co_plain"][n] + (noise if n == _SHARE_NS[-1] else 0)
+        for n in _SHARE_NS
+    }
+    values["s_solo_plain"] = {
+        n: values["s_solo_sync"][n] - service * outstanding(solo_depth, n)
+        for n in _SHARE_NS
+    }
+    rows = []
+    for probe, probe_id in _SHARE_SLOTS:
+        rows += [
+            f"s,{variant},{probe_id},{probe},TTQUEUE,{threads},{thread},{n},1,"
+            f"{values[probe][n]}\n"
+            for n in _SHARE_NS
+        ]
+    return rows
+
+
+def _share_text(tmp_path, rows):
+    parsed, _ = sweep.read_csv(_csv(tmp_path, rows))
+    out = io.StringIO()
+    sweep._sharing_check(parsed, lambda line="": print(line, file=out))
+    return out.getvalue()
+
+
+def test_phase_s_is_excluded_from_the_slope_ladder(tmp_path):
+    """It sweeps burst length, and its answer is a ratio rather than a level."""
+    rows, _ = sweep.read_csv(
+        _csv(tmp_path, _control() + _share_slot(depth=24, service=3))
+    )
+    series = sweep.attach_predictions(
+        sweep.apply_control(sweep.series_of(rows)), "blackhole"
+    )
+    kept, ladder = sweep.retained(series)
+    assert all(s["phase"] != "s" for s in kept)
+    assert dict((name, removed) for name, removed, _ in ladder)["phase == S"] == 6
+
+
+def test_the_depth_includes_the_reference_bursts_own_occupancy(tmp_path):
+    """The correction phase Q's read-out drops, pinned against a known answer.
+
+    The slot below holds 24 entries by construction. Its backlog at the longest
+    burst is (24 - 2) * 3 = 66 cycles, and 66/3 alone would report 22. The
+    missing 2 are what the n=4 reference burst is itself holding.
+    """
+    text = _share_text(tmp_path, _share_slot(depth=24, service=3))
+    assert "backlog +66 cycles" in text
+    assert "DEPTH ~24 ENTRIES" in text
+
+
+def test_a_queue_that_does_not_shrink_with_more_issuers_is_per_thread(tmp_path):
+    text = _share_text(
+        tmp_path,
+        _share_slot(depth=24, service=3, threads=1)
+        + _share_slot(depth=24, service=6, threads=2),
+    )
+    assert "1.00x (per-thread predicts 1.00x" in text
+    assert "PER-THREAD -- each core has its own queue" in text
+
+
+def test_a_queue_that_halves_with_two_issuers_is_shared(tmp_path):
+    """The discriminator. Both slots are saturated and both service rates are
+    measured in their own slot, so the only thing left to explain a halved
+    depth is that the second issuer is holding half the entries."""
+    text = _share_text(
+        tmp_path,
+        _share_slot(depth=24, service=3, threads=1)
+        + _share_slot(depth=12, service=6, threads=2),
+    )
+    assert "t2: 12 entries against t1's 24 = 0.50x" in text
+    assert "shared predicts 0.50x" in text
+    assert "SHARED -- one queue, split between the issuers" in text
+
+
+def test_the_spinning_thread_is_a_control_and_is_reported_as_one(tmp_path):
+    """A spinning thread pushes nothing, so it holds no entry under EITHER
+    hypothesis and its depth must not move. That is why it cannot be the
+    discriminator, and why it is worth running: a departure here is instruction
+    fetch or something else, not queue sharing."""
+    text = _share_text(
+        tmp_path,
+        _share_slot(depth=24, service=3, threads=1)
+        + _share_slot(depth=12, service=6, threads=2, solo_depth=24),
+    )
+    assert "SHARED" in text
+    assert "control: with the others only SPINNING" in text
+    assert "Both hypotheses predict 1.00x here" in text
+
+
+def test_no_verdict_without_a_second_thread_count(tmp_path):
+    """One thread count is a level, and a level is not this phase's answer."""
+    text = _share_text(tmp_path, _share_slot(depth=24, service=3))
+    assert "NO VERDICT: only one thread count" in text
+    assert "PER-THREAD" not in text.split("NO VERDICT")[1]
+
+
+def test_an_unbounded_queue_resolves_nothing_and_the_read_out_says_which(tmp_path):
+    """tt-sim's forced answer: `push_mop_instruction` is a list append, so the
+    backlog doubles with every doubling of the burst and never settles. No
+    depth may be divided out of that, at any thread count."""
+    growing = _share_slot(depth=10**6, service=3, threads=1)
+    text = _share_text(tmp_path, growing)
+    assert "still growing at the longest burst" in text
+    assert "DEPTH ~" not in text
+    assert "NO VERDICT: the single-thread slot resolved no depth" in text
+    assert "unbounded list append" in text
+
+
+def test_the_noise_floor_is_measured_by_a_byte_identical_repeat(tmp_path):
+    """`s_co_repeat` runs `s_co_plain` a second time, so the disagreement
+    between them is what ONE raw point can be wrong by -- measured in the run
+    rather than inherited from a control that runs a different body."""
+    quiet = _share_text(tmp_path, _share_slot(depth=24, service=3, noise=1))
+    noisy = _share_text(tmp_path, _share_slot(depth=24, service=3, noise=40))
+    assert "DEPTH ~24 ENTRIES" in quiet
+    assert "inside 2x this slot's measured repeatability" in noisy
+    assert "DEPTH ~" not in noisy
+
+
+def _footprint_series(tmp_path, costs):
+    """`costs` maps a probe name (`f_64`, `g_1280`, ...) to cycles/instruction."""
+    rows = []
+    for phase in sorted({nm[0] for nm in costs}):
+        rows += _control(phase=phase)
+    for nm, c in costs.items():
+        k = int(nm.split("_")[1])
+        rows += _slope_rows(nm, "RV_FETCH", 2 + int(k * c), phase=nm[0], unroll=k)
+    parsed, _ = sweep.read_csv(_csv(tmp_path, rows))
+    return sweep.attach_predictions(
+        sweep.apply_control(sweep.series_of(parsed)), "blackhole"
+    )
+
+
+def test_fetch_check_reports_flatness_and_a_cliff(tmp_path):
+    out = io.StringIO()
+    sweep._fetch_check(
+        _footprint_series(tmp_path, {"f_64": 1, "f_2048": 1}),
+        lambda line="": print(line, file=out),
+    )
     assert "flat" in out.getvalue()
 
     out = io.StringIO()
-    sweep._fetch_check(series({64: 1, 2048: 3}), lambda line="": print(line, file=out))
+    sweep._fetch_check(
+        _footprint_series(tmp_path, {"f_64": 1, "f_2048": 3}),
+        lambda line="": print(line, file=out),
+    )
     assert "NOT flat" in out.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Reconciling the two burst forms. Phase Q and phase S both resolve a Tensix
+# instruction queue depth at one issuing thread, from different reference
+# bursts and different loop blocks, and the numbers they PRINT are therefore
+# not comparable: phase Q's read-out drops the reference burst's own occupancy
+# and phase S's carries it. The reconciliation recomputes both under one
+# estimator and says what is left -- and on 2026-08-05 silicon what was left
+# was ~5 entries that the correction does not explain.
+# ---------------------------------------------------------------------------
+
+_RECONCILE_FIXED = 12  # the timed region's own cost, in both forms
+
+
+def _one_form(names, ns, n_ref, depth, service, issue):
+    """One burst form whose queue holds exactly `depth` entries.
+
+    Both probes carry the same fixed cost as the issue-limited baseline, which
+    is what silicon does -- they are the same macro with a different body -- and
+    is what lets the run-ahead estimator read the depth back undivided.
+    """
+    plain_name, sync_name, base_name = names
+    outstanding = {n: min(depth, n * (1 - issue / service)) for n in ns}
+    values = {
+        base_name: {n: _RECONCILE_FIXED + issue * n for n in ns},
+        sync_name: {n: _RECONCILE_FIXED + service * n + 9 for n in ns},
+    }
+    values[plain_name] = {
+        n: _RECONCILE_FIXED + service * (n - outstanding[n]) for n in ns
+    }
+    phase = "q" if n_ref == sweep.QUEUE_MIN_N else "s"
+    return [
+        f"{phase},t1,{50 + i},{probe},TTQUEUE,1,1,{n},1,{values[probe][n]:.0f}\n"
+        for i, probe in enumerate(values)
+        for n in ns
+    ]
+
+
+def _reconcile_text(tmp_path, q_depth, s_depth, service=3):
+    rows = _one_form(
+        (sweep.QUEUE_LOOP_PLAIN, sweep.QUEUE_LOOP_SYNC, sweep.QUEUE_LOOP_BASELINE),
+        _LOOP_NS,
+        sweep.QUEUE_MIN_N,
+        q_depth,
+        service,
+        issue=1.125,
+    ) + _one_form(
+        (sweep.SHARE_CO_PLAIN, sweep.SHARE_CO_SYNC, sweep.SHARE_BASELINE),
+        _SHARE_NS,
+        sweep.SHARE_MIN_N,
+        s_depth,
+        service,
+        issue=1.5,
+    )
+    parsed, _ = sweep.read_csv(_csv(tmp_path, rows))
+    out = io.StringIO()
+    sweep._depth_reconcile(parsed, lambda line="": print(line, file=out))
+    return out.getvalue()
+
+
+def test_one_form_alone_produces_no_reconciliation(tmp_path):
+    """The comparison is the whole output, so half of it is not half an answer."""
+    rows = _one_form(
+        (sweep.QUEUE_LOOP_PLAIN, sweep.QUEUE_LOOP_SYNC, sweep.QUEUE_LOOP_BASELINE),
+        _LOOP_NS,
+        sweep.QUEUE_MIN_N,
+        24,
+        3,
+        issue=1.125,
+    )
+    parsed, _ = sweep.read_csv(_csv(tmp_path, rows))
+    out = io.StringIO()
+    sweep._depth_reconcile(parsed, lambda line="": print(line, file=out))
+    assert out.getvalue() == ""
+
+
+def test_the_same_queue_seen_by_both_forms_reconciles(tmp_path):
+    """One device, two forms: the printed numbers differ by the reference-burst
+    term and by nothing else, and the read-out has to say so rather than
+    reporting a disagreement it manufactured itself."""
+    text = _reconcile_text(tmp_path, q_depth=24, s_depth=24)
+    assert "RECONCILED" in text
+    assert "LOWER BOUND by exactly the term it drops" in text
+    assert "UNEXPLAINED" not in text
+
+
+def test_the_bare_and_levelled_columns_are_the_two_read_outs(tmp_path):
+    """`bare` is what phase Q prints and `levelled` is what phase S prints, so
+    the gap between the two documents is a column subtraction and not a
+    difference between devices. At depth 24, n_ref=16 and p/S = 1.125/3 the
+    dropped term is 16 * (1 - 0.375) = 10 entries."""
+    text = _reconcile_text(tmp_path, q_depth=24, s_depth=24)
+    assert "terms differ by 8.0 entries (10.0 at n_ref = 16 against 2.0 at" in text
+
+
+def test_a_form_dependent_depth_is_reported_as_unexplained(tmp_path):
+    """What 2026-08-05 silicon actually produced. The reference-burst correction
+    is applied and the two forms STILL disagree, so neither number may be quoted
+    alone -- and the run-ahead estimator, which shares no term with the backlog
+    arithmetic, has to be shown disagreeing too or the residual could be blamed
+    on the correction."""
+    text = _reconcile_text(tmp_path, q_depth=21, s_depth=28)
+    assert "ENTRIES UNEXPLAINED" in text
+    assert "run-ahead estimator" in text
+    assert "SO THE DEPTH DEPENDS ON WHICH FORM MEASURES IT" in text
+    assert "RECONCILED" not in text
+
+
+def test_the_run_ahead_estimator_recovers_the_depth_it_was_built_from(tmp_path):
+    """It uses no `_sync` probe and no reference burst: only how far the plain
+    burst returns ahead of `n * S`, with the timed region's own fixed cost added
+    back from the issue-limited probe's intercept. Dropping that `c` would bias
+    every run-ahead down by 4 entries at a 3-cycle service rate."""
+    text = _reconcile_text(tmp_path, q_depth=24, s_depth=24)
+    rows = [ln for ln in text.splitlines() if ln.strip().startswith("phase ")]
+    assert [ln.split()[-1] for ln in rows] == ["24.0", "24.0"]
+
+
+# ---------------------------------------------------------------------------
+# Phase G -- the footprints between phase F's 1024 and 2048. It is a separate
+# kernel BUILD because phase F's is already at tt-metal's kernel config buffer
+# limit, and its probes therefore arrive under their own phase letter with
+# their own control. The read-out has to fold them into one footprint table
+# ordered by size, and it must not promote "a boundary in loop-body size" into
+# "a cache capacity" on the strength of a narrower bracket.
+# ---------------------------------------------------------------------------
+
+
+def test_phase_g_footprints_join_the_same_table_in_size_order(tmp_path):
+    out = io.StringIO()
+    sweep._fetch_check(
+        _footprint_series(
+            tmp_path,
+            {"f_64": 1, "f_1024": 1, "g_1024": 1, "g_1280": 1, "f_2048": 1.25},
+        ),
+        lambda line="": print(line, file=out),
+    )
+    table = [
+        line.split()[0]
+        for line in out.getvalue().splitlines()
+        if line.startswith(("  f_", "  g_"))
+    ]
+    assert table == ["f_64", "f_1024", "g_1024", "g_1280", "f_2048"]
+    assert "5120" in out.getvalue()  # g_1280's footprint in BYTES, which is the claim
+
+
+def test_the_bracket_narrows_with_a_phase_g_point_and_stays_a_loop_body_size(tmp_path):
+    """The whole point of phase G, and the whole point of the wording.
+
+    A stepped 1792 and a flat 1536 move the bracket from 4096-8192 to
+    6144-7168. What must NOT move is the noun: no document gives an
+    instruction cache size or a miss cost, so a narrower bracket is a narrower
+    bracket and nothing else.
+    """
+    out = io.StringIO()
+    sweep._fetch_check(
+        _footprint_series(
+            tmp_path,
+            {"f_64": 1, "f_1024": 1, "g_1536": 1, "g_1792": 1.25, "f_2048": 1.25},
+        ),
+        lambda line="": print(line, file=out),
+    )
+    text = out.getvalue()
+    assert "flat through a 6144-byte loop body, stepped by 7168 bytes" in text
+    assert "it is not a cache size" in text
+
+
+def test_the_additions_are_reported_present_so_a_forced_null_is_not_an_absence(
+    tmp_path,
+):
+    """Against tt-sim both new phases read their null BY CONSTRUCTION -- no
+    instruction cache is modelled and the Tensix queue is a list append -- so a
+    reader has to be able to tell that from a probe that never ran."""
+    rows, _ = sweep.read_csv(
+        _csv(
+            tmp_path,
+            _share_slot(depth=24, service=3)
+            + _slope_rows("g_1280", "RV_FETCH", 2, phase="g"),
+        )
+    )
+    out = io.StringIO()
+    sweep._additions_present(rows, lambda line="": print(line, file=out))
+    text = out.getvalue()
+    assert "phase S: " in text
+    assert "s_co_plain 8 points" in text
+    assert "phase G: " in text
+    assert "g_1280" in text
+    assert "g_1536" not in text.split("phase G:")[1].split("Exactly ONE")[0]
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +1331,22 @@ def test_the_failed_run_is_never_chosen_for_you():
     tracked = {p.name for p in sweep.reference_datasets()}
     assert {sweep.PRIMARY_DATASET, sweep.MIN_BLOCKS_DATASET} <= tracked
     assert sweep.default_measured_path().name == sweep.PRIMARY_DATASET
+
+
+def test_the_single_phase_gset_runs_are_tracked_and_never_chosen():
+    """Phase G could not be one kernel, so `g_1536` and `g_1792` exist only in
+    twelve-row `--gset` runs. They are tracked because they are the only
+    evidence for those two footprints -- and they can never be the primary,
+    because a single-phase single-thread run cannot run the live-instrument
+    check that makes any of its numbers readable."""
+    tracked = {p.name for p in sweep.reference_datasets()}
+    assert set(sweep.FOOTPRINT_DATASETS) <= tracked
+    assert sweep.PRIMARY_DATASET not in sweep.FOOTPRINT_DATASETS
+    assert sweep.default_measured_path().name == sweep.PRIMARY_DATASET
+    for name in sweep.FOOTPRINT_DATASETS:
+        rows, _ = sweep.read_csv(sweep.DATASET_DIR / name)
+        assert {r["phase"] for r in rows} == {"g"}
+        assert {r["variant"] for r in rows} == {"t1"}
 
 
 def test_the_tracked_datasets_carry_their_own_provenance():

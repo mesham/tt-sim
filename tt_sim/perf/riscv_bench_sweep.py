@@ -20,16 +20,24 @@ What the input is
 
     phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
 
-* **phases R / T / C / F** -- ``n`` unrolled blocks of ``unroll`` instructions,
-  timestamped off ``RISCV_DEBUG_REG_WALL_CLOCK_L``, the same register tt-metal's
-  device profiler reads. ``variant`` is ``t1``/``t2``/``t3``: how many TRISCs ran
-  the identical probes at once.
+* **phases R / T / C / F / G** -- ``n`` unrolled blocks of ``unroll``
+  instructions, timestamped off ``RISCV_DEBUG_REG_WALL_CLOCK_L``, the same
+  register tt-metal's device profiler reads. ``variant`` is ``t1``/``t2``/``t3``:
+  how many TRISCs ran the identical probes at once. Phase G is phase F's
+  question at the footprints between 1024 and 2048 instructions, in its own
+  kernel build because phase F's is already at tt-metal's size limit; see
+  :data:`FOOTPRINT_PROBES`.
 * **phase Q** -- ``n`` is a *burst length* (1, 2, 4 ... 128) rather than a block
   count, and ``unroll`` is 1. It is looking for a **knee**, not a slope, and is
   reported and gated separately for that reason: a straight line there would be
   the null result rather than the healthy one. Its read-out is a *rate over a
   wide baseline* rather than a point-by-point control subtraction; the silicon
   run that forced that change is described at :func:`_queue_check`.
+* **phase S** -- ``n`` is a burst length too (4, 8 ... 512), and the question is
+  whether the queue phase Q measured is **shared between the TRISCs or private
+  to each**. Its answer is a *ratio between thread counts* and never a level.
+  Why a spinning second thread cannot answer it, and what can, is at
+  :func:`_sharing_check`.
 
 Every cost below is a **slope** over ``n``, so the fixed cost of the two clock
 reads, the barrier and the surrounding call cancels exactly. The
@@ -117,16 +125,40 @@ DATASET_DIR = Path(__file__).resolve().parent / "datasets"
 #: peers. See :data:`MIN_BLOCKS_DATASET`.
 PRIMARY_DATASET = "riscvbench-blackhole.csv"
 
-#: The ``--blocks 8`` companion run. It is tracked **because it failed**: every
-#: one of its five phases was refused by the benchmark's own validity gate,
-#: almost all of it because the ``loop_overhead`` CONTROL itself fits to
-#: R^2 < 0.99 at four points spanning n = 8..32. That is not a statement about
-#: the device -- its per-instruction numbers agree with the primary run to a few
-#: thousandths of a cycle wherever both are readable -- it is the measurement
-#: that puts a floor under ``--blocks``. Sweeping it as if it were a result is
+#: The ``--blocks 8`` companion run. It is tracked **because it failed**: four
+#: of its five phases were refused by the benchmark's own validity gate, mostly
+#: because the ``loop_overhead`` CONTROL itself fits to R^2 < 0.99 at four
+#: points spanning n = 8..32. That is not a statement about the device -- its
+#: per-instruction numbers agree with the primary run to a few thousandths of a
+#: cycle wherever both are readable -- it is the measurement that puts a floor
+#: under ``--blocks``. Sweeping its SLOPE phases as if they were a result is
 #: exactly the mistake it exists to prevent, so the default is a choice made
 #: here rather than whatever sorts first.
+#:
+#: Its PHASE Q is a different matter and is evidence rather than a warning.
+#: Phase Q takes its burst length from the burst index alone -- the kernel's
+#: ``QPROBE``/``QLOOPPROBE`` macros never read ``base_blocks``, and the host
+#: labels a phase-Q point ``n0 << k`` where a slope probe gets
+#: ``base_blocks * (k + 1)`` -- so it is independent of ``--blocks`` by
+#: construction, and this file is that independence measured: every loop-form
+#: point in it is within two cycles of the primary run's at a quarter the block
+#: count.
 MIN_BLOCKS_DATASET = "riscvbench-blackhole-blocks8.csv"
+
+#: The two single-phase ``--gset`` runs. Phase G could not be one kernel --
+#: phase F's bodies already sit within a few hundred bytes of tt-metal's kernel
+#: config buffer and the three intermediates do not fit even alone -- so each
+#: intermediate is paired with a ``g_1024`` anchor in its own build. Set 0
+#: (``g_1280``) rides along in the two full runs; sets 1 and 2 are twelve rows
+#: each and are tracked because they are the only evidence for ``g_1536`` and
+#: ``g_1792``, which is what turned phase F's octave into a bracket and a
+#: plateau. They are never a candidate for :data:`PRIMARY_DATASET`: a
+#: single-phase, single-thread run cannot run the live-instrument check, and a
+#: sweep of one is a footprint table with nothing to calibrate it.
+FOOTPRINT_DATASETS = (
+    "riscvbench-blackhole-gset1.csv",
+    "riscvbench-blackhole-gset2.csv",
+)
 
 #: How many standard errors of the fitted slope count as "the fit cannot tell".
 #: Two, i.e. ~95 %, which is the ordinary convention and is written here rather
@@ -161,6 +193,29 @@ TT_SIM_CHARGES = frozenset(
 #: which load-latency row the stack probe landed in.
 _MMIO_BASE = 0xFFB00000
 
+#: Every instruction-footprint probe, phase F's and phase G's together, in the
+#: order the read-out prints them. The two phases are separate kernel BUILDS and
+#: that is not an accident: phase F's six bodies already sit within a few
+#: hundred bytes of tt-metal's kernel config buffer -- adding phase G's
+#: intermediates to it aborts the launch with ``Program size (125040) too large
+#: for kernel config buffer (70656)``, measured rather than predicted -- so the
+#: footprints between 1024 and 2048 had to become a phase of their own, and one
+#: split further into compile-time sets (``--gset``) at that. ``g_1024`` is
+#: every set's in-build flat anchor, which is what makes a phase-G reading
+#: interpretable without comparing across builds.
+FOOTPRINT_PROBES = (
+    "f_64",
+    "f_128",
+    "f_256",
+    "f_512",
+    "f_1024",
+    "f_2048",
+    "g_1024",
+    "g_1280",
+    "g_1536",
+    "g_1792",
+)
+
 
 def reference_datasets():
     """Every tracked reference measurement, sorted by path."""
@@ -173,7 +228,9 @@ def default_measured_path(arch=None):
     """The tracked dataset to sweep when ``--measured`` is not given.
 
     Never :data:`MIN_BLOCKS_DATASET`, whatever ``arch`` asks for: that file is a
-    deliberately-invalid run kept as evidence about the instrument.
+    deliberately-invalid run kept as evidence about the instrument. Never a
+    :data:`FOOTPRINT_DATASETS` entry either: those are twelve rows of one phase
+    at one thread, so nothing in them could fail the live-instrument check.
     """
     if arch is not None:
         candidate = DATASET_DIR / f"riscvbench-{arch}.csv"
@@ -181,7 +238,8 @@ def default_measured_path(arch=None):
     primary = DATASET_DIR / PRIMARY_DATASET
     if primary.exists():
         return primary
-    found = [p for p in reference_datasets() if p.name != MIN_BLOCKS_DATASET]
+    never = {MIN_BLOCKS_DATASET, *FOOTPRINT_DATASETS}
+    found = [p for p in reference_datasets() if p.name not in never]
     return found[0] if len(found) == 1 else None
 
 
@@ -313,12 +371,67 @@ def _latency_key(arch, region):
     return _LOAD_LATENCY_KEYS[arch].get(region)
 
 
-def _load_row(riscv, arch):
-    """``(key, raw entry)`` for an L1 access on ``arch``."""
-    from tt_sim.perf.model import RV_REGION_L1
+#: Each L1 load probe's DATA working set, in bytes, read off the kernel body in
+#: ``perfbench/riscvbench/src/kernels/compute/rv_probes.cpp``:
+#:
+#: * ``rv_load_chase`` walks a ring of ``RVBENCH_UNROLL`` = 64 nodes placed 16
+#:   bytes apart, so it touches 1024 bytes.
+#: * ``rv_load_indep`` loads from ``0/16/32/48(%scratch)`` in rotation, so it
+#:   touches 64 bytes.
+#:
+#: These are properties of the probe, not of the run, so they are declared here
+#: rather than read from the CSV -- there is no column that could carry them
+#: (``unroll`` is the instruction count, which is 64 for BOTH of these).
+L1_WORKING_SET_BYTES = {
+    "rv_load_chase": 64 * 16,
+    "rv_load_indep": 4 * 16,
+}
 
+
+def _l1_load_row(riscv, arch, working_set_bytes=None):
+    """``(key, raw entry)`` for an L1 load whose working set is known.
+
+    THIS USED TO READ ``_LOAD_LATENCY_KEYS`` AND NOTHING ELSE, which on
+    Blackhole names ``l1_dcache_hit`` -- and that was wrong for every probe
+    here. The mapping in ``model.py`` answers "what should the simulator charge
+    an arbitrary L1 load whose hit rate nobody publishes?", and its answer is
+    the low end of the two-ended pair, which is the same floor policy as every
+    ``at_least`` in the file. This function answers a different question:
+    **which row does a probe of known access pattern actually reach?** Choosing
+    between two distinct rows is not a bound-resolution problem, and resolving
+    it "conservatively" does not make it conservative -- it makes the residual
+    measure the wrong row. ``rv_load_chase`` is a pointer chase over 1 KiB
+    against a 64-byte L0 data cache; the hit row does not apply to it at all,
+    and predicting 2 where the documentation gives >= 8 read out as a 6-cycle
+    discrepancy that was entirely the sweep's own.
+
+    The discriminator is the cache's published CAPACITY and only that, because
+    capacity is the only property of the L0 that ``bh_riscv#l0-data-cache``
+    publishes. The test is STRICT: a working set *larger* than the capacity
+    cannot be resident under any organisation, so it reaches the miss row and
+    the document settles it. A working set that fits -- including one sitting
+    exactly ON the capacity, which is where ``rv_load_indep`` sits -- is left on
+    the table's default row. That is not a claim that it hits; it is a refusal
+    to claim either way from a page that publishes no associativity, no
+    replacement policy and a ~0.8 % periodic flush. ``rv_load_indep`` measures
+    the miss row's sustained rate on silicon, and moving its prediction on the
+    strength of that would be fitting the table to the measurement, which is the
+    one thing this whole apparatus exists to not do.
+    """
+    from tt_sim.perf.model import RV_REGION_L1, l1_dcache_miss_key
+
+    table = riscv.get("load_latency") or {}
     key = _latency_key(arch, RV_REGION_L1)
-    return key, (riscv.get("load_latency") or {}).get(key)
+    miss_key = l1_dcache_miss_key(arch)
+    capacity = (riscv.get("l0_data_cache") or {}).get("capacity_bytes")
+    if (
+        miss_key is not None
+        and capacity is not None
+        and working_set_bytes is not None
+        and working_set_bytes > capacity
+    ):
+        key = miss_key
+    return key, table.get(key)
 
 
 def predictions(arch, meta=None):
@@ -390,16 +503,53 @@ def predictions(arch, meta=None):
             div_bound,
             "riscv.integer_unit.divide_general",
             note="charged at the low end of the documented 6-33 range, as "
-            "model.py charges every bound; the benchmark's dividend and divisor "
-            "are in the CSV header",
+            "model.py charges every bound. THE RANGE IS DATA-DEPENDENT, not a "
+            "confidence interval: divide occupies EX1 for a number of cycles "
+            '"dependent upon the magnitude of the dividend", so 6 and 33 are '
+            "two operands rather than two guesses at one. The benchmark's "
+            "dividend is 0x12345678 (29 significant bits, in the CSV header) "
+            "and reads 33 -- the top of the band, from an operand near the top "
+            "of the magnitude range. A residual here sizes the BENCHMARK's "
+            "choice of dividend, not the table.",
         )
-    row_key, row = _load_row(riscv, arch)
+    capacity = (riscv.get("l0_data_cache") or {}).get("capacity_bytes")
+    chase_set = L1_WORKING_SET_BYTES["rv_load_chase"]
+    row_key, row = _l1_load_row(riscv, arch, chase_set)
     lat, lat_bound = _cycles_of(row)
     if lat is not None:
-        add("rv_load_chase", float(lat), lat_bound, f"riscv.load_latency.{row_key}")
+        add(
+            "rv_load_chase",
+            float(lat),
+            lat_bound,
+            f"riscv.load_latency.{row_key}",
+            note=None
+            if capacity is None
+            else f"the chase's ring is {chase_set} bytes against an L0 data cache "
+            f"of {capacity} (riscv.l0_data_cache.capacity_bytes), so it cannot be "
+            "resident and this is the row it reaches whatever the cache's "
+            "unpublished organisation. The hit row is not a conservative reading "
+            "of this probe -- it is a different row. NOTE that tt-sim charges "
+            "the HIT row for every L1 load, so against a tt-sim dataset this "
+            "probe reads ~2 against a prediction of 8: an under-charge by the "
+            "simulator of exactly the kind `rv_mul_dep` records, not an "
+            "over-prediction by the table.",
+        )
+    indep_set = L1_WORKING_SET_BYTES["rv_load_indep"]
+    indep_key, indep_row = _l1_load_row(riscv, arch, indep_set)
+    lat, lat_bound = _cycles_of(indep_row)
+    if lat is not None:
         under = loads.get("one_per_cycle_if_latency_under")
         per_window = loads.get("else_loads_per_window")
         offset = loads.get("else_window_cycles_offset")
+        boundary = (
+            None
+            if capacity is None or indep_set != capacity
+            else f" NOTE: this probe's {indep_set}-byte working set is EXACTLY the "
+            f"L0 data cache's capacity, which the documentation does not settle "
+            f"either way -- so it is left on `{indep_key}`, the table's default "
+            "row, rather than moved to the miss row that the silicon reading "
+            "matches. A residual here is the boundary, not an over-charge."
+        )
         if under is not None and per_window and offset is not None:
             if lat < under:
                 add(
@@ -408,8 +558,10 @@ def predictions(arch, meta=None):
                     "exact",
                     "riscv.load_throughput.one_per_cycle_if_latency_under",
                     kind="derived",
-                    derivation=f"load latency {lat} < {under}, so the docs' "
-                    f'"throughput of sustained loads is one per cycle" applies.',
+                    derivation=f"load latency {lat} < {under} on "
+                    f"`{indep_key}`, so the docs' "
+                    f'"throughput of sustained loads is one per cycle" applies.'
+                    + (boundary or ""),
                 )
             else:
                 value = (lat + offset) / float(per_window)
@@ -419,9 +571,10 @@ def predictions(arch, meta=None):
                     "at_least",
                     "riscv.load_throughput",
                     kind="derived",
-                    derivation=f"latency {lat} >= {under}, so the docs give "
-                    f"{per_window} loads every {lat} - 1 cycles, i.e. "
-                    f"({lat} + {offset}) / {per_window} = {value:.3f} cycles/load.",
+                    derivation=f"latency {lat} >= {under} on `{indep_key}`, so the "
+                    f"docs give {per_window} loads every {lat} - 1 cycles, i.e. "
+                    f"({lat} + {offset}) / {per_window} = {value:.3f} cycles/load."
+                    + (boundary or ""),
                 )
     l1_store, l1_store_bound = _cycles_of(stores.get("l1_period_cycles"))
     if l1_store is not None:
@@ -623,7 +776,7 @@ def predictions(arch, meta=None):
     # -- phase F -----------------------------------------------------------
     fetch = riscv.get("instruction_fetch") or {}
     period = fetch.get("expected_period_cycles")
-    for probe in ("f_64", "f_128", "f_256", "f_512", "f_1024", "f_2048"):
+    for probe in FOOTPRINT_PROBES:
         add(
             probe,
             None,
@@ -665,6 +818,15 @@ def _exclusions():
             "looking for a slope. A least-squares line through it would be "
             "meaningless by construction. Reported separately.",
             lambda s: s["phase"] != "q",
+        ),
+        (
+            "phase == S",
+            "phase S sweeps burst length too, and its answer is a RATIO between "
+            "thread counts rather than a level: whether the queue phase Q "
+            "measured is shared or per-thread. A slope through it, and a "
+            "residual against a table entry that does not exist, would both be "
+            "meaningless. Reported separately.",
+            lambda s: s["phase"] != "s",
         ),
         (
             "active_threads > 1",
@@ -936,9 +1098,12 @@ def report(rows, arch, out=None, label="measured", reference=None, meta=None):
     _fusion_check(series, emit, meta)
     _branch_check(series, arch, emit)
     _queue_check(rows, emit)
+    _sharing_check(rows, emit)
+    _depth_reconcile(rows, emit)
     _fetch_check(series, emit)
     _issue_limit_check(series, emit)
     _live_check(series, emit)
+    _additions_present(rows, emit)
     if reference is not None:
         _differential(rows, reference, arch, emit, meta)
     return kept
@@ -1227,6 +1392,28 @@ def _wide_rate(series, min_n=None):
 #: two single-shot measurements and carries the phase's whole noise floor.
 QUEUE_KNEE_FRACTION = 0.9
 
+#: The loop-form burst probes, added so that phase Q could reach n = 1024
+#: without its instruction stream growing with the burst. See
+#: :func:`_queue_loop_readout`.
+QUEUE_LOOP_PLAIN = "q_loop_adddmareg"
+QUEUE_LOOP_SYNC = "q_loop_adddmareg_sync"
+QUEUE_LOOP_BASELINE = "q_loop_addi"
+
+#: How much of its own level the backlog's last doubling may add before the
+#: series counts as an asymptote rather than a still-growing quantity. An
+#: unbounded queue absorbs the whole of every doubling, so its backlog doubles
+#: too and the last step is ~50 % of the level; a saturated one adds nothing.
+QUEUE_FLATTEN_FRACTION = 0.25
+
+#: How many ``q_ctrl`` spreads the backlog must clear before a depth in entries
+#: is reported at all. The backlog is
+#: ``(sync[n] - plain[n]) - (sync[lo] - plain[lo])`` -- a difference of two
+#: differences, i.e. four raw single-shot points -- and ``q_ctrl``'s spread is
+#: what ONE such point can be wrong by, so two of them is the floor. Taken from
+#: the run's own measured spread rather than fixed in cycles, because the floor
+#: is a property of the run and not of the instrument.
+QUEUE_NOISE_MULTIPLE = 2.0
+
 
 def _queue_check(rows, emit):
     """Phase Q: does the issuing core run ahead of the Tensix backend?
@@ -1303,9 +1490,12 @@ def _queue_check(rows, emit):
     emit(
         f"  NOISE FLOOR: `q_ctrl` spans {min(control_values)}-{max(control_values)} "
         f"cycles across the burst lengths in this\n"
-        f"  run ({spread} cycles). It executes the identical cascade with an empty body, so\n"
-        "  that spread is what a single phase-Q point can be wrong by, and any rate\n"
-        f"  below carries {spread}/(span) cycles per instruction of it."
+        f"  run ({spread} cycles, over every thread slot). It executes the identical\n"
+        "  cascade with an empty body, so that spread is what a single phase-Q point can\n"
+        f"  be wrong by, and any rate below carries {spread}/(span) cycles per instruction\n"
+        "  of it. Each slot's refusal below uses ITS OWN spread rather than this one,\n"
+        "  because the floor is a statement about that slot's run and not about the\n"
+        "  noisiest slot in the file."
     )
 
     for threads, thread in sorted(slots):
@@ -1338,9 +1528,21 @@ def _queue_check(rows, emit):
                 f"{first[2] - first[1]}, cycles per instruction"
             )
         _queue_slot_readout(probes, emit)
+        _queue_loop_readout(probes, emit)
 
     emit()
     emit(
+        "  TWO BURST FORMS, and `--blocks` enters NEITHER of them. The cascade emits\n"
+        "  2^p copies of the body straight-line and runs n = 1..128; the loop form runs\n"
+        "  n = 16..1024 as n/16 iterations of one 16-instruction block, so its\n"
+        "  instruction footprint is 64 bytes at every burst length and no difference\n"
+        "  between two of its points can be instruction fetch. Both take their burst\n"
+        "  length from the burst index alone -- `riscvbench.cpp` labels a phase-Q point\n"
+        "  `n0 << k` where the slope phases get `base_blocks * (k + 1)`, and the kernel's\n"
+        "  QPROBE/QLOOPPROBE macros never read `base_blocks` at all -- so a phase-Q\n"
+        "  reading is independent of `--blocks` by construction, and two runs an octave\n"
+        "  apart in `--blocks` reproduce it point for point.\n"
+        "\n"
         "  WHAT A KNEE WOULD BE, and why only one probe here can have one. Below the\n"
         "  queue's depth the core is not back-pressured and one more instruction costs\n"
         "  one cycle; above it, one more costs the backend unit's occupancy. That is\n"
@@ -1408,6 +1610,11 @@ def _queue_slot_readout(probes, emit):
             + "  ".join(
                 f"n={n} {synced[n] - plain[n] - base:+.0f}" for n in shared if n >= 8
             )
+            + "\n      (raw differences, UNADJUDICATED. They can come out negative, "
+            "which work in\n      flight cannot be, because each is four single-shot "
+            "points against a control\n      that spans ~16 cycles. The depth in entries "
+            f"is read off the `{QUEUE_LOOP_PLAIN}`\n      pair below, which alone has a "
+            "burst long enough for the backlog to settle.)"
         )
     emit(
         f"      -> issuing core {plain_rate[0]:.3f} cyc/instr against the work's own "
@@ -1427,16 +1634,580 @@ def _queue_slot_readout(probes, emit):
         )
 
 
+def _queue_loop_readout(probes, emit):
+    """The loop-form burst out to n = 1024: a depth in entries, or a refusal.
+
+    THE REFUSAL IS THE POINT, and it was added on 2026-08-05 after a run in
+    which three thread slots reported a NEGATIVE backlog and two more divided a
+    single-digit one by a service rate to announce "~1 instruction in flight".
+    Work in flight cannot be negative. That is not a noisy estimate, it is
+    arithmetic run where there is no signal, and printing a number from it is
+    the same class of error as the ``q_ctrl`` subtraction this phase already
+    retracted once.
+
+    So a depth is reported only when the backlog clears
+    :data:`QUEUE_NOISE_MULTIPLE` times the control's own measured spread AND has
+    stopped growing. The floor comes from ``q_ctrl`` rather than from a constant
+    because it is the run's own statement about how wrong one of its points can
+    be. It is what disqualifies every multi-thread slot on silicon: the drained
+    rate there is three times higher, so the same queue holds a backlog three
+    times smaller *in cycles*, and it lands underneath the floor.
+    """
+    plain = probes.get(QUEUE_LOOP_PLAIN)
+    synced = probes.get(QUEUE_LOOP_SYNC)
+    if not plain or not synced:
+        return
+    plain_rate = _wide_rate(plain)
+    sync_rate = _wide_rate(synced)
+    if plain_rate is None or sync_rate is None:
+        return
+
+    # Does changing the burst form change the quantity? Measured, over the span
+    # where the cascade also ran, rather than argued.
+    cascade = probes.get("q_adddmareg") or {}
+    shared = sorted(n for n in set(cascade) & set(plain) if n >= QUEUE_MIN_N)
+    if len(shared) >= 2:
+        lo, hi = shared[0], shared[-1]
+        casc = (cascade[hi] - cascade[lo]) / float(hi - lo)
+        loop = (plain[hi] - plain[lo]) / float(hi - lo)
+        emit(
+            f"      form check n={lo}..{hi}: cascade {casc:.3f}, loop {loop:.3f}, "
+            f"difference {loop - casc:+.3f} cyc/instr\n"
+            "        (the loop's own back edge is inside that difference; "
+            f"`{QUEUE_LOOP_BASELINE}` measures it)"
+        )
+
+    baseline = _wide_rate(probes.get(QUEUE_LOOP_BASELINE) or {})
+    emit(
+        f"      loop form to n={plain_rate[2]}: issuing core {plain_rate[0]:.3f} "
+        f"| drained {sync_rate[0]:.3f}"
+        + (
+            f" | issue-limited baseline {baseline[0]:.3f}"
+            if baseline is not None
+            else " | issue-limited baseline not measured"
+        )
+    )
+
+    ns = sorted(n for n in plain if n in synced)
+    if len(ns) < 3:
+        return
+    base = synced[ns[0]] - plain[ns[0]]
+    backlog = [(n, synced[n] - plain[n] - base) for n in ns]
+    emit(
+        f"      backlog in flight (cycles of ThCon work, less {base} for "
+        f"tensix_sync()'s\n      own cost at n={ns[0]}): "
+        + "  ".join(f"n={n} {v:+.0f}" for n, v in backlog)
+    )
+    margins = [(a, b, (plain[b] - plain[a]) / float(b - a)) for a, b in zip(ns, ns[1:])]
+    emit(
+        "      marginal, adjacent burst lengths: "
+        + "  ".join(f"{a}->{b} {m:.2f}" for a, b, m in margins)
+    )
+    knee = next(
+        (m for m in margins if m[2] >= QUEUE_KNEE_FRACTION * sync_rate[0]), None
+    )
+    if knee is None:
+        emit(
+            f"         NO KNEE up to n={plain_rate[2]}: the core never stops running "
+            "ahead within this sweep."
+        )
+    else:
+        emit(
+            f"         KNEE between n={knee[0]} and n={knee[1]}: the marginal reaches "
+            f"{knee[2]:.2f} against a\n         drained {sync_rate[0]:.3f}, so the core "
+            "is back-pressured from there on."
+        )
+
+    ctrl = probes.get(QUEUE_CONTROL_PROBE) or {}
+    spread = (max(ctrl.values()) - min(ctrl.values())) if ctrl else 0
+    floor = QUEUE_NOISE_MULTIPLE * spread
+    last = backlog[-1][1]
+    last_step = backlog[-1][1] - backlog[-2][1]
+    prev_step = backlog[-2][1] - backlog[-3][1]
+    if last <= 0:
+        emit(
+            f"         BACKLOG NEGATIVE ({last:+.0f} cycles at n={ns[-1]}): work in "
+            "flight cannot be\n         negative, so this slot has NO SIGNAL -- the true "
+            f"backlog is smaller than\n         the {spread}-cycle spread `q_ctrl` "
+            "measures for one raw point and the\n         subtraction has gone through "
+            "zero. NO DEPTH IN ENTRIES IS REPORTED."
+        )
+    elif last <= floor:
+        emit(
+            f"         BACKLOG {last:+.0f} cycles at n={ns[-1]}, INSIDE THE NOISE FLOOR "
+            f"({floor:.0f} = two\n         `q_ctrl` spreads of {spread}; the backlog is a "
+            "difference of two differences\n         of raw single-shot points). A depth "
+            "divided out of that would carry less\n         signal than the control's own "
+            "scatter. NO DEPTH IN ENTRIES IS REPORTED."
+        )
+    elif last_step > QUEUE_FLATTEN_FRACTION * last:
+        emit(
+            "         BACKLOG STILL GROWING at the largest burst (last two doublings "
+            f"added\n         {prev_step:+.0f} then {last_step:+.0f} cycles), so it is not "
+            "an asymptote and no depth in\n         entries is resolvable. Either the queue "
+            f"is deeper than n={ns[-1]}, or nothing\n         back-pressures this core at "
+            "all -- which is what tt-sim is by construction."
+        )
+    else:
+        emit(
+            f"         BACKLOG FLATTENED at ~{last:.0f} cycles (last two doublings added "
+            f"{prev_step:+.0f}\n         then {last_step:+.0f}), clearing a {floor:.0f}-cycle "
+            f"noise floor, and at the drained rate\n         of {sync_rate[0]:.3f} cycles "
+            f"per instruction that is ~{last / sync_rate[0]:.0f} INSTRUCTIONS in flight\n"
+            "         -- a measurement of the Tensix instruction queue's depth in entries."
+        )
+
+
+#: Phase S: the reference burst, the issuing thread, and the probe names.
+#:
+#: THE REFERENCE BURST IS THE DESIGN. Phase Q's backlog subtracts its value at
+#: the smallest burst it runs, n = 16, as ``tensix_sync()``'s own cost -- which
+#: is only true where the queue is EMPTY at that burst. It is not: a core
+#: pushing at 1/p instructions per cycle against a backend draining one every S
+#: leaves ``n * (1 - p/S)`` outstanding, ~10 entries at n = 16 and one issuing
+#: thread. At two and three threads a shared queue's per-thread share may be
+#: *smaller* than that, which makes phase Q's multi-thread backlogs
+#: structurally zero rather than merely small -- and zero is exactly what its
+#: two banked runs read there. Phase S references n = 4 instead, where the same
+#: arithmetic gives ~2 entries, so the correction is small and measured rather
+#: than assumed away.
+SHARE_MIN_N = 4
+SHARE_ISSUER = 1
+SHARE_BASELINE = "s_loop_addi"
+SHARE_CO_PLAIN = "s_co_plain"
+SHARE_CO_REPEAT = "s_co_repeat"
+SHARE_CO_SYNC = "s_co_sync"
+SHARE_SOLO_PLAIN = "s_solo_plain"
+SHARE_SOLO_SYNC = "s_solo_sync"
+
+#: How close to 1.0 the ratio of depths must be to read as a per-thread queue,
+#: and how close to 1/k to read as a shared one. Neither is a fitted number:
+#: the two hypotheses predict 1.00x and 1/k, which are a factor of k apart, and
+#: anything landing between the bands is reported as ambiguous rather than
+#: rounded to whichever is nearer.
+SHARE_PRIVATE_RATIO = 0.75
+SHARE_SHARED_SLACK = 1.25
+
+#: Phase G's intermediates, one per ``--gset``. Named here so the presence
+#: check can say that seeing one of them is a complete run.
+SHARE_G_INTERMEDIATES = ("g_1280", "g_1536", "g_1792")
+
+
+def _sharing_check(rows, emit):
+    """Phase S: is the queue phase Q measured shared between the TRISCs?
+
+    THE CONSTRUCTION, because the obvious one does not work. A shared queue of
+    depth D and a per-thread queue of depth D are the same device seen from one
+    thread, so the discriminator has to be a second thread that OCCUPIES queue
+    entries. Two candidates do not:
+
+    * a second thread that only **spins** pushes nothing, so it holds no entry
+      under either hypothesis. It is run anyway, as ``s_solo_*``, because it is
+      the control for "another core is awake" -- competing for instruction
+      fetch out of the same L1 -- as against "another core is issuing".
+    * a second thread issuing at a deliberately **low** rate holds ~0 entries
+      too, and for a reason that is not about this benchmark: occupancy is
+      arrival rate times residence time, so a thread served faster than it
+      arrives is never queued however long it runs.
+
+    Only a **saturated** second thread holds entries, and the price of
+    saturation is that it takes backend bandwidth from the thread being
+    measured. That is not a confound here because the drained rate is measured
+    in the same slot by ``s_co_sync`` and divided back out.
+
+    So the depth in entries is::
+
+        D = backlog / S + SHARE_MIN_N * (1 - p/S)
+
+    and the answer is ``D`` at k issuing threads against ``D`` at one:
+    **equal means per-thread, 1/k means shared**. A level is never the answer.
+    """
+    slots = {}
+    for row in rows:
+        if row["phase"] != "s" or row["probe"] == CONTROL_PROBE:
+            continue
+        key = (row["variant"], row["active_threads"], row["thread"])
+        slots.setdefault(key, {}).setdefault(row["probe"], {})[row["n"]] = row["cycles"]
+    if not slots:
+        return
+
+    emit()
+    emit("-" * 78)
+    emit("Phase S: is the Tensix instruction queue shared, or one per thread?")
+    emit("-" * 78)
+    emit(
+        "  EXPLORATORY, and the question phase Q left open. Nothing in either vendor\n"
+        "  tree gives a Tensix instruction queue depth, let alone whether it is\n"
+        "  replicated per thread.\n"
+        "\n"
+        "  ONLY A SATURATED SECOND THREAD OCCUPIES QUEUE ENTRIES. A spinning one holds\n"
+        "  none under either hypothesis (it is the `s_solo_*` CONTROL below, not the\n"
+        "  discriminator), and one issuing at a low rate holds ~0 by Little's law. The\n"
+        "  backend bandwidth a saturated one takes is measured in the same slot by\n"
+        f"  `{SHARE_CO_SYNC}` and divided back out.\n"
+        "\n"
+        f"      D = backlog / S + {SHARE_MIN_N} * (1 - p/S)\n"
+        "\n"
+        f"  with S from the `_sync` probe and p from `{SHARE_BASELINE}`. The second\n"
+        f"  term is the n = {SHARE_MIN_N} reference burst's own occupancy, which phase Q's\n"
+        "  read-out drops entirely -- so a phase-S depth at one thread should land\n"
+        "  ABOVE phase Q's by roughly the difference, and if it does, phase Q's figure\n"
+        "  is a lower bound.\n"
+        "\n"
+        "  EQUAL DEPTHS AT ONE AND k THREADS => PER-THREAD. 1/k => SHARED."
+    )
+
+    depths = {}
+    for key in sorted(slots):
+        variant, threads, thread = key
+        probes = slots[key]
+        ns = sorted({n for series in probes.values() for n in series})
+        emit()
+        emit(f"  [{variant} thread {thread}]  {threads} issuing thread(s)")
+        emit(
+            "      "
+            + f"{'probe':<16}"
+            + "".join(f"{n:>7}" for n in ns)
+            + f"{'rate':>9}"
+        )
+        for probe in (
+            SHARE_BASELINE,
+            SHARE_CO_PLAIN,
+            SHARE_CO_REPEAT,
+            SHARE_CO_SYNC,
+            SHARE_SOLO_PLAIN,
+            SHARE_SOLO_SYNC,
+        ):
+            series = probes.get(probe)
+            if not series:
+                continue
+            rate = _wide_rate(series, min_n=SHARE_MIN_N)
+            emit(
+                "      "
+                + f"{probe:<16}"
+                + "".join(f"{series[n]:>7}" if n in series else f"{'-':>7}" for n in ns)
+                + (f"{rate[0]:>9.3f}" if rate else f"{'-':>9}")
+            )
+        noise = _sharing_noise(probes)
+        emit(
+            f"      repeatability: |{SHARE_CO_PLAIN} - {SHARE_CO_REPEAT}| <= {noise:.0f} "
+            "cycles. Two identical\n        executions of one burst, so it is what ONE raw "
+            "point can be wrong by."
+        )
+        co = _sharing_depth(probes, SHARE_CO_PLAIN, SHARE_CO_SYNC, noise)
+        solo = _sharing_depth(probes, SHARE_SOLO_PLAIN, SHARE_SOLO_SYNC, noise)
+        for label, depth in (("co-issuing", co), ("solo (others spin)", solo)):
+            if depth is None:
+                continue
+            if depth["entries"] is None:
+                emit(
+                    f"      {label:<19} backlog {depth['backlog']:+.0f} cycles: "
+                    f"{depth['refusal']}.\n        NO DEPTH IN ENTRIES IS REPORTED for this "
+                    "slot."
+                )
+            else:
+                emit(
+                    f"      {label:<19} backlog {depth['backlog']:+.0f} cycles (last "
+                    f"doubling {depth['step']:+.0f}),\n        drained {depth['rate']:.3f} | "
+                    f"issue-limited {depth['issue']:.3f}  ->  DEPTH "
+                    f"~{depth['entries']:.0f} ENTRIES"
+                )
+        if thread == SHARE_ISSUER:
+            depths[threads] = (variant, co, solo)
+    _sharing_verdict(depths, emit)
+
+
+def _sharing_noise(probes):
+    """This slot's single-shot repeatability, from two identical executions."""
+    plain = probes.get(SHARE_CO_PLAIN) or {}
+    repeat = probes.get(SHARE_CO_REPEAT) or {}
+    shared = set(plain) & set(repeat)
+    return max((abs(plain[n] - repeat[n]) for n in shared), default=0.0)
+
+
+def _sharing_depth(probes, plain_name, sync_name, noise):
+    """``{entries, backlog, step, rate, issue, refusal}`` for one plain/sync pair.
+
+    The refusals are phase Q's, for phase Q's reasons: work in flight cannot be
+    negative, a backlog inside twice one point's own scatter is the subtraction
+    rather than the queue, and a backlog still growing at the longest burst has
+    not reached the number it is growing towards. What differs is that the
+    scatter is *measured here* -- by a byte-identical repeat of the probe --
+    rather than inherited from a control that runs a different body.
+    """
+    plain = probes.get(plain_name)
+    synced = probes.get(sync_name)
+    if not plain or not synced:
+        return None
+    rate = _wide_rate(synced, min_n=SHARE_MIN_N)
+    issue = _wide_rate(probes.get(SHARE_BASELINE) or {}, min_n=SHARE_MIN_N)
+    ns = sorted(n for n in plain if n in synced and n >= SHARE_MIN_N)
+    if rate is None or len(ns) < 3:
+        return None
+    base = synced[ns[0]] - plain[ns[0]]
+    backlog = [synced[n] - plain[n] - base for n in ns]
+    out = {
+        "entries": None,
+        "backlog": backlog[-1],
+        "step": backlog[-1] - backlog[-2],
+        "rate": rate[0],
+        "issue": issue[0] if issue else 0.0,
+        "refusal": "",
+    }
+    if backlog[-1] <= 0:
+        out["refusal"] = "not positive, and work in flight cannot be"
+    elif backlog[-1] <= QUEUE_NOISE_MULTIPLE * noise:
+        out["refusal"] = (
+            f"inside {QUEUE_NOISE_MULTIPLE:.0f}x this slot's measured repeatability"
+        )
+    elif out["step"] > QUEUE_FLATTEN_FRACTION * backlog[-1]:
+        out["refusal"] = "still growing at the longest burst, so not an asymptote"
+    elif rate[0] > 0:
+        out["entries"] = backlog[-1] / rate[0] + SHARE_MIN_N * (
+            1.0 - (out["issue"] / rate[0] if out["issue"] else 0.0)
+        )
+    return out
+
+
+def _sharing_verdict(depths, emit):
+    """The ratio, and only the ratio."""
+    emit()
+    base = depths.get(1)
+    if base is None or base[1] is None or base[1]["entries"] is None:
+        emit(
+            "  NO VERDICT: the single-thread slot resolved no depth, so there is no\n"
+            "  baseline to compare against. Against tt-sim this is forced --\n"
+            "  `TensixFrontend.push_mop_instruction` is an unbounded list append, so the\n"
+            "  backlog is still growing at every burst length in every slot and no depth\n"
+            "  is resolvable anywhere. That is a fact about the simulator and says\n"
+            "  nothing about any card."
+        )
+        return
+    one = base[1]["entries"]
+    compared = 0
+    for threads in sorted(depths):
+        if threads <= 1:
+            continue
+        variant, co, solo = depths[threads]
+        if co is None or co["entries"] is None:
+            emit(
+                f"  {variant}: no depth resolved with {threads} issuing; nothing to compare."
+            )
+            continue
+        compared += 1
+        ratio = co["entries"] / one
+        shared = 1.0 / threads
+        if ratio >= SHARE_PRIVATE_RATIO:
+            verdict = "PER-THREAD -- each core has its own queue"
+        elif ratio <= SHARE_SHARED_SLACK * shared:
+            verdict = "SHARED -- one queue, split between the issuers"
+        else:
+            verdict = "AMBIGUOUS -- between the two predictions"
+        emit(
+            f"  {variant}: {co['entries']:.0f} entries against t1's {one:.0f} = "
+            f"{ratio:.2f}x (per-thread predicts 1.00x,\n    shared predicts "
+            f"{shared:.2f}x)  ->  {verdict}"
+        )
+        if solo is not None and solo["entries"] is not None:
+            emit(
+                f"    control: with the others only SPINNING, {solo['entries']:.0f} entries "
+                f"({solo['entries'] / one:.2f}x).\n    Both hypotheses predict 1.00x here; a "
+                "departure is something other than queue\n    sharing, instruction fetch out "
+                "of the shared L1 being the likeliest."
+            )
+    if compared == 0:
+        emit(
+            "  NO VERDICT: only one thread count is in this file, and the answer is a\n"
+            "  comparison between thread counts. Run `--phase s --variants t1,t2,t3`."
+        )
+
+
+#: The two burst forms that have each resolved a Tensix instruction queue depth,
+#: as ``(label, plain, sync, issue-limited baseline, reference burst)``. They are
+#: the same experiment run twice with different constants, so their answers have
+#: to be reconciled rather than quoted side by side -- which is what
+#: :func:`_depth_reconcile` does.
+RECONCILE_FORMS = (
+    (
+        "phase Q (16-instruction block)",
+        QUEUE_LOOP_PLAIN,
+        QUEUE_LOOP_SYNC,
+        QUEUE_LOOP_BASELINE,
+        QUEUE_MIN_N,
+    ),
+    (
+        "phase S (4-instruction block)",
+        SHARE_CO_PLAIN,
+        SHARE_CO_SYNC,
+        SHARE_BASELINE,
+        SHARE_MIN_N,
+    ),
+)
+
+
+def _depth_reconcile(rows, emit):
+    """Do phase Q's and phase S's queue depths agree once the arithmetic is levelled?
+
+    THEY ARE THE SAME MEASUREMENT WITH DIFFERENT CONSTANTS, and two things
+    differ between them: the reference burst (n = 16 against n = 4) and the
+    loop block (16 instructions against 4). Phase Q's read-out publishes
+    ``backlog / S`` and drops the reference burst's own occupancy entirely;
+    phase S carries it. So the first thing to do with two depths from one card
+    is to recompute both under one estimator and see what is left.
+
+    THE THIRD ESTIMATOR IS WHY THIS IS WORTH PRINTING. Once the core is
+    back-pressured, ``plain[n] = n*S - runahead`` and the run-ahead is the queue
+    read WITHOUT the ``_sync`` probe, without the reference burst and without
+    ``tensix_sync()``'s own cost -- three of the four terms the other estimator
+    depends on. If the forms disagree there too, the disagreement is not the
+    correction arithmetic; it is the forms.
+    """
+    got = {}
+    for row in rows:
+        if row["variant"] != "t1" or row["thread"] != SHARE_ISSUER:
+            continue
+        got.setdefault(row["probe"], {})[row["n"]] = row["cycles"]
+    read = [(label, _reconcile_form(got, *rest)) for label, *rest in RECONCILE_FORMS]
+    read = [(label, d) for label, d in read if d is not None]
+    if len(read) < 2:
+        return
+
+    emit()
+    emit("-" * 78)
+    emit("Do the two burst forms agree about the depth?")
+    emit("-" * 78)
+    emit(
+        "  Phase Q and phase S measure ONE quantity twice, at one issuing thread, in\n"
+        "  the same launch. They differ in the reference burst they subtract and in\n"
+        "  the loop block they push from, so the two printed numbers are not\n"
+        "  comparable until both are recomputed under one estimator.\n"
+        "\n"
+        "    bare        backlog / S                    -- phase Q's read-out prints this\n"
+        "    levelled    bare + n_ref * (1 - p/S)       -- phase S's read-out prints this\n"
+        "    run-ahead   (n*S + c - plain[n]) / S       -- neither `_sync` nor a reference\n"
+        "\n"
+        "  with `c` the timed region's fixed cost, taken from the issue-limited probe's\n"
+        "  intercept. The two estimators share no term but `S`, so agreement between\n"
+        "  them inside one form is a check and disagreement between forms is not."
+    )
+    emit()
+    emit(
+        f"  {'form':<32}{'n_ref':>6}{'p':>7}{'S':>7}{'backlog':>9}"
+        f"{'bare':>8}{'levelled':>10}{'run-ahead':>11}"
+    )
+    for label, d in read:
+        emit(
+            f"  {label:<32}{d['n_ref']:>6}{d['issue']:>7.3f}{d['rate']:>7.3f}"
+            f"{d['backlog']:>9.0f}{d['bare']:>8.1f}{d['levelled']:>10.1f}"
+            f"{d['runahead']:>11.1f}"
+        )
+    _reconcile_verdict(read, emit)
+
+
+def _reconcile_form(got, plain_name, sync_name, baseline_name, n_ref):
+    """One form's three depth estimates, or ``None`` if it is not in this run."""
+    plain, synced = got.get(plain_name), got.get(sync_name)
+    if not plain or not synced:
+        return None
+    rate = _wide_rate(synced, min_n=n_ref)
+    issue = _wide_rate(got.get(baseline_name) or {}, min_n=n_ref)
+    ns = sorted(n for n in plain if n in synced and n >= n_ref)
+    if rate is None or issue is None or rate[0] <= 0 or len(ns) < 3:
+        return None
+    backlog = (synced[ns[-1]] - plain[ns[-1]]) - (synced[ns[0]] - plain[ns[0]])
+    # The marginal over the last doubling is the saturated service rate as the
+    # PLAIN probe sees it, so the run-ahead is read off that probe alone. What
+    # it needs from elsewhere is the timed region's own fixed cost -- the two
+    # clock reads and the loop entry -- which the issue-limited baseline gives
+    # as its intercept. Leaving it out biases the run-ahead DOWN by that many
+    # cycles in both forms, so it cancels in a comparison but not in a level.
+    marginal = (plain[ns[-1]] - plain[ns[-2]]) / float(ns[-1] - ns[-2])
+    fixed = _timed_region_fixed_cost(got.get(baseline_name) or {}, n_ref)
+    if marginal <= 0 or fixed is None:
+        return None
+    return {
+        "n_ref": n_ref,
+        "issue": issue[0],
+        "rate": rate[0],
+        "backlog": backlog,
+        "bare": backlog / rate[0],
+        "levelled": backlog / rate[0] + n_ref * (1.0 - issue[0] / rate[0]),
+        "fixed": fixed,
+        "runahead": (marginal * ns[-1] + fixed - plain[ns[-1]]) / marginal,
+    }
+
+
+def _timed_region_fixed_cost(baseline, n_ref):
+    """The clock reads and loop entry, as the issue-limited probe's intercept.
+
+    Read off the baseline's own last doubling rather than a fit through all its
+    points, because its smallest bursts carry a cold instruction fetch that a
+    fit would tilt the whole line to accommodate.
+    """
+    ns = sorted(n for n in baseline if n >= n_ref)
+    if len(ns) < 2:
+        return None
+    slope = (baseline[ns[-1]] - baseline[ns[-2]]) / float(ns[-1] - ns[-2])
+    return baseline[ns[-1]] - slope * ns[-1]
+
+
+#: How far apart two forms' levelled depths may land and still be one answer.
+#: One entry, because a depth in entries is an integer and the two estimators
+#: below already differ from each other by a fraction of one.
+RECONCILE_TOLERANCE = 1.0
+
+
+def _reconcile_verdict(read, emit):
+    """What the reference burst explains, and what is left over."""
+    (lo_label, lo), (hi_label, hi) = sorted(read, key=lambda pair: pair[1]["levelled"])
+    printed = hi["levelled"] - lo["bare"]
+    correction = hi["levelled"] - hi["bare"] - (lo["levelled"] - lo["bare"])
+    left = hi["levelled"] - lo["levelled"]
+    emit()
+    emit(
+        f"  The two read-outs print {hi['levelled']:.0f} and {lo['bare']:.0f} entries, a gap of "
+        f"{printed:+.1f}. The reference-burst\n"
+        f"  terms differ by {-correction:.1f} entries ({lo['levelled'] - lo['bare']:.1f} at "
+        f"n_ref = {lo['n_ref']} against {hi['levelled'] - hi['bare']:.1f} at\n"
+        f"  n_ref = {hi['n_ref']}), which is what phase S was built to carry and phase Q's\n"
+        "  read-out drops. Adding it back leaves"
+    )
+    if abs(left) <= RECONCILE_TOLERANCE:
+        emit(
+            f"      RECONCILED: {abs(left):.1f} entries between the two forms. Phase Q's figure\n"
+            "      is a LOWER BOUND by exactly the term it drops, and the two\n"
+            "      constructions measure the same queue."
+        )
+        return
+    emit(
+        f"      {left:+.1f} ENTRIES UNEXPLAINED, `{hi_label}` over\n"
+        f"      `{lo_label}`. That is not the correction arithmetic: the\n"
+        "      run-ahead estimator, which uses neither `_sync` probe nor either\n"
+        f"      reference burst, puts the same two forms {hi['runahead'] - lo['runahead']:+.1f} entries apart.\n"
+        "\n"
+        "      SO THE DEPTH DEPENDS ON WHICH FORM MEASURES IT, and neither number may be\n"
+        "      quoted alone. What the forms bracket is the finding; what separates them\n"
+        "      is a property of the instrument that this run does not resolve."
+    )
+
+
 def _fetch_check(series, emit):
-    """Phase F: does a bigger loop body cost more per instruction?"""
-    names = ("f_64", "f_128", "f_256", "f_512", "f_1024", "f_2048")
-    values = [(nm, _measured(series, nm)) for nm in names]
+    """Phases F and G: does a bigger loop body cost more per instruction?
+
+    The two phases are one measurement in two kernel BUILDS, and the split is
+    forced rather than chosen -- see :data:`FOOTPRINT_PROBES`. Phase G's
+    intermediates are each compiled against a ``g_1024`` anchor in their own
+    build, so a phase-G step is read against that rather than across the build
+    boundary; the table below prints both and the verdict says which it used.
+    """
+    values = [(nm, _measured(series, nm)) for nm in FOOTPRINT_PROBES]
     values = [(nm, v) for nm, v in values if v is not None]
     if len(values) < 2:
         return
+    values.sort(key=lambda pair: (int(pair[0].split("_")[1]), pair[0]))
     emit()
     emit("-" * 78)
-    emit("Phase F: instruction footprint")
+    emit("Phases F and G: instruction footprint")
     emit("-" * 78)
     emit(
         "  EXPLORATORY. `riscv.instruction_fetch` gives the fetch PERIOD -- one\n"
@@ -1444,6 +2215,15 @@ def _fetch_check(series, emit):
         '  cache miss cost is not published". No cache SIZE is published either. So a\n'
         "  flat row is consistent with the documentation and a cliff is a number\n"
         "  nothing has ever printed; both are results.\n"
+        "\n"
+        "  WHAT A STEP LOCATES IS A BOUNDARY IN LOOP-BODY SIZE, and narrowing it does\n"
+        "  not turn it into a cache capacity. A prefetch window, a TLB-like structure\n"
+        "  or an L1 access pattern would all produce this column, and no document\n"
+        "  distinguishes them. The `g_*` rows are phase G: the footprints between\n"
+        "  1024 and 2048, one per `--gset`, each measured against a `g_1024` body\n"
+        "  compiled into the SAME kernel -- phase F's six bodies already sit within a\n"
+        "  few hundred bytes of tt-metal's kernel config buffer, so they could not\n"
+        "  simply be added to it.\n"
     )
     emit(f"  {'footprint':<12}{'bytes':>8}{'cyc/instr':>12}")
     for nm, v in values:
@@ -1464,10 +2244,33 @@ def _fetch_check(series, emit):
     else:
         emit(
             f"  VERDICT: NOT flat -- {spread:.3f} cycles/instruction between the\n"
-            "  cheapest and dearest footprint. The step locates a capacity nothing\n"
-            "  publishes, and it is the first number this benchmark produces that no\n"
-            "  document could have given."
+            "  cheapest and dearest footprint. The step locates a boundary in\n"
+            "  loop-body size that nothing publishes, and it is the first number this\n"
+            "  benchmark produces that no document could have given."
         )
+        _fetch_bracket(values, emit)
+
+
+def _fetch_bracket(values, emit):
+    """Where the step falls, as a bracket in bytes -- never as a cache size."""
+    ordered = [(int(nm.split("_")[1]) * 4, nm, v) for nm, v in values]
+    low = min(v for _, _, v in ordered)
+    # "Stepped" is a per-instruction cost half way to the dearest reading, which
+    # is well outside any resolution this instrument claims and needs no
+    # threshold argument of its own.
+    cut = low + 0.5 * (max(v for _, _, v in ordered) - low)
+    flat = [b for b, _, v in ordered if v < cut]
+    stepped = [b for b, _, v in ordered if v >= cut]
+    if not flat or not stepped:
+        return
+    emit(
+        f"  BRACKET: flat through a {max(flat)}-byte loop body, stepped by "
+        f"{min(stepped)} bytes.\n"
+        "  That is the whole claim. It is a boundary in loop-body size, measured\n"
+        "  between two footprints that were run; it is not a cache size, and the\n"
+        "  cost of crossing it is an AMORTISED figure over a body that is either\n"
+        "  entirely resident or entirely not."
+    )
 
 
 def _issue_limit_check(series, emit):
@@ -1498,7 +2301,12 @@ def _issue_limit_check(series, emit):
         + "".join(f"{v:>10}" for v in variants)
         + "     verdict"
     )
-    probes = sorted({s["probe"] for s in series if s["phase"] != "q"})
+    # Phases Q and S sweep BURST LENGTH, so a least-squares slope through them
+    # against the block-count control is not a per-instruction cost -- it comes
+    # out negative, and a "per-core" verdict computed from two negative numbers
+    # is worse than no verdict. Both phases have their own read-out and the
+    # contention question is answered there, on their own terms.
+    probes = sorted({s["probe"] for s in series if s["phase"] not in ("q", "s")})
     for probe in probes:
         if probe == CONTROL_PROBE:
             continue
@@ -1579,6 +2387,50 @@ def _live_check(series, emit):
             f"  {above} of {seen} read above 1.0, so the timer resolves a real\n"
             "  per-instruction cost and a 1.000 elsewhere in this run is a finding\n"
             "  rather than a floor."
+        )
+
+
+def _additions_present(rows, emit):
+    """Did phases S and G run at all? A null is not an absence.
+
+    The same trap :func:`_live_check` exists for, in the form the two newer
+    phases take it. Against tt-sim BOTH are forced: it models no instruction
+    cache, so every phase-G footprint reads the same; and its Tensix queue is a
+    list append, so no phase-S slot resolves a depth. A reader who cannot tell
+    that from "the probe never ran" has learnt nothing from either, so this
+    prints which probes produced points before any verdict is read.
+    """
+    present = {}
+    for row in rows:
+        if row["phase"] in ("s", "g") and row["probe"] != CONTROL_PROBE:
+            present.setdefault(row["probe"], 0)
+            present[row["probe"]] += 1 if row["cycles"] else 0
+    if not present:
+        return
+    emit()
+    emit("-" * 78)
+    emit("Did the new phases run? (a forced null is not an absence)")
+    emit("-" * 78)
+    share = [p for p in present if p.startswith("s_")]
+    fetch = [p for p in present if p.startswith("g_")]
+    if share:
+        emit(
+            "  phase S: "
+            + ", ".join(f"{p} {present[p]} points" for p in sorted(share))
+            + "\n    Structural check: `s_co_sync` must exceed `s_co_plain` at every burst\n"
+            "    length -- a drain cannot be free. If they are equal the phase measured\n"
+            "    nothing, whatever the verdict above said. Against tt-sim the backlog\n"
+            "    grows without bound and every slot refuses a depth: forced, and a fact\n"
+            "    about the simulator."
+        )
+    if fetch:
+        emit(
+            "  phase G: "
+            + ", ".join(f"{p} {present[p]} points" for p in sorted(fetch))
+            + f"\n    Exactly ONE of {SHARE_G_INTERMEDIATES} is compiled per `--gset`, so a\n"
+            "    file holding one of them is a complete run and not a truncated one.\n"
+            "    Against tt-sim all footprints read alike: no instruction cache is\n"
+            "    modelled, so the flat row is forced and says nothing about hardware."
         )
 
 

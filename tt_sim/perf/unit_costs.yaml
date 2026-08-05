@@ -329,6 +329,28 @@ noc:
       congestion term. It is the right thing to *validate* a congestion model
       against; it is not itself one.
 
+      TESTED, 2026-08-05, rather than left as an assertion. The reason it
+      cannot supply one is sharper than "too coarse", and it is
+      identifiability: every multi-party row in that file changes the number
+      of concurrent flows by RESIZING A GRID (2x2, 3x3, 5x5, 8x8, the whole
+      device, all anchored at logical (0,0)), so the flow count, the path
+      lengths and the link sharing move together in four or five steps and no
+      two rows hold any of them fixed. The file records no core coordinates,
+      and its one scalar per key already contains the issuing core's loop --
+      which the retained rows measure at ~100 cycles per transaction, and
+      which dominates the multi-party rows at small transaction sizes -- plus
+      L1 port arbitration. One equation, three unknowns. A coefficient fitted
+      through that would be `provenance: estimated`, which this file does not
+      have; `vendor_source_derived` is not available either, because no
+      arithmetic on the published numbers isolates congestion from the other
+      two terms. What the dataset DOES give is a bound: all-to-all over an
+      N-core grid at 64 KiB shows aggregate bandwidth rising 3.4x (Wormhole)
+      and 6.0x (Blackhole) for 14x and 28x the cores, i.e. the per-core share
+      falling ~4x. Any congestion model tt-sim gains must reproduce that curve.
+      `python3 -m tt_sim.perf.noc_dataset_sweep` prints the whole argument
+      with the numbers, and names the four hardware measurements that would
+      settle it.
+
 # ---------------------------------------------------------------------------
 dram:
   note: >
@@ -1031,18 +1053,31 @@ arch_overrides:
           identically at one, two and three issuing threads -- so the fetch
           path is per-core rather than shared, which this page does not say.
 
-          THE STEP AT 2048 IS NOT RECORDED IN THIS FILE AND DELIBERATELY SO.
-          A ~25 % penalty appearing between a 4 KiB and an 8 KiB loop body
-          locates an instruction-cache capacity, and this entry's own note says
-          the miss cost is not published; no cache SIZE is published either. A
-          number with no documentary source has no home in these tables under
-          the discipline they are kept to, so it is written down in
-          docs/bh_arch.md instead. That tension is real and is stated there.
+          THE STEP IS NOT RECORDED IN THIS FILE AND DELIBERATELY SO. It
+          locates a boundary in LOOP-BODY SIZE and not a cache capacity: this
+          entry's own note says the miss cost is not published, no cache SIZE
+          is published either, and a prefetch window or a TLB-like structure
+          would produce the same column. A number with no documentary source
+          has no home in these tables under the discipline they are kept to, so
+          it is written down in docs/bh_arch.md instead. That tension is real
+          and is stated there.
 
-          TWO RUNS, ON ONE CARD, one operator, one power state, one day;
-          tt_sim/perf/datasets/riscvbench-blackhole.csv, phase F valid. The
-          companion --blocks 8 run reads 0.991-0.995 flat and 1.251 at 2048 --
-          the cliff to three decimal places.
+          PHASE G NARROWED IT, 2026-08-05, same card and same campaign: bodies
+          of 1280, 1536 and 1792 instructions read 1.153, 1.252 and 1.252
+          cycles per instruction against a 1024-instruction anchor compiled
+          into the same kernel at 1.000. So the boundary is between 4096 and
+          5120 bytes rather than between 4 KiB and 8 KiB, and the cost past it
+          RISES ONCE MORE AND THEN SATURATES rather than stepping cleanly --
+          which is consistent with partial residency of something holding about
+          4 KiB, and equally consistent with a fixed prefetch reach. Neither is
+          a documented quantity and neither is recorded here.
+
+          FOUR RUNS, ON ONE CARD, one operator, one power state, one day;
+          tt_sim/perf/datasets/riscvbench-blackhole.csv (phases F and G valid),
+          its --blocks 8 companion, and riscvbench-blackhole-gset1.csv and
+          -gset2.csv, which are the only measurements of the 6144- and
+          7168-byte bodies. The --blocks 8 run reads 0.991-0.995 flat, 1.150 at
+          1280 and 1.251 at 2048 -- the step to three decimal places.
       pipeline:
         stages: [frontend, ex1, ex2, load_store_unit, retire_unit]
         min_cycles_per_stage: 1
@@ -1124,6 +1159,39 @@ arch_overrides:
           probes specifically, whose slope over that shorter baseline is barely
           above the control's. Its branch deltas are larger (-0.158, -0.132)
           and still negative.
+      l0_data_cache:
+        capacity_bytes: 64
+        lines: 4
+        line_bytes: 16
+        flushed_by_fence_or_atomic: true
+        periodic_flush_chance_per_hit: 0.008
+        provenance: isa_doc
+        source: bh_riscv#l0-data-cache
+        note: >
+          "Each baby RISCV has a tiny L0 data cache between it and L1. The
+          capacity of this L0 data cache is a mere 64 bytes: 4 lines of 16
+          bytes each. The entire L0 data cache will be flushed by any `fence`
+          or atomic instruction, and cache hits also have a ~0.8% chance of
+          flushing the entire cache ... The cache is _not_ coherent". Stores to
+          L1 flush the containing line, so the cache is never dirty.
+
+          ASSOCIATIVITY, INDEXING AND REPLACEMENT ARE NOT PUBLISHED, which is
+          why only the capacity is recorded. What the capacity ALONE settles is
+          one-sided, and the one-sidedness is the point: a working set LARGER
+          than 64 bytes cannot be resident, so it reaches ``l1_dcache_miss``
+          however the cache is organised. A working set at or below 64 bytes is
+          NOT thereby predicted to hit -- that would need the organisation this
+          page does not give, and the ~0.8 % periodic flush on top of it.
+
+          NOTHING CHARGES THIS, and it is not a hit rate. tt_sim/pe/rv/cost.py
+          models no cache and charges ``l1_dcache_hit`` for every L1 load, the
+          low end of the pair, which is the same "a modelled count is a floor"
+          policy as every other two-ended cost in this file (see
+          ``_LOAD_LATENCY_KEYS`` in tt_sim/perf/model.py). The capacity is read
+          by tt_sim/perf/riscv_bench_sweep.py, which has to answer a different
+          question -- which row a BENCHMARK PROBE of known working set reaches
+          -- and cannot answer it from a policy chosen for kernels whose hit
+          rate nobody publishes.
       load_latency:
         core_local_data_ram: 2
         l1_dcache_hit: 2
@@ -1156,16 +1224,24 @@ arch_overrides:
           classifier, so the prediction and the simulation cannot disagree --
           and ``core_local_data_ram: 2`` is what it reads.
 
-          THE L1 ROW IS THE INTERESTING ONE: 8.098 is ``l1_dcache_miss``, not
-          ``l1_dcache_hit``. The probe chases a 1 KiB ring of 64 nodes for
-          thousands of iterations, so every node after the first pass is as warm
-          as a working set that size can be, and it still pays the miss
-          latency. The L0 data cache did not hold it. Whether that is a capacity
-          limit, a policy that declines to cache L1 pointer loads, or something
-          about the volatile access this probe issues, the benchmark cannot say
-          -- it can say that the 2-cycle row is not what a sustained L1 chase
-          gets. ``rv_load_indep`` agrees from a different construction: see
-          ``load_throughput`` above.
+          THE L1 ROW IS ``l1_dcache_miss``, AND THE DOCUMENT SAYS WHY. 8.098 is
+          the miss row, not ``l1_dcache_hit``; the probe chases a 64-node ring
+          16 bytes apart, which is a 1 KiB working set against an L0 data cache
+          whose published capacity is 64 bytes (see ``l0_data_cache``). Sixteen
+          times the capacity cannot be resident, so the chase reaches the miss
+          row by construction and no organisation of the cache could change
+          that. The measurement is the reason the capacity was looked up, not
+          the reason the row applies. ``rv_load_indep`` agrees from a different
+          construction: see ``load_throughput`` above.
+
+          WHAT IS NOT EXPLAINED is ``rv_load_indep``: its four addresses span
+          exactly four 16-byte lines, i.e. exactly the published capacity, and
+          it still reads the miss row's sustained rate. A working set AT the
+          capacity is not predicted to hit -- associativity, indexing and
+          replacement are unpublished and the ~0.8 % periodic flush is on top of
+          them -- so this is a gap in what the page says rather than a
+          disagreement with it. Nothing here is charged differently on the
+          strength of it.
 
           TWO RUNS, ON ONE CARD, one operator, one power state, one day;
           tt_sim/perf/datasets/riscvbench-blackhole.csv, phase R valid. The

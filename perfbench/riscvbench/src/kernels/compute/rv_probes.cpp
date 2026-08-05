@@ -35,7 +35,7 @@
 // does not have.
 //
 // ---------------------------------------------------------------------------
-// THE FIVE PHASES, and what each is for. Each is compiled only when selected
+// THE SEVEN PHASES, and what each is for. Each is compiled only when selected
 // (the host passes -DRVBENCH_PHASE_<X> through ComputeConfig::defines), so a
 // run measuring instruction fetch does not carry phase R's text and vice versa.
 // That matters for phase F in particular, whose bodies are 16 KiB of
@@ -102,13 +102,29 @@
 // PHASE Q -- how deep the Tensix instruction queue is. Phase T measures the
 // SUSTAINED rate, which is the queue's drain rate once it is full. This phase
 // measures the burst length at which it fills, by timing bursts of n
-// instructions for n = 1, 2, 4 ... 128 and looking for the KNEE: below the
-// queue depth the issuing core is not back-pressured and the marginal cost of
-// one more instruction is one cycle; above it, the marginal cost is the backend
-// unit's occupancy. `ADDDMAREG` is the burst op because tensixbench measured it
-// at 3.0 cycles on Blackhole silicon, so the two regimes are far enough apart
-// to see. Nothing in either the ISA documentation or the vendor trees gives a
-// queue depth, so this phase is EXPLORATORY: it has no prediction to confirm.
+// instructions and looking for the KNEE: below the queue depth the issuing core
+// is not back-pressured and the marginal cost of one more instruction is one
+// cycle; above it, the marginal cost is the backend unit's occupancy.
+// `ADDDMAREG` is the burst op because tensixbench measured it at 3.0 cycles on
+// Blackhole silicon, so the two regimes are far enough apart to see. Nothing in
+// either the ISA documentation or the vendor trees gives a queue depth, so this
+// phase is EXPLORATORY: it has no prediction to confirm.
+//
+// It sweeps n TWICE, in two burst forms, and the reason is the 2026-08-05
+// silicon run: at ONE issuing thread the core had not stopped running ahead by
+// n = 128, the largest burst the cascade emits, so the absorbed backlog was
+// still growing where it needed to be an asymptote and a depth in ENTRIES was
+// not resolvable. The fix is a longer burst -- but a longer STRAIGHT-LINE burst
+// is a longer instruction stream, and 1024 `.ttinsn` words are 4 KiB of it, in
+// the octave where phase F of this same benchmark found a fetch cliff. So:
+//
+//   cascade, n = 1 ... 128    2^p copies emitted straight-line. Unchanged, and
+//                             still the form the tracked silicon datasets used.
+//   loop,    n = 16 ... 1024  n/16 iterations of one 16-instruction block, so
+//                             the text is 64 bytes at every n and nothing in
+//                             this column can be instruction fetch.
+//
+// The two overlap at n = 16, 32, 64, 128. See the QLOOPBURST block below.
 //
 // PHASE F -- instruction footprint. A loop body of K instructions, for K from
 // 64 to 2048, i.e. 256 bytes to 8 KiB of instruction text. The ISA docs give
@@ -116,7 +132,31 @@
 // instructions, so instruction fetches are expected to occur at most once every
 // four cycles") and say nothing about the cache size or the miss cost. So the
 // prediction is only that small K costs 1.0 cycles per instruction; where it
-// stops doing so is the measurement, and it is exploratory.
+// stops doing so is the measurement, and it is exploratory. Its bodies are
+// UNCHANGED and deliberately so: two tracked silicon datasets carry its rows.
+//
+// PHASE G -- the same question at 1280, 1536 and 1792, which narrows the
+// boundary the 2026-08-05 Blackhole run put between a 4 KiB and an 8 KiB loop
+// body (0.998 flat from 64 through 1024, 1.251 at 2048). It is a separate
+// phase because phase F's build is already within a few hundred bytes of
+// tt-metal's kernel config buffer, and it is split into compile-time SETS
+// because the three intermediates do not fit in one build either. It does not
+// turn the boundary into a cache size: no document gives one, and a step in
+// cost against loop-body size is equally consistent with a prefetch window or
+// an L1 access pattern. What is measured is where the step is, in bytes of
+// loop body.
+//
+// PHASE S -- is the queue phase Q measured SHARED between the three TRISCs, or
+// PRIVATE to each? Phase Q resolved a depth of ~14-16 entries at one issuing
+// thread and could not resolve one at any other, so the two hypotheses are
+// still identical from where it stands. The construction that separates them,
+// and the two that look like they would and do not, are argued in
+// rvbench_layout.h's RVBENCH_S_* block. In one line: only a SATURATED second
+// thread occupies queue entries, so the discriminator has to be a second
+// thread issuing flat out, with the backend bandwidth it steals measured in
+// the same slot and divided back out -- and with a reference burst short
+// enough (n = 4) that the queue is not already full at it, which is the thing
+// phase Q's n = 16 reference got wrong.
 //
 // ---------------------------------------------------------------------------
 // LEAVING THE CARD CLEAN. This is a design constraint rather than a cleanup
@@ -155,6 +195,9 @@
 #define REP256(...) REP128(__VA_ARGS__) REP128(__VA_ARGS__)
 #define REP512(...) REP256(__VA_ARGS__) REP256(__VA_ARGS__)
 #define REP1024(...) REP512(__VA_ARGS__) REP512(__VA_ARGS__)
+#define REP1280(...) REP1024(__VA_ARGS__) REP256(__VA_ARGS__)
+#define REP1536(...) REP1024(__VA_ARGS__) REP512(__VA_ARGS__)
+#define REP1792(...) REP1024(__VA_ARGS__) REP512(__VA_ARGS__) REP256(__VA_ARGS__)
 #define REP2048(...) REP1024(__VA_ARGS__) REP1024(__VA_ARGS__)
 
 namespace {
@@ -263,6 +306,167 @@ inline void bench_barrier() {
     } else {                              \
         PROBE_SKIP(SLOT, RVBENCH_MAX_POINTS); \
     }
+
+// ---------------------------------------------------------------------------
+// The queue-depth probes, LOOP form: n / RVBENCH_Q_LOOP_BLOCK iterations of one
+// unrolled block, for n = 16, 32 ... 1024.
+//
+// WHY THE CASCADE WAS NOT SIMPLY EXTENDED TO 1024, which is the one design
+// decision in this phase that could have produced a confident wrong answer.
+// The cascade's instruction stream IS the burst: 1024 `.ttinsn` words are 4 KiB
+// of straight-line text. Phase F of this same benchmark measured a fetch cliff
+// in that octave (0.998 cycles/instruction flat through a 4 KiB loop body,
+// 1.251 at 8 KiB), and -- unlike every slope probe here -- a phase-Q burst runs
+// exactly ONCE, cold, with its own instruction fetch inside the timed region
+// and no repetition to average it out. So the cascade's cost per instruction
+// already carries a cold-fetch term, and lengthening the stream can only make
+// that term grow with n. A cost per instruction that grows with n is EXACTLY
+// the signature this phase reads as back-pressure. The two would have been
+// indistinguishable, and the phase would have reported a queue depth that was
+// really an instruction-fetch capacity.
+//
+// The loop form removes it rather than correcting for it: the body is
+// RVBENCH_Q_LOOP_BLOCK instructions -- 64 bytes -- at every burst length, so
+// the fetch cost is a per-burst CONSTANT and cancels exactly in any difference
+// between two points. What it adds instead is the loop's own back edge, worth
+// about (counter + compare + branch) / RVBENCH_Q_LOOP_BLOCK cycles per
+// instruction, and `q_loop_addi` -- the identical loop with `addi` bodies --
+// measures that instead of assuming it. The forms overlap at n = 16..128, where
+// the cascade also runs, so "does the form change the answer" is a measurement
+// too.
+// ---------------------------------------------------------------------------
+#define QLOOPBURST(N, ...)                                     \
+    do {                                                       \
+        const uint32_t iters = (N) / RVBENCH_Q_LOOP_BLOCK;     \
+        for (uint32_t qi = 0; qi < iters; qi++) {              \
+            REP16(__VA_ARGS__)                                 \
+        }                                                      \
+    } while (0)
+
+#define QLOOPPROBE(SLOT, ...)                                            \
+    do {                                                                 \
+        for (uint32_t p = 0; p < RVBENCH_Q_LOOP_POINTS; p++) {           \
+            bench_barrier();                                             \
+            const uint32_t t0 = wall_clock_lo();                         \
+            QLOOPBURST(RVBENCH_Q_LOOP_MIN_N << p, __VA_ARGS__);          \
+            out[(SLOT) * RVBENCH_MAX_POINTS + p] = wall_clock_lo() - t0; \
+        }                                                                \
+    } while (0)
+
+#define QLOOPRUN(SLOT, ...)                       \
+    if (PROBE_ON(SLOT)) {                         \
+        QLOOPPROBE(SLOT, __VA_ARGS__);            \
+    } else {                                      \
+        PROBE_SKIP(SLOT, RVBENCH_Q_LOOP_POINTS);  \
+    }
+
+// QLOOPBURST spells its unroll as REP16, so the two constants have to agree or
+// every loop-form burst would be a different length than the host labels it.
+static_assert(RVBENCH_Q_LOOP_BLOCK == 16, "QLOOPBURST unrolls with REP16");
+static_assert(RVBENCH_Q_LOOP_POINTS <= RVBENCH_MAX_POINTS, "result slots are fixed width");
+
+// ---------------------------------------------------------------------------
+// PHASE S -- is the Tensix instruction queue shared between the TRISCs, or
+// private to each? The design argument is in rvbench_layout.h's RVBENCH_S_*
+// block and at length in docs/plans/riscv-front-end-benchmark.md; what is
+// implemented here is the three things it concludes.
+//
+// (1) A SHORTER REFERENCE BURST. Every burst below starts at n = 4 rather than
+//     phase Q's 16, because the reference point is subtracted off as
+//     "tensix_sync()'s own cost" and that is only true where the queue is not
+//     already full. At n = 16 it is -- structurally so at two and three
+//     issuing threads, which is why phase Q's multi-thread slots read zero
+//     rather than reading small. A four-instruction loop block is what lets n
+//     start at 4; the body is 16 bytes at every burst length, so no difference
+//     between two points here is instruction fetch either.
+//
+// (2) A DRAINED PAIR PER CONDITION, so the service rate is measured in the
+//     slot it is used in rather than carried across from another thread count.
+//     The whole difficulty of this question is that any second thread which
+//     actually occupies queue entries must also be taking backend bandwidth --
+//     an idle or a slow one holds nothing, by Little's law -- so the bandwidth
+//     it takes has to be measured and divided back out, not avoided.
+//
+// (3) AN UNTIMED DRAIN BEFORE EVERY TIMED BURST. `tensix_sync()` immediately
+//     before `t0` guarantees the queue is empty when the burst starts, in the
+//     plain probe as well as the sync one. Without it the n = 4 point -- the
+//     one the whole read-out is referenced to -- would carry whatever the
+//     previous probe left behind.
+// ---------------------------------------------------------------------------
+#define SLOOPBURST(N, ...)                                     \
+    do {                                                       \
+        const uint32_t iters = (N) / RVBENCH_S_LOOP_BLOCK;     \
+        for (uint32_t si = 0; si < iters; si++) {              \
+            REP4(__VA_ARGS__)                                  \
+        }                                                      \
+    } while (0)
+
+// What a non-issuing thread does during a solo probe: the same loop, with
+// `addi` bodies, for RVBENCH_S_SPIN_MULT times as many instructions, so it is
+// certainly still running when the issuer's second clock read happens. It
+// pushes no Tensix instruction, which is the entire point -- it occupies no
+// queue entry under either hypothesis.
+#define SSPIN(N)                                                        \
+    SLOOPBURST(RVBENCH_S_SPIN_MULT * (N), asm volatile("addi %0, %0, 1" : "+r"(a0));)
+
+// The two values `DRAIN` takes below. `SDRAIN` puts `tensix_sync()` INSIDE the
+// timed region, so the probe cannot return until the pipe has drained;
+// `SNODRAIN` expands to nothing and the probe returns when the core's last
+// push did. The difference between the pair at each n is the work still in
+// flight, which is the whole measurement.
+#define SNODRAIN
+#define SDRAIN ckernel::tensix_sync();
+
+// Every active thread issues.
+#define SPROBE_CO(SLOT, DRAIN, ...)                                      \
+    do {                                                                 \
+        for (uint32_t p = 0; p < RVBENCH_S_POINTS; p++) {                \
+            bench_barrier();                                             \
+            ckernel::tensix_sync();                                      \
+            const uint32_t t0 = wall_clock_lo();                         \
+            SLOOPBURST(RVBENCH_S_MIN_N << p, __VA_ARGS__);               \
+            DRAIN                                                        \
+            out[(SLOT) * RVBENCH_MAX_POINTS + p] = wall_clock_lo() - t0; \
+        }                                                                \
+    } while (0)
+
+// Only RVBENCH_S_ISSUER issues; every other active thread spins. The
+// non-issuers write 0, and the host does not emit their rows at all.
+#define SPROBE_SOLO(SLOT, DRAIN, ...)                                        \
+    do {                                                                     \
+        for (uint32_t p = 0; p < RVBENCH_S_POINTS; p++) {                    \
+            bench_barrier();                                                 \
+            ckernel::tensix_sync();                                          \
+            if (g_thread == RVBENCH_S_ISSUER) {                              \
+                const uint32_t t0 = wall_clock_lo();                         \
+                SLOOPBURST(RVBENCH_S_MIN_N << p, __VA_ARGS__);               \
+                DRAIN                                                        \
+                out[(SLOT) * RVBENCH_MAX_POINTS + p] = wall_clock_lo() - t0; \
+            } else {                                                         \
+                SSPIN(RVBENCH_S_MIN_N << p);                                 \
+                out[(SLOT) * RVBENCH_MAX_POINTS + p] = 0;                    \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define SRUN_CO(SLOT, DRAIN, ...)                 \
+    if (PROBE_ON(SLOT)) {                         \
+        SPROBE_CO(SLOT, DRAIN, __VA_ARGS__);      \
+    } else {                                      \
+        PROBE_SKIP(SLOT, RVBENCH_S_POINTS);       \
+    }
+
+#define SRUN_SOLO(SLOT, DRAIN, ...)               \
+    if (PROBE_ON(SLOT)) {                         \
+        SPROBE_SOLO(SLOT, DRAIN, __VA_ARGS__);    \
+    } else {                                      \
+        PROBE_SKIP(SLOT, RVBENCH_S_POINTS);       \
+    }
+
+// SLOOPBURST spells its unroll as REP4, so the two constants have to agree.
+static_assert(RVBENCH_S_LOOP_BLOCK == 4, "SLOOPBURST unrolls with REP4");
+static_assert(RVBENCH_S_POINTS <= RVBENCH_MAX_POINTS, "result slots are fixed width");
+static_assert(RVBENCH_S_ISSUER < RVBENCH_MAX_THREADS, "the issuer must be a real thread");
 
 void kernel_main() {
     const uint32_t results_addr = get_arg_val<uint32_t>(0);
@@ -580,12 +784,42 @@ void kernel_main() {
     } else {
         PROBE_SKIP(RVBENCH_P_Q_ADDDMAREG_SYNC, RVBENCH_MAX_POINTS);
     }
+
+    // The loop form, out to n = 1024. `q_loop_addi` is not a spare probe: it is
+    // the fetch- AND structure-matched control for the two below it. Same loop,
+    // same trip count, same 4-byte instruction words, same 64-byte body, no
+    // Tensix involvement -- so it measures what this burst form costs when
+    // NOTHING can back-pressure it, which is the baseline the other two are
+    // read against. Without it a loop-form rate above 1.0 would be ambiguous
+    // between the queue and the loop's own back edge.
+    QLOOPRUN(RVBENCH_P_Q_LOOP_ADDI, asm volatile("addi %0, %0, 1" : "+r"(a0)););
+    QLOOPRUN(RVBENCH_P_Q_LOOP_ADDDMAREG, TTI_ADDDMAREG(1, 60, 1, 60););
+    if (PROBE_ON(RVBENCH_P_Q_LOOP_ADDDMAREG_SYNC)) {
+        // Warmed up outside the timed region for the same reason as the cascade
+        // probe above: the first `tensix_sync()` of a launch is not like its
+        // successors. Repeated here rather than relying on the cascade probe's
+        // warm-up, because `--probes` can turn that one off.
+        ckernel::tensix_sync();
+        for (uint32_t p = 0; p < RVBENCH_Q_LOOP_POINTS; p++) {
+            bench_barrier();
+            const uint32_t t0 = wall_clock_lo();
+            QLOOPBURST(RVBENCH_Q_LOOP_MIN_N << p, TTI_ADDDMAREG(1, 60, 1, 60););
+            ckernel::tensix_sync();
+            out[RVBENCH_P_Q_LOOP_ADDDMAREG_SYNC * RVBENCH_MAX_POINTS + p] =
+                wall_clock_lo() - t0;
+        }
+    } else {
+        PROBE_SKIP(RVBENCH_P_Q_LOOP_ADDDMAREG_SYNC, RVBENCH_Q_LOOP_POINTS);
+    }
 #else
     PROBE_SKIP(RVBENCH_P_Q_CTRL, RVBENCH_MAX_POINTS);
     PROBE_SKIP(RVBENCH_P_Q_NOP, RVBENCH_MAX_POINTS);
     PROBE_SKIP(RVBENCH_P_Q_SETDMAREG, RVBENCH_MAX_POINTS);
     PROBE_SKIP(RVBENCH_P_Q_ADDDMAREG, RVBENCH_MAX_POINTS);
     PROBE_SKIP(RVBENCH_P_Q_ADDDMAREG_SYNC, RVBENCH_MAX_POINTS);
+    PROBE_SKIP(RVBENCH_P_Q_LOOP_ADDI, RVBENCH_Q_LOOP_POINTS);
+    PROBE_SKIP(RVBENCH_P_Q_LOOP_ADDDMAREG, RVBENCH_Q_LOOP_POINTS);
+    PROBE_SKIP(RVBENCH_P_Q_LOOP_ADDDMAREG_SYNC, RVBENCH_Q_LOOP_POINTS);
 #endif
 
     // -----------------------------------------------------------------------
@@ -610,7 +844,80 @@ void kernel_main() {
     PROBE_SKIP(RVBENCH_P_F_2048, RVBENCH_SLOPE_POINTS);
 #endif
 
+    // -----------------------------------------------------------------------
+    // Phase G -- the intermediate footprints, 1280 / 1536 / 1792 instructions,
+    // one per compile-time set, each measured against a 1024-instruction body
+    // in the SAME build. Phase F could not simply be widened: its six bodies
+    // already sit within a few hundred bytes of tt-metal's kernel config
+    // buffer, and adding these three to it aborts the launch outright. See
+    // rvbench_layout.h's RVBENCH_P_G_* block for the measured numbers.
+    //
+    // The probes of a set that is not selected are not compiled AND not
+    // skipped: every thread of a given build runs the identical sequence, so
+    // the barriers stay in step without a PROBE_SKIP standing in for them.
+    // -----------------------------------------------------------------------
+#ifndef RVBENCH_G_SET
+#define RVBENCH_G_SET 0
+#endif
+#ifdef RVBENCH_PHASE_G
+    RUN(RVBENCH_P_G_1024, REP1024(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+#if RVBENCH_G_SET == 0
+    RUN(RVBENCH_P_G_1280, REP1280(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+#elif RVBENCH_G_SET == 1
+    RUN(RVBENCH_P_G_1536, REP1536(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+#else
+    RUN(RVBENCH_P_G_1792, REP1792(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+#endif
+#else
+    PROBE_SKIP(RVBENCH_P_G_1024, RVBENCH_SLOPE_POINTS);
+    PROBE_SKIP(RVBENCH_P_G_1280, RVBENCH_SLOPE_POINTS);
+    PROBE_SKIP(RVBENCH_P_G_1536, RVBENCH_SLOPE_POINTS);
+    PROBE_SKIP(RVBENCH_P_G_1792, RVBENCH_SLOPE_POINTS);
+#endif
+
+    // -----------------------------------------------------------------------
+    // Phase S -- is the Tensix instruction queue shared or per-thread? Six
+    // probes in the RVBENCH_S_* loop form, n = 4 ... 512. The kernel TEXT is
+    // identical in the t1, t2 and t3 launches -- only the runtime active mask
+    // differs -- so the comparison across thread counts, which is where this
+    // phase's answer lives, is not confounded by a different build.
+    // -----------------------------------------------------------------------
+#ifdef RVBENCH_PHASE_S
+    // The issue-limited control: `p` in the depth formula, and the measurement
+    // of what a four-instruction loop block costs in back edge.
+    SRUN_CO(RVBENCH_P_S_LOOP_ADDI, SNODRAIN, asm volatile("addi %0, %0, 1" : "+r"(a0)););
+    // Every active thread issuing. At t1 this is one thread and reproduces the
+    // phase Q question with a smaller reference burst; at t2/t3 the queue is
+    // contended, which is the condition that separates the two hypotheses.
+    SRUN_CO(RVBENCH_P_S_CO_PLAIN, SNODRAIN, TTI_ADDDMAREG(1, 60, 1, 60););
+    // Byte-identical to the probe above. The two differ only in having run at
+    // a different moment, so |co_plain - co_repeat| is this phase's measured
+    // single-shot repeatability -- the floor a backlog has to clear before it
+    // is divided by anything.
+    SRUN_CO(RVBENCH_P_S_CO_REPEAT, SNODRAIN, TTI_ADDDMAREG(1, 60, 1, 60););
+    SRUN_CO(RVBENCH_P_S_CO_SYNC, SDRAIN, TTI_ADDDMAREG(1, 60, 1, 60););
+    // One thread issues, the others only spin. THIS IS A CONTROL AND NOT THE
+    // DISCRIMINATOR: a spinning thread pushes nothing, so it holds no queue
+    // entry whether the queue is shared or private, and the issuer must see
+    // the same depth here at t1, t2 and t3 under BOTH hypotheses. What it
+    // separates is "another core is awake" -- competing for instruction fetch
+    // out of the same L1 -- from "another core is issuing", which is what the
+    // co probes above vary.
+    SRUN_SOLO(RVBENCH_P_S_SOLO_PLAIN, SNODRAIN, TTI_ADDDMAREG(1, 60, 1, 60););
+    SRUN_SOLO(RVBENCH_P_S_SOLO_SYNC, SDRAIN, TTI_ADDDMAREG(1, 60, 1, 60););
+#else
+    PROBE_SKIP(RVBENCH_P_S_LOOP_ADDI, RVBENCH_S_POINTS);
+    PROBE_SKIP(RVBENCH_P_S_CO_PLAIN, RVBENCH_S_POINTS);
+    PROBE_SKIP(RVBENCH_P_S_CO_REPEAT, RVBENCH_S_POINTS);
+    PROBE_SKIP(RVBENCH_P_S_CO_SYNC, RVBENCH_S_POINTS);
+    PROBE_SKIP(RVBENCH_P_S_SOLO_PLAIN, RVBENCH_S_POINTS);
+    PROBE_SKIP(RVBENCH_P_S_SOLO_SYNC, RVBENCH_S_POINTS);
+#endif
+
     // Nothing to release. See "LEAVING THE CARD CLEAN" in the header comment:
     // this kernel acquires no Tensix resource, so a completed run leaves the
     // coprocessor exactly as it found it and the next run needs no reset.
+    // Phase S changes nothing about that -- it issues the same `ADDDMAREG` into
+    // the same Tensix GPRs 60-62 and the same `tensix_sync()` the queue phase
+    // already used, and a spinning thread executes `addi` and nothing else.
 }
