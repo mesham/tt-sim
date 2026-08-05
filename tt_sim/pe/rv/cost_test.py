@@ -221,6 +221,11 @@ def test_blackhole_charges_the_l0_hit_because_the_miss_rate_is_unpublished():
         # Blackhole moves the TDMA registers from the ">= 7" group to ">= 4".
         assert wormhole.load_latency[RV_REGION_TDMA] == 7
         assert blackhole.load_latency[RV_REGION_TDMA] == 4
+        # The MISS row must stay out of this. `riscv_bench_sweep` gained a
+        # separate mapping to it on 2026-08-05, for predicting a benchmark
+        # probe of known working set; the guard that it never leaks into
+        # charging is in tt_sim/perf/model_test.py, which may import the model
+        # directly (this file deliberately may not).
 
 
 # ---------------------------------------------------------------------------

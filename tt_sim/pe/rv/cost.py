@@ -34,6 +34,26 @@ error the SFPU wiring already caught once:
    the next instruction cannot enter the unit until the multiply instruction
    has finished".
 
+   **The divide is charged 6, which is the low end of a 6-33 band, and that
+   was re-decided rather than inherited on 2026-08-05.** The band is a *data*
+   dependence — "between six and 33 cycles are required, dependent upon the
+   magnitude of the dividend" — so 6 and 33 are two operands, not two guesses
+   at one number, and :meth:`RiscvCostState._muldiv_occupancy` already has the
+   operands in hand (it reads the divisor, and the dividend for the ``INT_MIN``
+   case). What it does *not* have is the function: no document in either tree
+   relates a dividend to a cycle count anywhere between the endpoints, so any
+   per-magnitude charge would be an invented curve wearing a citation, which is
+   the failure the "WHY THERE IS NO ``measured`` PROVENANCE" block in
+   ``tensix_instruction_costs.yaml`` exists to prevent. Silicon reads **33.001**
+   for ``divu 0x12345678, 3`` — a 29-significant-bit dividend, at the top of the
+   magnitude range — so the floor is loose by 5.5x *at that operand*. The
+   exposure is small and was measured rather than assumed: across the in-tree
+   Blackhole replay guards a whole kernel launch executes **0-2 divides in
+   40,000-80,000 instructions**, with 9-to-12-bit dividends, three orders of
+   magnitude below the benchmark's. 27 under-charged cycles twice per launch is
+   under 0.15 % of a launch even at the worst-case operand, and these operands
+   are not that.
+
 **What is deliberately not modelled** — each an honest gap rather than an
 omission:
 

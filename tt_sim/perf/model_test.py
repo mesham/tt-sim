@@ -107,6 +107,32 @@ def test_bounded_costs_are_charged_at_their_low_end():
     assert modelled_occupancy(CycleCost(1.5)) == 2
 
 
+def test_the_l1_dcache_miss_row_never_reaches_the_charging_path():
+    """Two mappings from "an L1 load" to a table row, and only one charges.
+
+    ``_LOAD_LATENCY_KEYS`` is what a kernel is charged, and on Blackhole it
+    names the d-cache HIT row: no hit rate is published, so the two-ended cost
+    is charged at its low end like every other bound in the file.
+    ``l1_dcache_miss_key`` was added on 2026-08-05 for ``riscv_bench_sweep``,
+    which knows a benchmark probe's working set exactly and has to predict
+    against the row that probe actually reaches — a reporting question, not a
+    charging one. If the miss row ever leaks into the charge, every simulated
+    cycle count in the tree moves at once, so the separation is pinned here.
+    """
+    from tt_sim.perf.model import (
+        _LOAD_LATENCY_KEYS,
+        RV_REGION_L1,
+        l1_dcache_miss_key,
+        riscv_cost_model,
+    )
+
+    assert _LOAD_LATENCY_KEYS["blackhole"][RV_REGION_L1] == "l1_dcache_hit"
+    assert l1_dcache_miss_key("blackhole") == "l1_dcache_miss"
+    assert l1_dcache_miss_key("wormhole") is None
+    with _env("1"):
+        assert riscv_cost_model("blackhole").load_latency[RV_REGION_L1] == 2
+
+
 def test_a_charged_number_knows_whether_it_was_exact():
     thcon = UnitCostModel(load_costs("wormhole").unit("THCON"), "wormhole")
     assert thcon.occupancy("ATCAS") == 15  # the doc writes ">= 15"

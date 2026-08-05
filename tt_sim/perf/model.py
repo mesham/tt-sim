@@ -340,6 +340,32 @@ _LOAD_LATENCY_KEYS = {
     },
 }
 
+#: The L1 load-latency row an access reaches when the L0 data cache **cannot**
+#: hold its working set, or ``None`` on an architecture with no L0 cache (where
+#: L1 has a single row and the question does not arise).
+#:
+#: Deliberately *not* used for charging. :data:`_LOAD_LATENCY_KEYS` above is
+#: what the simulator charges, and it names the hit row because no hit rate is
+#: published and the low end of a two-ended cost is what every other bound in
+#: these files is charged at. This mapping exists for the one caller that knows
+#: something the simulator does not: ``tt_sim/perf/riscv_bench_sweep`` compares
+#: individual benchmark probes whose working sets are known exactly, and a
+#: probe whose working set exceeds ``riscv.l0_data_cache.capacity_bytes``
+#: reaches the miss row whatever the cache's (unpublished) organisation. Both
+#: mappings live here so the two can never name rows the other does not have.
+_L1_DCACHE_MISS_KEYS = {
+    "wormhole": None,
+    "blackhole": "l1_dcache_miss",
+}
+
+
+def l1_dcache_miss_key(arch):
+    """The ``riscv.load_latency`` row for an L1 load that misses the L0 cache.
+
+    ``None`` where the architecture publishes no L0 data cache.
+    """
+    return _L1_DCACHE_MISS_KEYS.get(arch)
+
 
 def _sourced_cycles(raw, provenance):
     """Cycles to charge for one raw YAML cost value, or ``None``.
