@@ -44,26 +44,47 @@ BUILD_TIMEOUT = 600
 # simulator; raise this (e.g. TT_SIM_EXAMPLE_TIMEOUT=900) to give them longer.
 RUN_TIMEOUT = int(os.environ.get("TT_SIM_EXAMPLE_TIMEOUT", "260"))
 
-# (example directory, physical Tensix coords the program launches on). Coords
-# are PHYSICAL NoC coords (see docs/running-tt-metal-on-the-simulator.md);
+# (case label, example directory, physical Tensix coords, extra environment).
+# Coords are PHYSICAL NoC coords (see docs/running-tt-metal-on-the-simulator.md);
 # logical (col,row) -> physical (col+1,row+1). Every example runs on the
 # default single tile "1-1" except ``nine`` and ``pipestall``, which bridge a CB
 # across two tiles (logical (0,0)+(1,0) -> physical 1-1 and 2-1). The exact
 # coords must be materialised, so we pass TT_SIM_TENSIX_COORDS rather than a
 # bare count.
+#
+# The label is normally the directory name; it differs only where one example is
+# run in more than one configuration, which so far is just ``pipestall``.
 EXAMPLES = [
-    ("one", "1-1"),
-    ("two", "1-1"),
-    ("three", "1-1"),
-    ("four", "1-1"),
-    ("four-fp", "1-1"),
-    ("five", "1-1"),
-    ("five-fp", "1-1"),
-    ("six", "1-1"),
-    ("eight", "1-1"),
-    ("nine", "1-1,2-1"),
-    ("pipestall", "1-1,2-1"),
-    ("loopback", "1-1"),
+    ("one", "one", "1-1", {}),
+    ("two", "two", "1-1", {}),
+    ("three", "three", "1-1", {}),
+    ("four", "four", "1-1", {}),
+    ("four-fp", "four-fp", "1-1", {}),
+    ("five", "five", "1-1", {}),
+    ("five-fp", "five-fp", "1-1", {}),
+    ("six", "six", "1-1", {}),
+    ("eight", "eight", "1-1", {}),
+    ("nine", "nine", "1-1,2-1", {}),
+    ("pipestall", "pipestall", "1-1,2-1", {}),
+    # Regression: a *multi-page* output CB with the producer running exactly one
+    # chunk ahead of the consumer. This configuration returned chunk 1 as 64
+    # zeroes until the example's CB pages were sized to a tile — `pack_tile`
+    # writes a whole tile, so page 1 lived inside page 0's pack footprint and the
+    # pack of chunk N destroyed the unread chunk N-1. Nothing else in the tree
+    # has an output CB deeper than one page, so without this entry the shape is
+    # untested. See the note at the top of examples/pipestall/src/pipestall.cpp
+    # and the oracle diff in optests/packspill.
+    (
+        "pipestall-2page",
+        "pipestall",
+        "1-1,2-1",
+        {
+            "PIPESTALL_OUT_DEPTH": "2",
+            "PIPESTALL_CREDITS": "1",
+            "PIPESTALL_DELAY": "1000",
+        },
+    ),
+    ("loopback", "loopback", "1-1", {}),
 ]
 
 
@@ -104,21 +125,132 @@ def skip_reason():
     return None
 
 
-def _reap_servers():
-    # Bracket the pattern so pkill can't match this process's own command line.
-    # Reap either arch's bridge server (the shared examples can target either).
-    # Anchored on the module name's end: unanchored, the pattern also matches
-    # `python3 -m driver.<arch>.server.<name>_replay_test`, so a live run would
-    # silently kill any offline replay guard running beside it.
-    subprocess.run(
-        ["pkill", "-9", "-f", r"[d]river\.(wormhole|blackhole)\.server( |$)"],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+# --- simulator process cleanup ------------------------------------------------
+# The Python twin of driver/sim_procs.sh, which carries the full rationale. In
+# short: UMD spawns the server detached, so it can't be cleaned up by pid; this
+# runner stamps a run tag into its command line (run.sh forwards
+# TT_SIM_RUN_TAG as --run-tag) and kills only servers carrying that tag, plus
+# servers tagged by a run whose owner process is gone (orphans from a crashed
+# earlier run). It used to `pkill -9 -f 'driver\.(wormhole|blackhole)\.server'`,
+# which killed every simulator on the machine — including ones a concurrent run
+# in another terminal depended on, silently corrupting that run's results.
+_TAG_PREFIX = "ttsim-run."
+# Trailing space anchors the module name: unanchored, the marker also matches
+# `-m driver.<arch>.server.<name>_replay_test`, so a live run would kill any
+# offline replay guard running beside it.
+_SERVER_MARKERS = ("-m driver.wormhole.server ", "-m driver.blackhole.server ")
+_orphans_reaped = False
 
 
-def _run_env(home, coords):
+def _stat_field(pid, index):
+    """Field ``index`` of /proc/<pid>/stat counting from the state field.
+
+    Splitting after the ``") "`` that ends comm survives a command name with
+    spaces or parens. Real field number minus 2 (state is field 3).
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    fields = stat.rpartition(") ")[2].split()
+    return fields[index - 1] if len(fields) >= index else None
+
+
+def _starttime(pid):
+    return _stat_field(pid, 20)
+
+
+def _cmdline(pid):
+    try:
+        return (
+            Path(f"/proc/{pid}/cmdline")
+            .read_bytes()
+            .replace(b"\0", b" ")
+            .decode("utf-8", "replace")
+        )
+    except OSError:
+        return None
+
+
+def _ancestry():
+    """This process and every process above it — never a cleanup target."""
+    seen, pid = set(), os.getpid()
+    while pid and pid > 1 and pid not in seen and len(seen) < 64:
+        seen.add(pid)
+        parent = _stat_field(pid, 2)
+        pid = int(parent) if parent and parent.isdigit() else None
+    return seen
+
+
+def _server_pids(match=None):
+    """pids of real tt-sim server processes, optionally filtered by a substring."""
+    skip = _ancestry()
+    out = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) in skip:
+            continue
+        cmd = _cmdline(entry.name)
+        if not cmd or not any(m in cmd for m in _SERVER_MARKERS):
+            continue
+        # A server is a python running the server module, nothing else — a
+        # *shell* whose argv merely quotes that module name is not a server.
+        if not os.path.basename(cmd.split(" ", 1)[0]).startswith("python"):
+            continue
+        if match is not None and match not in cmd:
+            continue
+        out.append(int(entry.name))
+    return out
+
+
+def _kill(pid):
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
+def _run_tag():
+    """This runner's tag: ttsim-run.<label>.<owner pid>.<owner start time>.
+
+    The start time makes "did the run that started this server finish?" exact
+    instead of a pid-reuse guess.
+    """
+    return f"{_TAG_PREFIX}examples_test.{os.getpid()}.{_starttime(os.getpid())}"
+
+
+def _reap_orphans():
+    """Kill tagged servers whose owning run is gone; leave every other alone.
+
+    ``TT_SIM_KILL_ALL_SERVERS=1`` opts back in to the old sledgehammer — every
+    simulator on the machine, tagged or not — for clearing up after manual runs,
+    which carry no tag and are otherwise never reaped.
+    """
+    if os.environ.get("TT_SIM_KILL_ALL_SERVERS", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        for pid in _server_pids():
+            _kill(pid)
+        return
+    for pid in _server_pids(f"--run-tag {_TAG_PREFIX}"):
+        cmd = _cmdline(pid) or ""
+        tag = cmd.partition("--run-tag ")[2].split(" ")[0]
+        parts = tag[len(_TAG_PREFIX) :].split(".")
+        if len(parts) != 3 or not parts[1].isdigit():
+            continue  # unparseable: leave it alone rather than kill a stranger's
+        if _starttime(parts[1]) == parts[2]:
+            continue  # owner still running — a concurrent run's server
+        _kill(pid)
+
+
+def _kill_own_servers():
+    for pid in _server_pids(f"--run-tag {_run_tag()}"):
+        _kill(pid)
+
+
+def _run_env(home, coords, extra=None):
     env = dict(os.environ)
     # Current tt-metal reads TT_METAL_RUNTIME_ROOT; also set TT_METAL_HOME for
     # older builds.
@@ -130,6 +262,12 @@ def _run_env(home, coords):
     env.pop("TT_SIM_TENSIX_CORES", None)
     env["TT_SIM_TENSIX_COORDS"] = coords
     env.setdefault("TT_METAL_SLOW_DISPATCH_MODE", "1")
+    # Marker run.sh stamps into the server's command line so cleanup can find
+    # exactly the servers this runner caused to start.
+    env["TT_SIM_RUN_TAG"] = _run_tag()
+    # Per-case knobs win over anything inherited, so a stray PIPESTALL_* in the
+    # caller's environment cannot silently change which case is being run.
+    env.update(extra or {})
     return env
 
 
@@ -155,23 +293,29 @@ def build_example(name):
     return exe
 
 
-def run_example(name, coords):
+def run_example(name, coords, extra_env=None):
     """Build and run one example against the simulator; return the CompletedProcess."""
     home = _tt_metal_root()
     src = EXAMPLES_DIR / name / "src"
     exe = build_example(name)
-    _reap_servers()
+    global _orphans_reaped
+    if not _orphans_reaped:
+        # Once per process: clear servers left behind by an earlier run of this
+        # runner that crashed or timed out before its own cleanup.
+        _reap_orphans()
+        _orphans_reaped = True
+    _kill_own_servers()  # a leftover from an earlier example in this run
     try:
         return subprocess.run(
             [str(exe)],
             cwd=src,
-            env=_run_env(home, coords),
+            env=_run_env(home, coords, extra_env),
             timeout=RUN_TIMEOUT,
             capture_output=True,
             text=True,
         )
     finally:
-        _reap_servers()
+        _kill_own_servers()
 
 
 def _failure_hint(proc):
@@ -187,17 +331,19 @@ def _failure_hint(proc):
 try:
     import pytest
 
-    @pytest.mark.parametrize("name,coords", EXAMPLES, ids=[e[0] for e in EXAMPLES])
-    def test_example(name, coords):
+    @pytest.mark.parametrize(
+        "label,name,coords,extra_env", EXAMPLES, ids=[e[0] for e in EXAMPLES]
+    )
+    def test_example(label, name, coords, extra_env):
         reason = skip_reason()
         if reason:
             pytest.skip(reason)
-        proc = run_example(name, coords)
+        proc = run_example(name, coords, extra_env)
         assert proc.returncode == 0, (
-            f"{name} exited {proc.returncode}\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
+            f"{label} exited {proc.returncode}\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}"
         )
         assert SUCCESS_LINE in proc.stdout, (
-            f"{name} missing success line\n{proc.stdout[-2000:]}"
+            f"{label} missing success line\n{proc.stdout[-2000:]}"
         )
 
 except ImportError:
@@ -210,22 +356,22 @@ def _main():
         print(f"SKIP: {reason}")
         return 0
     failures = []
-    for name, coords in EXAMPLES:
+    for label, name, coords, extra_env in EXAMPLES:
         try:
-            proc = run_example(name, coords)
+            proc = run_example(name, coords, extra_env)
         except subprocess.TimeoutExpired:
-            print(f"TIMEOUT  {name}")
-            failures.append(name)
+            print(f"TIMEOUT  {label}")
+            failures.append(label)
             continue
         except Exception as exc:  # noqa: BLE001 - report any build/run error per example
-            print(f"FAIL     {name} :: {exc}")
-            failures.append(name)
+            print(f"FAIL     {label} :: {exc}")
+            failures.append(label)
             continue
         if proc.returncode == 0 and SUCCESS_LINE in proc.stdout:
-            print(f"PASS     {name}")
+            print(f"PASS     {label}")
         else:
-            print(f"FAIL     {name} :: {_failure_hint(proc)}")
-            failures.append(name)
+            print(f"FAIL     {label} :: {_failure_hint(proc)}")
+            failures.append(label)
     print(f"\n{len(EXAMPLES) - len(failures)}/{len(EXAMPLES)} passed")
     return 1 if failures else 0
 

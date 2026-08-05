@@ -31,6 +31,14 @@ per chunk is a runtime argument, and the blocked run tracks it linearly
 *correct* kernel past the 10,000-cycle threshold. See ``tt_sim/device/deadlock.py``
 for what that measurement means for the detector.
 
+``OUT_DEPTH`` is a knob, though, and the *multi-page* case is where this example
+found a bug in itself: its output CB pages were originally sized to the 256-byte
+chunk the kernels move, while ``pack_tile`` writes a whole 4,096-byte tile, so at
+``OUT_DEPTH=2`` page 1 lay inside page 0's pack footprint and the pack of chunk N
+shredded the unread chunk N-1. The pages are tile-sized now; the live runners
+cover the two-page shape as ``pipestall-2page``, and ``optests/packspill`` pins
+the full-tile pack footprint against the vendor reference simulator.
+
 Run:  python3 -m driver.blackhole.server.pipestall_replay_test
       (or under pytest, as ``test_pipestall_replay``)
 """

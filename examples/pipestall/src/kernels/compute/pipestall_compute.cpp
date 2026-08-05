@@ -3,10 +3,15 @@
 
 // pipestall Tile A compute (TRISC). Ordinary eltwise add — CB0 + CB1 -> CB2 —
 // identical in shape to examples four and nine. The interesting part is not in
-// here: it is that CB2 is one page deep and drains only when a core on another
-// tile says so, so the pack thread parks in cb_reserve_back, the math thread
-// cannot free Dst, and the unpacker ends up blocked on a Src bank for the
-// length of the remote core's turnaround.
+// here: it is that CB2 is only a few pages deep and drains only when a core on
+// another tile says so, so the pack thread parks in cb_reserve_back, the math
+// thread cannot free Dst, and the unpacker ends up blocked on a Src bank for
+// the length of the remote core's turnaround.
+//
+// `pack_tile` below writes a whole 32x32 tile, not the 64-datum chunk the
+// dataflow kernels move, so CB2's pages must be tile-sized or this call
+// overruns into the next page. The host sizes them; see the note at the top of
+// pipestall.cpp for what happened when it did not.
 void kernel_main() {
     uint32_t data_size = get_arg_val<uint32_t>(0);
     uint32_t chunk_size = get_arg_val<uint32_t>(1);

@@ -44,14 +44,27 @@ using namespace tt::tt_metal;
 //   PIPESTALL_DELAY      consumer spin iterations per chunk (default 200)
 //   PIPESTALL_CREDITS    chunks the sender may run ahead     (default 1)
 //   PIPESTALL_OUT_DEPTH  pages in the producer's output CB   (default 1)
+//                        (one chunk per page; see the CB-geometry note below)
 //
-// Known bad combination, reproducible and not yet explained: OUT_DEPTH=2 with
-// CREDITS=1 and DELAY>0 leaves chunk 1 all zeroes in the result (64 of 512
-// elements) on the Wormhole simulator, while DELAY=0, CREDITS>=2 and
-// OUT_DEPTH=4 are all correct. Something about a two-page output CB with the
-// producer running exactly one chunk ahead; the pack of chunk 1 does not reach
-// the sender. Reproduce with
-// `PIPESTALL_OUT_DEPTH=2 PIPESTALL_DELAY=1000 ./build/pipestall`.
+// **A CB page is one tile.** Every page size below is `tt::tile_size(format)`,
+// never the chunk of data the kernels actually move, and that is not a style
+// choice — `pack_tile` copies a *whole* 32x32 tile out of Dst (see
+// `pack.h`: "Each subsequent pack call will increment the write pointer in the
+// cb by single tile size"; the datum count comes from the packer's X counter,
+// programmed from face_r_dim/num_faces by `_llk_pack_init_`, and no CB field
+// bounds it). A CB whose page is smaller than a tile is therefore written out
+// of bounds by its own producer, by tile_size - page_size bytes, on hardware
+// exactly as in the simulator — `optests/packspill` pins that against the
+// vendor reference simulator: one `pack_tile` into a 256 B page writes all 960
+// datums beyond it, and the two simulators agree byte for byte.
+//
+// This example found that the hard way. It originally sized the pages to the
+// chunk (in 64 B, out 256 B), which a *one-page* output CB survives — the
+// overrun lands in dead L1 past the buffer. At OUT_DEPTH=2 it does not: page 1
+// sits inside page 0's tile footprint, so packing chunk N into page 0 shredded
+// the still-unread chunk N-1 in page 1, and the run came back with chunk 1 all
+// zeroes. That was the workload's bug, not the simulator's, and the two-page
+// case is now covered live as `pipestall-2page` in both arch runners.
 //
 // Result is checked on the host: dst[i] = src0[i] + src1[i].
 static uint32_t env_u32(const char* name, uint32_t fallback) {
@@ -119,23 +132,30 @@ int main(int argc, char** argv) {
     // the compute, otherwise the unpack thread parks in cb_wait_front (a RISC-V
     // spin) instead of the unpacker blocking on a Src bank, and the stall this
     // example exists to create never reaches the Tensix backend.
-    constexpr uint32_t l1_in_chunk = 1 * CHUNK_SIZE;
+    //
+    // One page = one tile, per the note at the top of this file. The kernels
+    // only ever touch the first CHUNK_SIZE datums of each page; the rest of the
+    // tile is the footprint the unpacker reads and the packer writes, and it has
+    // to be inside the page or a neighbouring page pays for it.
+    constexpr uint32_t in_page = tt::tile_size(tt::DataFormat::Int8);    // 1024 B
+    constexpr uint32_t out_page = tt::tile_size(tt::DataFormat::Int32);  // 4096 B
     constexpr uint32_t in_depth = 4;
-    constexpr uint32_t l1_out_chunk = 4 * CHUNK_SIZE;
+    static_assert(in_page >= 1 * CHUNK_SIZE, "input chunk must fit in one tile");
+    static_assert(out_page >= 4 * CHUNK_SIZE, "output chunk must fit in one tile");
 
     CircularBufferConfig cb_src0_config =
-        CircularBufferConfig(in_depth * l1_in_chunk, {{CBIndex::c_0, tt::DataFormat::Int8}})
-            .set_page_size(CBIndex::c_0, l1_in_chunk);
+        CircularBufferConfig(in_depth * in_page, {{CBIndex::c_0, tt::DataFormat::Int8}})
+            .set_page_size(CBIndex::c_0, in_page);
     tt_metal::CreateCircularBuffer(program, core_a, cb_src0_config);
 
     CircularBufferConfig cb_src1_config =
-        CircularBufferConfig(in_depth * l1_in_chunk, {{CBIndex::c_1, tt::DataFormat::Int8}})
-            .set_page_size(CBIndex::c_1, l1_in_chunk);
+        CircularBufferConfig(in_depth * in_page, {{CBIndex::c_1, tt::DataFormat::Int8}})
+            .set_page_size(CBIndex::c_1, in_page);
     tt_metal::CreateCircularBuffer(program, core_a, cb_src1_config);
 
     CircularBufferConfig cb_out_config =
-        CircularBufferConfig(out_depth * l1_out_chunk, {{CBIndex::c_2, tt::DataFormat::Int32}})
-            .set_page_size(CBIndex::c_2, l1_out_chunk);
+        CircularBufferConfig(out_depth * out_page, {{CBIndex::c_2, tt::DataFormat::Int32}})
+            .set_page_size(CBIndex::c_2, out_page);
     tt_metal::CreateCircularBuffer(program, core_a, cb_out_config);
 
     // Two semaphores, both declared over the range covering both cores so
