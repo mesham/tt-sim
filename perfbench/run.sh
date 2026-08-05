@@ -55,4 +55,14 @@ if [ ! -x build/"$NAME" ]; then
   cmake --build build -j >/dev/null || exit 1
 fi
 
+# Tag the server this run spawns, and clear tagged servers left by runs that
+# have since died. This script cannot clean up after *itself* — it execs the
+# benchmark, so no trap of ours survives — but the tag keeps a server it leaves
+# behind recoverable by the next run of any of the test scripts, which is what
+# the old machine-wide `pkill` in those scripts used to do implicitly. See
+# driver/sim_procs.sh.
+# shellcheck source=../driver/sim_procs.sh
+. "$REPO/driver/sim_procs.sh"
+sim_procs_init perfbench
+
 exec ./build/"$NAME" "${ARGS[@]}"

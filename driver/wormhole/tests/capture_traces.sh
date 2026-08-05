@@ -14,12 +14,21 @@
 #
 # Optionally pass example names to capture a subset:
 #   TT_METAL_HOME=... ./driver/wormhole/tests/capture_traces.sh six nine
+#
+# Cleanup only touches the sim servers this run started (they carry its
+# TT_SIM_RUN_TAG) plus orphans left by an earlier run of this script whose
+# owner is gone, so a concurrent run in another terminal is never disturbed.
+# Set TT_SIM_KILL_ALL_SERVERS=1 to instead kill every tt-sim server on the
+# machine at startup — the way to clear up after manual runs, which carry no
+# tag.
 
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 EXAMPLES="$REPO/examples"
 TRACES="$REPO/driver/wormhole/server/traces"
+# shellcheck source=../../sim_procs.sh
+. "$REPO/driver/sim_procs.sh"
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
 export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
@@ -42,6 +51,8 @@ ORDER=(one two three four four-fp five five-fp six eight nine pipestall loopback
 [ "$#" -gt 0 ] && ORDER=("$@")
 
 mkdir -p "$TRACES"
+sim_procs_init capture_traces
+trap 'sim_kill_own_servers' EXIT INT TERM
 pass=0; fail=0; failed=()
 for name in "${ORDER[@]}"; do
   src="$EXAMPLES/$name/src"
@@ -54,7 +65,8 @@ for name in "${ORDER[@]}"; do
       && cmake --build build -j4 >>/tmp/wh_${name}_build.log 2>&1 ) \
       || { echo "FAIL  $name (build; see /tmp/wh_${name}_build.log)"; fail=$((fail+1)); failed+=("$name"); continue; }
   fi
-  pkill -9 -f 'driver\.wormhole\.server( |$)' 2>/dev/null; sleep 0.5
+  # Clear a server this run leaked earlier (e.g. the previous example timed out).
+  sim_kill_own_servers; sleep 0.5
   log="/tmp/wh_$name.out"
   # Run from the example's own src/ dir: host programs pass kernel paths relative
   # to CWD, so a wrong CWD aborts host-side before the device runs.
@@ -70,7 +82,7 @@ for name in "${ORDER[@]}"; do
     grep -iE "NotImplementedError|AssertionError|Error:|not.*supported|mismatch|Failure on the device" "$log" | head -3 | sed 's/^/      > /'
   fi
 done
-pkill -9 -f 'driver\.wormhole\.server( |$)' 2>/dev/null
+sim_kill_own_servers
 
 echo "----"
 echo "Wormhole trace capture: $pass captured, $fail failed"

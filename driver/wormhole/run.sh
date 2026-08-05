@@ -13,6 +13,9 @@
 #   TT_SIM_TENSIX_CORES=N         materialise N workers at default coords
 #                                 (column-major from 1-1) instead of naming
 #                                 them. Mutually exclusive with _COORDS.
+#   TT_SIM_RUN_TAG=<tag>      stamp <tag> into the server's command line, so the
+#                             test script that set it can clean up exactly the
+#                             servers it caused to start (driver/sim_procs.sh).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +27,7 @@ extra=()
 [ -n "${TT_SIM_LOG_PROTOCOL:-}" ] && extra+=(--log-protocol)
 [ -n "${TT_SIM_CYCLES_PER_POLL:-}" ] && extra+=(--cycles-per-poll "$TT_SIM_CYCLES_PER_POLL")
 [ -n "${TT_SIM_MOCK_TENSIX:-}" ] && extra+=(--mock-tensix)
+[ -n "${TT_SIM_RUN_TAG:-}" ] && extra+=(--run-tag "$TT_SIM_RUN_TAG")
 
 echo "[run.sh] starting tt-sim server on $NNG_SOCKET_ADDR" >&2
 exec python3 -u -m driver.wormhole.server "${extra[@]}" "$@"

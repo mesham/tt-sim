@@ -70,6 +70,10 @@ def main(argv=None):
     ap.add_argument("--mock-tensix", action="store_true", help="every core is NullCore")
     ap.add_argument("--cycles-per-poll", type=int, default=100, metavar="N")
     ap.add_argument("--record", metavar="FILE", default=None)
+    # Inert marker: the test scripts cannot reach this process by pid (UMD
+    # spawns run.sh detached), so they stamp their run tag into our command
+    # line and match on it when cleaning up. See driver/sim_procs.sh.
+    ap.add_argument("--run-tag", metavar="TAG", default=None)
     args = ap.parse_args(argv)
 
     addr = args.addr or os.environ.get("NNG_SOCKET_ADDR")

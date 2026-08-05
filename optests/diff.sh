@@ -22,9 +22,19 @@
 #
 # Add op programs under optests/<name>/src (a tt-metal host that dumps its
 # output tile as `OPDIFF_RESULT:<hex>`); the compute kernel picks the op.
+#
+# Cleanup only touches the sim servers this run started (they carry its
+# TT_SIM_RUN_TAG) plus orphans left by an earlier diff.sh whose owner is gone,
+# so a concurrent run in another terminal is never disturbed. Set
+# TT_SIM_KILL_ALL_SERVERS=1 to instead kill every tt-sim server on the machine
+# at startup — the way to clear up after manual runs, which carry no tag.
 
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Simulator cleanup that only touches the servers *this* run started; set
+# TT_SIM_KILL_ALL_SERVERS=1 for the old kill-everything behaviour.
+# shellcheck source=../driver/sim_procs.sh
+. "$REPO/driver/sim_procs.sh"
 NAME="${1:-optest}"
 SRC="$REPO/optests/$NAME/src"
 ARCH="${TT_SIM_ARCH:-blackhole}"
@@ -96,7 +106,8 @@ _stage_oracle() {
   return 1
 }
 
-trap '[ -n "$STAGED_ORACLE" ] && rm -rf "$STAGED_ORACLE"' EXIT
+sim_procs_init diff
+trap 'sim_kill_own_servers; [ -n "$STAGED_ORACLE" ] && rm -rf "$STAGED_ORACLE"' EXIT INT TERM
 _stage_oracle || exit 2
 
 if [ ! -x "$SRC/build/$NAME" ]; then
@@ -108,7 +119,8 @@ fi
 
 # $1 = TT_METAL_SIMULATOR, $2 = TT_SIM_TENSIX_COORDS ("" to skip), $3 = logfile
 _run() {
-  pkill -9 -f 'driver\.(wormhole|blackhole)\.server( |$)' 2>/dev/null; sleep 0.3
+  # Clear a server this run leaked earlier (e.g. the previous _run timed out).
+  sim_kill_own_servers; sleep 0.3
   ( cd "$SRC"
     export TT_METAL_SIMULATOR="$1"
     [ -n "$2" ] && export TT_SIM_TENSIX_COORDS="$2"
@@ -123,7 +135,7 @@ echo "[oracle: ttsim]  $ORACLE_DIR/$ORACLE_SO"
 _run "$ORACLE_DIR/$ORACLE_SO" "" "$ora_log"
 echo "[ours:   tt-sim] $REPO/driver/$ARCH  (coords=$COORDS)"
 _run "$REPO/driver/$ARCH" "$COORDS" "$our_log"
-pkill -9 -f 'driver\.(wormhole|blackhole)\.server( |$)' 2>/dev/null
+sim_kill_own_servers
 
 ora="$(_result "$ora_log")"
 our="$(_result "$our_log")"

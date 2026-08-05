@@ -99,6 +99,15 @@ def main(argv=None):
         default=None,
         help="record every wire message (and READ reply) to FILE",
     )
+    ap.add_argument(
+        "--run-tag",
+        metavar="TAG",
+        default=None,
+        help=(
+            "inert marker stamped into our command line by a test script, so it "
+            "can clean up exactly the servers it started (driver/sim_procs.sh)"
+        ),
+    )
     args = ap.parse_args(argv)
 
     addr = args.addr or os.environ.get("NNG_SOCKET_ADDR")
