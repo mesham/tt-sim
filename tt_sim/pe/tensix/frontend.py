@@ -121,7 +121,15 @@ class WaitGate(TensixFrontendUnit):
 
     # The math instructions to check allowedclient for, first element is
     # list of applicable instructions that need to check srcA, second element
-    # is list of applicable instructions that need to check srcB
+    # is list of applicable instructions that need to check srcB.
+    #
+    # Every name here must exist in ``tensix_instructions.yaml`` -- the check is
+    # a string membership test against the decoded opcode, so a misspelling
+    # silently removes an instruction from the gate rather than failing. That
+    # happened: ``TRNSPSRCB`` was spelled ``TRANSPSRCB`` and so never waited for
+    # SrcB, where ttsim's ``TENSIX_EXECUTE_TRNSPSRCB`` stalls until the FPU owns
+    # the bank. ``waitgate_allowed_client_test.py`` now pins the whole list
+    # against the instruction table.
     MATH_ALLOWED_CLIENT_INSTRUCTIONS = [
         (
             "MVMUL",
@@ -146,7 +154,7 @@ class WaitGate(TensixFrontendUnit):
             "MOVB2D",
             "MOVB2A",
             "SHIFTXB",
-            "TRANSPSRCB",
+            "TRNSPSRCB",
         ),
     ]
 

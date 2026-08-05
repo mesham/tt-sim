@@ -24,6 +24,7 @@ import pytest
 
 from tt_sim.arch.blackhole import BLACKHOLE_PROFILE
 from tt_sim.pe.tensix.backends.backend_base import DataFormat
+from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
 from tt_sim.pe.tensix.util import TensixConfigurationConstants
 from tt_sim.util.conversion import conv_to_uint32
@@ -462,9 +463,25 @@ def test_gmpool_holds_the_flag_until_the_last_column():
 def test_gmpool_clears_dvalid_and_flips_banks():
     with _backend(True) as backend:
         _load_gmpool_operands(backend, [1.0] * 16)
+        # Clearing dvalid is the *release* half of the Src ownership handshake,
+        # so the banks have to be owned first. In a real kernel the Wait Gate
+        # guarantees that (an unowned bank holds the GMPOOL at the gate until an
+        # unpack hands it over); this test issues straight into the backend, so
+        # it has to perform the acquire itself or it is asking the Matrix Unit
+        # to release something it never held -- which is the
+        # NonContractualBehavior ``_release_src_bank`` now refuses.
+        for bank in (0, 1):
+            backend.getSrcA(bank).allowedClient = SrcRegister.SrcClient.MatrixUnit
+            backend.getSrcB(bank).allowedClient = SrcRegister.SrcClient.MatrixUnit
         _issue(backend, _gmpool(clear_dvalid=0x3))
         assert backend.matrix_unit.srcABank == 1
         assert backend.matrix_unit.srcBBank == 1
+        # The released banks are the ones the FPU was reading, not the ones it
+        # moved on to.
+        assert backend.getSrcA(0).allowedClient is SrcRegister.SrcClient.Unpackers
+        assert backend.getSrcB(0).allowedClient is SrcRegister.SrcClient.Unpackers
+        assert backend.getSrcA(1).allowedClient is SrcRegister.SrcClient.MatrixUnit
+        assert backend.getSrcB(1).allowedClient is SrcRegister.SrcClient.MatrixUnit
 
 
 def test_gmpool_result_is_identical_on_wormhole():

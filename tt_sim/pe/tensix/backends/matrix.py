@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
@@ -7,6 +9,50 @@ from tt_sim.pe.tensix.util import DataFormatConversions
 from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_float, conv_to_uint32
+
+#: Environment variable that turns the Src dvalid release check off, following
+#: the ``TT_SIM_DISABLE_ALIGNMENT_CHECKS`` convention in
+#: ``tt_sim/network/alignment.py``.
+DISABLE_DVALID_CHECK_ENV_VAR = "TT_SIM_DISABLE_DVALID_CHECKS"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+#: Read once at import: this is consulted on every math op that clears dvalid.
+#: Call :func:`set_dvalid_checking_enabled` after mutating the environment.
+_dvalid_checks_disabled = (
+    os.environ.get(DISABLE_DVALID_CHECK_ENV_VAR, "").strip().lower() in _TRUTHY
+)
+
+
+class SrcDvalidError(RuntimeError):
+    """A Matrix Unit instruction released a Src bank the Matrix Unit did not own.
+
+    Clearing dvalid is the *release* half of the two-bank Src ownership
+    handshake: the unpackers hand a bank over by setting
+    ``AllowedClient = MatrixUnit`` (an ``UNPACR`` with ``SetDvalid``, an
+    ``UNPACR_NOP`` carrying ``set_dvalid``, or a ``SETDVALID``), and the FPU
+    hands it back by clearing it. Releasing a bank that is already owned by the
+    unpackers is ``NonContractualBehavior``: the vendor reference simulator
+    fails it outright (``ttsim`` ``src/tensix.cpp``, ``math_clear_src_valid``
+    and ``TENSIX_EXECUTE_CLEARDVALID``, ``TTSIM_VERIFY(p_tensix->src_a_valid &
+    (1 << p_tensix->src_a_matrix_bank), NonContractualBehavior, "SrcA bank is
+    not valid")``), and on silicon it desynchronises the two banks' pointers so
+    that a later acquire waits for a release that never comes.
+
+    The instructions that read Src wait for ownership at the Wait Gate, so they
+    cannot trip this. The ones that can are exactly those that clear dvalid
+    *without* reading Src -- ``CLEARDVALID`` and ``SETRWC``'s ``clear_ab_vld``
+    -- which is the shape a kernel reaches for when a math op did not carry
+    ``clear_dvalid`` inline. That is a real, and easy, software mistake: see
+    ``docs/plans/matrix-unit-thread-contention.md``, where an unmatched acquire
+    wedged a Blackhole card until it was power-cycled.
+    """
+
+
+def set_dvalid_checking_enabled(enabled: bool) -> None:
+    """Force the release check on or off, ignoring the environment (for tests)."""
+    global _dvalid_checks_disabled
+    _dvalid_checks_disabled = not enabled
 
 
 class MatrixUnit(TensixBackendUnit):
@@ -157,16 +203,21 @@ class MatrixUnit(TensixBackendUnit):
             self.backend.getSrcB(0).allowedClient = SrcRegister.SrcClient.Unpackers
             self.backend.getSrcB(1).allowedClient = SrcRegister.SrcClient.Unpackers
         else:
+            # CLEARDVALID's release is not gated on CLR_DVALID_Src{A,B}_Disable
+            # (ttsim's TENSIX_EXECUTE_CLEARDVALID clears unconditionally, unlike
+            # math_clear_src_valid), so this cannot go through
+            # optionally_flip_src_banks -- but the ownership check is the same
+            # one, and this is the instruction most likely to trip it.
             if flipSrcA:
-                self.backend.getSrcA(
-                    self.srcABank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
+                self._release_src_bank(
+                    "SrcA", self.srcABank, issue_thread, "CLEARDVALID"
+                )
                 if not keepReadingSameSrc:
                     self.srcABank ^= 1
             if flipSrcB:
-                self.backend.getSrcB(
-                    self.srcBBank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
+                self._release_src_bank(
+                    "SrcB", self.srcBBank, issue_thread, "CLEARDVALID"
+                )
                 if not keepReadingSameSrc:
                     self.srcBBank ^= 1
 
@@ -180,9 +231,11 @@ class MatrixUnit(TensixBackendUnit):
 
     def handle_trnspsrcb(self, instruction_info, issue_thread, instr_args):
         # Transpose the 16x16 matrix held in SrcB rows [16, 32) in place. The
-        # ISA wait-gate (FPU must own the SrcB bank before dispatch) is modelled
-        # by the one-instruction-per-cycle issue behaviour, so only the swap is
-        # performed here.
+        # ISA wait-gate condition (the FPU must own the SrcB bank before
+        # dispatch, as in ttsim's TENSIX_EXECUTE_TRNSPSRCB) is enforced in
+        # WaitGate.checkIfFPUInstructionShouldStall before the instruction
+        # reaches this unit -- it was not, for years, because the gate's table
+        # spelled the opcode TRANSPSRCB -- so only the swap is performed here.
         srcB = self.getSrcB()
         rowBase = 16
         for i in range(16):
@@ -787,7 +840,9 @@ class MatrixUnit(TensixBackendUnit):
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
-        self.perform_mvmul(issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4)
+        self.perform_mvmul(
+            issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4, "GAPOOL"
+        )
 
     @staticmethod
     def _gmpool_read_dst(dstVal, dstStyle):
@@ -989,7 +1044,7 @@ class MatrixUnit(TensixBackendUnit):
                 for i in range(1, 4):
                     dst.setDst16b(dstRow + i, j, 0)
 
-        self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB)
+        self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB, "GMPOOL")
 
         # Advance the RWCs
         rwc.applyAddrMod(issue_thread, addrMod)
@@ -1000,7 +1055,9 @@ class MatrixUnit(TensixBackendUnit):
         flipSrcA = instr_args["clear_dvalid"] & 0x1
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
-        self.perform_mvmul(issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4)
+        self.perform_mvmul(
+            issue_thread, dstRow, addrMod, False, flipSrcA, flipSrcB, 4, "DOTPV"
+        )
 
     def handle_mvmul(self, instruction_info, issue_thread, instr_args):
         dstRow = self._read_dst_field(instruction_info, instr_args)
@@ -1010,7 +1067,14 @@ class MatrixUnit(TensixBackendUnit):
         flipSrcB = instr_args["clear_dvalid"] & 0x2
 
         self.perform_mvmul(
-            issue_thread, dstRow, addrMod, broadcastSrcBRow, flipSrcA, flipSrcB, 8
+            issue_thread,
+            dstRow,
+            addrMod,
+            broadcastSrcBRow,
+            flipSrcA,
+            flipSrcB,
+            8,
+            "MVMUL",
         )
 
     def perform_mvmul(
@@ -1022,6 +1086,7 @@ class MatrixUnit(TensixBackendUnit):
         flipSrcA,
         flipSrcB,
         numRows,
+        opcode=None,
     ):
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
@@ -1054,7 +1119,7 @@ class MatrixUnit(TensixBackendUnit):
                 useDst32b,
                 fidelityPhase,
             )
-            self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB)
+            self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB, opcode)
             rwc.applyAddrMod(issue_thread, addrMod)
             return
 
@@ -1108,7 +1173,7 @@ class MatrixUnit(TensixBackendUnit):
             if broadcastSrcBRow:
                 i += 1
 
-        self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB)
+        self.optionally_flip_src_banks(issue_thread, flipSrcA, flipSrcB, opcode)
 
         # Advance the RWCs
         rwc.applyAddrMod(issue_thread, addrMod)
@@ -1570,21 +1635,49 @@ class MatrixUnit(TensixBackendUnit):
         fidelityPhase &= 3
         return fidelityPhase
 
-    def optionally_flip_src_banks(self, issue_thread, flipsrca, flipsrcb):
-        # Possibly flip source banks
+    def optionally_flip_src_banks(self, issue_thread, flipsrca, flipsrcb, opcode=None):
+        """Release the Src banks this instruction's ``clear_dvalid`` field names.
+
+        The single release site for the whole unit. ``CLEARDVALID``, ``SETRWC``
+        (via ``clear_ab_vld``), and every math op carrying ``clear_dvalid``
+        used to each carry their own copy of this five-line sequence, so a rule
+        added to one of them silently missed the other three.
+
+        The bank pointer advances whether or not the hand-back happens:
+        ``CLR_DVALID_Src{A,B}_Disable`` suppresses the release but not the flip,
+        exactly as ttsim's ``math_clear_src_valid`` does.
+        """
         if flipsrca:
             if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
-                self.backend.getSrcA(
-                    self.srcABank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
+                self._release_src_bank("SrcA", self.srcABank, issue_thread, opcode)
             self.srcABank ^= 1
 
         if flipsrcb:
             if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcB_Disable"):
-                self.backend.getSrcB(
-                    self.srcBBank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
+                self._release_src_bank("SrcB", self.srcBBank, issue_thread, opcode)
             self.srcBBank ^= 1
+
+    def _release_src_bank(self, which, bank, issue_thread, opcode):
+        """Hand one Src bank back to the unpackers, refusing an unowned release.
+
+        See :class:`SrcDvalidError` for why an unowned release is an error
+        rather than a no-op, and ``TT_SIM_DISABLE_DVALID_CHECKS`` for the
+        escape hatch.
+        """
+        src = (self.backend.getSrcA if which == "SrcA" else self.backend.getSrcB)(bank)
+        if (
+            not _dvalid_checks_disabled
+            and src.allowedClient != SrcRegister.SrcClient.MatrixUnit
+        ):
+            raise SrcDvalidError(
+                f"{opcode or 'A Matrix Unit instruction'} from thread {issue_thread} "
+                f"cleared dvalid on {which} bank {bank}, but that bank's AllowedClient "
+                f"is Unpackers -- the Matrix Unit does not own it, so there is nothing "
+                f"to release. Something acquired it and released it twice, or released "
+                f"it without acquiring. Set "
+                f"{DISABLE_DVALID_CHECK_ENV_VAR}=1 to disable this check."
+            )
+        src.allowedClient = SrcRegister.SrcClient.Unpackers
 
     def handle_elementwise_op(
         self,
@@ -1601,6 +1694,7 @@ class MatrixUnit(TensixBackendUnit):
         op_handler,
         int8_handler,
         fp_handler,
+        opcode=None,
     ):
         srcAStyle, useDst32b = self.get_dataformat_and_useDst(issue_thread, stateID)
 
@@ -1652,20 +1746,7 @@ class MatrixUnit(TensixBackendUnit):
                         op_handler,
                     )
 
-        # Possibly flip source banks
-        if flipsrca:
-            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
-                self.backend.getSrcA(
-                    self.srcABank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
-            self.srcABank ^= 1
-
-        if flipsrcb:
-            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcB_Disable"):
-                self.backend.getSrcB(
-                    self.srcBBank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
-            self.srcBBank ^= 1
+        self.optionally_flip_src_banks(issue_thread, flipsrca, flipsrcb, opcode)
 
         # Advance the RWCs
         rwc.applyAddrMod(issue_thread, addrMode)
@@ -1814,6 +1895,7 @@ class MatrixUnit(TensixBackendUnit):
             mul_handler,
             self.elementwise_mul_int8,
             self.elementwise_fp_other,
+            "ELWMUL",
         )
 
     def handle_elwadd(self, instruction_info, issue_thread, instr_args):
@@ -1858,6 +1940,7 @@ class MatrixUnit(TensixBackendUnit):
             add_handler,
             self.elementwise_addsub_int8,
             self.elementwise_fp_other,
+            "ELWADD",
         )
 
     def handle_elwsub(self, instruction_info, issue_thread, instr_args):
@@ -1902,6 +1985,7 @@ class MatrixUnit(TensixBackendUnit):
             sub_handler,
             self.elementwise_addsub_int8,
             self.elementwise_fp_other,
+            "ELWSUB",
         )
 
     def handle_setrwc(self, instruction_info, issue_thread, instr_args):
@@ -1947,19 +2031,7 @@ class MatrixUnit(TensixBackendUnit):
         if fidelity:
             rwc.FidelityPhase = 0
 
-        if flipsrca:
-            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcA_Disable"):
-                self.backend.getSrcA(
-                    self.srcABank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
-            self.srcABank ^= 1
-
-        if flipsrcb:
-            if not self.getThreadConfigValue(issue_thread, "CLR_DVALID_SrcB_Disable"):
-                self.backend.getSrcB(
-                    self.srcBBank
-                ).allowedClient = SrcRegister.SrcClient.Unpackers
-            self.srcBBank ^= 1
+        self.optionally_flip_src_banks(issue_thread, flipsrca, flipsrcb, "SETRWC")
 
     def _read_zeroacc_fields(self, instruction_info, instr_args):
         """Decode ZEROACC's ``dst`` / ``clear_mode`` / ``addr_mode``.
