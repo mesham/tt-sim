@@ -351,6 +351,57 @@ noc:
       with the numbers, and names the four hardware measurements that would
       settle it.
 
+      MEASURED ON A BLACKHOLE CARD, 2026-08-05, and it is still not a number
+      this table can carry. `perfbench/nocbench` put two flows on a searched
+      geometry in which only the payload link overlap moves. At 64 B per transaction the
+      series is flat (slope -0.00, span 0.1 cycles against a 0.5-cycle noise
+      floor), which is the designed negative control. At 16 KiB the cost per
+      transaction goes 268.8 -> 518.3 between ZERO and ONE shared link and then
+      stops moving (516.6, 511.6 at two and three). 16384 B / 64 B per cycle is
+      256 cycles of link occupancy; one flow costs 269, two flows sharing one
+      link cost 518. That is one link's bandwidth being split between the
+      saturating flows crossing it -- a STEP, not a slope, and not a per-hop
+      latency adder. Writing 250 cycles into a per-shared-link slot would be
+      false to the measurement, not conservative about it: it would charge two
+      shared links twice what it charges one, and the card charges the same.
+      The endpoint curve agrees: six 4096 B flows into one subordinate come back
+      at 137 / 202 / 268 / 333 / 399 / 399 cycles per transaction, evenly spaced
+      by ~65.5 where 4096 / 64 is 64.
+
+      RE-MEASURED ACROSS SIX TRANSACTION SIZES, same day, same card, separate
+      run (tt_sim/perf/datasets/nocbench-blackhole-sizes.csv), and THAT CHANGED
+      THE VERDICT ABOVE ABOUT WHAT IS EXPRESSIBLE -- though not about what is
+      wired. The 0-to-1-shared-link delta is 0.0 / 0.0 / 28.1 / 63.1 / 124.5 /
+      250.4 cycles at 64 / 512 / 2048 / 4096 / 8192 / 16384 bytes, against
+      occupancies (bytes / 64) of 1 / 8 / 32 / 64 / 128 / 256. Above the
+      ~40-cycle issue loop THE DELTA IS THE OCCUPANCY, to 0.88 / 0.99 / 0.97 /
+      0.98; below it, nothing happens at all. So the effect is not an
+      unquantified arbitration term at all -- it is
+      ``hops.router_to_router.throughput_flits_per_cycle: 1`` (isa_doc, already
+      in this file, currently spent only at the injecting NIU) being spent on
+      each router-to-router link a packet crosses. That needs NO NEW NUMBER and
+      would be `isa_doc_derived`, with the silicon above as corroboration -- see
+      ``arch_overrides.blackhole.noc``.
+
+      IT IS STILL NOT WIRED, and the reason is now three named build items in
+      tt_sim/network/tt_noc.py rather than a missing quantity: there is no
+      per-link state anywhere (only ``NUI._tx_free_cycle``, one watermark per
+      NIU); the network layer knows a hop COUNT but has never committed to a hop
+      ORDER, which a link identity needs; and a multicast write is modelled as N
+      unicasts, so claiming a link per destination would invent serialisation on
+      the tree's most common packet -- the exact over-charge
+      ``claim_injection_port`` exists to avoid. See docs/plans/cost-model.md,
+      "Banked, 2026-08-05" and the size-sweep instalment after it.
+
+      WHAT ``congestion`` STILL MEANS, now narrowed. The docs' one named
+      mechanism is virtual-channel arbitration, and it has now been measured
+      separately: two writers on one shared link, one pinned at VC 1 and the
+      other swept 0-3, cost 519.8 / 528.5+532.4 / 519.9 / 519.9 cycles per
+      transaction at 16 KiB. Different channels DO NOT avoid the split (all four
+      points are ~1.94x the uncontended 268), and sharing a channel costs a
+      further 2.0 % (10.5 cycles) on top. So VC arbitration is real, is worth
+      one fiftieth of the effect, and is the part that stays `unknown` here.
+
 # ---------------------------------------------------------------------------
 dram:
   note: >
@@ -892,6 +943,38 @@ arch_overrides:
         noc_max_burst_size going 8 KiB -> 16 KiB. No per-hop link bandwidth in
         GB/s is published for Blackhole, so ``link_bandwidth_gb_per_s`` is not
         overridden and must not be read as a Blackhole figure.
+      corroboration: >
+        ``flit_bits: 512`` at ``throughput_flits_per_cycle: 1`` is 64 bytes per
+        cycle per link, and that number MEASURED ON BLACKHOLE SILICON,
+        2026-08-05, by perfbench/nocbench -- twice, off two different
+        resources, in units the table never sees.
+
+        (1) The injecting NIU's own link. One flow of 64 x N bytes to a fixed
+        subordinate costs 39.9 / 39.8 / 40.2 / 72.2 / 137.8 / 268.4 cycles per
+        transaction at N = 64 / 512 / 2048 / 4096 / 8192 / 16384. Above the
+        ~40-cycle issue loop the cost IS the occupancy: 16384 / 64 = 256
+        against 268.4 measured, 8192 / 64 = 128 against 137.8.
+
+        (2) A router-to-router link, which the model charges nothing for. Two
+        flows whose payloads cross exactly ONE common link each pay one extra
+        occupancy: the 0-shared to 1-shared delta is 28.1 / 63.1 / 124.5 /
+        250.4 cycles at 2048 / 4096 / 8192 / 16384 bytes, against occupancies
+        of 32 / 64 / 128 / 256 -- a ratio of 0.88, 0.99, 0.97, 0.98. At 64 and
+        512 bytes the delta is zero, because a packet that holds the link for
+        1 or 8 cycles out of ~40 does not queue. THE SECOND READING IS NOT
+        CONSUMED; see ``noc.congestion`` for what it would take to consume it,
+        and note that it needs no new number -- only a place to spend
+        ``hops.router_to_router.throughput_flits_per_cycle``, which is already
+        ``isa_doc`` and already here.
+
+        TWO RUNS, ON ONE CARD, one operator, one day, and they are not
+        averaged: tt_sim/perf/datasets/nocbench-blackhole.csv is the run with
+        the controls in it (87 flows, `size` and `readport` both PASS,
+        `readport` 1.92x) and nocbench-blackhole-sizes.csv is a separate 96-flow
+        sweep that carries none. The two share two of twelve cells and agree to
+        0.8 cycles/tx. BLACKHOLE ONLY -- the same experiment has never been run
+        on Wormhole, where the flit is half as wide and the arithmetic would be
+        a different one.
       link_bandwidth_gb_per_s:
         provenance: unknown
         note: not published for Blackhole; the Wormhole 32 GB/s does not carry over.

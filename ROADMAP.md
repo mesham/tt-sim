@@ -1952,6 +1952,27 @@ status there:
   working, and the single-thread column still passes 4 of 4. No cost table
   gained or lost a cycle count; one `corroboration` field was rewritten to
   carry phase G and to stop calling the step "an instruction-cache capacity".
+  **— The untested candidate has since been tested and it was right; the
+  ~26–31 range is superseded by ~31–32, in the entry below.**
+- **The untimed drain: a pre-declared prediction, run and confirmed**
+  (2026-08-05, fourth campaign). One line went into `QLOOPPROBE` — the untimed
+  `ckernel::tensix_sync()` phase S always had — with its raw predicted cycles
+  **and three refutation criteria written down before the edit**. The run
+  (`--phase qs --variants t1 --blocks 32`, banked as
+  `tt_sim/perf/datasets/riscvbench-qdrain.csv`) returned `q_loop_adddmareg` at
+  **299 / 683 / 1451 / 2987** against a predicted **299 / 683 / 1451 / 2987** —
+  a 21-cycle fall at every n ≥ 128 and zero below. **None of the three criteria
+  fired**: `q_loop_adddmareg_sync` is identical to the cycle at all seven burst
+  lengths and `q_loop_addi` at six of its seven, moving 3–4 cycles only at
+  n = 16 against a 17-cycle control spread — reported rather than glossed,
+  because n = 16 is the backlog's reference point and that blip is exactly why
+  the levelled reconciliation reads 0.7 entries where 1.7 was predicted. The
+  two burst forms now **reconcile**, and the estimator that shares no term with
+  the others reads **32.3 for both**. `docs/bh_arch.md` §1.10 drops the ~26–31
+  range for **~31–32 entries at one issuing thread**. **The per-core verdict is
+  untouched**: that is a ratio between thread counts and this run has one, so it
+  still rests entirely on the third campaign's two full runs. No cost table
+  changed; no `estimated` entry exists.
 - ~~**Two follow-ups to the silicon run are built and unrun**~~ **— run, see
   above** (2026-08-05). `riscvbench` gains **phase S** — is the Tensix
   instruction queue **shared between the three TRISCs or private to each?** —
@@ -2098,7 +2119,19 @@ status there:
   congestion (per-core bandwidth falls ~4× from a 2×2 grid to the full
   device) without supplying it. `python3 -m
   tt_sim.perf.noc_dataset_sweep` prints the argument and names the four
-  card measurements that would settle it.
+  card measurements that would settle it. **Those measurements were then
+  taken, on a Blackhole card, 2026-08-05** (`perfbench/nocbench`): the
+  uncongested line comes out at `4373.7 + 8.38 * round_trip_hops` (r2
+  1.00), and congestion turns out to be a **step at the first shared
+  link, not a per-link slope** — at 16 KiB two flows sharing one
+  router-to-router link each pay 517.9 cycles/tx against 270.1 sharing
+  none, and sharing two or three links costs no more. That is one
+  link's bandwidth split between the saturating flows crossing it, so
+  `noc.congestion` stays `provenance: unknown`: the model has no term
+  of that shape, and it would need a per-link flow census rather than a
+  coefficient. See
+  [`docs/plans/cost-model.md`](docs/plans/cost-model.md), "Banked,
+  2026-08-05".
   The per-trid response-ordering hazard is **closed** (responses match
   their request by issue number rather than by arrival order), not
   merely still absent.

@@ -33,7 +33,13 @@ points at it rather than restating it as if it were independent.
 - **Mostly one run per figure**, and where there are two they are two runs of
   the same binary on the same card in the same afternoon. That is a
   reproduction of the *instrument*, not of the *part*.
-- **Two instruments, both with known one-sided biases.**
+- **Three instruments.** `perfbench/nocbench` (§4) is unlike the other two: it
+  times a whole pipelined region rather than fitting a slope, so it has no
+  control-loop subtraction and no bias of the kind described next — its
+  resolution is stated directly, as the spread of a family predicted constant
+  (§4.1), and it refuses to report a coefficient at all unless its own positive
+  controls moved.
+- **Two of the three have known one-sided biases.**
   `perfbench/tensixbench` and `perfbench/riscvbench` both fit a slope over four
   block counts and subtract an empty-body control loop. The control subtraction
   over-corrects by up to `slope(control)/unroll` whenever the probe stalls
@@ -99,6 +105,18 @@ single-phase `--gset` runs `riscvbench-blackhole-gset1.csv` and `-gset2.csv`
 that carry the only measurements of a 6144- and a 7168-byte loop body. **Four
 runs, one card, one operator, one day.** Reproduce the analysis with
 `python3 -m tt_sim.perf.riscv_bench_sweep`.
+
+A **fifth** run, `riscvbench-qdrain.csv`, was taken later the same day on the
+same card after one line changed in phase Q's loop probe — an untimed
+`ckernel::tensix_sync()`, so its bursts start drained as phase S's always did.
+It is `--phase qs --variants t1`, two phases at one thread, and it exists to
+score a prediction that was written down before the line was. **It bears on
+§1.10's depth only.** It carries no phase R, so the live-instrument check cannot
+run against it, and one thread count, so it says nothing about whether the queue
+is shared — that verdict stays where it was, in the two full runs. It also means
+`q_loop_addi` and `q_loop_adddmareg` in the four earlier datasets are a record
+of a binary no longer in the tree, which their headers say; every other row in
+them, and every other section of this document, is unaffected.
 
 Phases **S** and **G** — the follow-ups §1.10 and §1.1 named — **have now run on
 a card**, and this is the campaign they ran in. Phase S answers the question
@@ -482,6 +500,14 @@ against a drained 3.000; at two and three threads it has stepped by n = 64.
 Three issuing threads share one backend, so each thread's service rate is a
 third of it and the queue fills three times sooner.
 
+**The t1 plain column moved slightly after the drain fix** and the conclusion
+does not. `riscvbench-qdrain.csv` (§1.10) reads 2.936 rather than 2.953 with the
+same drained 3.000, and its marginal steps 1.25 → 1.84 → 3.00 rather than
+1.06 → 1.84 → 3.33 — the knee is in the same place and it now arrives *at* the
+drained rate instead of overshooting it, which is what removing the previous
+burst's residue predicts. The two- and three-thread rows are from the full runs
+and are untouched: the drain run has one thread.
+
 **Status: absent.** Nothing in the ISA documentation or either vendor tree gives
 a Tensix instruction queue depth.
 
@@ -493,14 +519,18 @@ launch — a third and fourth independent route to ThCon's 3-cycle occupancy
 (§2.1), sharing no arithmetic with either of the two burst measurements. The
 plain column carries the full noise of a single-shot cold burst; see §3.2.
 
-## 1.10 The Tensix instruction queue is **one per core**, and holds ~26–31 entries — **absent**
+## 1.10 The Tensix instruction queue is **one per core**, and holds ~31–32 entries — **absent**
 
-**Two claims, and they are worth very different amounts.** The first — that the
-queue is private to each TRISC rather than shared between them — is a *ratio*,
-it is what phase S was built to measure, and it came out cleanly. The second —
-the depth in entries — is a *level*, and the two constructions that measure it
-do not agree as closely as they should. Quoting the second without the first
-paragraph of "the magnitude does not settle" below overstates it.
+**Two claims, and they rest on different runs.** The first — that the queue is
+private to each TRISC rather than shared between them — is a *ratio* between
+thread counts, it is what phase S was built to measure, and it comes from the
+two full three-thread runs of 2026-08-05. The second — the depth in entries — is
+a *level* at **one** issuing thread, and it comes from those runs plus a third,
+`riscvbench-qdrain.csv`, which is `--phase qs --variants t1` and therefore has
+no bearing on the first claim whatsoever. The two constructions that measure the
+level disagreed by ~5–7 entries until that third run; they now agree to 0.7, for
+a pre-declared reason, and the settling is
+[below](#the-magnitude-settles-and-a-pre-declared-prediction-is-what-settled-it).
 
 ### It is per-thread, and this was pre-declared
 
@@ -531,99 +561,122 @@ ratio a statement about the *queue* and not about the tile.
 whether this queue exists as a queue, let alone how deep it is or whether it is
 replicated.
 
-### The magnitude does not settle, and here is exactly how far it gets
+**This verdict is untouched by everything below.** It is a ratio between one,
+two and three issuing threads, measured in the two full runs; the run that
+settled the *depth* is one thread and contributes nothing to it. If a later
+reader finds only the drain run in front of them, the sharing question is not
+answered by it.
+
+### The magnitude settles, and a pre-declared prediction is what settled it
 
 Phase S at one issuing thread reads **31 entries**. The pre-declaration said it
 should land *above* phase Q's figure by roughly the reference burst's own
-occupancy, ~8 entries. Phase Q on the same run reads **~16**. So the direction
-is confirmed — **phase Q's figure was a lower bound, as declared** — and the
-size is not: the gap is 15.3 entries where 8.0 was predicted.
+occupancy, ~8 entries. Phase Q on the same run read **~16**, so the direction was
+confirmed — phase Q's figure was a lower bound, as declared — but the gap was
+15.3 entries where 8.0 was predicted, and **5.3 of it survived the correction
+arithmetic**. The diagnosis, the pre-declared test of it and the result are all
+below; the short version is that phase S drained its pipe before every timed
+burst and phase Q did not.
 
-The sweep prints the reconciliation (`Do the two burst forms agree about the
-depth?`), and it is a difference between the two probe *forms* rather than
-between two devices:
+**The residual, as it stood.** The sweep prints the reconciliation (`Do the two
+burst forms agree about the depth?`). Pre-drain, from
+`riscvbench-blackhole.csv`:
 
 | form | n_ref | p | S | backlog | `backlog/S` | levelled | run-ahead |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | phase Q, 16-instruction block | 16 | 1.123 | 3.000 | 47 | **15.7** | 25.7 | 25.3 |
 | phase S, 4-instruction block | 4 | 1.508 | 3.000 | 87 | 29.0 | **31.0** | 32.3 |
 
-- `backlog/S` is what phase Q's read-out prints; `levelled` adds
-  `n_ref·(1 − p/S)`, the reference burst's own occupancy, and is what phase S's
-  read-out prints. **8.0 of the 15.3-entry gap is that term** — 10.0 at phase
-  Q's n = 16 against 2.0 at phase S's n = 4 — which is precisely the correction
-  the pre-declaration named, at precisely the size it named.
-- **5.3 entries survive the levelling**, and they are not the correction
-  arithmetic. A third estimator — run-ahead, `(n·S + c − plain[n])/S`, which
-  uses no `_sync` probe, no reference burst and no `tensix_sync()` cost — agrees
-  with `levelled` *within* each form (25.3 against 25.7; 32.3 against 31.0) and
-  puts the two forms **7.0 entries apart**.
+`backlog/S` is what phase Q's read-out prints; `levelled` adds `n_ref·(1 − p/S)`,
+the reference burst's own occupancy, and is what phase S's read-out prints. 8.0
+of the 15.3-entry gap was that term — 10.0 at phase Q's n = 16 against 2.0 at
+phase S's n = 4 — precisely the correction the pre-declaration named, at
+precisely the size it named. The other 5.3 was not the correction arithmetic: a
+third estimator, run-ahead `(n·S + c − plain[n])/S`, which uses no `_sync`
+probe, no reference burst and no `tensix_sync()` cost, agreed with `levelled`
+*within* each form and put the two forms **7.0 entries apart**.
 
-**Where the 7 entries live, and it is one column.** The two forms' saturated
-`sync − plain` is 79 cycles (phase Q) and 100 cycles (phase S), and both
-reproduce **to the cycle** across all four banked runs. Read as run-ahead,
-`3n − plain[n]` is a flat 64 cycles for phase Q at n = 256, 512 and 1024, and a
-flat 85 for phase S at n = 128, 256 and 512. But phase Q's *own* run-ahead is
-**85 cycles at n = 64** — phase S's value exactly — and drops to 64 from n = 128
-onward. So one form steps and the other does not, and the step is 21 cycles,
-which is the 7 entries.
+**It lived in one column, and entirely in `plain`.** The two forms' saturated
+`sync − plain` was 79 cycles (phase Q) and 100 (phase S); `3n − plain[n]` was a
+flat 64 for phase Q from n = 128 and a flat 85 for phase S — but phase Q's own
+value was **85 at n = 64**, phase S's exactly, stepping down to 64 thereafter.
+The `_sync` probes were identical to the cycle at all six shared burst lengths.
+So it was a flat 21-cycle tax on phase Q's undrained `plain` probe once the
+queue was full, and nowhere else.
 
-**And it is entirely in `plain`.** Lining the two forms' raw t1 points up at the
-six burst lengths they share, the `_sync` probes are **identical to the cycle**
-— 63, 111, 207, 399, 783, 1551 at n = 16…512 in both — while the `plain` probes
-differ by −5, −12, −3, **+21, +21, +21**. Whatever this is, it is not the
-backend, not the drain and not the reference arithmetic: it is a flat 21-cycle
-tax on phase Q's undrained `plain` probe once the queue is full.
+**The explanation, and it was tested rather than argued.** Phase S runs an
+untimed `tensix_sync()` immediately before every `t0`; phase Q did not. A
+saturated backend never idles, so whatever the previous burst point left in the
+queue is added to `plain` permanently rather than absorbed — a deficit that
+grows with the *preceding* point and then plateaus once that point is itself
+saturated. One line was added to `QLOOPPROBE`, and **the raw cycles it would
+produce, plus three ways it would be refuted, were written down before the line
+was** ([the plan doc](plans/riscv-front-end-benchmark.md), "The untimed drain,
+pre-declared before it was written", and the section that scores it).
 
-**The leading explanation, offered as a candidate and not as a finding.** Phase
-S runs an untimed `tensix_sync()` immediately before every `t0`; **phase Q does
-not**. A saturated backend never idles, so whatever the previous burst left in
-the queue is added to `plain` permanently rather than absorbed. That predicts a
-deficit which grows with the *preceding* point and then saturates once the
-preceding burst is itself saturated — a step followed by a plateau, which is
-what the column shows, and one free parameter (~21 entries draining during
-`bench_barrier()`) fits all three regimes. If that is right, phase Q's data
-corrected for it gives ~28 entries, which is phase S's run-ahead figure.
+**What came back**, `riscvbench-qdrain.csv`, `--phase qs --variants t1
+--blocks 32`, same card, `q_loop_adddmareg` at t1:
 
-**The test has now been built and not yet run, and the numbers here are from
-before it.** `QLOOPPROBE` gained the untimed drain on 2026-08-05, so the two
-phase-Q loop-form `plain` probes in the four banked datasets — `q_loop_addi` and
-`q_loop_adddmareg` — **describe a binary that is no longer in the tree**, and
-the phase-Q row of the table above is read off them. Nothing else moved: the
-cascade probes, `q_loop_adddmareg_sync` and every other phase are untouched, so
-§1.1, §1.3, §1.9 and the per-thread verdict at the top of this entry are
-unaffected. The prediction was written down before the edit
-([the plan doc](plans/riscv-front-end-benchmark.md), "The untimed drain,
-pre-declared before it was written"): `q_loop_adddmareg` falls 21 cycles at
-n ≥ 128 and nowhere else, `q_loop_addi` does not move, phase Q's run-ahead goes
-25.3 → 32.3 and meets phase S's 32.3 exactly. **Until that run exists this entry
-keeps its range**; a run that does not produce those numbers refutes the
-explanation rather than adjusting the estimator.
+| n | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| pre-drain | 31 | 48 | 107 | 320 | 704 | 1472 | 3008 |
+| **predicted** | 31 | 48 | 107 | **299** | **683** | **1451** | **2987** |
+| measured | 28 | 48 | 107 | **299** | **683** | **1451** | **2987** |
 
-**So the number to quote is a range, and the honest form of it is:**
+Four for four at the four burst lengths the prediction moved, to the cycle: a
+21-cycle fall at every n ≥ 128 and zero below it. `q_loop_adddmareg_sync`, which
+is not edited, is identical to the cycle to both banked runs. `q_loop_addi`, the
+control that pushes no Tensix instruction and must therefore not move, is
+identical at six of its seven points and **3–4 cycles low at n = 16** — reported
+here rather than glossed, because n = 16 is the backlog's reference point; it is
+3 cycles against a 17-cycle `q_ctrl` spread for one raw point, and the two banked
+runs already disagree by a cycle there. It cost one entry off the levelled
+figure, and the estimator that does not touch n = 16 landed dead on.
 
-> **~26–31 entries at one issuing thread**, per core — the two constructions'
-> levelled readings — and **not ~14–16**, which was two corrections short.
+And the derived quantities, all pre-declared: `sync − plain` saturates at **100**
+cycles (was 79), which is phase S's value; `3n − plain[n]` is a **flat 85** from
+n = 64 to 1024 (it stepped 85 → 64), which is phase S's value; the backlog
+flattens at a constant **65** cycles from n = 64 and the marginal cost reaches
+exactly **3.00** against a drained 3.000. The reconciliation:
 
-**What is retracted.** The "~14–16 instructions" headline of this entry. It was
-never wrong about what it measured; it dropped the reference burst's occupancy,
-which the same run had the data to compute, and it inherited a form effect
-nobody had looked for. The `~14` and `~16` were not even two readings of the
-part: the asymptotic `sync − plain` is **79 cycles in all four runs**, and the
-spread between 14 and 16 is entirely the ±6-cycle single-shot scatter of the
-*one* raw reference point at n = 16. That is a good illustration of why phase S
-moved the reference to n = 4, where the same scatter buys a quarter as much
-error.
+| form | n_ref | p | S | backlog | `backlog/S` | levelled | run-ahead |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| phase Q, 16-instruction block | 16 | 1.127 | 3.000 | 65 | 21.7 | **31.7** | **32.3** |
+| phase S, 4-instruction block | 4 | 1.502 | 3.000 | 87 | 29.0 | **31.0** | **32.3** |
 
-**What would settle it.** Not another thread count and not a longer burst. (a)
-The untimed drain in phase Q's loop probe, which tests the leading explanation
-directly — **written, not yet run**: `./build/riscvbench --phase qs --variants
-t1 --blocks 32 --out riscvbench-qdrain.csv`, seconds on the card, then
-`python3 -m tt_sim.perf.riscv_bench_sweep --measured riscvbench-qdrain.csv`.
-(b) A phase-S run with a 16-instruction block and an n = 4 reference,
-which separates "the block size" from "the missing drain" — they are confounded
-in everything above. (c) A second *card*, which is what would make any of this a
-fact about Blackhole rather than about this part.
+`RECONCILED: 0.7 entries`, against ~7 before. **The run-ahead estimator shares no
+term with the other two, uses neither `_sync` probe nor either reference burst,
+and reads 32.3 for both forms.** That independence is what makes this a
+confirmation and not a fit.
+
+**So the number to quote is:**
+
+> **~31–32 entries at one issuing thread**, per core. The estimators that use
+> every measured term cluster at 31.0, 31.7, 32.3 and 32.3; the deficit-only
+> reading that drops the timed region's measured 12-cycle fixed cost gives 28.3,
+> which is the low end of the pre-declared ~28–32 bracket. Not ~26–31, which was
+> a bracket built out of two forms that disagreed, and not ~14–16, which was two
+> corrections short.
+
+**What is retracted, in order.** "~14–16 instructions" was never wrong about
+what it measured; it dropped the reference burst's occupancy, which the same run
+had the data to compute, and it inherited the missing drain. The `~14` and `~16`
+were not even two readings of the part: the asymptotic `sync − plain` is 79
+cycles in all four pre-drain runs, and the 14-to-16 spread is entirely the
+±6-cycle single-shot scatter of the *one* raw reference point at n = 16 — which
+is why phase S moved its reference to n = 4. "~26–31" then bracketed two forms
+that disagreed for a reason nobody had found yet; the reason has been found and
+tested, so the bracket collapses rather than narrowing.
+
+**What is still one card and one thread.** The depth is a level read at **one**
+issuing thread on **one** part, now on three runs of two binaries. The two
+constructions agreeing is a statement about the instrument's arithmetic, not a
+second part. What would still sharpen it: (a) a phase-S variant with a
+16-instruction block and an n = 4 reference, which separates "the block size"
+from "the missing drain" — they were confounded before this run and the drain
+run does not disentangle them either, it only shows the drain was worth 21
+cycles; (b) a second card, which is what would make any of this a fact about
+Blackhole rather than about this part.
 
 ### The multi-thread phase-Q slots, and why phase S exists
 
@@ -652,8 +705,15 @@ with *n* is indistinguishable from back-pressure. The loop form's footprint is
 64 bytes (phase Q) or 16 bytes (phase S) at every burst length. That the change
 of form did not change the *rate* is measured where the two overlap: at one
 thread cascade and loop agree to **+0.062 cycles per instruction** over
-n = 16…128. What it did change is the run-ahead, by the 21 cycles above, and
-that is a level rather than a rate.
+n = 16…128. What appeared to change was the run-ahead, by the 21 cycles above —
+and that turned out to be the missing drain rather than the form. The cascade is
+not drained either and was not edited, and in the drain run it reads 101 and 319
+cycles at n = 64 and 128, **identical to the cycle** to the pre-drain run, with
+its `_sync` companion identical at all eight points; only the loop form moved.
+The two forms consequently now differ by −0.161 cycles per instruction over
+n = 16…128, which is the residue the cascade still carries and the loop no
+longer does. So the loop form bought a fixed footprint and cost nothing, which
+is what it was for.
 
 ---
 
@@ -860,7 +920,7 @@ exactly. **Phase Q does not**: each burst length is one timed execution of code
 that runs once, cold. Four consequences, all of which the read-out now states:
 
 - Its own control, `q_ctrl`, spans **6 to 25 cycles** across the eight burst
-  lengths — reproducibly (both runs agree point for point) and
+  lengths — reproducibly (both full runs agree point for point) and
   **non-monotonically**. The design had assumed this control grew with the burst
   index and subtracted it point by point, which produced *negative* net costs at
   small *n*. It does not grow: all seven of the cascade's `if` tests are
@@ -881,6 +941,15 @@ that runs once, cold. Four consequences, all of which the read-out now states:
   in one slot and reported three negative ones in others. The threshold is
   taken from each run's own measured spread rather than fixed in cycles,
   because it is the run's own statement about how noisy it was.
+- **And the drain run put a number on how far that spread reaches.** It was
+  pre-declared, from a deterministic tt-sim A/B of the two kernels, that adding
+  the untimed `tensix_sync()` would move `q_ctrl` by ~1 cycle through register
+  pressure across `kernel_main` and nothing else. On silicon `q_ctrl` moved at
+  four of its eight points (13→6 at n = 1, 22→23, 13→17, 17→18) while the
+  unedited cascade probe it is subtracted from reads identically to the cycle at
+  n = 64 and 128. That is the same fact from the other side: at small *n* this
+  phase's raw points carry more scatter than any effect it is looking for, which
+  is why the depth is read off n ≥ 16 differences over a long span.
 
 ## 3.3 A 1.000 is only readable next to something that is not 1.000
 
@@ -943,15 +1012,269 @@ throughput and not a cost.
 
 ---
 
+# 4. The NoC
+
+Source for all of §4: `perfbench/nocbench`, Blackhole silicon, 2026-08-05,
+planned by `tt_sim/perf/noc_congestion_plan.py` against this card's own
+`--dump-grid` capture and read back by `tt_sim/perf/noc_congestion_sweep.py`.
+**Two runs, one card, one operator, one day**, and they are two runs of
+*different plans* rather than a repetition — which claim rests on which is
+stated in every entry below, and where the two overlap they are quoted as two
+numbers and never averaged:
+
+| dataset | what it is |
+| --- | --- |
+| `tt_sim/perf/datasets/nocbench-blackhole.csv` | **the main run.** 87 flows over 55 runs, all six experiments. The controls live here, so this is the only one of the two that can carry a verdict, and it carries `RESULT: CONGESTION MEASURED` |
+| `tt_sim/perf/datasets/nocbench-blackhole-sizes.csv` | **the size sweep.** 96 flows over 48 runs, `shared` only, six transaction sizes × eight shared-link counts. No controls by construction, so its own verdict is `INVALID` and it is only ever read next to the main run |
+| `tt_sim/perf/datasets/nocbench-grid-blackhole.csv` | the card's core map, from a probe kernel reading each core's own `NOC_NODE_ID` |
+
+Reproduce with `python3 -m tt_sim.perf.noc_congestion_sweep` (the main run is
+the default) or `--measured …-sizes.csv`.
+
+**The card is harvested, and this is the campaign that found out.** Its
+addressed worker columns are `{1..7, 10..14}` — a legal *subset* of an
+unharvested Blackhole's physical `{1..7, 10..16}`, which is why the previous
+campaign's planner concluded the dump was already physical. It is not: the
+kernels' own `NOC_NODE_ID` puts the columns at `{1..6, 11..16}`, so physical 7
+and 10 are the disabled pair and anything addressed at x ≥ 7 sits further right
+than an unharvested map would put it. Every number in this section is on the
+corrected geometry, with **zero coordinate mismatches and zero invariant
+complaints** in both files — which the previous campaign, on the same
+experiment, could not say.
+
+## 4.1 A round trip costs 8.4–8.8 cycles per hop, and the NoC really is a directional torus — **agrees**
+
+**Measured** (main run). One flow, one master, everything fixed but the
+subordinate's coordinate, 64 × 4096 B per point. The round trip falls on
+exactly three levels and the fit through them is
+
+```
+region cycles = 4363.4 + 8.80 * round_trip_hops     (r2 1.00)
+```
+
+| family | n | round-trip hops | mean region | spread |
+| --- | --- | --- | --- | --- |
+| col | 8 | 12 | 4470.2 | ±11.5 |
+| row | 8 | 17 | 4511.0 | ±16.5 |
+| diag | 8 | 29 | 4619.0 | ±16.5 |
+
+**Status: agrees**, with the ISA docs' "the latency of each hop is at least 9
+cycles". 8.80 is under 9 and the entry says *at least*, so this is the low end
+of a bound rather than a contradiction. The previous campaign, on the wrong
+geometry, fitted 8.38 through the same three levels; the two lines are not as
+far apart as their slopes look, because they agree to ~5 cycles at every level
+(4469/4474 at 12, 4513/4516 at 17, 4619/4617 at 29) and a 5-cycle disagreement
+over a 17-hop lever is what moves a slope by 0.4. **Per transaction the two
+campaigns differ by 0.08 cycles.** Quote the bracket, 8.4–8.8, not either
+endpoint.
+
+**The structural half is the more interesting one and it is confirmed.** Every
+hop count in `tt_sim` assumes both NoCs are *directional* tori — a packet only
+ever travels in the increasing direction of that NoC's coordinates and wraps
+past the edge rather than turning round, so a request and its reply go the same
+way round the ring and a round trip costs `grid_x`, `grid_y` or `grid_x +
+grid_y` hops *whatever the coordinates*. That predicts three levels and
+flatness within each. Both hold: within the row family the fit against
+*forward* distance is slope −1.64 over an 8-point sweep, i.e. flat, and a
+shortest-path NoC would have shown a rising line there instead.
+
+**The noise floor everything else is read against.** The row family is
+predicted constant, so its spread *is* this harness's resolution: **0.5
+cycles/tx**.
+
+## 4.2 Two flows sharing one router-to-router link each pay one extra transaction's link occupancy — **absent**
+
+This is §4's result, and the shape of it matters more than any single number.
+
+**Measured** (the size sweep; the main run's two columns are quoted beside it
+below). Two flows, a searched placement in which *every* leg-pair link overlap
+except the payload one is held at zero, flow A byte-identical at every point,
+flow B's hop count fixed at 10 forward and 29 round trip. The only thing that
+moves is how many router-to-router links the two payloads share.
+
+| transaction | occupancy = bytes ÷ 64 | 0 shared links | 1 shared link | delta | delta ÷ occupancy | ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| 64 B | 1 | 39.9 | 39.8 | −0.1 | −0.09 | 1.00 |
+| 512 B | 8 | 39.8 | 39.8 | 0.0 | 0.00 | 1.00 |
+| 2048 B | 32 | 40.2 | 68.3 | **28.1** | 0.88 | 1.70 |
+| 4096 B | 64 | 72.2 | 135.4 | **63.1** | 0.99 | 1.87 |
+| 8192 B | 128 | 137.8 | 262.3 | **124.5** | 0.97 | 1.90 |
+| 16384 B | 256 | 268.4 | 518.8 | **250.4** | 0.98 | 1.93 |
+
+(cycles per transaction; 64 transactions per flow.)
+
+**The claim is the fourth column: above a threshold, the cost of a second flow
+on a shared link is one transaction's worth of that link's occupancy**, where
+the occupancy is `bytes ÷ 64` because a Blackhole flit is 512 bits and a link
+carries one per cycle. Four sizes, ratios 0.88 / 0.99 / 0.97 / 0.98.
+
+**And below the threshold it is exactly nothing**, which is the negative
+control the design predicted and is what makes the positive readings mean
+something. A 64 B packet holds a link for 1 cycle and a 512 B packet for 8,
+against a ~39.8-cycle issue loop: the link is 2 % busy, two flows almost never
+want it at once, and nothing shows. **The regime boundary is between 512 B and
+2048 B** — i.e. where occupancy approaches the issue interval — and the ratio
+then climbs toward perfect halving as the fixed cost amortises: 1.70 → 1.87 →
+1.90 → 1.93.
+
+**Then it stops.** From 2 to 7 shared links the reading does not move at any
+size. At 16 KiB the seven points from 1 to 7 span 15.8 cycles against a
+250-cycle step — 6 % — so the whole effect is at the *first* shared link. A
+naive regression through all eight points gives +22.5 cycles per shared link at
+r² 0.37, and **that slope describes a machine that does not exist**: it would
+charge two shared links twice what one costs, and the card charges the same.
+The sweep names this shape `SATURATING` for exactly this reason, and prints the
+per-share means so the step is visible.
+
+**Status: absent.** No document in the ISA documentation or either vendor tree
+gives a congestion figure at all; the NoC pages say congestion "can negatively
+impact latency" and quantify nothing. What *is* documented is the thing this
+turns out to be — `noc.hops.router_to_router.throughput_flits_per_cycle: 1`,
+"one flit (256 bits) per cycle per axis" — which is why the measurement is
+recorded as a `corroboration` on `arch_overrides.blackhole.noc` rather than as
+a number of its own. See [`docs/plans/cost-model.md`](plans/cost-model.md) for
+why it is nevertheless not yet charged.
+
+**Two independent confirmations in the same file, by different routes.**
+
+* **The `readport` control**, which shares no geometry with the above. Two
+  masters *reading* 64 × 8192 B from one subordinate: both response streams
+  leave that subordinate's single NIU. Alone 138.6 cycles/tx; together 266.0 —
+  **1.92×**, and 266.0 ≈ 2 × 128 + 10. Same arithmetic, different resource (an
+  NIU injection port, not a router link), and it **PASSES on silicon** where
+  the control it replaced read 1.00 and was blind to its own subject.
+* **The endpoint ladder.** Six 4096 B flows into one subordinate come back at
+  136.9 / 202.3 / 267.6 / 333.0 / 398.6 / 399.0 cycles per transaction — evenly
+  spaced by ~65.5 where 4096 ÷ 64 is 64, in a stable rank order. N flows into
+  one endpoint serialise at one occupancy each. This reproduces the previous
+  campaign's ladder (137 / 203 / 268 / 333 / 399 / 399) to within a cycle,
+  which is the only figure in §4 measured twice on two different plans.
+
+**One residual, stated rather than smoothed.** The 4–7 shared-link half sits
+above the 1–3 half by 8.8 cycles at 16 KiB (1.7 %), 2.5 at 8 KiB and −1.1 at
+4 KiB. It is a step and not a trend, it falls exactly where flow B's route
+starts wrapping past the torus edge through the non-worker columns, and no
+recorded covariate accounts for it. It does not touch §4.2's claim, which is
+measured between 0 and 1 shared links inside the non-wrapping half at every
+size.
+
+## 4.3 Different virtual channels do not avoid the split; sharing one costs a further 2 % — **agrees** on the mechanism, **absent** on the size
+
+The ISA docs name exactly one congestion mechanism — "if the two packets have
+the same virtual circuit number, then one packet will wait for the other" — and
+every flow in §4.2 was on one channel, so §4.2 alone could not tell VC
+arbitration from link occupancy. This separates them.
+
+**Measured** (main run). Two writers, 64 × 16384 B, payloads sharing exactly
+one router-to-router link. Flow A pinned at tt-metal's own
+`NOC_UNICAST_WRITE_VC` (1); flow B swept 0–3, so `vc1` is "both writers on one
+channel" and the other three are its control.
+
+| flow B's VC | cycles/tx | |
+| --- | --- | --- |
+| 0 | 520.2 | different channels |
+| 1 | 530.4 | **same channel as flow A** |
+| 2 | 519.9 | different channels |
+| 3 | 519.9 | different channels |
+
+**The answer is no.** All four points are ~1.94× the 268.4 that the same
+transaction costs with no shared link, so **putting the two writers on
+different virtual channels does not avoid the halving**. The three
+different-channel points agree to 0.3 cycles — inside the 0.5-cycle noise
+floor — and the same-channel point stands 10.5 cycles above them, twenty times
+the floor.
+
+**Status.** The mechanism **agrees** with the document: sharing a channel does
+cost extra, measurably and reproducibly across a three-point control. Its
+**size is absent** from every source, and it is small: **2.0 %**. So the
+documented mechanism is real and is worth one fiftieth of the effect; the other
+98 % is the link's bandwidth being divided, which is not congestion in the
+docs' sense at all but the published link rate arriving where the model was not
+spending it.
+
+This is also the experiment the previous campaign could not run: its
+bidirectional form **hung the card** and no plan may emit one again. The
+unidirectional redesign answers the question without it.
+
+## 4.4 One tile's wall clock keeps its own epoch, by a constant, across resets — **absent**
+
+**Measured.** Two of the main run's 25 multi-flow runs, and six of the size
+sweep's 48, reported a timed-region overlap of 0.00 — "the flows barely
+coincided", which is the harness's own refusal to call a flat reading a result.
+All eight are the same experiment point and all eight have the **same core** as
+flow 1: addressed (7, 2), SoC-physical **(11, 2)**, logical (6, 0).
+
+It is not a placement, a rendezvous hazard or a harvested-grid artefact. It is
+that this tile's `RISCV_DEBUG_REG_WALL_CLOCK` counts from a **different
+epoch**:
+
+| | |
+| --- | --- |
+| offset from every other tile | **+1,143,914,613 ± 4 cycles** (≈0.85 s at 1.35 GHz) |
+| runs it reproduces in | 8 — 2 in the main run, 6 in the size sweep |
+| spread of those 8 | **7 cycles** |
+| implied relative rate error | < 3 × 10⁻⁸ over 2.3 × 10⁸ cycles of elapsed time |
+| tiles used as masters | 19, across physical columns 1–6 and 11–15 |
+| tiles showing it | **1** |
+
+Four things establish it and one is deliberately left open.
+
+1. **It is an epoch, not a delay.** The eight implied offsets agree to 7 cycles.
+   A flow that genuinely started late cannot start late by the same number of
+   cycles eight times. And the offset **exceeds the whole session** — the
+   file's own stamps span 3.0 × 10⁸ cycles — so it is not a delay that could
+   have happened inside the run at all.
+2. **The two clocks run at the same rate.** Same-core durations are untouched
+   and the offset does not drift across 2.3 × 10⁸ cycles of elapsed time. One
+   counter, started earlier; not a second clock domain.
+3. **It survives a device open.** The two files are separate program
+   invocations whose stamp ranges overlap, so the counters were re-based
+   between them — and the offset comes back identical to ±4 cycles. Reset-release
+   jitter does not reproduce to four cycles across two resets.
+4. **The stamps are 32 bits and one of the affected runs caught the wrap.** The
+   size sweep's 16 KiB point stamps `t0 = 34,990,120` where its partner reads
+   `3,186,042,806`; add the offset and 2³² lands on the partner exactly. That
+   is the cleanest single confirmation in this entry, because it is the offset
+   predicting a value rather than being fitted to one.
+5. **The cause is not established, and cannot be from this data.** Whether the
+   tile was released from reset earlier, or its counter is pre-loaded, or
+   something in the ARC boot sequence touches that column, needs the card and a
+   different experiment.
+
+**Status: absent**, and it is the kind of absent this file exists for: no
+document says the per-tile wall clocks share an epoch, and nothing in the vendor
+tree aligns them. tt-metal's own profiler assumes they do — `syncDeviceHost`
+runs the sync kernel on **one** logical core per device and `setShift` applies
+that single answer device-wide (`tt_metal/impl/profiler/tt_metal_profiler.cpp`)
+— so on this card a profiler timestamp from physical (11, 2) is out by 0.85 s
+relative to every other core, silently. That is a claim about what the code
+does, not a bug report: nothing here has run the profiler on this part.
+
+**What it does *not* touch.** Every coefficient in §4 is fitted to `t1 − t0`
+measured **on one core**, which no cross-tile epoch can reach; the affected
+points' own cycle counts are indistinguishable from their neighbours (the
+16 KiB share-4 point reads 527 cycles/tx where share-5, -6 and -7 read 527 and
+the uncontended baseline is 268 — the flows plainly contended). Only the
+cross-core overlap *check* was fooled, and `noc_congestion_sweep`'s
+`clock_skew_report` now detects and subtracts it. That correction is
+deliberately not per-run — it would then assume the overlap it is used to check
+— but per **core**, and only when the offset reproduces across runs *and* is
+too large to have been a delay. With it, the main run's median overlap is 1.00,
+nothing is below 0.5, and the verdict is `CONGESTION MEASURED`.
+
+---
+
 # Where these came from
 
 | | |
 | --- | --- |
 | `perfbench/riscvbench/` | The RISC-V front-end benchmark, and its operator runbook |
 | `perfbench/tensixbench/` | The Tensix instruction-cost benchmark |
+| `perfbench/nocbench/` | The NoC congestion harness, and its operator runbook |
 | `tt_sim/perf/datasets/` | Every dataset quoted here, each with its provenance in its own `#` header |
 | `tt_sim/perf/riscv_bench_sweep.py` | The §1 analysis; `python3 -m tt_sim.perf.riscv_bench_sweep` |
 | `tt_sim/perf/tensix_bench_sweep.py` | The §2 analysis; `python3 -m tt_sim.perf.tensix_bench_sweep` |
+| `tt_sim/perf/noc_congestion_sweep.py` | The §4 analysis; `python3 -m tt_sim.perf.noc_congestion_sweep` |
 | [`docs/plans/riscv-front-end-benchmark.md`](plans/riscv-front-end-benchmark.md) | §1's design, method and full running record |
 | [`docs/plans/tensix-cost-benchmark.md`](plans/tensix-cost-benchmark.md) | §2's, likewise |
 | [`docs/plans/cost-model.md`](plans/cost-model.md) | What any of it is allowed to change in the simulator |

@@ -156,9 +156,99 @@ struct Flow {
     std::vector<uint32_t> result;
 };
 
+// Read each core's own NOC_NODE_ID, i.e. its SoC-physical NoC 0 coordinate.
+//
+// The host API has no way to ask for this. `worker_core_from_logical_core`
+// answers the coordinate a kernel ADDRESSES, which on a harvested part -- or
+// any part whose compute grid is narrower than its worker grid -- is a dense
+// renumbering of the surviving workers. `tt_sim.perf.noc_congestion_plan`'s
+// link arithmetic is only valid in physical space, and the two spaces are not
+// distinguishable from the addressed coordinates alone: a Blackhole card that
+// dumps columns {1..7, 10..14} may be sitting on physical {1..7, 10..14} or on
+// {1..7, 12..16}, and the first card this ran on was the second. So a kernel
+// is asked, on the core, where it is.
+//
+// Only the first logical row and the first logical column are probed --
+// `logical.x + logical.y - 1` cores rather than all of them. Harvesting
+// removes whole rows or columns, so the mapping is separable per axis, and the
+// two axis maps determine every interior core. Every run afterwards re-checks
+// its own masters' physical coordinates against the plan (see the executor
+// below), so a device on which that assumption failed is caught loudly rather
+// than believed.
+bool probe_physical_coords(IDevice* device, CoreCoord logical, std::map<uint32_t, uint32_t>& x_map,
+                           std::map<uint32_t, uint32_t>& y_map) {
+    std::set<CoreRange> ranges;
+    std::vector<CoreCoord> probes;
+    for (uint32_t x = 0; x < logical.x; x++) {
+        probes.push_back(CoreCoord(x, 0));
+    }
+    for (uint32_t y = 1; y < logical.y; y++) {
+        probes.push_back(CoreCoord(0, y));
+    }
+    for (const CoreCoord& c : probes) {
+        ranges.insert(CoreRange(c));
+    }
+    CoreRangeSet all_cores(ranges);
+
+    constexpr uint32_t result_bytes = NOCBENCH_R_WORDS * 4;
+    InterleavedBufferConfig cfg{
+        .device = device, .size = result_bytes, .page_size = result_bytes, .buffer_type = BufferType::L1};
+    std::shared_ptr<Buffer> scratch = CreateBuffer(cfg);
+    const uint32_t results_addr = scratch->address();
+
+    Program program = CreateProgram();
+    KernelHandle k = CreateKernel(
+        program,
+        "kernels/dataflow/probe.cpp",
+        all_cores,
+        DataMovementConfig{.processor = DataMovementProcessor::RISCV_0, .noc = NOC::NOC_0});
+    std::vector<uint32_t> zeros(NOCBENCH_R_WORDS, 0);
+    for (const CoreCoord& c : probes) {
+        SetRuntimeArgs(program, k, c, {results_addr});
+        detail::WriteToDeviceL1(device, c, results_addr, zeros);
+    }
+    detail::LaunchProgram(device, program, true, true);
+
+    for (const CoreCoord& c : probes) {
+        std::vector<uint32_t> out;
+        detail::ReadFromDeviceL1(device, c, results_addr, result_bytes, out);
+        if (out.size() <= NOCBENCH_R_MAGIC || out[NOCBENCH_R_MAGIC] != NOCBENCH_MAGIC) {
+            fprintf(stderr, "nocbench: probe kernel left no stamp on logical (%u,%u)\n",
+                    (unsigned)c.x, (unsigned)c.y);
+            return false;
+        }
+        const uint32_t px = out[NOCBENCH_R_NODE_X];
+        const uint32_t py = out[NOCBENCH_R_NODE_Y];
+        if (px == 0 && py == 0) {
+            return false;  // device does not answer NOC_NODE_ID
+        }
+        CoreCoord addressed = device->worker_core_from_logical_core(c);
+        auto ins_x = x_map.emplace((uint32_t)addressed.x, px);
+        auto ins_y = y_map.emplace((uint32_t)addressed.y, py);
+        if ((!ins_x.second && ins_x.first->second != px) || (!ins_y.second && ins_y.first->second != py)) {
+            fprintf(stderr,
+                    "nocbench: the addressed->physical map is not separable per axis "
+                    "(logical (%u,%u) addressed (%u,%u) is physical (%u,%u)); refusing to "
+                    "extrapolate it to cores that were not probed\n",
+                    (unsigned)c.x, (unsigned)c.y, (unsigned)addressed.x, (unsigned)addressed.y, px, py);
+            return false;
+        }
+    }
+    return true;
+}
+
 int dump_grid(IDevice* device, const std::string& out_path) {
     const CoreCoord grid = device->grid_size();
     const CoreCoord logical = device->compute_with_storage_grid_size();
+
+    std::map<uint32_t, uint32_t> x_map, y_map;
+    const bool have_phys = probe_physical_coords(device, logical, x_map, y_map);
+    if (!have_phys) {
+        printf("nocbench: NOTE -- could not probe physical NoC coordinates; writing the "
+               "addressed ones only. The planner will refuse this dump unless the addressed "
+               "grid is the full unharvested worker grid.\n");
+    }
+
     FILE* f = fopen(out_path.c_str(), "w");
     if (f == nullptr) {
         fprintf(stderr, "nocbench: cannot write '%s'\n", out_path.c_str());
@@ -173,20 +263,33 @@ int dump_grid(IDevice* device, const std::string& out_path) {
         (unsigned)logical.x,
         (unsigned)logical.y);
     fprintf(f, "# noc_x/noc_y are worker_core_from_logical_core(), i.e. the coordinate a kernel addresses.\n");
-    fprintf(f, "log_x,log_y,noc_x,noc_y\n");
+    if (have_phys) {
+        fprintf(f, "# phys_x/phys_y are each core's own NOC_NODE_ID, read by a probe kernel on the first\n");
+        fprintf(f, "# logical row and column and extended per axis. This is the SoC-physical NoC 0 space,\n");
+        fprintf(f, "# which is the only one a link or hop count is valid in.\n");
+        fprintf(f, "log_x,log_y,noc_x,noc_y,phys_x,phys_y\n");
+    } else {
+        fprintf(f, "log_x,log_y,noc_x,noc_y\n");
+    }
     for (uint32_t y = 0; y < logical.y; y++) {
         for (uint32_t x = 0; x < logical.x; x++) {
-            CoreCoord phys = device->worker_core_from_logical_core(CoreCoord(x, y));
-            fprintf(f, "%u,%u,%u,%u\n", x, y, (unsigned)phys.x, (unsigned)phys.y);
+            CoreCoord addressed = device->worker_core_from_logical_core(CoreCoord(x, y));
+            if (have_phys) {
+                fprintf(f, "%u,%u,%u,%u,%u,%u\n", x, y, (unsigned)addressed.x, (unsigned)addressed.y,
+                        x_map[(uint32_t)addressed.x], y_map[(uint32_t)addressed.y]);
+            } else {
+                fprintf(f, "%u,%u,%u,%u\n", x, y, (unsigned)addressed.x, (unsigned)addressed.y);
+            }
         }
     }
     fclose(f);
-    printf("nocbench: wrote %s (%u x %u logical workers on a %u x %u SoC grid)\n",
+    printf("nocbench: wrote %s (%u x %u logical workers on a %u x %u SoC grid, physical coords %s)\n",
            out_path.c_str(),
            (unsigned)logical.x,
            (unsigned)logical.y,
            (unsigned)grid.x,
-           (unsigned)grid.y);
+           (unsigned)grid.y,
+           have_phys ? "probed" : "UNAVAILABLE");
     return 0;
 }
 
@@ -333,9 +436,11 @@ int main(int argc, char** argv) {
     std::shared_ptr<Buffer> data_scratch = CreateBuffer(data_cfg);
     const uint32_t data_addr = data_scratch->address();
 
-    // Two result slots per core, one per data-movement RISC, so the `selfport`
-    // control (two flows out of one core) does not have its two kernels
-    // overwrite each other's stamp.
+    // Two result slots per core, one per data-movement RISC. No plan puts two
+    // flows on one core any more -- `check_invariants` refuses it, because the
+    // two DM RISCs share command buffer 0 -- but the executor still keys the
+    // slot on `proc` so that a hand-written plan cannot silently have one
+    // kernel overwrite the other's stamp.
     constexpr uint32_t result_bytes = NOCBENCH_R_WORDS * 4;
     constexpr uint32_t result_block = 2 * result_bytes;
     InterleavedBufferConfig res_cfg{

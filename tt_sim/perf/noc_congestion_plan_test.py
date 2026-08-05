@@ -19,20 +19,31 @@ from tt_sim.network.tt_noc import noc_hop_count
 from tt_sim.perf import noc_congestion_plan as plan
 
 
-def _grid_text(arch, translated=False):
+def _grid_text(arch, translated=False, with_phys=False, drop_columns=()):
+    """A ``--dump-grid`` CSV.
+
+    ``drop_columns`` removes logical columns, which is what a harvested part or
+    a compute grid narrower than the worker grid looks like from the host side:
+    the addressed space closes up around what went and does not record it.
+    """
     cols, rows = plan.WORKER_COLUMNS[arch], plan.WORKER_ROWS[arch]
     gx, gy = plan.SOC_GRID[arch]
+    keep = [(i, px) for i, px in enumerate(cols) if i not in drop_columns]
+    header = "log_x,log_y,noc_x,noc_y" + (",phys_x,phys_y" if with_phys else "")
     lines = [
         f"# nocbench-grid arch={arch} soc_grid_x={gx} soc_grid_y={gy} "
-        f"logical_grid_x={len(cols)} logical_grid_y={len(rows)}",
-        "log_x,log_y,noc_x,noc_y",
+        f"logical_grid_x={len(keep)} logical_grid_y={len(rows)}",
+        header,
     ]
     for ly, py in enumerate(rows):
-        for lx, px in enumerate(cols):
-            if translated:
-                lines.append(f"{lx},{ly},{18 + lx},{18 + ly}")
-            else:
-                lines.append(f"{lx},{ly},{px},{py}")
+        for lx, (_orig, px) in enumerate(keep):
+            noc = (18 + lx, 18 + ly) if translated else (lx + 1, py)
+            if not translated and not drop_columns:
+                noc = (px, py)
+            row = f"{lx},{ly},{noc[0]},{noc[1]}"
+            if with_phys:
+                row += f",{px},{py}"
+            lines.append(row)
     return "\n".join(lines) + "\n"
 
 
@@ -124,13 +135,52 @@ def test_translated_coordinates_are_remapped_to_physical(tmp_path):
     assert g.phys != g.noc
 
 
-def test_a_harvested_translated_dump_is_refused(tmp_path):
-    text = _grid_text("blackhole", translated=True).splitlines()
-    kept = [ln for ln in text if not ln.startswith("13,")]  # drop a column
+def test_a_dump_short_of_the_worker_grid_is_refused_without_physical_coords(tmp_path):
+    """The bug the first card hit, as a test.
+
+    That card dumped columns ``{1..7, 10..14}``, which is a legal SUBSET of an
+    unharvested Blackhole's physical worker columns AND a dense renumbering of
+    ``{1..7, 12..16}``. The old check asked "do these look physical?", the
+    answer was yes, and four of the eight shared-link counts in the resulting
+    plan were computed for a machine that does not exist.
+    """
     path = tmp_path / "g.csv"
-    path.write_text("\n".join(kept) + "\n")
-    with pytest.raises(plan.PlanError, match="Harvesting renumbers"):
+    path.write_text(_grid_text("blackhole", drop_columns=(8, 9)))
+    with pytest.raises(plan.PlanError, match="cannot be recovered"):
         plan.load_grid(path)
+
+
+def test_physical_coordinates_in_the_dump_settle_it(tmp_path):
+    """With the self-report present, a short dump is fine and is not guessed at."""
+    path = tmp_path / "g.csv"
+    path.write_text(_grid_text("blackhole", with_phys=True, drop_columns=(8, 9)))
+    g = plan.load_grid(path)
+    cols = plan.WORKER_COLUMNS["blackhole"]
+    assert g.coord_space == "translated"
+    assert sorted({c[0] for c in g.phys.values()}) == [
+        c for i, c in enumerate(cols) if i not in (8, 9)
+    ]
+    assert g.phys != g.noc
+
+
+def test_physical_coordinates_outside_the_worker_grid_are_refused(tmp_path):
+    text = _grid_text("blackhole", with_phys=True).replace(",1,2\n", ",0,2\n", 1)
+    path = tmp_path / "g.csv"
+    path.write_text(text)
+    with pytest.raises(plan.PlanError, match="not worker positions"):
+        plan.load_grid(path)
+
+
+def test_an_all_zero_self_report_is_unavailable_not_the_origin(tmp_path):
+    """A device that does not answer NOC_NODE_ID stamps (0, 0) everywhere."""
+    text = _grid_text("blackhole", with_phys=True).splitlines()
+    out = [text[0], text[1]]
+    for line in text[2:]:
+        out.append(",".join(line.split(",")[:4]) + ",0,0")
+    path = tmp_path / "g.csv"
+    path.write_text("\n".join(out) + "\n")
+    g = plan.load_grid(path)  # falls back to the full-house inference
+    assert g.coord_space == "noc0"
 
 
 def test_an_unknown_arch_is_refused(tmp_path):
@@ -250,25 +300,88 @@ def test_contention_shared_links_grow_with_n_and_that_is_declared(grid):
     assert shared[-1] > 0
 
 
-def test_selfport_puts_both_flows_on_one_core_at_equal_distance(grid):
-    points = plan.plan_selfport(grid)
+def test_readport_puts_the_two_flows_on_different_cores_reading_one_subordinate(grid):
+    points = plan.plan_readport(grid)
     gx, gy = grid.grid_x, grid.grid_y
     two = points[-1].flows
     assert len(two) == 2
-    assert two[0].master == two[1].master
-    assert two[0].proc != two[1].proc
+    assert two[0].master != two[1].master, "the retracted control's premise, back again"
+    assert two[0].sub == two[1].sub
+    assert {f.proc for f in two} == {0}, "one data-movement RISC per core"
+    assert {f.direction for f in two} == {plan.DIR_READ}
     assert two[0].fwd_hops(gx, gy) == two[1].fwd_hops(gx, gy)
     assert two[0].rt_hops(gx, gy) == two[1].rt_hops(gx, gy) == gx + gy
+    # The payload is on the RETURN leg, so the two streams leave one NIU and
+    # must share at least the first link out of it. That is the shared resource
+    # the control is named for; every link beyond it is noise the search
+    # minimises.
+    assert plan.payload_overlap(two[0], two[1], gx, gy) >= 1
 
 
-def test_vc_moves_nothing_but_the_virtual_channel(grid):
+def test_readport_refuses_a_size_at_which_the_port_is_not_the_bottleneck(grid):
+    with pytest.raises(plan.PlanError, match="at least"):
+        plan.plan_readport(grid, num_tx=4, tx_bytes=8192)
+
+
+def test_readport_refuses_to_be_a_write(grid):
+    with pytest.raises(plan.PlanError, match="has to be a READ"):
+        plan.plan_readport(grid, direction=plan.DIR_WRITE)
+
+
+def test_selfport_no_longer_exists(grid):
+    """The retracted control is gone from the planner, not merely deprecated."""
+    assert "selfport" not in plan.EXPERIMENTS
+    assert not hasattr(plan, "plan_selfport")
+    assert "readport" in plan.MINIMUM
+
+
+def test_two_flows_on_one_master_core_are_refused(grid):
+    """The retracted control's configuration, refused at plan time.
+
+    BRISC_WR_CMD_BUF and NCRISC_WR_CMD_BUF are both command buffer 0, so two
+    kernels issuing on one NoC race on one set of NOC_TARG_ADDR registers and
+    can hang the card -- and their barriers share a per-NIU ack counter, so the
+    measurement is blind even when it survives.
+    """
+    m = sorted(grid.phys.values())[0]
+    a, b = sorted(grid.phys.values())[1], sorted(grid.phys.values())[2]
+    point = plan.Point("x", "p", [plan.Flow(m, a), plan.Flow(m, b, proc=1)])
+    with pytest.raises(plan.PlanError, match="two flows on master core"):
+        plan.check_invariants([point], grid, set())
+
+
+def test_a_bidirectional_flow_is_refused(grid):
+    """It hung a Blackhole card and the cause is not established."""
+    m, s = sorted(grid.phys.values())[0], sorted(grid.phys.values())[1]
+    point = plan.Point("x", "p", [plan.Flow(m, s, plan.DIR_BIDIR)])
+    with pytest.raises(plan.PlanError, match="bidirectional"):
+        plan.check_invariants([point], grid, set())
+
+
+def test_no_experiment_emits_a_bidirectional_or_shared_core_point(grid):
+    for name, build in plan.EXPERIMENTS.items():
+        for point in build(grid):
+            assert all(f.direction != plan.DIR_BIDIR for f in point.flows), name
+            masters = [f.master for f in point.flows]
+            assert len(masters) == len(set(masters)), name
+
+
+def test_vc_moves_nothing_but_the_second_writers_virtual_channel(grid):
     points = plan.plan_vc(grid)
-    assert [p.flows[0].vc for p in points] == [0, 1, 2, 3]
-    assert (
-        len({(p.flows[0].master, p.flows[0].sub, p.flows[0].tx_bytes) for p in points})
-        == 1
-    )
-    assert all(p.flows[0].direction == plan.DIR_BIDIR for p in points)
+    gx, gy = grid.grid_x, grid.grid_y
+    assert [p.flows[1].vc for p in points] == [0, 1, 2, 3]
+    # Flow A is pinned on tt-metal's own unicast write channel at every point,
+    # so `vc1` is the "both writers on one channel" reading and the other three
+    # are its control.
+    assert {p.flows[0].vc for p in points} == {plan.NOC_UNICAST_WRITE_VC}
+    assert all(f.direction == plan.DIR_WRITE for p in points for f in p.flows)
+    assert len({(p.flows[0].master, p.flows[0].sub) for p in points}) == 1
+    assert len({(p.flows[1].master, p.flows[1].sub) for p in points}) == 1
+    # Exactly one shared link, and nothing else shared, at every point.
+    shared = {plan.payload_overlap(p.flows[0], p.flows[1], gx, gy) for p in points}
+    assert len(shared) == 1
+    assert shared.pop() >= 1
+    assert {plan.other_overlap(p.flows[0], p.flows[1], gx, gy) for p in points} == {0}
 
 
 def test_a_read_puts_its_payload_on_the_return_leg():

@@ -91,18 +91,56 @@ POSITIVE CONTROL -- transaction size, one flow, geometry frozen.
   simulator. If it does not, the harness is not measuring anything and every
   flat reading elsewhere is meaningless. This is the control that makes the
   forced null in experiments 2-4 interpretable.""",
-    "selfport": """\
-POSITIVE CONTROL -- two flows out of ONE core, sharing that core's injection
-  port.
+    "readport": """\
+POSITIVE CONTROL -- two masters READING from one subordinate, sharing that
+  subordinate's injection port.
 
-  Held fixed: the master core; both subordinates' distance; sizes; counts; NoC.
-  Varying: whether the second flow is present.
+  Held fixed: the subordinate; both masters' forward and round-trip hop counts;
+  sizes; counts; direction (read); NoC; ONE data-movement RISC per core.
+  Varying: whether the second master is present.
 
-  tt-sim models exactly one kind of contention -- an NIU's own injection port
-  -- so per-transaction cost must roughly double here on the simulator. It is
-  the control that proves the concurrency machinery (the rendezvous, the
-  overlap check) actually makes two flows contend. A flat reading here means
-  the flows did not overlap in time, which invalidates experiments 2 and 3.""",
+  This replaces the `selfport` control, which was RETRACTED -- see
+  docs/plans/cost-model.md, "the self-port control is not a measurement". The
+  short version: `selfport` put two flows on one core's two DM RISCs, and
+  `noc_async_write_barrier` compares a per-NIU HARDWARE ack counter against a
+  per-RISC SOFTWARE one, so with two issuers each RISC's wait is satisfied by
+  ANY N acks and both kernels stop at the halfway point. That control reads the
+  single-flow time whether the injection port serialises perfectly or not at
+  all, which was shown by deleting the mechanism in tt-sim and watching the
+  control not move. It is also a configuration that can HANG a card
+  (BRISC_WR_CMD_BUF and NCRISC_WR_CMD_BUF are both command buffer 0), and
+  `check_invariants` now refuses it.
+
+  A read reaches the same shared resource by the route tt-metal actually
+  supports: the payload rides the RETURN leg, so both response streams leave
+  the subordinate's single NIU and queue on its one injection port. One DM RISC
+  per core means every barrier counts only its own core's responses, so the
+  rendezvous, the overlap check and the barriers all mean what they say.
+
+  Sized so the port is the BOTTLENECK, which the retracted control was not: at
+  four transactions the timed region is dominated by the fixed round trip and
+  the per-transaction term the port touches is a small share of it. The planner
+  refuses a readport point carrying less than 64 KiB per flow for that reason.
+
+  * THE FLOWS CONTEND: per-transaction cost roughly DOUBLES when the second
+    master joins -- the subordinate's port carries twice the payload and each
+    master waits for its own responses, so each sees about 2x. Against tt-sim
+    this is the prediction under the model as it stands, because `send_response`
+    claims the responder's `_tx_free_cycle`; ablating `claim_injection_port` to
+    a no-op must collapse it to ~1x, and if it does not this control is as
+    blind as the one it replaces.
+  * THE FLOWS DO NOT CONTEND: flat. On tt-sim that would mean the injection
+    port is not on this path and the control is unusable. On a card it would
+    mean the two flows never overlapped in time, which invalidates experiments
+    2 and 3.
+
+  What this control does NOT do is attribute the rise to one mechanism. Two
+  response streams leaving one tile share the first router-to-router link out
+  of it as well as the port, and on a card those are indistinguishable. That is
+  fine for a positive control, whose only job is to show the flows really
+  contend; the attribution is experiment 2's job. On tt-sim they ARE
+  distinguishable, because tt-sim charges nothing whatever for a
+  router-to-router link.""",
     "shared": """\
 EXPERIMENT 2 -- THE COEFFICIENT. Two flows, N FIXED AT 2, positioned so their
   payload paths share 0, 1, 2 ... k router-to-router links.
@@ -163,18 +201,46 @@ EXPERIMENT 3 -- THE CONTENTION CURVE. N flows into ONE subordinate, every
   Any congestion model tt-sim ever gains must reproduce this curve; that is the
   "validate, not derive" role rung 2 was climbed for.""",
     "vc": """\
-EXPERIMENT 4 -- VIRTUAL CHANNEL ARBITRATION. One master reading from and
-  writing to one subordinate at once, write VC swept 0-3.
+EXPERIMENT 4 -- VIRTUAL CHANNEL ARBITRATION. TWO writers whose payloads share
+  exactly ONE router-to-router link, the second writer's VC swept 0-3.
 
-  Held fixed: both coordinates; sizes; counts; the NoC; the fact that a read
-  and a write are in flight together. Varying: the write's virtual channel.
+  Held fixed: both masters, both subordinates, every hop count, the shared-link
+  count (1), sizes, counts, the NoC, the direction (write), and the first
+  writer's VC (1, which is tt-metal's NOC_UNICAST_WRITE_VC and therefore what
+  every other flow in this harness uses). Varying: the second writer's VC.
 
   This is the one congestion mechanism the ISA docs actually name: "if the two
   packets have the same virtual circuit number, then one packet will wait for
-  the other". So a difference between the VC the reads use and the other three
-  is the documented effect showing up; no difference across all four means
-  either the read and the write never collided or VC arbitration costs nothing
-  at this offered load. tt-sim models no VCs at all, so it must be flat.""",
+  the other". The experiment therefore has to put two packets on one link and
+  ask whether the VC number changes what happens -- so the reading at vc=1
+  (both writers on one VC) against vc in {0, 2, 3} is the documented effect,
+  with a three-point control built in.
+
+  It is aimed straight at the ONE banked congestion result: a single shared
+  link at a saturating transaction size roughly halves each flow's bandwidth on
+  Blackhole silicon. If that halving is VC arbitration then it must go away
+  when the two writers are put on different VCs; if it is link occupancy it
+  must not. Nothing else in this harness separates those.
+
+  * VC ARBITRATION IS THE MECHANISM: vc=1 costs about twice vc in {0, 2, 3}.
+  * LINK OCCUPANCY IS THE MECHANISM: all four VCs read the same, and equal to
+    the shared-link-1 point of experiment 2.
+  * tt-sim models no VCs at all, so it must be flat there, and a non-flat
+    simulator reading means the plan is not holding what it claims.
+
+  THIS EXPERIMENT USED TO BE BIDIRECTIONAL AND IT HUNG A CARD. The previous
+  design was one master reading from and writing to one subordinate at once,
+  with the write's VC swept. On a Blackhole card the first and only
+  `direction=BIDIR` point never returned, while all 79 unidirectional flows in
+  the same session completed. It is not the VC: every one of those 79 flows
+  issued its writes on VC 0. It is not the kernel: tt-sim executes the same
+  binary and the same plan (64 x 4096 B, BIDIR, VC 0-3) to completion in 4958
+  cycles. tt-metal's own `core_bidirectional` suite disables its entire
+  directed-ideal family -- same-kernel AND different-kernel, write-VC sweep
+  included -- with `GTEST_SKIP() << "Skipping test"; // Timeout issue
+  (#36428)`. The root cause is not established and cannot be established from
+  here, so `check_invariants` refuses DIR_BIDIR outright rather than leave a
+  configuration in the plan that can hang somebody's card.""",
 }
 
 
@@ -231,9 +297,17 @@ class Grid:
 
 
 def load_grid(path):
-    """Parse a ``nocbench --dump-grid`` CSV into a :class:`Grid`."""
+    """Parse a ``nocbench --dump-grid`` CSV into a :class:`Grid`.
+
+    A dump may carry two, four or six columns of coordinates. ``phys_x`` /
+    ``phys_y``, when present, are each core's own ``NOC_NODE_ID`` read by a
+    probe kernel *on that core* -- the SoC-physical NoC 0 coordinate, which is
+    the only space the link arithmetic is valid in. Older dumps have only the
+    addressed coordinate, and :func:`_resolve_grid` then has to infer.
+    """
     arch = None
     rows = []
+    header = None
     for line in Path(path).read_text().splitlines():
         line = line.strip()
         if not line:
@@ -243,52 +317,98 @@ def load_grid(path):
                 if token.startswith("arch="):
                     arch = token.split("=", 1)[1]
             continue
-        if line.startswith("log_x"):
+        cells = line.split(",")
+        if header is None:
+            header = cells
             continue
-        lx, ly, nx, ny = (int(v) for v in line.split(",")[:4])
-        rows.append(((lx, ly), (nx, ny)))
+        v = [int(c) for c in cells]
+        by_name = dict(zip(header, v))
+        phys = None
+        if "phys_x" in by_name and "phys_y" in by_name:
+            phys = (by_name["phys_x"], by_name["phys_y"])
+        rows.append(
+            (
+                (by_name["log_x"], by_name["log_y"]),
+                (by_name["noc_x"], by_name["noc_y"]),
+                phys,
+            )
+        )
     if arch not in SOC_GRID:
         raise PlanError(
             f"grid dump names arch={arch!r}; expected one of {sorted(SOC_GRID)}"
         )
     if not rows:
         raise PlanError(f"{path} lists no cores")
-    return _resolve_grid(arch, dict(rows))
+    noc_map = {log: noc for log, noc, _p in rows}
+    # A device that does not answer NOC_NODE_ID stamps (0, 0) everywhere; that
+    # is "unavailable", not "every core is at the origin", and is treated the
+    # same as an old dump with no such column at all.
+    reported = {log: p for log, _n, p in rows if p is not None and p != (0, 0)}
+    phys_map = reported if len(reported) == len(rows) else None
+    return _resolve_grid(arch, noc_map, phys_map)
 
 
-def _resolve_grid(arch, noc_map):
+def _resolve_grid(arch, noc_map, phys_map=None):
     """Decide which coordinate space a dump is in, and map it to physical.
 
-    Two spaces occur in practice and they must not be confused, because the hop
-    count of a route is a property of the physical torus and the translated
-    space is a *dense* renumbering that omits the non-worker columns. Getting
-    this wrong would not fail loudly; it would quietly produce shared-link
-    counts for a machine that does not exist.
+    Three spaces occur in practice and they must not be confused, because the
+    hop count of a route is a property of the physical torus while the space a
+    kernel addresses is a *dense* renumbering of it. Getting this wrong would
+    not fail loudly; it would quietly produce shared-link counts for a machine
+    that does not exist -- which is exactly what happened on the first
+    Blackhole card this was run on, a **harvested** part whose addressed
+    columns ``{1..7, 10..14}`` are a subset of the unharvested physical worker
+    columns ``{1..7, 10..16}`` and so passed the "looks physical" test below
+    while actually being ``{1..7, 12..16}``. Four of the eight shared-link
+    counts in that plan were wrong, and one hop count the experiment declared
+    fixed was not. The order of the tests here is the fix: a dump that is short
+    of an unharvested part's worker count is refused *before* anything is
+    inferred from the coordinates it carries.
     """
     grid_x, grid_y = SOC_GRID[arch]
     cols, rows = WORKER_COLUMNS[arch], WORKER_ROWS[arch]
     xs = sorted({c[0] for c in noc_map.values()})
     ys = sorted({c[1] for c in noc_map.values()})
 
-    if set(xs) <= set(cols) and set(ys) <= set(rows):
-        return Grid(arch, grid_x, grid_y, "noc0", dict(noc_map), dict(noc_map))
-
-    # Translated: dense, in the order the physical workers appear. Only safe
-    # when nothing is harvested, because a harvested machine renumbers around
-    # the missing row/column and the dump does not say which one went.
-    if len(xs) != len(cols) or len(ys) != len(rows):
-        raise PlanError(
-            f"grid dump is in an unrecognised coordinate space (x={xs}, y={ys}) and has "
-            f"{len(xs)}x{len(ys)} workers where an unharvested {arch} has "
-            f"{len(cols)}x{len(rows)}. Harvesting renumbers the translated space around the "
-            f"missing row or column, and the dump does not record which -- so the physical "
-            f"link geometry cannot be recovered. Run on an unharvested part, or teach nocbench "
-            f"to dump UMD's NOC0 coordinates directly."
+    if phys_map is not None:
+        bad = sorted(
+            c for c in phys_map.values() if c[0] not in cols or c[1] not in rows
         )
-    x_map = dict(zip(xs, cols))
-    y_map = dict(zip(ys, rows))
-    phys = {log: (x_map[nx], y_map[ny]) for log, (nx, ny) in noc_map.items()}
-    return Grid(arch, grid_x, grid_y, "translated", dict(noc_map), phys)
+        if bad:
+            raise PlanError(
+                f"the probe kernels report physical coordinates {bad} that are not worker "
+                f"positions on {arch} (columns {list(cols)}, rows {list(rows)}); the "
+                f"WORKER_COLUMNS/WORKER_ROWS tables and this part disagree"
+            )
+        space = "noc0" if phys_map == noc_map else "translated"
+        return Grid(arch, grid_x, grid_y, space, dict(noc_map), dict(phys_map))
+
+    # No self-report. The dump is then only interpretable when NOTHING is
+    # missing from it: a full house of worker columns and rows can only be the
+    # physical layout or a dense renumbering of the whole of it, and both are
+    # recoverable. Anything short of that is genuinely ambiguous -- the card
+    # this was first run on dumped columns {1..7, 10..14}, which is a legal
+    # SUBSET of the physical worker columns {1..7, 10..16} and also a dense
+    # renumbering of {1..7, 12..16}, and it was the second. Nothing in the
+    # coordinates distinguishes them, so nothing here tries.
+    if set(xs) == set(cols) and set(ys) == set(rows):
+        return Grid(arch, grid_x, grid_y, "noc0", dict(noc_map), dict(noc_map))
+    if len(xs) == len(cols) and len(ys) == len(rows):
+        # Dense renumbering of the complete worker set, in order.
+        x_map = dict(zip(xs, cols))
+        y_map = dict(zip(ys, rows))
+        phys = {log: (x_map[nx], y_map[ny]) for log, (nx, ny) in noc_map.items()}
+        return Grid(arch, grid_x, grid_y, "translated", dict(noc_map), phys)
+    raise PlanError(
+        f"grid dump lists {len(xs)}x{len(ys)} worker columns/rows (x={xs}, y={ys}) where an "
+        f"unharvested {arch} has {len(cols)}x{len(rows)}, and carries no phys_x/phys_y "
+        f"column. Something is missing -- harvesting, or a compute grid narrower than the "
+        f"worker grid -- and the space a kernel addresses is renumbered around whatever went "
+        f"without recording which. The physical link geometry therefore cannot be recovered "
+        f"from these coordinates, and a shared-link count computed for the wrong geometry is "
+        f"indistinguishable from a measurement. Re-dump with a nocbench new enough to probe "
+        f"NOC_NODE_ID on each core (`--dump-grid` then writes phys_x/phys_y)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +452,17 @@ def route_links(src, dst, grid_x, grid_y):
 
 
 #: Direction codes, matching ``perfbench/nocbench/src/kernels/nocbench_layout.h``.
+#: ``DIR_BIDIR`` is refused by :func:`check_invariants` -- the kernel still
+#: implements it, but no plan may contain it. See :func:`_refuse_unrunnable`.
 DIR_WRITE, DIR_READ, DIR_BIDIR = 0, 1, 2
+
+#: tt-metal's default unicast write virtual channel, from
+#: ``tt_metal/hw/inc/internal/dataflow/dataflow_api_common.h``
+#: (``#define NOC_UNICAST_WRITE_VC 1``; reads default to the same one). Every
+#: flow in this harness that is not deliberately sweeping the VC uses it, so
+#: that "the same VC" and "a different VC" are statements about the channel the
+#: rest of the machine is on.
+NOC_UNICAST_WRITE_VC = 1
 
 
 @dataclass(frozen=True)
@@ -504,6 +634,62 @@ def _shared_other_total(flows, gx, gy):
     return sum(other_overlap(a, b, gx, gy) for a, b in itertools.combinations(flows, 2))
 
 
+def _refuse_unrunnable(point):
+    """Refuse a point no card should be asked to run, whatever it would measure.
+
+    The invariant checks below are about *identifiability*. These two are about
+    the machine surviving the experiment, and they come from a Blackhole run
+    that produced one of each.
+
+    **Two flows on one master core.** A Tensix's two data-movement RISCs are
+    separated by *NoC*, never by command buffer: ``BRISC_WR_CMD_BUF`` and
+    ``NCRISC_WR_CMD_BUF`` are *both* command buffer 0 ("for large writes", same
+    header, both architectures --
+    ``tt_metal/hw/inc/internal/tt-1xx/<arch>/noc_nonblocking_api.h``). Two
+    kernels issuing on one NoC therefore race on one set of ``NOC_TARG_ADDR`` /
+    ``NOC_RET_ADDR`` / ``NOC_PACKET_TAG`` / ``NOC_CTRL`` registers, between the
+    ``noc_cmd_buf_ready`` poll and the ``NOC_CTRL_SEND_REQ`` that arms them.
+    The measurement is unusable even when it survives: ``noc_async_*_barrier``
+    compares a per-NIU *hardware* counter against a per-RISC *software* one
+    seeded from it at kernel init (``noc_local_state_init``), so with two
+    issuers each RISC's ``==`` is satisfied by ANY N acks and both stop at the
+    halfway point -- and an ``==`` against a monotonic counter that two issuers
+    are advancing can be **overshot between polls**, which hangs. That was the
+    retracted ``selfport`` control; ``plan_readport`` is the replacement.
+
+    **A bidirectional flow.** On a Blackhole card the first and only
+    ``DIR_BIDIR`` point never returned, while all 79 unidirectional flows in
+    the same session completed. tt-sim runs the identical binary and plan to
+    completion, so the root cause is something the simulator does not model and
+    cannot be found from here; tt-metal's own ``core_bidirectional`` suite
+    disables its whole directed-ideal family with ``GTEST_SKIP() << "Skipping
+    test"; // Timeout issue (#36428)``. Refusing is not a diagnosis, it is the
+    only responsible thing to emit while there is not one.
+    """
+    by_master = {}
+    for f in point.flows:
+        if f.direction == DIR_BIDIR:
+            raise PlanError(
+                f"experiment {point.experiment!r} point {point.label!r} asks for a "
+                f"bidirectional flow ({f.master} <-> {f.sub}). That configuration hung a "
+                f"Blackhole card and its cause is not established; no plan may contain it. "
+                f"Use two unidirectional flows -- `plan_vc` shows how the virtual-channel "
+                f"question is asked without one."
+            )
+        if f.master in by_master:
+            raise PlanError(
+                f"experiment {point.experiment!r} point {point.label!r} puts two flows on "
+                f"master core {f.master}. A Tensix's two data-movement RISCs share command "
+                f"buffer 0 (BRISC_WR_CMD_BUF == NCRISC_WR_CMD_BUF == 0), so two kernels "
+                f"issuing on one NoC race on one set of NOC_TARG_ADDR / NOC_PACKET_TAG "
+                f"registers and can hang the card; and their barriers compare a per-NIU "
+                f"hardware ack counter against a per-RISC software one, so each stops after "
+                f"any N acks and the measurement is blind whatever it reads. Put the second "
+                f"flow on another core."
+            )
+        by_master[f.master] = f
+
+
 def check_invariants(points, grid, varying_keys):
     """Raise unless exactly ``varying_keys`` differ across ``points``.
 
@@ -512,7 +698,13 @@ def check_invariants(points, grid, varying_keys):
     that let two move would be the same mistake in a new file. So every quantity
     an experiment could plausibly confound is computed for each point, and any
     that differs and is not on the declared varying list is a hard error.
+
+    :func:`_refuse_unrunnable` runs first and applies to every point on its own,
+    including a single-point plan: those two refusals are about the card, not
+    about the experiment, so they must not be skipped by the early return.
     """
+    for point in points:
+        _refuse_unrunnable(point)
     if len(points) < 2:
         return {}
     sigs = [_fixed_signature(p, grid) for p in points]
@@ -570,7 +762,18 @@ def plan_hops(
             Point(
                 "hops",
                 f"row+{(x - master[0]) % gx}",
-                [Flow(master, (x, master[1]), direction, noc, 0, 0, num_tx, tx_bytes)],
+                [
+                    Flow(
+                        master,
+                        (x, master[1]),
+                        direction,
+                        noc,
+                        NOC_UNICAST_WRITE_VC,
+                        0,
+                        num_tx,
+                        tx_bytes,
+                    )
+                ],
             )
         )
     # Same column: round trip is grid_y.
@@ -579,7 +782,18 @@ def plan_hops(
             Point(
                 "hops",
                 f"col+{(y - master[1]) % gy}",
-                [Flow(master, (master[0], y), direction, noc, 0, 0, num_tx, tx_bytes)],
+                [
+                    Flow(
+                        master,
+                        (master[0], y),
+                        direction,
+                        noc,
+                        NOC_UNICAST_WRITE_VC,
+                        0,
+                        num_tx,
+                        tx_bytes,
+                    )
+                ],
             )
         )
     # Both axes: round trip is grid_x + grid_y.
@@ -588,7 +802,18 @@ def plan_hops(
             Point(
                 "hops",
                 f"diag+{x}-{y}",
-                [Flow(master, (x, y), direction, noc, 0, 0, num_tx, tx_bytes)],
+                [
+                    Flow(
+                        master,
+                        (x, y),
+                        direction,
+                        noc,
+                        NOC_UNICAST_WRITE_VC,
+                        0,
+                        num_tx,
+                        tx_bytes,
+                    )
+                ],
             )
         )
     check_invariants(points, grid, {"subs", "fwd_hops", "rt_hops"})
@@ -611,71 +836,150 @@ def plan_size(
     rows = sorted({c[1] for c in present})
     master, sub = (cols[0], rows[0]), (cols[1], rows[1])
     points = [
-        Point("size", f"{n}B", [Flow(master, sub, direction, noc, 0, 0, num_tx, n)])
+        Point(
+            "size",
+            f"{n}B",
+            [Flow(master, sub, direction, noc, NOC_UNICAST_WRITE_VC, 0, num_tx, n)],
+        )
         for n in sizes
     ]
     check_invariants(points, grid, {"tx_bytes"})
     return points
 
 
-def plan_selfport(grid, *, tx_bytes=16384, num_tx=64, direction=DIR_WRITE, noc=0):
-    """Positive control: one core's injection port, shared by one flow then two.
+#: Minimum payload per flow for the ``readport`` control, in bytes. Below this
+#: the timed region is dominated by the fixed round trip rather than by the
+#: shared port, and a 1-vs-2 ratio cannot resolve the port at all -- which is
+#: precisely how the retracted ``selfport`` control was sized (4 x 8 KiB, ~440
+#: of 568 cycles being round trip). 64 KiB is 1024 cycles of injection at
+#: Blackhole's 64 B/cycle against a ~260-cycle round trip: port-dominated by
+#: about 4:1, which is the smallest ratio worth running.
+READPORT_MIN_BYTES_PER_FLOW = 64 * 1024
 
-    The two flows run on the same master core's two data-movement RISCs, so they
-    contend for that NIU's injection port and for nothing else -- their
-    subordinates are distinct and equidistant. tt-sim models exactly this and
-    nothing else, so it is the control that proves the flows really do overlap.
+
+def plan_readport(grid, *, tx_bytes=8192, num_tx=64, direction=DIR_READ, noc=0):
+    """Positive control: one subordinate's injection port, read by one master then two.
+
+    Replaces ``plan_selfport``, which was retracted -- see
+    ``HYPOTHESES["readport"]`` and ``docs/plans/cost-model.md``. The two flows
+    are on two *different* master cores, one data-movement RISC each, so every
+    barrier counts only its own core's responses; they meet at the
+    subordinate's single NIU, because a read's payload rides the return leg.
     """
     gx, gy = grid.grid_x, grid.grid_y
+    if direction != DIR_READ:
+        raise PlanError(
+            "the readport control has to be a READ: a write's payload leaves the master, so "
+            "two writers into one subordinate would share that subordinate's L1 write port "
+            "rather than its injection port, which is a different resource"
+        )
+    if num_tx * tx_bytes < READPORT_MIN_BYTES_PER_FLOW:
+        raise PlanError(
+            f"readport would carry {num_tx * tx_bytes} B per flow; it needs at least "
+            f"{READPORT_MIN_BYTES_PER_FLOW} B for the shared port rather than the fixed round "
+            f"trip to dominate the timed region. Raise --num-tx or --readport-bytes. A control "
+            f"sized below this reads the same whether or not the port serialises, which is how "
+            f"the `selfport` control it replaces came to be retracted."
+        )
     present = _workers(grid)
     cols = sorted({c[0] for c in present})
     rows = sorted({c[1] for c in present})
-    master = (cols[0], rows[0])
-    # Both subordinates must differ from the master on BOTH axes -- so every
+    sub = (cols[0], rows[0])
+    # Both masters must differ from the subordinate on BOTH axes -- so every
     # round trip is grid_x + grid_y -- and be the same forward distance away, so
-    # that adding the second flow adds no path length.
-    off_axis = [c for c in sorted(present) if c[0] != master[0] and c[1] != master[1]]
+    # that adding the second flow adds no path length in either direction.
+    off_axis = [c for c in sorted(present) if c[0] != sub[0] and c[1] != sub[1]]
     by_dist = {}
     for c in off_axis:
-        by_dist.setdefault(len(route_links(master, c, gx, gy)), []).append(c)
-    usable = [d for d, cs in by_dist.items() if len(cs) >= 2]
-    if not usable:
+        by_dist.setdefault(len(route_links(c, sub, gx, gy)), []).append(c)
+    # Among the equidistant pairs, take the one whose two RESPONSE paths share
+    # the fewest router-to-router links. They cannot share none -- both leave
+    # the subordinate's NIU on the same first hop, which is exactly why they
+    # queue on its port -- but every link beyond the first is a mechanism this
+    # control cannot tell from the port on silicon, so minimising them is free
+    # precision. On a full Blackhole grid this takes the overlap from 13 to 1.
+    best = None
+    for d, candidates in sorted(by_dist.items()):
+        for a, b in itertools.combinations(candidates, 2):
+            fa = Flow(a, sub, direction, noc, NOC_UNICAST_WRITE_VC, 0, num_tx, tx_bytes)
+            fb = Flow(b, sub, direction, noc, NOC_UNICAST_WRITE_VC, 0, num_tx, tx_bytes)
+            overlap = payload_overlap(fa, fb, gx, gy)
+            if best is None or (overlap, d) < best[0]:
+                best = ((overlap, d), fa, fb)
+    if best is None:
         raise PlanError(
-            "no two off-axis subordinates at equal forward hop distance from the master"
+            "no two off-axis masters at equal forward hop distance from the subordinate"
         )
-    s0, s1 = by_dist[min(usable)][:2]
-    one = [Flow(master, s0, direction, noc, 0, 0, num_tx, tx_bytes)]
-    two = [
-        Flow(master, s0, direction, noc, 0, 0, num_tx, tx_bytes),
-        Flow(master, s1, direction, noc, 0, 1, num_tx, tx_bytes),
+    m0, m1 = best[1].master, best[2].master
+    one = [
+        Flow(
+            m0,
+            sub,
+            direction,
+            noc,
+            NOC_UNICAST_WRITE_VC,
+            0,
+            num_tx,
+            tx_bytes,
+        )
     ]
-    points = [Point("selfport", "1flow", one), Point("selfport", "2flows", two)]
-    # The flow count and the second subordinate's identity move. The two
-    # acknowledgement paths converge on the one master, so they necessarily
-    # share links near it -- that is declared, not hidden, and it does not
-    # weaken the control: tt-sim charges nothing for a shared router-to-router
-    # link, so anything this control moves on the simulator came from the
-    # injection port, which is the thing being proved live.
+    two = [
+        Flow(
+            m0,
+            sub,
+            direction,
+            noc,
+            NOC_UNICAST_WRITE_VC,
+            0,
+            num_tx,
+            tx_bytes,
+        ),
+        Flow(
+            m1,
+            sub,
+            direction,
+            noc,
+            NOC_UNICAST_WRITE_VC,
+            0,
+            num_tx,
+            tx_bytes,
+        ),
+    ]
+    points = [Point("readport", "1flow", one), Point("readport", "2flows", two)]
+    # The flow count and the second master's identity move. The two response
+    # paths leave one tile, so they necessarily share the links next to it --
+    # declared, not hidden, and stated in HYPOTHESES["readport"] as the reason
+    # this control proves contention without attributing it.
     check_invariants(
-        points, grid, {"n_flows", "subs", "shared_payload_links", "shared_other_links"}
+        points,
+        grid,
+        {"n_flows", "masters", "shared_payload_links", "shared_other_links"},
     )
     for p in points:
         if {f.rt_hops(gx, gy) for f in p.flows} != {gx + gy}:
             raise PlanError(
-                "selfport subordinates are not all a full grid_x + grid_y round trip away"
+                "readport masters are not all a full grid_x + grid_y round trip away"
             )
+        if len({f.proc for f in p.flows}) != 1 or p.flows[0].proc != 0:
+            raise PlanError("readport must use one data-movement RISC per core")
+    if payload_overlap(two[0], two[1], gx, gy) < 1:
+        raise PlanError(
+            "the two readport response paths share no link, so they cannot be leaving one "
+            "NIU -- the geometry search picked masters the subordinate reaches by different "
+            "first hops"
+        )
     return points
 
 
-def plan_shared(
-    grid, *, tx_bytes=(64, 16384), num_tx=64, direction=DIR_WRITE, noc=0, max_points=8
-):
-    """Experiment 2: two flows, N fixed at 2, payload-link overlap swept.
+def _search_shared_placement(grid, *, num_tx=64, direction=DIR_WRITE, noc=0, want=8):
+    """``(score, flow_a, {shared_links: flow_b})`` -- the searched two-flow geometry.
 
     The placement is SEARCHED, not written down, because the constraint that
     matters -- every leg-pair overlap except the payload one stays at zero -- is
     easier to check than to solve. See :data:`HYPOTHESES` for the geometry the
-    search is exploiting.
+    search is exploiting. Shared by experiment 2 (which sweeps the overlap) and
+    experiment 4 (which pins the overlap at 1 and sweeps a virtual channel), so
+    the two are the same geometry with one axis swapped.
     """
     gx, gy = grid.grid_x, grid.grid_y
     present = _workers(grid)
@@ -695,7 +999,9 @@ def plan_shared(
                 a_sub = ((ax + d) % gx, y1)
                 if a_sub not in present:
                     continue
-                a = Flow((ax, y0), a_sub, direction, noc, 0, 0, num_tx, 0)
+                a = Flow(
+                    (ax, y0), a_sub, direction, noc, NOC_UNICAST_WRITE_VC, 0, num_tx, 0
+                )
                 by_overlap = {}
                 for bx in cols:
                     if bx == ax or (bx, y0) not in present:
@@ -703,7 +1009,16 @@ def plan_shared(
                     b_sub = ((bx + d) % gx, y2)
                     if b_sub not in present:
                         continue
-                    b = Flow((bx, y0), b_sub, direction, noc, 0, 0, num_tx, 0)
+                    b = Flow(
+                        (bx, y0),
+                        b_sub,
+                        direction,
+                        noc,
+                        NOC_UNICAST_WRITE_VC,
+                        0,
+                        num_tx,
+                        0,
+                    )
                     if len({a.master, a.sub, b.master, b.sub}) != 4:
                         continue
                     if other_overlap(a, b, gx, gy) != 0:
@@ -715,19 +1030,27 @@ def plan_shared(
                 score = (len(by_overlap), max(by_overlap))
                 if best is None or score > best[0]:
                     best = (score, a, by_overlap)
-                if len(by_overlap) >= max_points and max(by_overlap) >= max_points - 1:
-                    # A contiguous run of `max_points` overlap values starting
-                    # at zero is everything the sweep can use; searching on
-                    # would only relabel the same experiment.
-                    return _shared_points(
-                        best, grid, tx_bytes, num_tx, direction, noc, max_points
-                    )
+                if len(by_overlap) >= want and max(by_overlap) >= want - 1:
+                    # A contiguous run of `want` overlap values starting at zero
+                    # is everything the sweep can use; searching on would only
+                    # relabel the same experiment.
+                    return best
     if best is None:
         raise PlanError(
             "no placement found in which two flows can be slid to share 0, 1, 2 ... links "
             "while every other leg-pair overlap stays at zero. This is a property of the "
             "worker grid in the dump, not of the request."
         )
+    return best
+
+
+def plan_shared(
+    grid, *, tx_bytes=(64, 16384), num_tx=64, direction=DIR_WRITE, noc=0, max_points=8
+):
+    """Experiment 2: two flows, N fixed at 2, payload-link overlap swept."""
+    best = _search_shared_placement(
+        grid, num_tx=num_tx, direction=direction, noc=noc, want=max_points
+    )
     return _shared_points(best, grid, tx_bytes, num_tx, direction, noc, max_points)
 
 
@@ -740,9 +1063,31 @@ def _shared_points(best, grid, tx_bytes, num_tx, direction, noc, max_points):
     for size in sorted(tx_bytes):
         for ov in overlaps:
             b = by_overlap[ov]
+            # Both flows on the FIRST data-movement RISC of their own core. They
+            # are on different cores, so nothing forces them apart, and using
+            # one processor for both removes a confound the earlier version
+            # carried: BRISC and NCRISC do not run the same issue loop.
             flows = [
-                Flow(a.master, a.sub, direction, noc, 0, 0, num_tx, size),
-                Flow(b.master, b.sub, direction, noc, 0, 1, num_tx, size),
+                Flow(
+                    a.master,
+                    a.sub,
+                    direction,
+                    noc,
+                    NOC_UNICAST_WRITE_VC,
+                    0,
+                    num_tx,
+                    size,
+                ),
+                Flow(
+                    b.master,
+                    b.sub,
+                    direction,
+                    noc,
+                    NOC_UNICAST_WRITE_VC,
+                    0,
+                    num_tx,
+                    size,
+                ),
             ]
             points.append(
                 Point(
@@ -800,7 +1145,8 @@ def plan_contention(
     points = []
     for n in counts:
         flows = [
-            Flow(m, sub, direction, noc, 0, 0, num_tx, tx_bytes) for m in masters[:n]
+            Flow(m, sub, direction, noc, NOC_UNICAST_WRITE_VC, 0, num_tx, tx_bytes)
+            for m in masters[:n]
         ]
         points.append(Point("contention", f"N{n}", flows, {"n_flows": n}))
     # `shared_payload_links` is DECLARED to move: N flows into one endpoint
@@ -822,38 +1168,79 @@ def plan_contention(
     return points
 
 
-def plan_vc(grid, *, tx_bytes=4096, num_tx=64, noc=0):
-    """Experiment 4: one bidirectional pair, write VC swept 0-3."""
-    present = _workers(grid)
-    cols = sorted({c[0] for c in present})
-    rows = sorted({c[1] for c in present})
-    master, sub = (cols[0], rows[0]), (cols[1], rows[1])
+def plan_vc(grid, *, tx_bytes=16384, num_tx=64, noc=0):
+    """Experiment 4: two writers sharing ONE link, the second's write VC swept.
+
+    Unidirectional by construction. The previous design -- one master reading
+    from and writing to one subordinate at once -- hung a Blackhole card, and
+    :func:`_refuse_unrunnable` now rejects it outright; see
+    ``HYPOTHESES["vc"]`` for the evidence and for what this asks instead.
+    """
+    gx, gy = grid.grid_x, grid.grid_y
+    best = _search_shared_placement(
+        grid, num_tx=num_tx, direction=DIR_WRITE, noc=noc, want=2
+    )
+    _score, a, by_overlap = best
+    non_zero = sorted(ov for ov in by_overlap if ov > 0)
+    if not non_zero:
+        raise PlanError(
+            "the searched placement offers no point at which the two writers share a link, so "
+            "there is nothing for a virtual channel to arbitrate"
+        )
+    b = by_overlap[non_zero[0]]
+    shared_links = non_zero[0]
+
     points = [
         Point(
             "vc",
             f"vc{vc}",
-            [Flow(master, sub, DIR_BIDIR, noc, vc, 0, num_tx, tx_bytes)],
+            [
+                Flow(
+                    a.master,
+                    a.sub,
+                    DIR_WRITE,
+                    noc,
+                    NOC_UNICAST_WRITE_VC,
+                    0,
+                    num_tx,
+                    tx_bytes,
+                ),
+                Flow(b.master, b.sub, DIR_WRITE, noc, vc, 0, num_tx, tx_bytes),
+            ],
             {"vc": vc},
         )
         for vc in range(4)
     ]
+    # `vc` is the ONLY thing that moves: same two masters, same two
+    # subordinates, same hop counts, same shared-link count, same size, same
+    # count, same NoC, same processor. That is a stronger claim than the
+    # retracted bidirectional version could make, and it is checked rather than
+    # asserted.
     check_invariants(points, grid, {"vc"})
+    for p in points:
+        if _shared_payload_total(p.flows, gx, gy) != shared_links:
+            raise PlanError("the vc points do not all share the same number of links")
+        if other_overlap(p.flows[0], p.flows[1], gx, gy) != 0:
+            raise PlanError(
+                "a vc point has a non-payload leg overlap, so the two writers meet somewhere "
+                "other than the one link this experiment is about"
+            )
     return points
 
 
 EXPERIMENTS = {
     "hops": plan_hops,
     "size": plan_size,
-    "selfport": plan_selfport,
+    "readport": plan_readport,
     "shared": plan_shared,
     "contention": plan_contention,
     "vc": plan_vc,
 }
 
 #: The two the cost model actually needs, per docs/plans/cost-model.md: an
-#: intercept and a slope. `size` and `selfport` are the controls that make a
+#: intercept and a slope. `size` and `readport` are the controls that make a
 #: null reading in `shared` interpretable, so they are not optional either.
-MINIMUM = ("hops", "size", "selfport", "shared")
+MINIMUM = ("hops", "size", "readport", "shared")
 
 
 # ---------------------------------------------------------------------------
@@ -943,7 +1330,9 @@ def tensix_coords(rows):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--grid", required=True, help="a `nocbench --dump-grid` CSV")
+    # Not `required=True`: `--hypotheses` prints the pre-declared predictions
+    # and needs no card, and the README tells people to run it that way.
+    ap.add_argument("--grid", help="a `nocbench --dump-grid` CSV")
     ap.add_argument("--out", default="nocbench-plan.csv")
     ap.add_argument(
         "--experiments",
@@ -958,11 +1347,13 @@ def main(argv=None):
     )
     ap.add_argument("--noc", type=int, default=0, choices=(0, 1))
     ap.add_argument(
-        "--selfport-bytes",
+        "--readport-bytes",
         type=int,
-        default=16384,
+        default=8192,
         help="bytes per transaction for the injection-port control; it only "
-        "works when the port rather than the issue loop is the bottleneck",
+        "works when the port rather than the fixed round trip is the "
+        "bottleneck, so --num-tx times this must be at least "
+        f"{READPORT_MIN_BYTES_PER_FLOW} B",
     )
     ap.add_argument(
         "--sizes",
@@ -995,6 +1386,8 @@ def main(argv=None):
             print()
         return 0
 
+    if not args.grid:
+        ap.error("--grid is required to build a plan (see --hypotheses)")
     grid = load_grid(args.grid)
     names = (
         sorted(EXPERIMENTS)
@@ -1012,10 +1405,10 @@ def main(argv=None):
     rows, notes, run = [], [], 0
     for name in names:
         kwargs = {"noc": args.noc, "num_tx": args.num_tx}
-        if name in ("hops", "vc", "contention"):
+        if name in ("hops", "contention"):
             kwargs["tx_bytes"] = args.tx_bytes
-        if name == "selfport":
-            kwargs["tx_bytes"] = args.selfport_bytes
+        if name == "readport":
+            kwargs["tx_bytes"] = args.readport_bytes
         if name == "size":
             kwargs["sizes"] = tuple(int(v) for v in args.sizes.split(","))
         if name == "shared":

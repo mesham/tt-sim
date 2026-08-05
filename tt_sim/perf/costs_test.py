@@ -374,6 +374,7 @@ def test_an_extras_corroboration_is_held_to_the_same_rules():
 #: evidence about Wormhole, and the base sections are what Wormhole reads.
 CORROBORATED_SECTIONS = {
     "riscv.ttinsn_fusion",
+    "arch_overrides.blackhole.noc",
     "arch_overrides.blackhole.riscv.issue",
     "arch_overrides.blackhole.riscv.integer_unit",
     "arch_overrides.blackhole.riscv.load_latency",
@@ -426,6 +427,25 @@ def test_a_section_corroboration_is_held_to_the_same_rules():
         assert "tt_sim/perf/datasets/" in text, path
 
 
+def _resolved_block(arch, path):
+    """The block a ``CORROBORATED_SECTIONS`` path names, after the arch merge.
+
+    ``arch_overrides.blackhole.riscv.issue`` and plain ``riscv.ttinsn_fusion``
+    both resolve to somewhere under a top-level section, which is the only form
+    a consumer ever sees. Returns ``None`` when the merge produced nothing
+    there, so a caller can say which path failed rather than raise a KeyError.
+    """
+    parts = path.split(".")
+    if parts[0] == "arch_overrides":
+        parts = parts[2:]
+    block = load_costs(arch).section(parts[0])
+    for key in parts[1:]:
+        if not isinstance(block, dict) or key not in block:
+            return None
+        block = block[key]
+    return block
+
+
 def test_a_section_corroboration_never_stands_in_for_a_source():
     """ "Somebody measured it" is not a provenance here either.
 
@@ -434,9 +454,9 @@ def test_a_section_corroboration_never_stands_in_for_a_source():
     RESOLVED section: after the merge, every corroborated block must still
     declare where its numbers came from and name a document.
     """
-    riscv = load_costs("blackhole").section("riscv")
     for path in CORROBORATED_SECTIONS:
-        block = riscv[path.rsplit(".", 1)[1]]
+        block = _resolved_block("blackhole", path)
+        assert block, path
         assert block.get("corroboration"), path
         assert block.get("provenance") in SOURCED_PROVENANCE, path
         assert block.get("source"), path
@@ -447,13 +467,15 @@ def test_a_blackhole_corroboration_does_not_leak_into_wormhole():
     section. Multiply, the mispredict bubble, the L0 d-cache and the coalescing
     store queue all differ between the two chips, so a Blackhole measurement
     attached to a shared block would read as evidence about a part nobody ran
-    it on."""
-    wormhole = load_costs("wormhole").section("riscv")
+    it on. The NoC one is the same argument with a different mechanism: the flit
+    is 512 bits on Blackhole and 256 on Wormhole, so every byte-per-cycle
+    figure the measurement corroborates is a different number there.
+    """
     for path in CORROBORATED_SECTIONS:
-        key = path.rsplit(".", 1)[1]
         if not path.startswith("arch_overrides."):
             continue
-        assert "corroboration" not in wormhole[key], key
+        block = _resolved_block("wormhole", path)
+        assert block is None or "corroboration" not in block, path
 
 
 def test_contradictions_are_exactly_the_ones_we_expect():

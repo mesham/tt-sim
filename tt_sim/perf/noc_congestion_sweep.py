@@ -12,7 +12,7 @@ interact. A harness that measured nothing would read flat too. So a verdict of
 "no congestion effect" is only issued when the positive controls moved:
 
 * ``size`` must rise with transaction size (tt-sim models link serialisation);
-* ``selfport`` must rise when a second flow joins the same injection port;
+* ``readport`` must rise when a second master reads from the same subordinate;
 * every multi-flow point's timed regions must actually have overlapped.
 
 If any of those fails, the verdict is ``INVALID`` and no coefficient is printed
@@ -50,6 +50,23 @@ MAY_VARY = {
         "rt_hops",
     },
     "size": {"tx_bytes"},
+    "readport": {
+        "n_flows",
+        "mst_lx",
+        "mst_ly",
+        "mst_nx",
+        "mst_ny",
+        "mst_px",
+        "mst_py",
+        "flow",
+        "shared_payload_links",
+        "shared_other_links",
+    },
+    # RETRACTED, kept only so that files recorded before the retraction still
+    # parse. `selfport` put two flows on one core's two data-movement RISCs;
+    # `report_selfport` explains why its reading is not evidence either way and
+    # the verdict below no longer consults it. `noc_congestion_plan` refuses to
+    # emit one.
     "selfport": {
         "n_flows",
         "sub_lx",
@@ -94,7 +111,26 @@ MAY_VARY = {
         "shared_payload_links",
         "shared_other_links",
     },
-    "vc": {"vc"},
+    # Two writers sharing one link, the SECOND one's VC swept. Flow A and flow
+    # B differ in coordinates and hop count within every point, so those are
+    # pooled across the group and have to be allowed; `vc` is the axis.
+    "vc": {
+        "vc",
+        "flow",
+        "mst_lx",
+        "mst_ly",
+        "mst_nx",
+        "mst_ny",
+        "mst_px",
+        "mst_py",
+        "sub_lx",
+        "sub_ly",
+        "sub_nx",
+        "sub_ny",
+        "sub_px",
+        "sub_py",
+        "fwd_hops",
+    },
 }
 
 #: Columns never worth comparing: bookkeeping, or the measurement itself.
@@ -191,7 +227,136 @@ def recheck_invariants(rows):
     return complaints
 
 
-def overlap_report(rows):
+#: The wall-clock stamps are the low 32 bits of ``RISCV_DEBUG_REG_WALL_CLOCK``,
+#: so every difference between two of them is modular.
+_WRAP = 1 << 32
+
+#: Two cores in one run disagreeing about the time by more than this many
+#: cycles is not a scheduling delay. The rendezvous releases every flow in a
+#: run within a few hundred cycles of the others and the longest timed region
+#: ever measured is ~35 000 cycles, so a disagreement three orders of magnitude
+#: past that is either a genuine non-overlap or a difference of *epoch*.
+_SKEW_FLOOR = 100_000
+
+#: ...and this is what tells those two apart. A genuine non-overlap is a
+#: property of one run; a difference of epoch is a property of the *core*, so
+#: it reproduces, to the cycle, in every run that core appears in. Implied
+#: offsets agreeing this closely across independent runs cannot be a delay.
+_SKEW_TOLERANCE = 1_000
+
+#: Below this many runs an outlying core's disagreement has not reproduced and
+#: is left alone -- one large disagreement is exactly what a real non-overlap
+#: looks like.
+_SKEW_MIN_RUNS = 2
+
+
+def _signed_wrap(delta):
+    """``delta`` reduced into ``(-2**31, 2**31]``: the stamps are 32-bit."""
+    delta %= _WRAP
+    return delta - _WRAP if delta > _WRAP // 2 else delta
+
+
+def _master(row):
+    return (row.get("mst_px"), row.get("mst_py"))
+
+
+def clock_skew_report(rows):
+    """``{core: {"offset", "runs", "spread"}}`` -- per-core wall-clock epochs.
+
+    ``RISCV_DEBUG_REG_WALL_CLOCK`` is a **per-tile** free-running counter with
+    no defined epoch; nothing in tt-metal aligns the tiles to each other
+    (``syncDeviceHost`` runs on one core and ``setShift`` applies its answer to
+    the whole device). So two stamps from two tiles are only comparable if
+    those tiles happen to share an epoch, and on the Blackhole part this was
+    first seen on, one tile does not: see ``docs/bh_arch.md`` §4.4.
+
+    Correcting for that would be circular if the correction were fitted per
+    run -- it would assume the overlap it is used to check. It is not. An
+    offset is only accepted when it **reproduces**: the same core, the same
+    constant, in :data:`_SKEW_MIN_RUNS` or more independent runs, agreeing to
+    within :data:`_SKEW_TOLERANCE` cycles. A flow that genuinely started a
+    second late cannot start a second late by the same number of cycles twice,
+    so the rule separates the two rather than papering over either.
+
+    Reproducibility alone would still be fooled by a delay tied to a core's
+    *role* rather than to the core -- a rendezvous that always releases flow 1
+    late would reproduce too. So an offset must also be **impossible as a
+    delay**: bigger than the whole session, measured as the span of the file's
+    own stamps within the reference frame. A flow cannot start later than the
+    program ran.
+
+    The reference frame is the largest set of cores that agree with each other,
+    which is the only frame derivable from the file. With fewer than three
+    distinct cores there is no majority and nothing is corrected.
+    """
+    parent = {}
+
+    def find(c):
+        parent.setdefault(c, c)
+        while parent[c] != c:
+            parent[c] = parent[parent[c]]
+            c = parent[c]
+        return c
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    pairs = []  # (core_a, core_b, implied offset of b relative to a, run)
+    for run, group in _by_run(rows).items():
+        measured = [r for r in group if r.get("measured")]
+        if len(measured) < 2:
+            continue
+        base = measured[0]
+        for other in measured[1:]:
+            a, b = _master(base), _master(other)
+            if a == b:
+                continue
+            find(a), find(b)
+            delta = _signed_wrap(other["t0"] - base["t0"])
+            pairs.append((a, b, delta, run))
+            if abs(delta) <= _SKEW_FLOOR:
+                union(a, b)
+
+    if len(parent) < 3:
+        return {}
+    sizes = defaultdict(int)
+    for c in parent:
+        sizes[find(c)] += 1
+    biggest = max(sizes.values())
+    if sum(1 for s in sizes.values() if s == biggest) > 1:
+        return {}  # no majority frame; refuse to name one
+    frame = max(sizes, key=lambda root: sizes[root])
+
+    in_frame = [r for r in rows if r.get("measured") and find(_master(r)) == frame]
+    session = max(r["t0"] for r in in_frame) - min(r["t0"] for r in in_frame)
+
+    implied = defaultdict(list)
+    for a, b, delta, _run in pairs:
+        if find(a) == frame and find(b) != frame:
+            implied[b].append(delta)
+        elif find(b) == frame and find(a) != frame:
+            implied[a].append(-delta)
+
+    out = {}
+    for core, deltas in implied.items():
+        if len(deltas) < _SKEW_MIN_RUNS:
+            continue
+        spread = max(deltas) - min(deltas)
+        if spread > _SKEW_TOLERANCE:
+            continue
+        if abs(statistics.median(deltas)) <= session:
+            continue
+        out[core] = {
+            "offset": int(statistics.median(deltas)),
+            "runs": len(deltas),
+            "spread": spread,
+        }
+    return out
+
+
+def overlap_report(rows, skew=None):
     """Per multi-flow run: how much of the shorter flow ran while the other did.
 
     Concurrency is an assumption every congestion measurement rests on and none
@@ -200,14 +365,29 @@ def overlap_report(rows):
     compares timestamps taken on different cores, which assumes the free-running
     counters are common to the device. Same-core durations need no such
     assumption and are what the coefficients are fitted to.
+
+    That assumption is false on at least one part, so ``skew`` (from
+    :func:`clock_skew_report`) is subtracted first when it is supplied. Each
+    flow's *end* is taken as its own ``t0 + cycles`` rather than its ``t1``,
+    which makes the arithmetic proof against the 32-bit stamp wrapping inside a
+    timed region.
     """
+    skew = skew or {}
     out = {}
     for run, group in _by_run(rows).items():
         if len(group) < 2 or not all(r.get("measured") for r in group):
             continue
-        start, end = max(r["t0"] for r in group), min(r["t1"] for r in group)
+        base = group[0]
+
+        def rel(row, base=base):
+            offset = skew.get(_master(row), {}).get("offset", 0)
+            base_offset = skew.get(_master(base), {}).get("offset", 0)
+            return _signed_wrap((row["t0"] - offset) - (base["t0"] - base_offset))
+
+        starts = [rel(r) for r in group]
+        ends = [s + r["cycles"] for s, r in zip(starts, group)]
         shortest = min(r["cycles"] for r in group)
-        overlap = max(0, end - start)
+        overlap = max(0, min(ends) - max(starts))
         out[run] = 0.0 if shortest == 0 else min(1.0, overlap / shortest)
     return out
 
@@ -351,8 +531,15 @@ def report_size(rows, emit):
     return {"ok": rose, "slope_per_kib": slope * 1024, "intercept": intercept}
 
 
-def report_selfport(rows, emit, noise=None):
-    """Positive control: a second flow on the same injection port."""
+def report_readport(rows, emit, noise=None):
+    """Positive control: a second master reading from the same subordinate.
+
+    Replaces ``report_selfport``. The difference that matters is not the
+    geometry but the *bookkeeping*: one data-movement RISC per core, so each
+    kernel's ``noc_async_read_barrier`` waits on its own core's responses and
+    the timed region ends when that core's traffic has landed rather than when
+    half of somebody else's has.
+    """
     per_point = defaultdict(list)
     for r in rows:
         per_point[r["point"]].append(_per_tx(r))
@@ -375,10 +562,48 @@ def report_selfport(rows, emit, noise=None):
         f"  (bar: +{floor:.1f} cycles/tx, from the noise floor and 2 % of the single-flow cost)"
     )
     emit(
-        f"  CONTROL: {'PASS' if ok else 'FAIL'} -- two flows out of one NIU must contend "
-        f"for its injection port"
+        f"  CONTROL: {'PASS' if ok else 'FAIL'} -- two masters reading from one NIU must "
+        f"contend for its injection port"
+    )
+    emit(
+        "  (this proves the flows contend; it does not say WHERE. Two response streams out "
+        "of one tile share the first link out of it as well as the port, and on silicon "
+        "those are one reading. Attribution is experiment 2's job.)"
     )
     return {"ok": ok, "ratio": ratio}
+
+
+def report_selfport(rows, emit, noise=None):
+    """RETRACTED control: two flows on one core's two data-movement RISCs.
+
+    Reported, because files recorded before the retraction still contain it,
+    but it gates nothing. ``noc_async_*_barrier`` compares a per-NIU *hardware*
+    counter against a per-RISC *software* one seeded from it at kernel init, so
+    with two issuers on one NIU each RISC's ``==`` is satisfied by any N acks
+    and both kernels stop at the halfway point. The ratio it prints is
+    therefore about 1.0 whether the injection port serialises perfectly or does
+    not exist -- which was established by deleting the mechanism in tt-sim and
+    watching the ratio move by 0.04, in the wrong direction, while the absolute
+    cost moved 35 %. See docs/plans/cost-model.md.
+    """
+    per_point = defaultdict(list)
+    for r in rows:
+        per_point[r["point"]].append(_per_tx(r))
+    for name in sorted(per_point):
+        emit(
+            f"  {name:<8} {statistics.fmean(per_point[name]):>9.1f} cycles/tx  (n={len(per_point[name])})"
+        )
+    one = statistics.fmean(per_point.get("1flow") or [float("nan")])
+    two = statistics.fmean(per_point.get("2flows") or [float("nan")])
+    emit(f"  ratio {two / one if one else float('nan'):.2f}x")
+    emit(
+        "  RETRACTED -- this control is blind. Both kernels share one NIU's hardware ack "
+        "counter, so each stops after any N acks and the region ends at the halfway point; "
+        "the ratio reads ~1.0 whether the port serialises or not. It gates nothing. The "
+        "replacement is `readport`, and the planner refuses to emit `selfport` at all "
+        "(two flows on one master core can also hang a card)."
+    )
+    return {"ok": None, "retracted": True, "ratio": two / one if one else None}
 
 
 def report_shared(rows, emit, noise=None):
@@ -420,6 +645,10 @@ def report_shared(rows, emit, noise=None):
             "r2": r2,
             "span": span,
             "shape": shape,
+            # The per-share means themselves. A SATURATING fit's slope is not a
+            # coefficient -- it is a regression drawn through a step -- so
+            # anything reading this result needs the points and not the line.
+            "points": list(zip(shares, means)),
         }
     return results
 
@@ -446,24 +675,45 @@ def report_contention(rows, emit):
 
 
 def report_vc(rows, emit):
-    """Experiment 4: virtual-channel arbitration."""
-    by_vc = defaultdict(list)
+    """Experiment 4: virtual-channel arbitration, two writers on one link.
+
+    Every point has flow A pinned at ``NOC_UNICAST_WRITE_VC`` (1) and flow B on
+    the swept channel, so the point to read is ``vc1`` -- both writers on one
+    channel -- against the other three. The reading is taken per point rather
+    than per row, because the two flows in a point carry different ``vc``
+    values by construction.
+    """
+    by_point = defaultdict(list)
+    swept = {}
     for r in rows:
-        by_vc[r["vc"]].append(_per_tx(r))
+        by_point[r["point"]].append(_per_tx(r))
+        # Flow 0 is the pinned one; flow 1 carries the swept channel.
+        if r["flow"] == 1:
+            swept[r["point"]] = r["vc"]
     means = {}
-    for vc in sorted(by_vc):
-        means[vc] = statistics.fmean(by_vc[vc])
-        emit(f"  write VC {vc}  {means[vc]:>9.1f} cycles/tx")
+    for name in sorted(by_point):
+        means[swept.get(name, name)] = statistics.fmean(by_point[name])
+    for vc in sorted(means, key=str):
+        same = " (both writers on this channel)" if vc == 1 else ""
+        emit(f"  flow B on VC {vc}  {means[vc]:>9.1f} cycles/tx{same}")
     if len(means) < 2:
         return means
     span = max(means.values()) - min(means.values())
     emit(f"  span across VCs: {span:.1f} cycles")
+    if 1 in means and len(means) > 1:
+        others = [v for k, v in means.items() if k != 1]
+        emit(
+            f"  same VC / different VC: {means[1] / statistics.fmean(others):.2f}x -- above 1 "
+            f"means the shared link is arbitrated per virtual channel; 1.00 means it is "
+            f"occupancy and the channel number does not enter it"
+        )
     return means
 
 
 REPORTERS = {
     "hops": report_hops,
     "size": report_size,
+    "readport": report_readport,
     "selfport": report_selfport,
     "shared": report_shared,
     "contention": report_contention,
@@ -492,7 +742,8 @@ def sweep(rows, emit=print, min_overlap=0.5):
         f"ran on NoC {r['kernel_noc']}"
         for r in wrong_noc
     ]
-    overlaps = overlap_report(rows)
+    skew = clock_skew_report(rows)
+    overlaps = overlap_report(rows, skew)
     poor = {run: frac for run, frac in overlaps.items() if frac < min_overlap}
 
     emit("=" * 78)
@@ -506,6 +757,23 @@ def sweep(rows, emit=print, min_overlap=0.5):
     emit(f"  invariant complaints    {len(complaints)}")
     for c in complaints:
         emit(f"    {c}")
+    if skew:
+        emit(
+            f"  clock-epoch skew        {len(skew)} core(s) whose wall clock keeps a "
+            f"different epoch from the rest of the device"
+        )
+        for core in sorted(skew, key=lambda c: (c is None, c)):
+            info = skew[core]
+            emit(
+                f"    core {core}: {info['offset']:+d} cycles, reproduced over "
+                f"{info['runs']} runs to within {info['spread']} cycles -- subtracted "
+                f"before the overlap below"
+            )
+        emit(
+            "    (RISCV_DEBUG_REG_WALL_CLOCK is per tile and free-running; a constant "
+            "that reproduces across independent runs cannot be a scheduling delay. "
+            "Same-core durations, which every coefficient is fitted to, are unaffected.)"
+        )
     if overlaps:
         emit(
             f"  multi-flow runs         {len(overlaps)}, median timed-region overlap "
@@ -517,7 +785,7 @@ def sweep(rows, emit=print, min_overlap=0.5):
 
     results = {}
     noise = None
-    for name in ("hops", "size", "selfport", "shared", "contention", "vc"):
+    for name in ("hops", "size", "readport", "selfport", "shared", "contention", "vc"):
         if name not in groups:
             continue
         emit("=" * 78)
@@ -525,8 +793,8 @@ def sweep(rows, emit=print, min_overlap=0.5):
         emit("=" * 78)
         if name == "shared":
             results[name] = report_shared(groups[name], emit, noise)
-        elif name == "selfport":
-            results[name] = report_selfport(groups[name], emit, noise)
+        elif name in ("readport", "selfport"):
+            results[name] = REPORTERS[name](groups[name], emit, noise)
         else:
             results[name] = REPORTERS[name](groups[name], emit)
         if name == "hops":
@@ -548,7 +816,7 @@ def sweep(rows, emit=print, min_overlap=0.5):
     emit("VERDICT")
     emit("=" * 78)
     controls_ok = True
-    for control in ("size", "selfport"):
+    for control in ("size", "readport"):
         res = results.get(control)
         if res is None:
             emit(
@@ -560,6 +828,12 @@ def sweep(rows, emit=print, min_overlap=0.5):
             controls_ok = False
         else:
             emit(f"  {control}: passed")
+    if "selfport" in results:
+        emit(
+            "  selfport: RETRACTED and not consulted -- it reads ~1.0x whether or not the "
+            "injection port serialises (see report above). A file containing it predates the "
+            "retraction; re-plan to get `readport` instead."
+        )
     if unmeasured or coord_mismatch or complaints:
         emit(
             "  RESULT: INVALID -- the file does not describe the experiment it claims to"
@@ -604,9 +878,19 @@ def sweep(rows, emit=print, min_overlap=0.5):
     return {"verdict": "MEASURED", "results": results}
 
 
+#: The banked silicon run, so the analysis reproduces with no hardware. It is
+#: the file with the controls in it; the ``-sizes`` companion beside it is a
+#: separate run and carries none, which is why it is not the default.
+DEFAULT_MEASURED = Path(__file__).with_name("datasets") / "nocbench-blackhole.csv"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--measured", required=True, help="a nocbench output CSV")
+    ap.add_argument(
+        "--measured",
+        default=str(DEFAULT_MEASURED),
+        help="a nocbench output CSV (default: the banked Blackhole silicon run)",
+    )
     ap.add_argument("--min-overlap", type=float, default=0.5)
     args = ap.parse_args(argv)
     rows, comments = load_measured(args.measured)
