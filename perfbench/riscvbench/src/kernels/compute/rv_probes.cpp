@@ -343,10 +343,30 @@ inline void bench_barrier() {
         }                                                      \
     } while (0)
 
+// THE UNTIMED DRAIN, and why it is here. Every timed burst below starts from an
+// EMPTY Tensix instruction queue, because `tensix_sync()` sits between
+// `bench_barrier()` and `t0` -- outside the timed region, so it costs this probe
+// no measured cycle. Without it the burst at point p starts with whatever point
+// p-1 left in flight: a saturated backend never idles, so the residue is not
+// absorbed, it back-pressures the core that many entries sooner and is added to
+// `plain` permanently. The four banked 2026-08-05 runs show exactly that, at
+// +21 cycles flat from n = 128 onward against phase S's identically-shaped
+// probe, which has had this line since it was written. Phase S's block comment
+// below, point (3), is the same argument.
+//
+// It is deliberately in the macro rather than in one probe, so `q_loop_addi` --
+// the fetch- and structure-matched control -- gets it too. `q_loop_addi` pushes
+// no Tensix instruction, so its drain returns on an empty queue and its numbers
+// must not move at all: that is the control ON THIS EDIT as well as on the
+// burst form. The `_sync` probe below needs no such line and does not have one:
+// its timed region ENDS with `tensix_sync()`, so its next point already starts
+// drained -- which is why the two forms' `_sync` probes already agree to the
+// cycle where their `plain` probes do not.
 #define QLOOPPROBE(SLOT, ...)                                            \
     do {                                                                 \
         for (uint32_t p = 0; p < RVBENCH_Q_LOOP_POINTS; p++) {           \
             bench_barrier();                                             \
+            ckernel::tensix_sync();                                      \
             const uint32_t t0 = wall_clock_lo();                         \
             QLOOPBURST(RVBENCH_Q_LOOP_MIN_N << p, __VA_ARGS__);          \
             out[(SLOT) * RVBENCH_MAX_POINTS + p] = wall_clock_lo() - t0; \
@@ -799,6 +819,12 @@ void kernel_main() {
         // probe above: the first `tensix_sync()` of a launch is not like its
         // successors. Repeated here rather than relying on the cascade probe's
         // warm-up, because `--probes` can turn that one off.
+        //
+        // ONE warm-up is all this probe needs, where QLOOPPROBE drains before
+        // every point: the loop below ENDS each timed region with a drain, so
+        // every later point already starts on an empty queue. See QLOOPPROBE's
+        // comment -- this asymmetry is the whole reason the two forms' `plain`
+        // probes differed by 21 cycles while their `_sync` probes did not.
         ckernel::tensix_sync();
         for (uint32_t p = 0; p < RVBENCH_Q_LOOP_POINTS; p++) {
             bench_barrier();

@@ -1,10 +1,10 @@
 # riscvbench — running it on real hardware
 
 **You have a Tenstorrent card. This page is everything you need; you do not need
-to know anything about tt-sim.** It asks you to build one program, run it four
-times, and send back four CSV files. Budget **20 minutes**, most of it the
+to know anything about tt-sim.** It asks you to build one program, run it five
+times, and send back five CSV files. Budget **20 minutes**, most of it the
 build: the two main runs are a minute or two each and the two extra phase G runs
-are seconds.
+and the phase-Q drain run are seconds.
 
 If you want to know *why* the benchmark is shaped the way it is, and what its
 numbers can and cannot prove, read
@@ -91,6 +91,11 @@ unset TT_METAL_SIMULATOR                 # make sure you are on the real card
 # because its three bodies do not fit in one kernel either.
 ./build/riscvbench --phase g --variants t1 --blocks 32 --gset 1 --out riscvbench-g1.csv
 ./build/riscvbench --phase g --variants t1 --blocks 32 --gset 2 --out riscvbench-g2.csv
+
+# Run 5 -- seconds, and it is the one open question this benchmark has a
+# written prediction for. See "Run 5" under "What the interesting answers look
+# like" for the numbers that confirm it and the numbers that refute it.
+./build/riscvbench --phase qs --variants t1 --blocks 32 --out riscvbench-qdrain.csv
 ```
 
 Runs 1 and 2 include **phase S**, which is new and is the one that needs all
@@ -176,7 +181,7 @@ config buffer (70656)`, which is measured rather than predicted.
 
 ## What to send back
 
-**All four CSVs, plus the terminal output of each run if you have it** — the
+**All five CSVs, plus the terminal output of each run if you have it** — the
 summary tables, the per-phase read-outs and the validity verdicts are in the
 terminal output and not in the CSV. The phase S verdict and the phase G step are
 *only* in the terminal output.
@@ -445,11 +450,55 @@ four runs and is **not explained**. The sweep prints the whole reconciliation
 under `Do the two burst forms agree about the depth?`, and
 `docs/bh_arch.md` §1.10 banks a range rather than a number because of it.
 
-**If you are re-running this, the cheapest thing you can do for that residual**
-is add an untimed `ckernel::tensix_sync()` immediately before `t0` in
-`QLOOPPROBE` — phase S has one and phase Q does not, and a saturated backend
-never idles, so phase Q's `plain` may be carrying the previous burst point's
-residue forever. That is the leading candidate and it has not been tested.
+### Run 5 — the one run this repo is actually waiting for
+
+**`QLOOPPROBE` now carries an untimed `ckernel::tensix_sync()` immediately
+before `t0`**, which phase S has always had and phase Q never did. That one line
+is a *test* of the leading explanation for the residual above — a saturated
+backend never idles, so phase Q's `plain` may have been carrying the previous
+burst point's residue forever — and **the prediction was written down before the
+line was**. It is in
+[`docs/plans/riscv-front-end-benchmark.md`](../../docs/plans/riscv-front-end-benchmark.md),
+"The untimed drain, pre-declared before it was written".
+
+Seconds on the card, one launch of phase Q and one of phase S:
+
+```bash
+cd perfbench/riscvbench/src
+./build/riscvbench --phase qs --variants t1 --blocks 32 --out riscvbench-qdrain.csv
+```
+
+Then, back in this repo:
+
+```bash
+python3 -m tt_sim.perf.riscv_bench_sweep --measured riscvbench-qdrain.csv
+```
+
+and read the raw t1 rows plus `Do the two burst forms agree about the depth?`.
+**What confirms it**, against the pre-drain run banked in
+`tt_sim/perf/datasets/riscvbench-blackhole.csv`:
+
+| probe (t1) | n = 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `q_loop_addi` — must not move | 32 | 48 | 84 | 156 | 300 | 588 | 1164 |
+| `q_loop_adddmareg` — was | 31 | 48 | 107 | 320 | 704 | 1472 | 3008 |
+| `q_loop_adddmareg` — **confirms at** | 31 | 48 | 107 | **~299** | **~683** | **~1451** | **~2987** |
+| `q_loop_adddmareg_sync` — must not move | 63 | 111 | 207 | 399 | 783 | 1551 | 3087 |
+
+i.e. a **21-cycle fall at n ≥ 128 and nowhere else**, which makes phase Q's
+run-ahead 32.3 against phase S's 32.3 and closes the two forms to 0.0 entries
+under the sync-free estimator.
+
+**What refutes it:** `q_loop_adddmareg` not falling by 21 ± 14 cycles at
+n ≥ 128; or `q_loop_addi` or `q_loop_adddmareg_sync` moving at all, neither of
+which is edited and either of which would mean the change perturbed instruction
+placement rather than the queue. Any of those and the untimed-drain explanation
+is **wrong**, `docs/bh_arch.md` §1.10 keeps its ~26–31 range, and nothing in
+the sweep gets adjusted to make the numbers meet.
+
+**Until this run exists**, `q_loop_addi` and `q_loop_adddmareg` in the two
+tracked full-run datasets are a record of the *pre-drain* binary and their
+headers say so.
 
 ---
 

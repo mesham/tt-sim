@@ -93,6 +93,34 @@
 # entries and phase G's 1.150 exactly -- which is a reproduction of the
 # instrument, not of the part.
 #
+# THE KERNEL HAS MOVED UNDER THIS FILE, in one place, after this run. On
+# 2026-08-05 `QLOOPPROBE` in kernels/compute/rv_probes.cpp gained an untimed
+# `ckernel::tensix_sync()` between `bench_barrier()` and `t0`, which is the
+# test of the leading explanation for the two burst forms' 7-entry
+# disagreement -- see "The untimed drain, pre-declared before it was written"
+# in docs/plans/riscv-front-end-benchmark.md. So the two phase-Q LOOP-FORM
+# plain probes here, `q_loop_addi` and `q_loop_adddmareg`, are a record of the
+# PRE-DRAIN binary: `q_loop_adddmareg` is predicted to read 21 cycles LOWER at
+# n >= 128 when the current tree is run, and `q_loop_addi` is predicted not to
+# move at all. No other PROBE is edited -- the cascade probes (QPROBE) and
+# `q_loop_adddmareg_sync` are untouched, and phases R, T, C, F, S and G never
+# compile QLOOPPROBE.
+#
+# ONE UNINTENDED SIDE EFFECT, measured rather than assumed. Running the two
+# kernels back to back against tt-sim (deterministic: a repeat of either is
+# byte-identical) the ONLY rows that move are `q_ctrl` at n = 32 and n = 128,
+# by +1 cycle each. That is code generation, not the queue: the added call
+# changes register pressure across the whole of kernel_main and `q_ctrl` is an
+# empty-bodied cascade probe whose cost is a handful of compares. `q_ctrl` is
+# subtracted point by point from q_nop / q_setdmareg / q_adddmareg, so those
+# three CASCADE readings may move by a cycle at a point or two on hardware as
+# well. Every loop-form row -- the ones the depth is read from -- is
+# byte-identical across the edit on tt-sim.
+#
+# Until a post-drain run exists this file is still what docs/bh_arch.md 1.10's
+# phase-Q row is read off, and that row is therefore a measurement of a binary
+# no longer in the tree.
+#
 # arch=blackhole magic=0x7B10CF03 probe_mask=0x7FFFFFFFFFFFF phases=rtcqfsg variants=t1,t2,t3 base_blocks=32 gset=0 group_reps=16 pad=16 stack_addr=0xFFB00FA8 scratch_addr=0x0017D440 div_dividend=0x12345678 div_divisor=3
 phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
 r,t1,0,loop_overhead,-,1,1,32,64,82

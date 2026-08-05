@@ -1068,12 +1068,17 @@ def test_fetch_check_reports_flatness_and_a_cliff(tmp_path):
 _RECONCILE_FIXED = 12  # the timed region's own cost, in both forms
 
 
-def _one_form(names, ns, n_ref, depth, service, issue):
+def _one_form(names, ns, n_ref, depth, service, issue, ref_bias=0):
     """One burst form whose queue holds exactly `depth` entries.
 
     Both probes carry the same fixed cost as the issue-limited baseline, which
     is what silicon does -- they are the same macro with a different body -- and
     is what lets the run-ahead estimator read the depth back undivided.
+
+    `ref_bias` moves the SINGLE reference point that only the levelled estimator
+    subtracts, which is the one raw cold burst in the whole construction. It is
+    how a run reaches the third verdict: the queue is one depth, the run-ahead
+    reads it, and the levelled columns are pushed apart by scatter on one point.
     """
     plain_name, sync_name, base_name = names
     outstanding = {n: min(depth, n * (1 - issue / service)) for n in ns}
@@ -1084,6 +1089,7 @@ def _one_form(names, ns, n_ref, depth, service, issue):
     values[plain_name] = {
         n: _RECONCILE_FIXED + service * (n - outstanding[n]) for n in ns
     }
+    values[plain_name][n_ref] += ref_bias
     phase = "q" if n_ref == sweep.QUEUE_MIN_N else "s"
     return [
         f"{phase},t1,{50 + i},{probe},TTQUEUE,1,1,{n},1,{values[probe][n]:.0f}\n"
@@ -1092,7 +1098,7 @@ def _one_form(names, ns, n_ref, depth, service, issue):
     ]
 
 
-def _reconcile_text(tmp_path, q_depth, s_depth, service=3):
+def _reconcile_text(tmp_path, q_depth, s_depth, service=3, q_ref_bias=0):
     rows = _one_form(
         (sweep.QUEUE_LOOP_PLAIN, sweep.QUEUE_LOOP_SYNC, sweep.QUEUE_LOOP_BASELINE),
         _LOOP_NS,
@@ -1100,6 +1106,7 @@ def _reconcile_text(tmp_path, q_depth, s_depth, service=3):
         q_depth,
         service,
         issue=1.125,
+        ref_bias=q_ref_bias,
     ) + _one_form(
         (sweep.SHARE_CO_PLAIN, sweep.SHARE_CO_SYNC, sweep.SHARE_BASELINE),
         _SHARE_NS,
@@ -1160,6 +1167,23 @@ def test_a_form_dependent_depth_is_reported_as_unexplained(tmp_path):
     assert "run-ahead estimator" in text
     assert "SO THE DEPTH DEPENDS ON WHICH FORM MEASURES IT" in text
     assert "RECONCILED" not in text
+
+
+def test_a_levelled_gap_with_no_run_ahead_gap_is_not_called_form_dependent(tmp_path):
+    """The third outcome, and the one the untimed-drain fix is expected to
+    produce. One queue, one depth, both forms' plain probes reading it -- and
+    six cycles of scatter on the single cold reference burst that only the
+    levelled estimator subtracts. That pushes the levelled columns two entries
+    apart while the sync-free run-ahead stays exactly together, and the read-out
+    must NOT then say "that is not the correction arithmetic", because that is
+    precisely what it is.
+    """
+    text = _reconcile_text(tmp_path, q_depth=24, s_depth=24, q_ref_bias=-6)
+    assert "SYNC-FREE ESTIMATOR AGREES" in text
+    assert "SO THE FORMS MEASURE ONE QUEUE" in text
+    assert "+0.0 entries apart" in text
+    assert "UNEXPLAINED" not in text
+    assert "SO THE DEPTH DEPENDS ON WHICH FORM MEASURES IT" not in text
 
 
 def test_the_run_ahead_estimator_recovers_the_depth_it_was_built_from(tmp_path):

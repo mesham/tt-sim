@@ -2158,7 +2158,18 @@ RECONCILE_TOLERANCE = 1.0
 
 
 def _reconcile_verdict(read, emit):
-    """What the reference burst explains, and what is left over."""
+    """What the reference burst explains, and what is left over.
+
+    THREE OUTCOMES, NOT TWO, and the third is why this is not a two-branch
+    function. The levelled estimate and the sync-free run-ahead can disagree
+    with each other about whether the forms disagree, and when they do it says
+    *where* the residual lives: a levelled gap with a run-ahead gap is a
+    property of the burst forms, a levelled gap WITHOUT one is arithmetic
+    downstream of the single raw reference point that only the levelled
+    estimator subtracts. Collapsing the third case into the second prints
+    "that is not the correction arithmetic" about a residual that is exactly
+    the correction arithmetic.
+    """
     (lo_label, lo), (hi_label, hi) = sorted(read, key=lambda pair: pair[1]["levelled"])
     printed = hi["levelled"] - lo["bare"]
     correction = hi["levelled"] - hi["bare"] - (lo["levelled"] - lo["bare"])
@@ -2179,11 +2190,26 @@ def _reconcile_verdict(read, emit):
             "      constructions measure the same queue."
         )
         return
+    free = hi["runahead"] - lo["runahead"]
+    if abs(free) <= RECONCILE_TOLERANCE:
+        emit(
+            f"      {left:+.1f} entries, `{hi_label}` over\n"
+            f"      `{lo_label}` -- BUT THE SYNC-FREE ESTIMATOR AGREES: run-ahead,\n"
+            "      which uses neither `_sync` probe nor either reference burst, puts the\n"
+            f"      same two forms {free:+.1f} entries apart ({hi['runahead']:.1f} against {lo['runahead']:.1f}).\n"
+            "\n"
+            "      SO THE FORMS MEASURE ONE QUEUE and what is left is downstream of the\n"
+            "      single raw reference point that only the levelled estimator subtracts:\n"
+            "      one cold burst, on which a cycle of scatter is\n"
+            f"      {1.0 / lo['rate']:.2f} entries, so {left:+.1f} is {abs(left) * lo['rate']:.0f} cycles on that one point.\n"
+            "      Quote the run-ahead pair."
+        )
+        return
     emit(
         f"      {left:+.1f} ENTRIES UNEXPLAINED, `{hi_label}` over\n"
         f"      `{lo_label}`. That is not the correction arithmetic: the\n"
         "      run-ahead estimator, which uses neither `_sync` probe nor either\n"
-        f"      reference burst, puts the same two forms {hi['runahead'] - lo['runahead']:+.1f} entries apart.\n"
+        f"      reference burst, puts the same two forms {free:+.1f} entries apart.\n"
         "\n"
         "      SO THE DEPTH DEPENDS ON WHICH FORM MEASURES IT, and neither number may be\n"
         "      quoted alone. What the forms bracket is the finding; what separates them\n"

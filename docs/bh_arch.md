@@ -559,13 +559,21 @@ between two devices:
   with `levelled` *within* each form (25.3 against 25.7; 32.3 against 31.0) and
   puts the two forms **7.0 entries apart**.
 
-**Where the 7 entries live.** The two forms' saturated `sync − plain` is 79
-cycles (phase Q) and 100 cycles (phase S), and both reproduce **to the cycle**
-across all four banked runs. Read as run-ahead, `3n − plain[n]` is a flat 64
-cycles for phase Q at n = 256, 512 and 1024, and a flat 85 for phase S at
-n = 128, 256 and 512. But phase Q's *own* run-ahead is **85 cycles at n = 64** —
-phase S's value exactly — and drops to 64 from n = 128 onward. So one form
-steps and the other does not, and the step is 21 cycles, which is the 7 entries.
+**Where the 7 entries live, and it is one column.** The two forms' saturated
+`sync − plain` is 79 cycles (phase Q) and 100 cycles (phase S), and both
+reproduce **to the cycle** across all four banked runs. Read as run-ahead,
+`3n − plain[n]` is a flat 64 cycles for phase Q at n = 256, 512 and 1024, and a
+flat 85 for phase S at n = 128, 256 and 512. But phase Q's *own* run-ahead is
+**85 cycles at n = 64** — phase S's value exactly — and drops to 64 from n = 128
+onward. So one form steps and the other does not, and the step is 21 cycles,
+which is the 7 entries.
+
+**And it is entirely in `plain`.** Lining the two forms' raw t1 points up at the
+six burst lengths they share, the `_sync` probes are **identical to the cycle**
+— 63, 111, 207, 399, 783, 1551 at n = 16…512 in both — while the `plain` probes
+differ by −5, −12, −3, **+21, +21, +21**. Whatever this is, it is not the
+backend, not the drain and not the reference arithmetic: it is a flat 21-cycle
+tax on phase Q's undrained `plain` probe once the queue is full.
 
 **The leading explanation, offered as a candidate and not as a finding.** Phase
 S runs an untimed `tensix_sync()` immediately before every `t0`; **phase Q does
@@ -575,9 +583,22 @@ deficit which grows with the *preceding* point and then saturates once the
 preceding burst is itself saturated — a step followed by a plateau, which is
 what the column shows, and one free parameter (~21 entries draining during
 `bench_barrier()`) fits all three regimes. If that is right, phase Q's data
-corrected for it gives ~28 entries, which is phase S's run-ahead figure. **It is
-a one-parameter fit to three points and it has not been tested**; the test is
-cheap — add the untimed drain to `QLOOPPROBE` and re-run.
+corrected for it gives ~28 entries, which is phase S's run-ahead figure.
+
+**The test has now been built and not yet run, and the numbers here are from
+before it.** `QLOOPPROBE` gained the untimed drain on 2026-08-05, so the two
+phase-Q loop-form `plain` probes in the four banked datasets — `q_loop_addi` and
+`q_loop_adddmareg` — **describe a binary that is no longer in the tree**, and
+the phase-Q row of the table above is read off them. Nothing else moved: the
+cascade probes, `q_loop_adddmareg_sync` and every other phase are untouched, so
+§1.1, §1.3, §1.9 and the per-thread verdict at the top of this entry are
+unaffected. The prediction was written down before the edit
+([the plan doc](plans/riscv-front-end-benchmark.md), "The untimed drain,
+pre-declared before it was written"): `q_loop_adddmareg` falls 21 cycles at
+n ≥ 128 and nowhere else, `q_loop_addi` does not move, phase Q's run-ahead goes
+25.3 → 32.3 and meets phase S's 32.3 exactly. **Until that run exists this entry
+keeps its range**; a run that does not produce those numbers refutes the
+explanation rather than adjusting the estimator.
 
 **So the number to quote is a range, and the honest form of it is:**
 
@@ -596,7 +617,10 @@ error.
 
 **What would settle it.** Not another thread count and not a longer burst. (a)
 The untimed drain in phase Q's loop probe, which tests the leading explanation
-directly. (b) A phase-S run with a 16-instruction block and an n = 4 reference,
+directly — **written, not yet run**: `./build/riscvbench --phase qs --variants
+t1 --blocks 32 --out riscvbench-qdrain.csv`, seconds on the card, then
+`python3 -m tt_sim.perf.riscv_bench_sweep --measured riscvbench-qdrain.csv`.
+(b) A phase-S run with a 16-instruction block and an n = 4 reference,
 which separates "the block size" from "the missing drain" — they are confounded
 in everything above. (c) A second *card*, which is what would make any of this a
 fact about Blackhole rather than about this part.

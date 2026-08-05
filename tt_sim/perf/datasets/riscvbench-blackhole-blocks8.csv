@@ -16,6 +16,20 @@
 # collected=2026-08-05
 # host=unrecorded
 #
+# THE KERNEL HAS MOVED UNDER THIS FILE, in one place, after this run. On
+# 2026-08-05 `QLOOPPROBE` in kernels/compute/rv_probes.cpp gained an untimed
+# `ckernel::tensix_sync()` between `bench_barrier()` and `t0` -- see "The
+# untimed drain, pre-declared before it was written" in
+# docs/plans/riscv-front-end-benchmark.md. So `q_loop_addi` and
+# `q_loop_adddmareg` here are a record of the PRE-DRAIN binary
+# (`q_loop_adddmareg` predicted 21 cycles lower at n >= 128 on the current
+# tree, `q_loop_addi` predicted unchanged). No other probe is edited: QPROBE
+# and `q_loop_adddmareg_sync` are untouched and no other phase compiles
+# QLOOPPROBE. The one measured side effect, from a deterministic tt-sim A/B of
+# the two kernels, is `q_ctrl` at n = 32 and n = 128 moving +1 cycle -- code
+# generation across kernel_main, not the queue; the primary dataset's header
+# gives it in full.
+#
 # WHY IT FAILED, and it is not what a reader expects. FIVE OF THE SEVEN R^2
 # FAILURES ARE THE `loop_overhead` CONTROL ITSELF, at R^2 = 0.9894 and 0.9657
 # against a gate of 0.99. At --blocks 8 the four fitted points span n = 8, 16,
