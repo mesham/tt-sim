@@ -418,8 +418,62 @@ have been dropped where they had already drifted; grep for
       writer core and — in a multi-core tt-metal pipeline — a remote consumer.
       No in-tree workload pipelines core-to-core, so that case is not in the
       numbers, and aborting a correct kernel on an extrapolation is the trade
-      declined for the `SETDVALID` `NonContractualBehavior` guard. Promote it
-      to a raise once a core-to-core pipelined workload has been surveyed.
+      declined for the `SETDVALID` `NonContractualBehavior` guard. ~~Promote it
+      to a raise once a core-to-core pipelined workload has been surveyed.~~
+    - *That survey has now been done, and the answer is that the cycle
+      threshold must never be promoted.* `examples/pipestall` is the missing
+      workload: `nine`'s two-tile pipeline plus a reverse credit semaphore, so
+      the producer's Tensix backs up behind the consumer **core** with the
+      consumer's per-chunk cost as a runtime argument. The producer's unpacker
+      blocks for `5 * delay + 56` cycles (r = 1.000, Wormhole; Blackhole
+      matches), i.e. **linearly in downstream cost with no ceiling**: 1,056
+      cycles at the frozen guard setting, **10,056 at a consumer costing
+      ~10,000 cycles a tile**, 20,056 at twice that. Deeper buffering does not
+      help — four credits or a four-page output CB each bought under 8 %,
+      because a rate-limited producer stalls one consumer turnaround per tile
+      however deep the pipe. And raising the threshold would defeat the other
+      end: the minimal `UNPACR_NOP` reproduction runs ~18,300 cycles end to
+      end, so anything above ~16,000 misses it. The interval between "high
+      enough for a correct pipeline" and "low enough for a short wedge" is
+      empty; 10,000 stays, as a **hint**, not a verdict.
+    - *And it now reads and behaves like one.* It stays on by default — a
+      broken third-party eight-core GEMM produced a report on all eight
+      workers and none on the corrected form, which nobody would have seen
+      behind an opt-in flag, and "suppress it while a downstream consumer is
+      progressing" is unsound because the true positive also runs on a
+      progressing device (that is the check's whole premise). What changed is
+      the message: it prints both readings, declines to pick one, and is
+      **de-duplicated to one report per unit per waited-on instruction** —
+      the old once-per-window count was run-length dependent (576 reports on
+      one run of that GEMM, 352 on a longer one) and so meant nothing. A unit
+      that later unblocks prints `[UNIT STALL CLEARED]`, which is what lets a
+      user settle the question mid-run instead of waiting for teardown.
+    - *What replaces it:* `[UNIT WEDGED]`, a terminal check with no threshold
+      at all. A Src bank is handed back by an instruction and no thread can
+      issue one from soft reset, so a unit still blocked once **every baby core
+      on its tile is in reset** can never be satisfied. It fires on a
+      reproduction far too short for any cycle count, and cannot fire on a
+      correct kernel (no unit ends a launch blocked in any of the 41 surveyed
+      workloads or any `pipestall` configuration). Warning for now; this is the
+      one to promote to a raise.
+    - Also fixed here: the per-unit arming pass rode the *global* watchdog's
+      cadence, so end-to-end latency was `unit_stall_threshold +
+      deadlock_threshold / 8` and lowering `TT_SIM_UNIT_STALL_THRESHOLD` alone
+      could not make a report arrive sooner. It has its own cadence now
+      (`1.125x` its own threshold, whatever the other knob is set to).
+    - *Guards:* `driver/{wormhole,blackhole}/server/pipestall_replay_test.py`
+      replay the frozen trace, check the values **and** assert the longest
+      blocked run is a real cross-core stall that stays under the shipped
+      threshold.
+    - *One value divergence came out of building it, and it was the workload's,
+      not the simulator's.* `pipestall` sized its CB pages to the 256 B chunk
+      its kernels move; `pack_tile` writes a whole 4,096 B tile, so at
+      `OUT_DEPTH=2` page 1 sat inside page 0's pack footprint and the pack of
+      chunk N shredded the unread chunk N-1 (chunk 1 came back all zeroes, both
+      arches). Pages are `tt::tile_size(format)` now. `optests/packspill` pins
+      the full-tile pack footprint against ttsim (agreement on all 1,024
+      datums, 960 of them past the page), and `pipestall-2page` runs the shape
+      live in both arch runners.
   - *Test:* `tt_sim/pe/tensix/setdvalid_srcrow_test.py` already pins the
     instruction word and the hand-over; the missing one issues the setup twice
     with no intervening clear and asserts the second blocks.
@@ -959,6 +1013,18 @@ fix would mislead).
 - **PC buffer.** `pe/pcbuf.py` `TODO` — write delays / synchronisation
   not modelled.
   - *Test:* no example needed — perf/timing modelling.
+  - *Fixed alongside:* the **blocking** words were decoded one word too
+    high. `misc/ttsync.py` is mapped at `0xFFE80004`, so its offset `0x0`
+    is `pc_buf_base[1]` — what `ckernel::tensix_sync()` reads — and that
+    returned zero unconditionally, with the Tensix-FIFO-drain check
+    sitting on `pc_buf_base[2]` (`mop_sync()`'s word) and the MOP check
+    on the unused word 3. `tensix_sync()` was therefore a **no-op**
+    against tt-sim and could not order anything: measured on the `six`
+    replay, five reads, zero blocked cycles. Corrected against
+    `tt_llk_*/common/inc/ckernel.h` and ttsim's `tensix_pc_buf_rd32`;
+    the same five reads now block for 8,043 cycles. Nothing moved:
+    776 tests green and `cost_model_gate.py` output byte-identical to
+    the pre-change baseline.
 - **Extra core types.** `device/tt_device.py` raises on anything beyond
   BRISC/NCRISC/TRISC0–2; needs widening if ERISC ever lands as a
   bridge-visible core type.
@@ -1412,7 +1478,13 @@ status there:
   Blackhole's `CFGSHIFTMASK` is a 2-cycle occupancy the `untilize` guard
   executes 32 times, so it is not the no-op it was assumed to be. The
   cost-model gate passes with every poll-budget multiplier unchanged and
-  not one simulated cycle moves. The
+  not one simulated cycle moves. Occupancy is charged **per IPC group**
+  rather than per unit (2026-08-04), transcribed from the `IPC group`
+  column of Blackhole's Configuration Unit table — the only such column
+  published for any Tensix unit — so a `CFGSHIFTMASK` holds `Config` and
+  leaves `SETC16` free; the whole-unit over-charge it replaces turned out
+  to refuse no issue anywhere in the tree, so `untilize` reads 12,189
+  cycles either way. The
   unpacker and mover, NoC bandwidth/contention and DRAM latency are the
   rest of this section.
 - **Phase 5, second half — the baby RISC-V load/store path** (2026-08-03),
@@ -1725,6 +1797,219 @@ status there:
   over-charged when 18 were fractions of a cycle inside its own
   resolution, and now names one. The admitted cost: it cannot detect an
   over-charge below ~0.03 cycles/instruction.
+- **The RISC-V front end now has a measuring instrument**
+  (2026-08-05). `perfbench/riscvbench` is the companion to `tensixbench`,
+  and it exists because of that benchmark's headline: against tt-sim
+  **every** probe of **every** Tensix unit at **every** data format reads
+  exactly 1.000 cycles, because nothing back-pressures the core that
+  issued it. Same conventions — one tt-metal binary for silicon and
+  tt-sim, slope method so fixed costs cancel, per-phase verdict, CSV with
+  its provenance in a `#` header — plus a companion sweep
+  (`tt_sim/perf/riscv_bench_sweep.py`, 46 tests) that reads its
+  predictions *out of* `unit_costs.yaml` rather than restating them,
+  declares its exclusions before any residual, carries a per-series
+  resolution term and reports residuals by axis. Five phases, scored
+  independently: **R** straight-line RV32IM, **T** the `.ttinsn` issue
+  path, **C** branch direction, **Q** the Tensix instruction queue's
+  depth, **F** instruction footprint. **Nothing was added to any cost
+  table.**
+  The design's own hardest problem is that **a run where everything reads
+  1.000 is simultaneously the expected answer and the signature of a
+  benchmark that measured nothing** — a baby core issues at most 1 IPC,
+  so 1.000 is the floor of the instrument. It is answered with four
+  probes tt-sim *already* charges (`rv_mul_dep`, `rv_div`,
+  `rv_load_chase`, `rv_store_spread`): with `TT_SIM_COST_MODEL=1` they
+  land on 1.000 / 6.000 / 1.984 / 4.969 against table values of 2 / 6 /
+  2 / 5 — the 2 being `l1_dcache_hit`, which is what the simulator
+  charges every L1 load — and with the model off all four read 1.000 and
+  both the benchmark and the sweep refuse the run in those words.
+  **The strongest simulator result is not a null.** `q_adddmareg` and
+  `q_adddmareg_sync` issue the same burst; the second drains inside its
+  own timed region. At a 128-instruction burst the core sees **128
+  cycles** and the work costs **505** — 377 cycles in flight when the
+  last `.ttinsn` returned, growing linearly, so nothing was ever waited
+  for. That is `cost-model.md`'s "the constraint is the un-modelled
+  RISC-V front end" made quantitative in one number.
+  It also found one real gap in tt-sim, recorded and **not** acted on:
+  Blackhole's multiply is one cycle of EX1 plus one of EX2, an occupancy
+  of 1 and a latency of 2, and `cost.py` charges the occupancy with no
+  scoreboard entry for the result — so a dependent chain reads 1.000
+  where the pipeline description gives 2. An under-charge, which is the
+  direction the policy asks for; closing it is a separate change with its
+  own gate run.
+  The prediction placed on record before the hardware run: phase T's
+  fusion delta, phase C's direction delta, phase Q's knee and phase F's
+  footprint row are all **forced** to zero against tt-sim — it has no
+  instruction cache, no branch predictor and an unbounded queue — so a
+  difference on a card is the whole result. Runbook in
+  `perfbench/riscvbench/README.md`, methodology in
+  [`docs/plans/riscv-front-end-benchmark.md`](docs/plans/riscv-front-end-benchmark.md).
+- **It has now run on Blackhole silicon** (2026-08-05), and three of the
+  four pre-declared numbers came out **against** the null. Two datasets
+  are tracked in `tt_sim/perf/datasets/`, so
+  `python3 -m tt_sim.perf.riscv_bench_sweep` reproduces it all with no
+  hardware. The instrument is live — `rv_div` 33.001, `rv_load_chase`
+  8.098, `rv_store_spread` 5.217, `rv_mul_dep` 1.985, all four above the
+  1.000 floor — so every 1.000 elsewhere in the run is a finding.
+  **`.ttinsn` fusion does not happen.** `spread4 − fuse4` is **+0.077**
+  cycles/group where `PushTensixInstruction.md` predicts **+3.000**, in
+  all six thread slots and in both runs. The "two different quantities"
+  reading that resolved the `RDCFG` conflict was looked for and closed:
+  the kernel ELF was disassembled and the four `.ttinsn` words really are
+  adjacent; the fetch-line-straddle hypothesis predicts +2 and is refuted
+  outright by `tt_fuse2`, whose pairs are all co-resident in one 128-bit
+  read and still cost two cycles. `riscv.ttinsn_fusion` keeps its numbers
+  and its `isa_doc` rank and gains a **`contradiction`** field — a new
+  key, for the case the provenance convention describes as "record both
+  and say so" and had no vehicle for.
+  **There is an instruction-fetch cliff nothing has published**: flat at
+  ~0.998 cycles/instruction for 64…1024-instruction loop bodies and
+  **1.251 at 2048**, so a boundary sits between 4 KiB and 8 KiB of text —
+  identical at one, two and three threads, and identical in both runs.
+  **Issuing a Tensix instruction costs the core one cycle** (0.996–0.998
+  on three units) and scales 2×/3× with thread count for shared units
+  while `TTI_NOP` on unit `NONE` stays flat, which is the control that
+  makes the rest legible. `tt_adddmareg` at 2.972/5.987/8.995 reproduces
+  `tensixbench`'s independent `ADDDMAREG` 3.0 — the only entry in either
+  cost file now measured by two different benchmarks. **No branch penalty
+  is resolvable** (`taken − not taken` = −0.047; taken is marginally
+  *cheaper*), which bears on the mispredict **rate** and leaves the
+  documented 4-cycle **bubble** untested.
+  Phase Q was refused by the benchmark's own gate and its read-out has
+  been **rebuilt**: the point-by-point `q_ctrl` subtraction rested on a
+  false premise (the cascade evaluates all seven of its `if`s at every
+  burst length, so its cost is constant in `n`, not growing) and was
+  injecting ±17 cycles of structured error. Rebuilt on raw differences
+  over a wide baseline it says the core outruns ThCon at one thread (2.22
+  against 3.000 cycles/instruction, ~92 cycles still in flight at a
+  128-burst) and is fully back-pressured at three (8.99 against 9.000) —
+  but **a queue depth in entries is not resolvable** by this
+  construction, and the sweep must reach n ≈ 1024 to settle it. The gate
+  was not weakened. **Zero cost-table numbers changed**; seven
+  `corroboration` fields were added, all under `arch_overrides.blackhole`.
+- **Two of the silicon residuals were then adjudicated, and only one was
+  a defect** (2026-08-05). `rv_div`'s 33.001 against a charged 6 is the
+  floor policy working: 6–33 is a *data* dependence — "dependent upon the
+  magnitude of the dividend" — so the ends are two operands, the function
+  between them is published nowhere, and interpolating would be an
+  invented curve wearing a citation. The exposure was measured rather
+  than argued: across four in-tree Blackhole replay guards a kernel
+  launch executes **0–2 divides in 40,000–80,000 instructions** with
+  **9-to-12-bit** dividends, against the benchmark's 29 significant bits.
+  **So 33 is the benchmark's operand, not the instruction as kernels use
+  it** — a finding about the benchmark; the floor stands and the reasoning
+  is recorded in `tt_sim/pe/rv/cost.py`.
+  `rv_load_chase`'s 8.098 against a charged 2 **was** a defect, in the
+  sweep and not in the table. The prediction was read off `model.py`'s
+  `_LOAD_LATENCY_KEYS`, which names `l1_dcache_hit` because that is the
+  low end of a two-ended cost and the right thing to *charge* a kernel
+  whose hit rate nobody publishes — and the wrong authority for a probe
+  whose access pattern is known. **The L0 data cache is 64 bytes, "4
+  lines of 16 bytes each"**, and the chase walks a 1 KiB ring, so
+  `l1_dcache_miss` is the row it reaches under any organisation. The
+  sweep now picks the row from each probe's working set against that
+  published capacity (new `riscv.l0_data_cache`, `isa_doc`, charged by
+  nothing), and the residual is **+0.098** where it was +6.098.
+  `rv_load_indep` sits *exactly* on the capacity, which the page does not
+  settle either way, so its prediction was deliberately **not** moved to
+  match its reading. **No simulated cycle changed**: this is a reporting
+  fix, and the RV load path still charges the hit row.
+- **Phases S and G ran on the card, and one of the two pre-declarations only
+  half-held** (2026-08-05). Four more runs — `--blocks 32`, `--blocks 8` and
+  two single-phase `--gset` runs — all four banked in `tt_sim/perf/datasets/`.
+  **The Tensix instruction queue is ONE PER CORE**: `D` at k issuing threads
+  over `D` at one reads 0.97×/0.95× at two and 1.06×/1.07× at three, where a
+  shared queue predicts 0.50× and 0.33×, and the spinning control moves
+  0.91×–1.00× as both hypotheses require. Four discriminating comparisons, two
+  runs, none within a factor of two of the shared prediction.
+  **Phase G tightened the footprint boundary from an octave to 4096–5120 bytes
+  and found a plateau**: 1.000 at 4096, 1.153 at 5120, 1.252 at 6144 and 7168,
+  1.251 at 8192. A graded rise that saturates is the signature of *partial*
+  residency, and it is equally the signature of a fixed prefetch reach — so
+  `docs/bh_arch.md` §1.1 records the shape and **keeps its noun**: a boundary
+  in loop-body size, not a cache capacity, because nothing publishes one.
+  **What did not hold is the SIZE of phase Q's correction.** It was declared
+  that phase S should read above phase Q by the reference burst's own occupancy,
+  ~8 entries. It reads 15.3 above — 31 against 16. Exactly 8.0 is the declared
+  term, to a tenth of an entry; the remaining ~5–7 is a difference between the
+  two burst *forms* that reproduces to the cycle in four runs and is **not
+  explained**. A third estimator sharing no term with the backlog arithmetic
+  puts the forms 7.0 entries apart too, so it is not the correction. The
+  leading candidate — phase S drains the pipe before `t0` and phase Q does not,
+  so a saturated backend carries the previous burst's residue into `plain`
+  forever — is a one-parameter fit to three points and is untested. **So the
+  depth is banked as a range, ~26–31 entries, and the old ~14–16 headline is
+  retracted as two corrections short.** The sweep gained `_depth_reconcile`,
+  which prints the whole comparison and says `RECONCILED` on a synthetic device
+  whose queue really does hold one depth, so "the forms disagree" is a reading
+  the instrument can distinguish rather than something it only ever prints.
+  **Phase R regressed and it is not ours**: two R² failures, both
+  `rv_store_spread` at t2/t3 — the only phase-R probe where three cores hammer
+  L1 stores at once — and both single-point outliers rather than slope changes.
+  Phase R's kernel carries no phase-S or phase-G text and every uncontended
+  probe is unchanged to the cycle. Nothing was changed on the strength of it;
+  the gate refusing a phase whose contended slots went non-linear is the gate
+  working, and the single-thread column still passes 4 of 4. No cost table
+  gained or lost a cycle count; one `corroboration` field was rewritten to
+  carry phase G and to stop calling the step "an instruction-cache capacity".
+- ~~**Two follow-ups to the silicon run are built and unrun**~~ **— run, see
+  above** (2026-08-05). `riscvbench` gains **phase S** — is the Tensix
+  instruction queue **shared between the three TRISCs or private to each?** —
+  and
+  **phase G**, which narrows the loop-body boundary phase F bracketed between
+  4 KiB and 8 KiB by sweeping 1280/1536/1792. The interesting half is that
+  **the construction §1.10 named as the answer does not work**: one thread
+  issuing while another only *spins* separates nothing, because a spinning
+  thread pushes no `.ttinsn` and therefore holds no queue entry under either
+  hypothesis. Only a **saturated** second thread occupies entries (occupancy
+  is arrival rate × residence time, so a slow one holds none), and the backend
+  bandwidth it steals is measured in the same slot by `s_co_sync` and divided
+  back out. The spinner is kept as the *control* — both hypotheses predict it
+  changes nothing. The second half of the fix is the **reference burst**:
+  phase Q subtracts its value at n = 16 as `tensix_sync()`'s own cost, which
+  assumes the queue is empty there, and it is not — `n·(1 − p/S)` is ~10
+  entries — so at two and three threads a shared queue's per-thread share can
+  be *smaller than the reference*, which makes phase Q's multi-thread backlogs
+  **structurally zero** rather than unluckily small. Phase S references n = 4
+  and reports `D = backlog/S + 4·(1 − p/S)`; its verdict is a **ratio between
+  thread counts** (1.00× per-thread, 1/k shared) and one variant produces no
+  verdict at all. A consequence written down as a prediction rather than an
+  edit: phase Q's depth is a **lower bound** by that same arithmetic.
+  Phase G is a separate phase, and split into three `--gset` builds, for a
+  measured reason — phase F's kernel is within a few hundred bytes of
+  tt-metal's config buffer and widening it aborts the launch with `Program
+  size (125040) too large for kernel config buffer (70656)` — which leaves
+  phase F's bodies untouched and both tracked datasets reproducible.
+  Verified against tt-sim, where **both answers are forced** (no instruction
+  cache, `push_mop_instruction` is a list append): phase G reads a flat 1.001
+  at every footprint and phase S refuses a depth in every slot and prints NO
+  VERDICT. At the time of this entry neither had run on a card, no cost table
+  changed, and `docs/bh_arch.md` §1.1 and §1.10 gained pointers and a
+  retraction but no numbers.
+- **`docs/bh_arch.md` is new** (2026-08-05) — a record of Blackhole
+  microarchitectural facts established by measurement, categorised by
+  whether each **agrees with**, **contradicts** or is **absent from** the
+  published documentation. It exists because the cost tables' discipline
+  has a gap the front-end run walked into: every table number must trace
+  to a document and a measurement enters only as `corroboration`, so **a
+  quantity no document mentions has nowhere to be recorded** — a
+  corroboration needs something to corroborate. The i-cache cliff is
+  exactly that, and is its first entry. The file loads into no code and
+  competes with no table; where an entry does exist it points at that
+  entry's `corroboration` rather than restating the number. **The tension
+  is stated rather than filed as solved**: one number and a new document
+  are proportionate, and if it becomes ten the question of whether the
+  tables need a rank comes back and should be answered deliberately.
+  Also holds `tensixbench`'s findings — the `ADDDMAREG` family at 3
+  cycles, `RDCFG` at 1 rather than the documented ≥ 2, no resolvable
+  source-data-format effect across four formats with a null control that
+  makes it a finding, the fidelity arithmetic confirmed at +16/+32, and
+  `MVMUL`'s **two regimes** (~1.07 cycles MOP-issued against ~6 through
+  the Wait Gate), which is the one most likely to mislead a reader who
+  quotes a single number. Everything in it is **Blackhole**, and it says
+  which findings would need their own Wormhole run —
+  `UnpackRowWidth` differing 16 versus 32 between the two being the
+  standing reminder that they diverge in exactly this kind of detail.
 - **The config-write ordering bug is fixed** (2026-08-04) — the one the
   `RDCFG` table entry above made unreachable without making untrue. The
   fault was in `TensixBackendUnit.clock_tick`, not in the config unit:
@@ -1806,6 +2091,14 @@ status there:
   say congestion "can negatively impact latency" and quantify
   nothing), and with them the router-to-router links' own occupancy,
   which cannot be modelled without an arbiter between two senders.
+  **And it cannot come from tt-metal's measured NoC dataset either**,
+  tested 2026-08-05: that file changes the flow count only by resizing
+  a grid, so concurrency and geometry are never separated, and its one
+  scalar per key already holds the issuing core's loop. It *bounds*
+  congestion (per-core bandwidth falls ~4× from a 2×2 grid to the full
+  device) without supplying it. `python3 -m
+  tt_sim.perf.noc_dataset_sweep` prints the argument and names the four
+  card measurements that would settle it.
   The per-trid response-ordering hazard is **closed** (responses match
   their request by issue number rather than by arrival order), not
   merely still absent.

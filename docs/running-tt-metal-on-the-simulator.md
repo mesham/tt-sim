@@ -323,25 +323,90 @@ On by default; warns (does not stop) after N cycles of no observable progress.
 | `TT_SIM_DEADLOCK` | set falsy (`0/false/no/off`) to disable |
 | `TT_SIM_DEADLOCK_THRESHOLD` | cycles of no progress before a `[DEADLOCK …]` warning (default `50000`); lower it to surface stalls sooner |
 
-A wedged **Tensix backend unit** does not show up there, because the rest of the
-device carries on: nothing back-pressures the baby RISC-V cores on Tensix
-instruction issue, so the kernel behind a blocked unpacker runs to the end and
-reports done. A second, independent check reports that one — a
-`[UNIT STALL cycle=…]` block naming the unit, the thread, the opcode and the Src
-bank it is waiting for.
+### 4.5 Wedged Tensix backend units
+
+A wedged **Tensix backend unit** does not show up in the watchdog above, because
+the rest of the device carries on: nothing back-pressures the baby RISC-V cores
+on Tensix instruction issue, so the kernel behind a blocked unpacker runs to the
+end and reports done. Two further checks cover that, and **they are not
+equivalent** — one is a proof, the other is a hint. Reach for the proof first.
 
 | Variable | Effect |
 | --- | --- |
-| `TT_SIM_UNIT_STALL` | set falsy to disable the per-unit check |
-| `TT_SIM_UNIT_STALL_THRESHOLD` | consecutive cycles one unit may stay blocked on a single instruction (default `10000`) |
+| `TT_SIM_UNIT_STALL` | set falsy to disable **both** checks below |
+| `TT_SIM_UNIT_STALL_THRESHOLD` | consecutive cycles one unit may stay blocked on a single instruction before a `[UNIT STALL]` hint (default `10000`). Has no effect on `[UNIT WEDGED]` |
 
-The default is measured, not guessed: every replay guard, example and
+#### `[UNIT WEDGED]` — the authoritative one
+
+```
+[UNIT WEDGED cycle=41678] Unpacker 0 is still blocked with every baby core on the tile in soft reset
+  UNPACR_NOP from thread 1: waiting for SrcA bank 0 to be given back by the Matrix Unit (dvalid was set and never cleared)
+  ...
+```
+
+If you see this, you have a bug. It is not a heuristic and **has no threshold** —
+there is nothing to tune, and `TT_SIM_UNIT_STALL_THRESHOLD` cannot silence it.
+The reasoning is short enough to check: a Src bank is handed back to the unpacker
+by an *instruction*, and no thread can issue an instruction from soft reset. So a
+unit still blocked once every baby core on its tile is in reset is waiting for
+something that can never happen, whatever the cycle count says. (A short grace
+period covers a backend instruction that was still in flight when the reset
+landed; those retire in single-digit cycles.)
+
+Two practical consequences:
+
+- It fires on a **short** reproduction — one that finishes long before any cycle
+  threshold could elapse, which is exactly when someone is watching. The minimal
+  `UNPACR_NOP` deadlock reproduction runs ~18,300 cycles end to end and is caught.
+- It fires **after** the launch it belongs to has reported done. That pairing is
+  correct, not a contradiction: on this model the issuing core is never
+  back-pressured, so the launch completes and on silicon it is the *next* launch
+  that hangs. See ROADMAP.md, "Unpacker dvalid deadlock".
+
+No in-tree workload has ever produced one: not the 41 surveyed replay guards,
+examples and differential op tests, and not any `examples/pipestall`
+configuration. It is a warning today only because it is young; it is the check
+intended to be promoted to a hard error.
+
+#### `[UNIT STALL]` — a hint, and only a hint
+
+Fires when one unit stays blocked on the same latched instruction for
+`TT_SIM_UNIT_STALL_THRESHOLD` consecutive cycles, naming the unit, thread,
+opcode and Src bank. It is genuinely useful — on a broken eight-core GEMM it
+named every affected worker and none on the corrected form — but it **can fire
+on correct code**, and no threshold avoids that.
+
+The reason is architectural, not a tuning miss. A unit legitimately waits on the
+whole downstream chain (math → Dst → output CB → packer → a consumer that may be
+on another core), so the longest legitimate blocked run is linear in the
+downstream consumer's cost with no ceiling. `examples/pipestall` measures it at
+`5 · PIPESTALL_DELAY + 56` cycles (r = 1.000), so a consumer doing ~10,000 cycles
+of ordinary work per tile trips the default on a kernel that computes the right
+answer. Deeper buffering does not help: four credits or a four-page output CB
+each bought under 8%, because a rate-limited producer stalls one consumer
+turnaround per tile however deep the pipe. Raising the threshold to cover that
+would defeat the other end — the wedge reproduction is only ~18,300 cycles long,
+so anything above ~16,000 misses it. The interval between "high enough for a
+correct pipeline" and "low enough for a short wedge" is empty.
+
+So the message does not claim a verdict. It prints both readings and names the
+line that settles it:
+
+- **`[UNIT STALL CLEARED]`** for the same unit ⇒ it recovered. Deep pipeline;
+  nothing is wrong, and the block's true length is in that line.
+- **`[UNIT WEDGED]`** for the same unit ⇒ it never can. Act on that one.
+
+Each unit reports **once per waited-on instruction** for the whole run, not once
+per detection window, so the number of reports tells you how many units are
+affected rather than how long you left the run going.
+
+The default of 10,000 is measured, not guessed: every replay guard, example and
 differential op test in the tree was instrumented for the longest legitimate
-blocked run, with and without `TT_SIM_COST_MODEL`, and the worst case is 3,528
-cycles (Wormhole `sfpumath`, unpacker 1 waiting for the SFPU to hand SrcB back).
-Raise it if a kernel with a much longer per-tile compute than anything in-tree
-trips it; the count is of *consecutive* blocked cycles, so a unit that waits
-repeatedly but briefly never accumulates.
+blocked run, with and without `TT_SIM_COST_MODEL`, and the worst single-core case
+is 3,528 cycles (Wormhole `sfpumath`, unpacker 1 waiting for the SFPU to hand
+SrcB back). Raise it if you are running a deliberately deep cross-core pipeline
+and do not want the hint; the count is of *consecutive* blocked cycles, so a unit
+that waits repeatedly but briefly never accumulates.
 
 ---
 
