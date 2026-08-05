@@ -350,11 +350,12 @@ What to look for, in the read-out's own words:
   reached the drained rate, so the core is back-pressured from there on.
 - **`the backlog FLATTENED at ~X cycles`** — the real prize. It means the burst
   stopped absorbing, and `X / (drained rate)` is the queue's depth **in
-  entries**. On Blackhole, at one issuing thread, that read ~14–16 — **and it is
-  a lower bound that phase S has since corrected to a range of ~26–31**, because
-  this read-out drops the reference burst's own occupancy and phase S's does
-  not. Read the phase-S block and the reconciliation below it, not this line
-  alone.
+  entries**. **It is a LOWER BOUND**, because this line drops the reference
+  burst's own occupancy and phase S's read-out does not. On Blackhole at one
+  issuing thread it printed ~14–16 pre-drain and ~22 post-drain, against a
+  settled depth of **~31–32** once the reference-burst term is added back and
+  both forms are drained. Read the phase-S block and the reconciliation below
+  it, not this line alone.
 - **`BACKLOG STILL GROWING` / `NO KNEE up to n=1024`** — also a result, and an
   honest one: the queue is deeper than this sweep reaches. Do not read a depth
   off a backlog that is still growing; the program refuses to, and so should
@@ -446,22 +447,26 @@ roughly the difference. It read 31 against phase Q's 16 — a lower bound
 confirmed in direction, but a gap of 15.3 entries where 8.0 was declared. The
 8.0 is exactly the reference-burst term; the remaining ~5–7 entries are a
 difference between the two burst *forms* that is reproducible to the cycle in
-four runs and is **not explained**. The sweep prints the whole reconciliation
-under `Do the two burst forms agree about the depth?`, and
-`docs/bh_arch.md` §1.10 banks a range rather than a number because of it.
+four runs and was **not explained** at the time. The sweep prints the whole
+reconciliation under `Do the two burst forms agree about the depth?`. **Run 5
+below explained it**, so §1.10 now banks a number rather than a range.
 
-### Run 5 — the one run this repo is actually waiting for
+### Run 5 — the untimed drain, pre-declared and confirmed
 
-**`QLOOPPROBE` now carries an untimed `ckernel::tensix_sync()` immediately
-before `t0`**, which phase S has always had and phase Q never did. That one line
-is a *test* of the leading explanation for the residual above — a saturated
-backend never idles, so phase Q's `plain` may have been carrying the previous
-burst point's residue forever — and **the prediction was written down before the
-line was**. It is in
+**`QLOOPPROBE` carries an untimed `ckernel::tensix_sync()` immediately before
+`t0`**, which phase S has always had and phase Q never did. That one line is a
+*test* of the leading explanation for the residual above — a saturated backend
+never idles, so phase Q's `plain` was carrying the previous burst point's
+residue forever — and **the prediction was written down before the line was**.
+It is in
 [`docs/plans/riscv-front-end-benchmark.md`](../../docs/plans/riscv-front-end-benchmark.md),
-"The untimed drain, pre-declared before it was written".
+"The untimed drain, pre-declared before it was written", and the section after
+it scores what came back.
 
-Seconds on the card, one launch of phase Q and one of phase S:
+**It has run** (2026-08-05, Blackhole, banked as
+`tt_sim/perf/datasets/riscvbench-qdrain.csv`), so what follows is the recipe for
+reproducing it rather than a request. Seconds on the card, one launch of phase Q
+and one of phase S:
 
 ```bash
 cd perfbench/riscvbench/src
@@ -475,30 +480,46 @@ python3 -m tt_sim.perf.riscv_bench_sweep --measured riscvbench-qdrain.csv
 ```
 
 and read the raw t1 rows plus `Do the two burst forms agree about the depth?`.
-**What confirms it**, against the pre-drain run banked in
+**What confirmed it**, against the pre-drain run banked in
 `tt_sim/perf/datasets/riscvbench-blackhole.csv`:
 
 | probe (t1) | n = 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `q_loop_addi` — must not move | 32 | 48 | 84 | 156 | 300 | 588 | 1164 |
+| `q_loop_addi` — **read** | 28 | 48 | 84 | 156 | 300 | 588 | 1164 |
 | `q_loop_adddmareg` — was | 31 | 48 | 107 | 320 | 704 | 1472 | 3008 |
-| `q_loop_adddmareg` — **confirms at** | 31 | 48 | 107 | **~299** | **~683** | **~1451** | **~2987** |
-| `q_loop_adddmareg_sync` — must not move | 63 | 111 | 207 | 399 | 783 | 1551 | 3087 |
+| `q_loop_adddmareg` — **predicted** | 31 | 48 | 107 | **299** | **683** | **1451** | **2987** |
+| `q_loop_adddmareg` — **read** | 28 | 48 | 107 | **299** | **683** | **1451** | **2987** |
+| `q_loop_adddmareg_sync` — must not move, and did not | 63 | 111 | 207 | 399 | 783 | 1551 | 3087 |
 
-i.e. a **21-cycle fall at n ≥ 128 and nowhere else**, which makes phase Q's
-run-ahead 32.3 against phase S's 32.3 and closes the two forms to 0.0 entries
-under the sync-free estimator.
+i.e. a **21-cycle fall at n ≥ 128 and nowhere else**, exactly as predicted,
+which puts phase Q's run-ahead at 32.3 against phase S's 32.3 — the two forms
+**0.0 entries apart** under the sync-free estimator and `RECONCILED: 0.7` under
+the levelled one.
 
-**What refutes it:** `q_loop_adddmareg` not falling by 21 ± 14 cycles at
-n ≥ 128; or `q_loop_addi` or `q_loop_adddmareg_sync` moving at all, neither of
-which is edited and either of which would mean the change perturbed instruction
-placement rather than the queue. Any of those and the untimed-drain explanation
-is **wrong**, `docs/bh_arch.md` §1.10 keeps its ~26–31 range, and nothing in
-the sweep gets adjusted to make the numbers meet.
+**The one thing that moved and should not have**: `q_loop_addi` and
+`q_loop_adddmareg` each came in 3–4 cycles low at n = 16 and identical to the
+cycle everywhere else. That is inside the 17-cycle `q_ctrl` spread for one raw
+point and the two banked runs already disagree by a cycle there, but n = 16 is
+the backlog's reference point, so it moved the levelled reading by one entry —
+it is reported in `docs/bh_arch.md` §1.10 and scored in the plan doc rather than
+absorbed.
 
-**Until this run exists**, `q_loop_addi` and `q_loop_adddmareg` in the two
-tracked full-run datasets are a record of the *pre-drain* binary and their
-headers say so.
+**What would have refuted it:** `q_loop_adddmareg` not falling by 21 ± 14 cycles
+at n ≥ 128; or `q_loop_addi` or `q_loop_adddmareg_sync` moving, neither of which
+is edited and either of which would have meant the change perturbed instruction
+placement rather than the queue. None fired, and nothing in the sweep was
+adjusted to make the numbers meet.
+
+`q_loop_addi` and `q_loop_adddmareg` in the two tracked full-run datasets are a
+record of the *pre-drain* binary — superseded for the depth, still the "before"
+arm of this comparison, and still surrounded by 1500-odd rows that nothing here
+touches. Their headers say exactly that.
+
+**What this run does NOT say.** It is `--variants t1`. It produces **no**
+shared-versus-per-thread verdict — that is a ratio between thread counts and
+comes from runs 3 and 4 — and it carries no phase R, so the live-instrument
+check cannot run against it.
 
 ---
 

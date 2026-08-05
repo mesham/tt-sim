@@ -1373,6 +1373,22 @@ def test_the_single_phase_gset_runs_are_tracked_and_never_chosen():
         assert {r["variant"] for r in rows} == {"t1"}
 
 
+def test_the_queue_drain_run_is_tracked_and_never_chosen():
+    """The post-drain phase-Q run confirms a pre-declared prediction and is the
+    only dataset in which the two burst forms' depths reconcile -- so it is
+    tracked. It is `--phase qs --variants t1`: no phase R, so the
+    live-instrument check cannot run against it, and one thread count, so it
+    carries no shared-versus-per-thread verdict. Sweeping it as if it were a
+    full run would let both absences read as answers."""
+    tracked = {p.name for p in sweep.reference_datasets()}
+    assert sweep.QUEUE_DRAIN_DATASET in tracked
+    assert sweep.QUEUE_DRAIN_DATASET != sweep.PRIMARY_DATASET
+    assert sweep.default_measured_path().name == sweep.PRIMARY_DATASET
+    rows, _ = sweep.read_csv(sweep.DATASET_DIR / sweep.QUEUE_DRAIN_DATASET)
+    assert {r["phase"] for r in rows} == {"q", "s"}
+    assert {r["variant"] for r in rows} == {"t1"}
+
+
 def test_the_tracked_datasets_carry_their_own_provenance():
     """A measurement separated from its card, firmware and flags is not one."""
     for path in sweep.reference_datasets():

@@ -160,6 +160,21 @@ FOOTPRINT_DATASETS = (
     "riscvbench-blackhole-gset2.csv",
 )
 
+#: The post-drain phase-Q run: ``--phase qs --variants t1 --blocks 32``, taken
+#: after ``QLOOPPROBE`` gained the untimed ``ckernel::tensix_sync()`` that phase
+#: S always had. It is tracked because it is the confirming run of a
+#: pre-declared prediction -- the raw cycles and the three refutation criteria
+#: were written down before the kernel was touched -- and because it is the only
+#: dataset in which the two burst forms' depth estimates RECONCILE.
+#:
+#: It is never a candidate for :data:`PRIMARY_DATASET`, and the reason is what
+#: its own header says at length: two phases at one thread carries no phase R,
+#: so the live-instrument check cannot run against it, and one thread count
+#: carries no shared-versus-per-thread ratio. It answers the question it was run
+#: for and nothing else, which is exactly why it must not be swept as if it were
+#: a full run.
+QUEUE_DRAIN_DATASET = "riscvbench-qdrain.csv"
+
 #: How many standard errors of the fitted slope count as "the fit cannot tell".
 #: Two, i.e. ~95 %, which is the ordinary convention and is written here rather
 #: than inlined so that widening it is a visible edit.
@@ -230,7 +245,9 @@ def default_measured_path(arch=None):
     Never :data:`MIN_BLOCKS_DATASET`, whatever ``arch`` asks for: that file is a
     deliberately-invalid run kept as evidence about the instrument. Never a
     :data:`FOOTPRINT_DATASETS` entry either: those are twelve rows of one phase
-    at one thread, so nothing in them could fail the live-instrument check.
+    at one thread, so nothing in them could fail the live-instrument check. And
+    never :data:`QUEUE_DRAIN_DATASET`, for the same reason plus one more: it has
+    a single thread count, so it cannot produce phase S's verdict either.
     """
     if arch is not None:
         candidate = DATASET_DIR / f"riscvbench-{arch}.csv"
@@ -238,7 +255,7 @@ def default_measured_path(arch=None):
     primary = DATASET_DIR / PRIMARY_DATASET
     if primary.exists():
         return primary
-    never = {MIN_BLOCKS_DATASET, *FOOTPRINT_DATASETS}
+    never = {MIN_BLOCKS_DATASET, QUEUE_DRAIN_DATASET, *FOOTPRINT_DATASETS}
     found = [p for p in reference_datasets() if p.name not in never]
     return found[0] if len(found) == 1 else None
 

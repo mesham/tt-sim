@@ -147,8 +147,10 @@
 // loop body.
 //
 // PHASE S -- is the queue phase Q measured SHARED between the three TRISCs, or
-// PRIVATE to each? Phase Q resolved a depth of ~14-16 entries at one issuing
-// thread and could not resolve one at any other, so the two hypotheses are
+// PRIVATE to each? Phase Q resolved a depth at one issuing thread (~31-32
+// entries on Blackhole silicon, once its read-out's dropped reference-burst
+// term is added back and its bursts are drained) and could not resolve one at
+// any other, so the two hypotheses are
 // still identical from where it stands. The construction that separates them,
 // and the two that look like they would and do not, are argued in
 // rvbench_layout.h's RVBENCH_S_* block. In one line: only a SATURATED second

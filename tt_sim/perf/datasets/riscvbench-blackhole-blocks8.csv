@@ -16,19 +16,31 @@
 # collected=2026-08-05
 # host=unrecorded
 #
-# THE KERNEL HAS MOVED UNDER THIS FILE, in one place, after this run. On
-# 2026-08-05 `QLOOPPROBE` in kernels/compute/rv_probes.cpp gained an untimed
-# `ckernel::tensix_sync()` between `bench_barrier()` and `t0` -- see "The
-# untimed drain, pre-declared before it was written" in
-# docs/plans/riscv-front-end-benchmark.md. So `q_loop_addi` and
-# `q_loop_adddmareg` here are a record of the PRE-DRAIN binary
-# (`q_loop_adddmareg` predicted 21 cycles lower at n >= 128 on the current
-# tree, `q_loop_addi` predicted unchanged). No other probe is edited: QPROBE
-# and `q_loop_adddmareg_sync` are untouched and no other phase compiles
-# QLOOPPROBE. The one measured side effect, from a deterministic tt-sim A/B of
+# THE KERNEL HAS MOVED UNDER THIS FILE, in one place, after this run, AND THE
+# POST-DRAIN RUN NOW EXISTS. On 2026-08-05 `QLOOPPROBE` in
+# kernels/compute/rv_probes.cpp gained an untimed `ckernel::tensix_sync()`
+# between `bench_barrier()` and `t0` -- see "The untimed drain, pre-declared
+# before it was written" in docs/plans/riscv-front-end-benchmark.md, and the
+# section after it that scores the prediction. So `q_loop_addi` and
+# `q_loop_adddmareg` here are a record of the PRE-DRAIN binary. No other probe
+# is edited: QPROBE and `q_loop_adddmareg_sync` are untouched and no other
+# phase compiles QLOOPPROBE.
+#
+# SO: those two probes are SUPERSEDED as a statement about the device's queue
+# depth -- `riscvbench-qdrain.csv` in this directory is the same probes on the
+# same card with the drain in place, and it is what any depth is now read from
+# -- and NOTHING ELSE IN THIS FILE IS. Every reason this dataset is tracked
+# survives untouched: the `--blocks` floor (a slope-phase question that never
+# touches phase Q), phase S's validity and its per-thread verdict (a ratio
+# between three thread counts, which the one-thread post-drain run cannot speak
+# to at all), and the demonstration that phases Q and S are independent of
+# `--blocks` by construction. The pre-drain rows also remain load-bearing as
+# the "before" arm: the pre-declared 21-cycle fall is a difference against them.
+#
+# The one measured side effect of the edit, from a deterministic tt-sim A/B of
 # the two kernels, is `q_ctrl` at n = 32 and n = 128 moving +1 cycle -- code
 # generation across kernel_main, not the queue; the primary dataset's header
-# gives it in full.
+# gives it in full, and how it scored on silicon.
 #
 # WHY IT FAILED, and it is not what a reader expects. FIVE OF THE SEVEN R^2
 # FAILURES ARE THE `loop_overhead` CONTROL ITSELF, at R^2 = 0.9894 and 0.9657
@@ -67,7 +79,9 @@
 # construction. This run is the measurement of that. Every phase-Q loop-form
 # point is within seven cycles of the primary's at a quarter the block count,
 # the one-thread backlog flattens at the same ~47 cycles for ~16 instructions
-# in flight, and PHASE S IS VALID HERE, reproducing the primary's depth exactly:
+# in flight (a PRE-DRAIN reading, superseded by riscvbench-qdrain.csv's 65
+# cycles; what it establishes here is the `--blocks` independence, not a
+# depth), and PHASE S IS VALID HERE, reproducing the primary's depth exactly:
 # 31 entries at one issuing thread, 29 at two (0.95x) and 33 at three (1.07x),
 # where a shared queue predicts 0.50x and 0.33x. Two runs, one card, and the
 # per-thread verdict in both.

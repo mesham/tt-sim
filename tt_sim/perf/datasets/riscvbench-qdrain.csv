@@ -1,0 +1,225 @@
+# riscvbench raw points -- see docs/plans/riscv-front-end-benchmark.md
+#
+# THIS IS THE POST-DRAIN PHASE-Q RUN. It is the confirming run of a
+# pre-declared prediction: on 2026-08-05 `QLOOPPROBE` in
+# kernels/compute/rv_probes.cpp gained an untimed `ckernel::tensix_sync()`
+# between `bench_barrier()` and `t0`, so phase Q's loop-form bursts start from
+# a drained queue exactly as phase S's always did, and the raw cycles this
+# would produce -- together with three ways it would be refuted -- were written
+# down BEFORE the line was ("The untimed drain, pre-declared before it was
+# written", and the section scoring it, in
+# docs/plans/riscv-front-end-benchmark.md). This file is what that section is
+# scored against. It is a REFERENCE MEASUREMENT, NOT RUN OUTPUT.
+#
+# device=blackhole-silicon simulator=no
+# firmware_bundle=19.6.0 kmd=2.10.0 -- as reported for the 2026-08-05 campaign
+#   this run belongs to; this run did not re-read them.
+# flags: --phase qs --variants t1 --blocks 32 (gset 0)
+# slow_dispatch=1
+# valid: NOT RECORDED -- the benchmark's stdout was not banked alongside this
+#   CSV. Recomputed from the rows here: the only monotonicity violation is the
+#   CASCADE probe `q_adddmareg` at n = 8 -> 16 (35 -> 30 cycles), which is the
+#   same class of failure -- one shot of a handful of cycles at a small n --
+#   that refused phase Q in both full runs. Every phase-Q LOOP-FORM series and
+#   every phase-S series is monotone, and those are the only series any
+#   conclusion below is read from.
+# rows=117 phases=q,s variants=t1
+# collected=2026-08-05
+# host=unrecorded
+#
+# ONE RUN, ON ONE CARD, by one operator, at one power state, on one day, and at
+# one thread count. Every conclusion drawn from it inherits that. The depth is
+# still a one-card, one-thread number; what changed is that the two
+# constructions that measure it now agree, not how many cards have seen it.
+#
+# WHAT THIS FILE CAN SPEAK TO, AND WHAT IT CANNOT. `--phase qs --variants t1`
+# is two phases at ONE issuing thread, so:
+#   * it settles the phase-Q/phase-S DEPTH reconciliation, which is entirely a
+#     one-thread quantity, and that is what it was run for;
+#   * it says NOTHING about whether the queue is shared or per-thread. That
+#     verdict is a ratio between thread counts, it needs at least t1,t2, and it
+#     comes from the earlier campaign's two full runs (0.97x/0.95x at two
+#     issuers, 1.06x/1.07x at three). Nothing here re-confirms it, and the
+#     sweep prints `NO VERDICT: only one thread count is in this file`;
+#   * it carries no phase R, so the LIVE-INSTRUMENT CHECK cannot run against
+#     it. A 1.000 in this file would not be readable; nothing in it is 1.000,
+#     but that is not the same as the check passing;
+#   * it carries no phase T, C, F or G, so it bears on fusion, branches and the
+#     instruction-footprint boundary not at all.
+# The sweep will never choose it for you (riscv_bench_sweep.QUEUE_DRAIN_DATASET).
+#
+# THE PREDICTION, AND WHAT CAME BACK. Raw t1 cycles, `q_loop_adddmareg`:
+#
+#        n =        16    32    64    128    256     512     1024
+#   pre-drain        31    48   107    320    704    1472     3008
+#   PREDICTED        31    48   107   *299*  *683*  *1451*   *2987*
+#   MEASURED         28    48   107    299    683    1451     2987
+#
+# Four for four at the four burst lengths the prediction moved, to the cycle.
+# The fall is exactly 21 cycles at every n >= 128 and zero at n = 32 and 64,
+# which is refutation criterion 1 (a fall under 7 or over 35 cycles) not firing.
+#
+# `q_loop_adddmareg_sync` -- criterion 3, and it is not edited at all -- is
+# 63 / 111 / 207 / 399 / 783 / 1551 / 3087, IDENTICAL TO THE CYCLE to both
+# banked full runs.
+#
+# `q_loop_addi` -- criterion 2, the control that pushes no Tensix instruction
+# and whose timed region must therefore be unchanged -- is
+# 28 / 48 / 84 / 156 / 300 / 588 / 1164, identical to the cycle at six of its
+# seven points and 3-4 cycles low at n = 16 (32 in the --blocks 32 run, 31 in
+# the --blocks 8 run, 28 here). That is REPORTED RATHER THAN GLOSSED: it is the
+# reference point of phase Q's backlog, `q_loop_adddmareg` moved by the same 3
+# cycles at the same point, and it is 3 cycles against a `q_ctrl` spread of 17
+# cycles for one raw point in this very run. It did not fire the criterion --
+# six of seven points identical, and the two banked runs already disagree by a
+# cycle at that one point -- but it is not a clean pass either, and it moves
+# the levelled reconciliation by one entry. See the scoring section in the plan
+# document, which works through what it would have cost.
+#
+# THE DERIVED QUANTITIES, all of which were pre-declared:
+#   * `sync - plain` saturates at 100 cycles (was 79). 100 is phase S's value.
+#   * `3n - plain[n]` is a FLAT 85 cycles at n = 64..1024, where it previously
+#     stepped 85 -> 64. 85 is phase S's value at every saturated n.
+#   * the backlog flattens at a constant 65 cycles from n = 64 onward (it
+#     previously stepped 68 -> 47), and the marginal cost of one more
+#     instruction reaches exactly 3.00 against a drained 3.000.
+#   * the reconciliation, which is the point of the run:
+#
+#       form                          n_ref      p      S  backlog  bare  levelled  run-ahead
+#       phase Q (16-instr block)         16  1.127  3.000       65  21.7      31.7       32.3
+#       phase S (4-instr block)           4  1.502  3.000       87  29.0      31.0       32.3
+#
+#     `RECONCILED: 0.7 entries`, against ~7 before. The RUN-AHEAD estimator --
+#     (n*S + c - plain[n])/S, with c the timed region's fixed cost from the
+#     issue-limited probe's intercept -- shares no term with the other two, uses
+#     neither `_sync` probe nor either reference burst, and reads 32.3 for BOTH
+#     forms. That independence is what makes this a confirmation rather than a
+#     fit.
+#
+# PHASE S IS UNCHANGED BY THE EDIT, which is the fourth check and was not
+# pre-declared as one. No phase but Q compiles QLOOPPROBE, and every phase-S
+# series here reproduces the primary dataset's to the cycle except at its
+# smallest point n = 4 (s_loop_addi 14 -> 17, s_co_repeat 12 -> 14,
+# s_solo_plain 8 -> 9, s_solo_sync 25 -> 30). `s_co_plain` is identical at all
+# eight burst lengths. Both p (1.502) and the intercept (12 cycles) are
+# unchanged, so nothing the reconciliation reads off phase S moved.
+#
+# arch=blackhole magic=0x7B10CF03 probe_mask=0x7FFFFFFFFFFFF phases=qs variants=t1 base_blocks=32 gset=0 group_reps=16 pad=16 stack_addr=0xFFB00F98 scratch_addr=0x0017D440 div_dividend=0x12345678 div_divisor=3
+phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
+q,t1,0,loop_overhead,-,1,1,32,64,76
+q,t1,0,loop_overhead,-,1,1,64,64,140
+q,t1,0,loop_overhead,-,1,1,96,64,204
+q,t1,0,loop_overhead,-,1,1,128,64,268
+q,t1,27,q_ctrl,TTQUEUE,1,1,1,1,6
+q,t1,27,q_ctrl,TTQUEUE,1,1,2,1,11
+q,t1,27,q_ctrl,TTQUEUE,1,1,4,1,20
+q,t1,27,q_ctrl,TTQUEUE,1,1,8,1,13
+q,t1,27,q_ctrl,TTQUEUE,1,1,16,1,21
+q,t1,27,q_ctrl,TTQUEUE,1,1,32,1,23
+q,t1,27,q_ctrl,TTQUEUE,1,1,64,1,17
+q,t1,27,q_ctrl,TTQUEUE,1,1,128,1,18
+q,t1,28,q_nop,TTQUEUE,1,1,1,1,7
+q,t1,28,q_nop,TTQUEUE,1,1,2,1,13
+q,t1,28,q_nop,TTQUEUE,1,1,4,1,23
+q,t1,28,q_nop,TTQUEUE,1,1,8,1,35
+q,t1,28,q_nop,TTQUEUE,1,1,16,1,37
+q,t1,28,q_nop,TTQUEUE,1,1,32,1,55
+q,t1,28,q_nop,TTQUEUE,1,1,64,1,87
+q,t1,28,q_nop,TTQUEUE,1,1,128,1,157
+q,t1,29,q_setdmareg,TTQUEUE,1,1,1,1,7
+q,t1,29,q_setdmareg,TTQUEUE,1,1,2,1,13
+q,t1,29,q_setdmareg,TTQUEUE,1,1,4,1,16
+q,t1,29,q_setdmareg,TTQUEUE,1,1,8,1,28
+q,t1,29,q_setdmareg,TTQUEUE,1,1,16,1,37
+q,t1,29,q_setdmareg,TTQUEUE,1,1,32,1,54
+q,t1,29,q_setdmareg,TTQUEUE,1,1,64,1,88
+q,t1,29,q_setdmareg,TTQUEUE,1,1,128,1,155
+q,t1,30,q_adddmareg,TTQUEUE,1,1,1,1,7
+q,t1,30,q_adddmareg,TTQUEUE,1,1,2,1,13
+q,t1,30,q_adddmareg,TTQUEUE,1,1,4,1,16
+q,t1,30,q_adddmareg,TTQUEUE,1,1,8,1,35
+q,t1,30,q_adddmareg,TTQUEUE,1,1,16,1,30
+q,t1,30,q_adddmareg,TTQUEUE,1,1,32,1,55
+q,t1,30,q_adddmareg,TTQUEUE,1,1,64,1,101
+q,t1,30,q_adddmareg,TTQUEUE,1,1,128,1,319
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,1,1,21
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,2,1,21
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,4,1,26
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,8,1,36
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,16,1,60
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,32,1,108
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,64,1,204
+q,t1,31,q_adddmareg_sync,TTQUEUE,1,1,128,1,396
+q,t1,38,q_loop_addi,TTQUEUE,1,1,16,1,28
+q,t1,38,q_loop_addi,TTQUEUE,1,1,32,1,48
+q,t1,38,q_loop_addi,TTQUEUE,1,1,64,1,84
+q,t1,38,q_loop_addi,TTQUEUE,1,1,128,1,156
+q,t1,38,q_loop_addi,TTQUEUE,1,1,256,1,300
+q,t1,38,q_loop_addi,TTQUEUE,1,1,512,1,588
+q,t1,38,q_loop_addi,TTQUEUE,1,1,1024,1,1164
+q,t1,39,q_loop_adddmareg,TTQUEUE,1,1,16,1,28
+q,t1,39,q_loop_adddmareg,TTQUEUE,1,1,32,1,48
+q,t1,39,q_loop_adddmareg,TTQUEUE,1,1,64,1,107
+q,t1,39,q_loop_adddmareg,TTQUEUE,1,1,128,1,299
+q,t1,39,q_loop_adddmareg,TTQUEUE,1,1,256,1,683
+q,t1,39,q_loop_adddmareg,TTQUEUE,1,1,512,1,1451
+q,t1,39,q_loop_adddmareg,TTQUEUE,1,1,1024,1,2987
+q,t1,40,q_loop_adddmareg_sync,TTQUEUE,1,1,16,1,63
+q,t1,40,q_loop_adddmareg_sync,TTQUEUE,1,1,32,1,111
+q,t1,40,q_loop_adddmareg_sync,TTQUEUE,1,1,64,1,207
+q,t1,40,q_loop_adddmareg_sync,TTQUEUE,1,1,128,1,399
+q,t1,40,q_loop_adddmareg_sync,TTQUEUE,1,1,256,1,783
+q,t1,40,q_loop_adddmareg_sync,TTQUEUE,1,1,512,1,1551
+q,t1,40,q_loop_adddmareg_sync,TTQUEUE,1,1,1024,1,3087
+s,t1,0,loop_overhead,-,1,1,32,64,76
+s,t1,0,loop_overhead,-,1,1,64,64,140
+s,t1,0,loop_overhead,-,1,1,96,64,204
+s,t1,0,loop_overhead,-,1,1,128,64,268
+s,t1,41,s_loop_addi,TTQUEUE,1,1,4,1,17
+s,t1,41,s_loop_addi,TTQUEUE,1,1,8,1,24
+s,t1,41,s_loop_addi,TTQUEUE,1,1,16,1,36
+s,t1,41,s_loop_addi,TTQUEUE,1,1,32,1,60
+s,t1,41,s_loop_addi,TTQUEUE,1,1,64,1,108
+s,t1,41,s_loop_addi,TTQUEUE,1,1,128,1,204
+s,t1,41,s_loop_addi,TTQUEUE,1,1,256,1,396
+s,t1,41,s_loop_addi,TTQUEUE,1,1,512,1,780
+s,t1,42,s_co_plain,TTQUEUE,1,1,4,1,14
+s,t1,42,s_co_plain,TTQUEUE,1,1,8,1,24
+s,t1,42,s_co_plain,TTQUEUE,1,1,16,1,36
+s,t1,42,s_co_plain,TTQUEUE,1,1,32,1,60
+s,t1,42,s_co_plain,TTQUEUE,1,1,64,1,110
+s,t1,42,s_co_plain,TTQUEUE,1,1,128,1,299
+s,t1,42,s_co_plain,TTQUEUE,1,1,256,1,683
+s,t1,42,s_co_plain,TTQUEUE,1,1,512,1,1451
+s,t1,43,s_co_repeat,TTQUEUE,1,1,4,1,14
+s,t1,43,s_co_repeat,TTQUEUE,1,1,8,1,24
+s,t1,43,s_co_repeat,TTQUEUE,1,1,16,1,36
+s,t1,43,s_co_repeat,TTQUEUE,1,1,32,1,60
+s,t1,43,s_co_repeat,TTQUEUE,1,1,64,1,110
+s,t1,43,s_co_repeat,TTQUEUE,1,1,128,1,299
+s,t1,43,s_co_repeat,TTQUEUE,1,1,256,1,683
+s,t1,43,s_co_repeat,TTQUEUE,1,1,512,1,1451
+s,t1,44,s_co_sync,TTQUEUE,1,1,4,1,27
+s,t1,44,s_co_sync,TTQUEUE,1,1,8,1,39
+s,t1,44,s_co_sync,TTQUEUE,1,1,16,1,63
+s,t1,44,s_co_sync,TTQUEUE,1,1,32,1,111
+s,t1,44,s_co_sync,TTQUEUE,1,1,64,1,207
+s,t1,44,s_co_sync,TTQUEUE,1,1,128,1,399
+s,t1,44,s_co_sync,TTQUEUE,1,1,256,1,783
+s,t1,44,s_co_sync,TTQUEUE,1,1,512,1,1551
+s,t1,45,s_solo_plain,TTQUEUE,1,1,4,1,9
+s,t1,45,s_solo_plain,TTQUEUE,1,1,8,1,22
+s,t1,45,s_solo_plain,TTQUEUE,1,1,16,1,34
+s,t1,45,s_solo_plain,TTQUEUE,1,1,32,1,58
+s,t1,45,s_solo_plain,TTQUEUE,1,1,64,1,108
+s,t1,45,s_solo_plain,TTQUEUE,1,1,128,1,297
+s,t1,45,s_solo_plain,TTQUEUE,1,1,256,1,681
+s,t1,45,s_solo_plain,TTQUEUE,1,1,512,1,1449
+s,t1,46,s_solo_sync,TTQUEUE,1,1,4,1,30
+s,t1,46,s_solo_sync,TTQUEUE,1,1,8,1,37
+s,t1,46,s_solo_sync,TTQUEUE,1,1,16,1,61
+s,t1,46,s_solo_sync,TTQUEUE,1,1,32,1,109
+s,t1,46,s_solo_sync,TTQUEUE,1,1,64,1,205
+s,t1,46,s_solo_sync,TTQUEUE,1,1,128,1,397
+s,t1,46,s_solo_sync,TTQUEUE,1,1,256,1,781
+s,t1,46,s_solo_sync,TTQUEUE,1,1,512,1,1549

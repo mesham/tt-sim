@@ -1308,10 +1308,13 @@ int main(int argc, char** argv) {
         printf("phase S: is the Tensix instruction queue shared, or one per thread?\n");
         printf("%s\n", std::string(78, '-').c_str());
         printf(
-            "  EXPLORATORY, and it is the question phase Q left open: that phase resolved\n"
-            "  a depth of ~14-16 entries at ONE issuing thread and could not resolve one\n"
-            "  at any other, and a shared queue of depth D looks exactly like a per-thread\n"
-            "  queue of depth D when only one thread is looking at it.\n"
+            "  EXPLORATORY, and it is the question phase Q left open: that phase resolves\n"
+            "  a depth at ONE issuing thread and cannot resolve one at any other, and a\n"
+            "  shared queue of depth D looks exactly like a per-thread queue of depth D\n"
+            "  when only one thread is looking at it. (Phase Q's own read-out prints a\n"
+            "  LOWER BOUND -- ~16 entries pre-drain, ~22 after QLOOPPROBE gained its\n"
+            "  untimed sync -- because it drops the term below; the settled figure on\n"
+            "  Blackhole silicon is ~31-32.)\n"
             "\n"
             "  WHAT SEPARATES THE TWO, and what does not:\n"
             "    * a second thread that only SPINS does not. It pushes nothing, so it\n"
@@ -1340,9 +1343,11 @@ int main(int argc, char** argv) {
             "  rate from `s_loop_addi`. Both are measured in the same slot. The second\n"
             "  term is the reference burst's own occupancy, which phase Q's read-out\n"
             "  drops; it is ~2 entries here and ~10 there, so a phase-S depth at one\n"
-            "  thread is expected to come out ABOVE phase Q's ~14-16 by roughly that\n"
-            "  difference. If it does, phase Q's figure is a lower bound and this says by\n"
-            "  how much. If it does not, this correction is wrong and should be said so.\n\n",
+            "  thread is expected to come out ABOVE phase Q's printed figure by roughly\n"
+            "  that difference. If it does, phase Q's figure is a lower bound and this\n"
+            "  says by how much. If it does not, this correction is wrong and should be\n"
+            "  said so. On Blackhole silicon it did, and the two forms reconcile to 0.7\n"
+            "  entries once phase Q's bursts are drained too.\n\n",
             RVBENCH_S_MIN_N,
             RVBENCH_S_MIN_N);
 

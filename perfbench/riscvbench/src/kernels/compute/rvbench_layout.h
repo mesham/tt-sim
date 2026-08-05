@@ -91,8 +91,8 @@
 // ---------------------------------------------------------------------------
 // Phase S's burst form, and why phase Q's could not answer phase S's question.
 //
-// PHASE S ASKS ONE THING: is the ~14-16-entry Tensix instruction queue phase Q
-// measured SHARED between the three TRISCs or PRIVATE to each? Phase Q cannot
+// PHASE S ASKS ONE THING: is the Tensix instruction queue phase Q measured
+// SHARED between the three TRISCs or PRIVATE to each? Phase Q cannot
 // answer it, and neither could a longer or a repeated phase-Q run: a shared
 // queue of depth D and a per-thread queue of depth D are the same device seen
 // from one thread, and phase Q's multi-thread slots read zero.
