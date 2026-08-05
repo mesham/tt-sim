@@ -1,0 +1,67 @@
+# nocbench plan -- built by tt_sim.perf.noc_congestion_plan
+# arch=blackhole grid_x=17 grid_y=12 coord_space=noc0
+# *_lx/_ly logical, *_nx/_ny the coordinate a kernel addresses, *_px/_py SoC-physical NoC 0
+# tt_sim_tensix_coords=1-2,1-3,1-4,2-2,2-3,2-4,3-2,3-3,3-4,4-4,5-4
+# hops: 6 points, 6 flows
+# size: 3 points, 3 flows
+# selfport: 2 points, 3 flows
+# shared: 2 points, 4 flows
+# measured by nocbench on arch=blackhole magic=0x4E4F4342
+==============================================================================
+VALIDITY
+==============================================================================
+  flows in file           16
+  unmeasured (no stamp)   0
+  coordinate mismatches   0
+  invariant complaints    0
+  multi-flow runs         3, median timed-region overlap 0.98, 0 below 0.5
+
+==============================================================================
+HOPS
+==============================================================================
+  family        n   round-trip hops   cycles/region  (spread)
+  col           2   [12]                      296.0  (+/-0.0)
+  diag          2   [29]                      448.0  (+/-0.0)
+  row           2   [17]                      340.0  (+/-0.0)
+    col: cycles vs FORWARD hops -> slope +0.00, r2 1.00
+    diag: cycles vs FORWARD hops -> slope +0.00, r2 1.00
+    row: cycles vs FORWARD hops -> slope +0.00, r2 1.00
+    (a directional torus predicts slope 0 in every family: the reply travels the rest of the way round)
+  uncongested line over 3 round-trip levels: 188.3 + 8.95 * hops  (r2 1.00)
+    slope is the per-hop round-trip cost (ISA docs: ~9 cycles router to router); intercept is the issuing core's path plus the endpoint
+  NOISE FLOOR (row family spread): 0.0 cycles/tx -- the row family is predicted constant, so its spread is this harness's resolution, and every 'flat' claim below is read against it
+
+==============================================================================
+SIZE
+==============================================================================
+       64 B      110.5 cycles/tx
+      512 B      112.0 cycles/tx
+     2048 B      121.0 cycles/tx
+  slope +5.57 cycles per KiB, intercept 109.7, r2 0.99
+  CONTROL: PASS -- larger transactions must cost more
+
+==============================================================================
+SELFPORT
+==============================================================================
+  1flow        217.0 cycles/tx  (n=1)
+  2flows       208.5 cycles/tx  (n=2)
+  ratio 0.96x
+  (bar: +4.3 cycles/tx, from the noise floor and 2 % of the single-flow cost)
+  CONTROL: FAIL -- two flows out of one NIU must contend for its injection port
+
+==============================================================================
+SHARED
+==============================================================================
+  8192 B:
+     0 shared links      217.0 cycles/tx
+     1 shared links      217.0 cycles/tx
+    slope +0.00 cycles per shared link, intercept 217.0, r2 1.00
+    span 0.0 cycles against a noise floor of 0.0
+    SHAPE: FLAT
+
+==============================================================================
+VERDICT
+==============================================================================
+  size: passed
+  selfport: FAILED -- did not move
+  RESULT: INVALID -- the controls did not move, so a flat congestion reading is indistinguishable from a harness that measured nothing

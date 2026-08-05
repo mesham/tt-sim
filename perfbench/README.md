@@ -10,20 +10,33 @@ against tt-sim and the two can be diffed.
 perfbench/
 ├── run.sh              simulator-side runner (arch, coords, venv, cost model)
 ├── tensixbench/src/    per-instruction Tensix cycle costs
-└── riscvbench/src/     the baby RISC-V front end: issue rate, `.ttinsn` push
-                        cost, branch cost, instruction fetch
+├── riscvbench/src/     the baby RISC-V front end: issue rate, `.ttinsn` push
+│                       cost, branch cost, instruction fetch, the Tensix
+│                       instruction queue's depth and whether it is shared
+└── nocbench/           NoC congestion: latency against hop count, and against
+                        the number of links two concurrent flows share
 ```
 
-The two are complements, and the second exists because of the first's headline
+The first two are complements, and the second exists because of the first's headline
 result: `tensixbench` measures what a Tensix unit costs, and found that against
 tt-sim **every** probe of **every** unit reads exactly 1.000 cycles because
 nothing back-pressures the core that issued it. `riscvbench` measures that core.
 
-| | tensixbench | riscvbench |
-| --- | --- | --- |
-| **Run it on hardware** | [`tensixbench/README.md`](tensixbench/README.md) | [`riscvbench/README.md`](riscvbench/README.md) |
-| **Why it is shaped this way** | [`../docs/plans/tensix-cost-benchmark.md`](../docs/plans/tensix-cost-benchmark.md) | [`../docs/plans/riscv-front-end-benchmark.md`](../docs/plans/riscv-front-end-benchmark.md) |
-| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` |
+| | tensixbench | riscvbench | nocbench |
+| --- | --- | --- | --- |
+| **Run it on hardware** | [`tensixbench/README.md`](tensixbench/README.md) | [`riscvbench/README.md`](riscvbench/README.md) | [`nocbench/README.md`](nocbench/README.md) — or just `nocbench/run_card.sh` |
+| **Why it is shaped this way** | [`../docs/plans/tensix-cost-benchmark.md`](../docs/plans/tensix-cost-benchmark.md) | [`../docs/plans/riscv-front-end-benchmark.md`](../docs/plans/riscv-front-end-benchmark.md) | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "Rung 2" and its addendum |
+| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.noc_congestion_sweep --measured <csv>` |
+
+`nocbench` is the odd one out in two ways. It is the only one whose experiment
+is *planned* by a separate, tested Python module
+(`tt_sim.perf.noc_congestion_plan`) rather than being wired into the C++, because
+the thing that makes or breaks a congestion measurement is which confounds are
+held fixed, and an invariant that lives in tested code is checkable in a way that
+one living in a comment is not. And it is the only one whose honest verdict
+against tt-sim is `INVALID`: the simulator models no link congestion at all, so
+the experiment is forced flat, and the harness refuses to report a flat reading
+as a result when the control that proves flows contend does not move either.
 
 Against the simulator:
 
