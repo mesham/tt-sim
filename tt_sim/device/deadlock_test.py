@@ -366,6 +366,17 @@ def _pump(detector, cycles):
         detector.tick(cycle)
 
 
+def _pump_from(detector, start, cycles):
+    """``_pump`` for a test that has to change the unit's state mid-run.
+
+    ``_pump`` always restarts at cycle 0, which a detector already past its
+    threshold would read as the clock rewinding; this one carries the cursor.
+    """
+    for cycle in range(start, start + cycles):
+        detector.tick(cycle)
+    return start + cycles
+
+
 def test_reports_a_unit_blocked_past_the_threshold(capsys):
     detector = _detector_with_unit_stall_check()
     _watch(detector, _FakeBlockedUnit())
@@ -444,6 +455,87 @@ def test_unit_stall_survives_every_core_going_back_into_reset(capsys):
     device.run(3 * UNIT_STALL_THRESHOLD)
 
     assert "[UNIT STALL" in capsys.readouterr().err
+
+
+def test_unit_stall_is_reported_once_however_long_the_run(capsys):
+    """The de-duplication rule, and why the old count was meaningless.
+
+    Repeats carried no information — same unit, same latched instruction, same
+    bank — but made the number of reports a function of *run length*: the same
+    broken eight-core GEMM gave 576 on one run and 352 on a longer one. One
+    report per unit per waited-on instruction makes the count "how many units
+    are affected", which is a quantity worth reading.
+    """
+    detector = _detector_with_unit_stall_check()
+    _watch(detector, _FakeBlockedUnit())
+
+    _pump(detector, 40 * UNIT_STALL_THRESHOLD)
+
+    err = capsys.readouterr().err
+    assert len(re.findall(r"\[UNIT STALL cycle=", err)) == 1, err
+    assert "will not repeat" in err
+
+
+def test_a_recovered_unit_retracts_its_own_stall_report(capsys):
+    """The half of the hint that settles it, without waiting for teardown.
+
+    A deep pipeline recovers and says so; a wedge never does. That difference
+    is what a user reads, not the cycle count.
+    """
+    detector = _detector_with_unit_stall_check()
+    unit = _FakeBlockedUnit()
+    _watch(detector, unit)
+
+    at = _pump_from(detector, 0, 2 * UNIT_STALL_THRESHOLD)
+    assert "[UNIT STALL cycle=" in capsys.readouterr().err
+    unit.blocked = False
+    _pump_from(detector, at, 4)
+
+    err = capsys.readouterr().err
+    assert "[UNIT STALL CLEARED cycle=" in err, err
+    assert "Unpacker 1" in err
+    assert "got SrcB bank 0 back" in err
+    assert "deep pipeline, not a wedge" in err
+
+
+def test_a_second_block_on_the_same_instruction_is_not_reported_again(capsys):
+    """``pipestall`` blocks once per tile on the same instruction, for ever."""
+    detector = _detector_with_unit_stall_check()
+    unit = _FakeBlockedUnit()
+    _watch(detector, unit)
+
+    at = 0
+    for _round in range(4):
+        unit.blocked = True
+        at = _pump_from(detector, at, 2 * UNIT_STALL_THRESHOLD)
+        unit.blocked = False
+        at = _pump_from(detector, at, 4)
+
+    err = capsys.readouterr().err
+    assert len(re.findall(r"\[UNIT STALL cycle=", err)) == 1, err
+    assert len(re.findall(r"\[UNIT STALL CLEARED cycle=", err)) == 1, err
+
+
+def test_a_wedged_unit_does_not_retract_its_report(capsys):
+    """A block that "clears" because the tile was torn down is not a recovery.
+
+    ``[UNIT WEDGED]`` is the authoritative signal and nothing may walk it back:
+    printing ``[UNIT STALL CLEARED]`` after it would tell the user the proof was
+    a false alarm.
+    """
+    detector, state = _detector_with_a_fake_tile(in_reset=False)
+    unit = _FakeBlockedUnit()
+    _watch(detector, unit)
+
+    at = _pump_from(detector, 0, 2 * UNIT_STALL_THRESHOLD)
+    state.set(True)
+    at = _pump_from(detector, at, 2 * _WEDGE_CONFIRM_CYCLES)
+    unit.blocked = False
+    _pump_from(detector, at, 4)
+
+    err = capsys.readouterr().err
+    assert "[UNIT WEDGED" in err, err
+    assert "[UNIT STALL CLEARED cycle=" not in err
 
 
 def test_unit_stall_check_can_be_disabled(capsys):

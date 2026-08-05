@@ -265,8 +265,8 @@ that a report arrives up to `threshold / 8 + 64` cycles later than it used to
 | --- | --- |
 | `TT_SIM_DEADLOCK` | Set falsy (`0`/`false`/`no`/`off`) to disable the watchdog. On by default. |
 | `TT_SIM_DEADLOCK_THRESHOLD` | Cycles of no observable progress before a warning fires (default `50000`). Raise it if a long compute loop trips a false positive; lower it to surface stalls sooner — the sampling interval is a fixed fraction of it, so a low threshold also samples more often, down to every cycle. |
-| `TT_SIM_UNIT_STALL` | Set falsy to disable the per-unit stall check. On by default. |
-| `TT_SIM_UNIT_STALL_THRESHOLD` | Consecutive cycles one Tensix backend unit may stay blocked on a single latched instruction before a `[UNIT STALL …]` warning fires (default `10000`). |
+| `TT_SIM_UNIT_STALL` | Set falsy to disable the per-unit checks (`[UNIT STALL]` **and** `[UNIT WEDGED]`). On by default. |
+| `TT_SIM_UNIT_STALL_THRESHOLD` | Consecutive cycles one Tensix backend unit may stay blocked on a single latched instruction before a `[UNIT STALL …]` hint fires (default `10000`). No effect on `[UNIT WEDGED]`, which is not a cycle count. |
 
 The second pair is a *different* check with a different question. The watchdog above
 asks "did anything change anywhere"; a wedged Tensix unit answers yes, because nothing
@@ -278,6 +278,18 @@ threshold is one unbroken run and not a loop that happened to be blocked at ever
 sample point. The default of 10,000 is 2.8x the longest legitimate blocked run measured
 anywhere in the tree (3,528 cycles, Wormhole `sfpumath`, with and without the cost
 model); zero of the 41 in-tree workloads produce a report.
+
+`[UNIT STALL]` is a **hint** and cannot be anything else — a correct cross-core
+pipeline blocks linearly in its downstream consumer's cost with no ceiling
+(`examples/pipestall`), so no threshold separates it from a wedge. It says so, prints
+once per unit per waited-on instruction, and names the two lines that do settle it:
+`[UNIT STALL CLEARED]` (the unit recovered — deep pipeline, nothing wrong) and
+`[UNIT WEDGED]`. **`[UNIT WEDGED]` is the authoritative signal**: it reports a unit still
+blocked once *every baby core on its tile is in soft reset*, which is a proof rather than
+a heuristic — handing a Src bank back takes an instruction and no thread can issue one
+from reset — so it has no threshold, fires on reproductions far too short for any cycle
+count, and has never fired on an in-tree workload. Full write-up:
+[`docs/running-tt-metal-on-the-simulator.md`](../../docs/running-tt-metal-on-the-simulator.md) §4.5.
 
 ## NoC alignment checking
 

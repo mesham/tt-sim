@@ -177,6 +177,48 @@ for longer than a single-core workload ever needs, look at why", not as
 "something is wrong". It is the wrong shape for a verdict, and no constant is
 the right one.
 
+**Why it is still on by default, and what was changed instead.** It is
+simultaneously useful and capable of firing on correct code, and those two
+facts pull in opposite directions:
+
+* it has already earned its keep on a third-party kernel — a genuinely broken
+  eight-core GEMM produced a report on all eight workers and none on the
+  corrected form, each naming unit, thread, opcode and Src bank, which is the
+  diagnosis rather than a silent timeout; and
+* ``pipestall`` shows it firing on a *correct* pipeline whenever the downstream
+  consumer costs more than ~2,000 cycles a tile.
+
+Three fixes were considered and two rejected. **Making it opt-in** forfeits the
+whole value: nobody who does not already suspect a wedged unit will set the
+variable, and the GEMM's author did not. **Suppressing it when the block is
+"explained" by a downstream consumer still making progress** is unsound, and
+unsound in the one direction that matters: the true positive *also* runs on a
+device that is still making progress — that is the check's entire premise, and
+the reason the global signature cannot see it — so the same suppression that
+silences ``pipestall`` silences the GEMM.
+
+What changed is what the report *says* and how often it says it.
+
+* **It reads as a hint.** The old text named one cause (the ``UNPACR_NOP``
+  dvalid deadlock) and asserted the kernel would report done anyway, which on a
+  deep pipeline is a false accusation. It now gives both readings, says the
+  check cannot separate them, and names the two lines that can.
+* **It is de-duplicated** to one report per unit per waited-on instruction,
+  instead of once per detection window. The old count was **run-length
+  dependent and therefore meaningless as a severity measure** — the same broken
+  GEMM gave 576 reports on one run and 352 on a longer one. The new count is
+  "how many units are affected", which is a real quantity, and it drops
+  ``pipestall`` from four identical warnings to one.
+* **It gets a retraction.** When a reported unit does unblock,
+  ``[UNIT STALL CLEARED]`` says so and says what it means. That is the piece
+  that lets a user decide in seconds without waiting for teardown: a deep
+  pipeline recovers and prints it, a wedge never does.
+
+So the verdict a user acts on is always one of the two follow-up lines —
+``[UNIT STALL CLEARED]`` (recovered; it was the pipeline) or ``[UNIT WEDGED]``
+(cannot recover; it is the bug) — and ``[UNIT STALL]`` itself only says where
+to look. Neither the threshold nor the terminal check moved.
+
 **The terminal wedge, which is a proof rather than a heuristic.** What
 separates the ``UNPACR_NOP`` deadlock from a slow pipeline is not duration but
 whether the wait can still be satisfied. Handing a Src bank back takes an
@@ -194,7 +236,9 @@ firing, which is the same discipline the cycle threshold got.
 
 * ``TT_SIM_UNIT_STALL`` — falsy disables both per-unit checks. Default on.
 * ``TT_SIM_UNIT_STALL_THRESHOLD`` — consecutive blocked cycles before an
-  ``[UNIT STALL]`` report. Default 10000. Does not affect ``[UNIT WEDGED]``.
+  ``[UNIT STALL]`` report. Default 10000. Deliberately has **no effect on**
+  ``[UNIT WEDGED]``, which is not a cycle count: turning this knob up to quiet
+  the hint cannot turn the proof off with it.
 """
 
 import os
@@ -322,11 +366,17 @@ class DeadlockDetector:
             1, unit_stall_threshold // _SAMPLES_PER_WINDOW
         )
         #: ``(coord, unit_id) -> [unit, blocked_on tuple, cycle it was armed,
-        #: cycles the owning tile has been fully in reset while still blocked]``
-        #: for every unit currently under per-cycle watch. Empty on a device
-        #: with nothing blocked, which is the common case and the one the
-        #: sampling cadence is preserved for.
+        #: cycles the owning tile has been fully in reset while still blocked,
+        #: whether ``[UNIT STALL]`` has already been printed for it]`` for every
+        #: unit currently under per-cycle watch. Empty on a device with nothing
+        #: blocked, which is the common case and the one the sampling cadence is
+        #: preserved for.
         self._stall_watch = {}
+        #: ``(coord, unit_id, blocked_on tuple)`` already reported. The
+        #: de-duplication key — see the module docstring: once per unit per
+        #: waited-on instruction, not once per detection window, so the number
+        #: of reports counts affected units rather than how long the run was.
+        self._stall_reported = set()
         #: Units exposing ``blocked_on()``, resolved once per tile.
         self.stallable_units = []
         #: ``coord -> (tile, cores)``, for the terminal-wedge check.
@@ -632,7 +682,7 @@ class DeadlockDetector:
                 continue
             waiting = unit.blocked_on()
             if waiting is not None:
-                watch[key] = [unit, waiting, cycle, 0]
+                watch[key] = [unit, waiting, cycle, 0, False, False]
 
     def _tile_fully_in_reset(self, coord):
         """Is every baby core on ``coord``'s tile held in soft reset?
@@ -668,13 +718,22 @@ class DeadlockDetector:
         * the **terminal wedge**, a proof ("this can no longer be satisfied"),
           reached when the whole tile has gone into soft reset with the unit
           still blocked.
+
+        A unit dropping out after it was reported is itself information — it
+        settles the hint the other way — so that transition prints
+        ``[UNIT STALL CLEARED]`` rather than passing silently.
         """
         reset_cache = {}
         for key, entry in list(self._stall_watch.items()):
-            unit, waiting, since, in_reset = entry
+            unit, waiting, since, in_reset, reported, wedged = entry
             now = unit.blocked_on()
             if now is None or now != waiting:
                 del self._stall_watch[key]
+                # Not after a wedge report: a unit whose block "clears" once the
+                # tile it is on has been torn down and rebuilt did not recover,
+                # and retracting the proof on that basis would be a lie.
+                if reported and not wedged:
+                    self._report_unit_stall_cleared(key, waiting, cycle - since, cycle)
                 continue
             coord = key[0]
             if coord not in reset_cache:
@@ -685,14 +744,24 @@ class DeadlockDetector:
                 # were reset, and that retires within a handful of cycles.
                 entry[3] = in_reset + 1
                 if entry[3] == _WEDGE_CONFIRM_CYCLES:
+                    entry[5] = True
                     self._report_unit_wedged(key, waiting, cycle)
             else:
                 entry[3] = 0
-            if cycle - since >= self.unit_stall_threshold:
-                self._report_unit_stall(key, waiting, cycle - since, cycle)
-                # Re-arm rather than drop: one report per window, as the global
-                # watchdog does, so a wedge keeps saying so.
-                entry[2] = cycle
+            if not reported and cycle - since >= self.unit_stall_threshold:
+                # One report per unit per waited-on instruction, for the whole
+                # run — not one per detection window. Repeats carried no new
+                # information (same unit, same latched instruction, same bank)
+                # and made the report *count* a function of how long the run
+                # was rather than of how much is wrong. ``since`` is
+                # deliberately not re-armed, so the blocked run keeps
+                # accumulating and ``[UNIT STALL CLEARED]`` can state its true
+                # length.
+                key_seen = (key[0], key[1], waiting)
+                if key_seen not in self._stall_reported:
+                    self._stall_reported.add(key_seen)
+                    entry[4] = True
+                    self._report_unit_stall(key, waiting, cycle - since, cycle)
 
     def _report_unit_wedged(self, key, waiting, cycle):
         coord, name = key
@@ -706,11 +775,15 @@ class DeadlockDetector:
                     f"  {opcode} from thread {thread}: waiting for {which} bank "
                     f"{bank} to be given back by the Matrix Unit (dvalid was set "
                     f"and never cleared)",
-                    "  Nothing can satisfy that wait any more — handing the bank "
-                    "back takes an instruction, and no thread can issue one from "
-                    "reset. The launch behind this unit will have reported done; "
-                    "on silicon the *next* launch is where it hangs. See "
-                    'ROADMAP.md, "Unpacker dvalid deadlock".',
+                    "  Nothing can satisfy that wait any more — handing the bank",
+                    "  back takes an instruction, and no thread can issue one from",
+                    "  reset. The launch behind this unit will have reported done;",
+                    "  on silicon the *next* launch is where it hangs. See",
+                    '  ROADMAP.md, "Unpacker dvalid deadlock".',
+                    "  This is a proof, not a threshold: no cycle count is",
+                    "  involved, no correct kernel can reach it, and it fires on a",
+                    "  reproduction far too short for the blocked-cycle hint. Act",
+                    "  on it.",
                     "  (TT_SIM_UNIT_STALL=0 to disable)",
                 ]
             ),
@@ -718,6 +791,12 @@ class DeadlockDetector:
         )
 
     def _report_unit_stall(self, key, waiting, blocked_cycles, cycle):
+        """The hint. Deliberately declines to say which of the two it is.
+
+        Both readings are printed because the check genuinely cannot separate
+        them, and the two lines that *can* are named so the reader knows what
+        to wait for rather than acting on this one. See the module docstring.
+        """
         coord, name = key
         thread, opcode, which, bank = waiting
         tile_label = f"tile={coord} " if len(self.tile_cores) > 1 else ""
@@ -730,11 +809,54 @@ class DeadlockDetector:
                     f"  {opcode} from thread {thread}: waiting for {which} bank "
                     f"{bank} to be given back by the Matrix Unit (dvalid was set "
                     f"and never cleared)",
-                    "  Nothing back-pressures the baby RISC-V cores on Tensix "
-                    "instruction issue, so the kernel behind this unit can still "
-                    'report done. See ROADMAP.md, "Unpacker dvalid deadlock".',
+                    "  This is a hint, not a verdict: it has two readings and "
+                    "this check cannot tell them apart.",
+                    "    * A deep pipeline. A unit waits on the whole downstream",
+                    "      chain — math, Dst, the output CB, the packer, and a",
+                    "      consumer that may be on another core — so a consumer",
+                    "      costing ~10000 cycles a tile reaches this legitimately.",
+                    "      See examples/pipestall.",
+                    "    * A real wedge: a Src bank handed to the Matrix Unit and",
+                    "      never handed back. Nothing back-pressures the baby",
+                    "      RISC-V cores on Tensix instruction issue, so the kernel",
+                    "      behind the unit reports done either way. See ROADMAP.md,",
+                    '      "Unpacker dvalid deadlock".',
+                    "  Rather than act on the line above, wait for whichever of",
+                    "  these names this same unit:",
+                    "    * [UNIT STALL CLEARED] — it recovered. Deep pipeline;",
+                    "      nothing is wrong.",
+                    "    * [UNIT WEDGED], at the end of the launch — it never can.",
+                    "      That one is a proof, and is the one to act on.",
+                    "  Reported once per unit per waited-on instruction, so this",
+                    "  will not repeat however long the run is.",
                     "  (TT_SIM_UNIT_STALL=0 to disable, "
                     "TT_SIM_UNIT_STALL_THRESHOLD=N to tune)",
+                ]
+            ),
+            file=sys.stderr,
+        )
+
+    def _report_unit_stall_cleared(self, key, waiting, blocked_cycles, cycle):
+        """The retraction, and half the value of the hint above.
+
+        Printed only for a unit that was actually reported, so it costs nothing
+        on a quiet device. It is what lets a user settle the question during
+        the run instead of waiting to see whether ``[UNIT WEDGED]`` turns up at
+        teardown.
+        """
+        coord, name = key
+        thread, opcode, which, bank = waiting
+        tile_label = f"tile={coord} " if len(self.tile_cores) > 1 else ""
+        print(
+            "\n".join(
+                [
+                    f"[UNIT STALL CLEARED cycle={cycle}] {tile_label}{name} "
+                    f"unblocked after {blocked_cycles} cycles: {opcode} from "
+                    f"thread {thread} got {which} bank {bank} back",
+                    "  So the [UNIT STALL] above was a deep pipeline, not a wedge, "
+                    "and needs no action.",
+                    "  Further blocks of this unit on this instruction are not "
+                    "reported.",
                 ]
             ),
             file=sys.stderr,
