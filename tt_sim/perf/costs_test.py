@@ -965,12 +965,24 @@ EXPECTED_CONSUMERS = {
     # it off this list is fixed in TensixBackendUnit.clock_tick; the divergence
     # that bug exposed is merely unreachable, which config.py says out loud.
     "tt_sim/pe/tensix/backends/config.py",
+    # The unpackers, and the only unit whose charge is a *function of the
+    # transfer* rather than of the opcode: a >= 2-cycle address phase plus a
+    # data phase of transfer-bytes over the throttle rate in effect, priced at
+    # decode from the config this UNPACR latched. The joint 80 B/cycle ceiling
+    # is deliberately not charged -- see UnitCostModel.unpack_data_phase_cycles.
+    "tt_sim/pe/tensix/backends/unpacker.py",
+    # The mover, and the first unit to read a *bandwidth* table rather than an
+    # occupancy one: the XMOV entry's 1 is the issue cost, and the background
+    # transfer's duration comes from ``mover.transfer`` in unit_costs.yaml.
+    "tt_sim/pe/tensix/backends/mover.py",
     # Only mentions the model in prose: the ``cost_model`` attribute and the
     # ``instruction_occupancy`` hook every unit inherits, whose default is now
     # the straight table lookup the five constant-cost units above rely on.
     "tt_sim/pe/tensix/backends/backend_base.py",
     "tt_sim/pe/tensix/matrix_cost_model_test.py",
     "tt_sim/pe/tensix/backend_cost_model_test.py",
+    "tt_sim/pe/tensix/unpacker_cost_model_test.py",
+    "tt_sim/pe/tensix/mover_cost_model_test.py",
     # The baby RISC-V cores' load/store path — the first consumer outside the
     # Tensix coprocessor, and the first to read the tables as something other
     # than a per-opcode occupancy: ``riscv.load_latency`` is a latency table
@@ -1011,16 +1023,13 @@ EXPECTED_CONSUMERS = {
 
 #: The Tensix backend units that are *not* wired to the tables, and why. Kept
 #: next to the allow-list so "which units are costed" is one thing to read.
+#:
+#: It is down to one. ``UNPACK`` and ``XMOV`` were wired on 2026-08-06 (see
+#: docs/plans/cost-model.md, "Unpacker and mover occupancy"): the unpacker's
+#: non-constant charge is computed at decode from the transfer size and the
+#: throttle config, and the mover's transfer duration comes from the
+#: bandwidth table rather than from its 1-cycle issue entry.
 UNWIRED_UNITS = {
-    # Owned by concurrent work on its row-stride path at the time this landed;
-    # its cost is also the one genuinely non-constant entry in the file (a
-    # ">= 2" address phase plus a throttle-mode-dependent data phase), so it
-    # wants more than the flat lookup the other units use.
-    "UNPACK": "tt_sim/pe/tensix/backends/unpacker.py",
-    # XMOV's 1-cycle entry is the issue cost only; the transfer duration is
-    # bandwidth-derived and lives in tt_sim/perf/unit_costs.yaml under
-    # ``mover``, which nothing consumes yet.
-    "XMOV": "tt_sim/pe/tensix/backends/mover.py",
     # Every Miscellaneous Unit op is one cycle by one blanket sentence, so
     # wiring it would charge nothing; left out to keep the allow-list honest
     # about which units the model has actually been reasoned about for.

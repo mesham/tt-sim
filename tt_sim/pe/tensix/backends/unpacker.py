@@ -11,6 +11,7 @@ from tt_sim.pe.tensix.backends.backend_base import (
 )
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import DataFormatConversions
+from tt_sim.perf.model import unit_cost_model
 from tt_sim.util.bits import get_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
@@ -41,7 +42,21 @@ class UnPackerUnit(TensixBackendUnit):
         self.pending_unpack = None
         self.setRegBase = 0
         self.setRegAcc = 0
+        # Occupancy the current tick's handler wants charged, armed by
+        # ``clock_tick`` once the handler has run. The unpacker cannot use the
+        # base per-opcode charge because its cost is not a constant: a
+        # datum-moving UNPACR costs a >= 2-cycle address phase plus a data
+        # phase of transfer-bytes / throttle-rate, both knowable only after
+        # the instruction's config has been decoded. See ``handle_regular``.
+        self._pending_occupancy = 0
         super().__init__(backend, UnPackerUnit.OPCODE_TO_HANDLER, "Unpacker")
+        # Phase 5 of docs/plans/event-driven-pump.md, wired 2026-08-06 as the
+        # seventh unit (the last-but-one; TDMA stays out deliberately).
+        # ``None`` unless TT_SIM_COST_MODEL is set, in which case every unpack
+        # completes in the tick it was issued exactly as before.
+        self.cost_model = unit_cost_model(
+            "UNPACK", "blackhole" if backend.blackhole else "wormhole"
+        )
 
     def issueInstruction(self, instruction, from_thread):
         if self.blocked:
@@ -100,16 +115,67 @@ class UnPackerUnit(TensixBackendUnit):
         # to read, so report the one actually latched at the blocking site.
         return (issue_thread, instruction_info["name"], which, self.blocked_wait_bank)
 
+    def instruction_occupancy(self, instruction_name, issue_thread):
+        """``None`` for UNPACR: its cost is charged from the handler instead.
+
+        The base hook runs before the handler and sees only the opcode name,
+        which for the unpacker is not enough twice over: ``UNPACR`` is three
+        instruction forms sharing one opcode (regular / increment-context /
+        flush-cache), and only the datum-moving regular form has published
+        timing (``UNPACR_Regular.md``'s Performance section); and the regular
+        form's cost depends on the transfer size and the throttle config,
+        which exist only after ``read_unpack_state`` has decoded them. So the
+        charge is computed there and armed by :meth:`clock_tick` through
+        ``_pending_occupancy``. ``UNPACR_NOP`` keeps the flat table lookup
+        (a documented 1, which ``occupy_for`` no-ops on).
+        """
+        if instruction_name == "UNPACR":
+            return None
+        return super().instruction_occupancy(instruction_name, issue_thread)
+
     def clock_tick(self, cycle_num):
         if self.blocked:
+            if self.busy_until is not None:
+                # The base drain releases expired holds at the top of its own
+                # tick; the blocked path never reaches it, so an address-phase
+                # hold armed just before the block would otherwise outlive its
+                # deadline for as long as the wait lasted.
+                self._release_expired(cycle_num)
             assert self.repeat_instruction is not None
             instruction_info, issue_thread = self.repeat_instruction
             assert instruction_info["name"] in UnPackerUnit.OPCODE_TO_HANDLER
             getattr(self, UnPackerUnit.OPCODE_TO_HANDLER[instruction_info["name"]])(
                 instruction_info, issue_thread, instruction_info["instr_args"]
             )
+            # An unpack that just came unblocked completed above; its data
+            # phase starts at this tick, so the hold is anchored here — the
+            # address phase was already charged at issue, and the blocked
+            # cycles in between were the unit *waiting* on a Src bank, not
+            # busy, so nothing was charged for them and nothing is
+            # double-counted now.
+            self._arm_pending_occupancy(cycle_num)
         else:
             super().clock_tick(cycle_num)
+            # Anchored at the acceptance cycle (one before this retire tick),
+            # exactly as the base batch arming anchors its charges.
+            self._arm_pending_occupancy(cycle_num - 1)
+
+    def _arm_pending_occupancy(self, anchor_cycle):
+        cycles = self._pending_occupancy
+        if cycles:
+            self._pending_occupancy = 0
+            self.occupy_for(anchor_cycle, cycles)
+
+    def _address_phase_cycles(self):
+        """The UNPACR entry's own occupancy: the >= 2-cycle address phase.
+
+        Charged at its low end by the model (2, exact for uncompressed data —
+        the only kind tt-sim unpacks), and 0 with no model or no entry.
+        """
+        model = self.cost_model
+        if model is None:
+            return 0
+        return model.occupancy("UNPACR") or 0
 
     def handle_unpacr_nop(self, instruction_info, issue_thread, instr_args):
         if self.backend.blackhole:
@@ -1350,7 +1416,8 @@ class UnPackerUnit(TensixBackendUnit):
         # configuration afresh when a stalled unpack finally runs would pick up
         # the *next* matmul's context and base address, so latch it here and
         # reuse it for as long as the unpack is blocked.
-        if self.pending_unpack is None:
+        fresh = self.pending_unpack is None
+        if fresh:
             self.pending_unpack = self.read_unpack_state(issue_thread, instr_args)
 
         src = self.backend.getSrcA if self.unpacker_id == 0 else self.backend.getSrcB
@@ -1358,6 +1425,14 @@ class UnPackerUnit(TensixBackendUnit):
             self.blocked = True
             self.blocked_wait_bank = self.srcBank
             self.repeat_instruction = (instruction_info, issue_thread)
+            if fresh:
+                # The address phase happens up front, before the wait for the
+                # Src bank ("spends at least two cycles calculating the
+                # initial input address" — then "the primary bottleneck being
+                # the fetching of bytes from L1"). Charge it now, once; the
+                # blocked re-runs charge nothing, because a blocked unit is
+                # waiting, not busy.
+                self._pending_occupancy = self._address_phase_cycles()
             return
 
         self.blocked = False
@@ -1365,6 +1440,13 @@ class UnPackerUnit(TensixBackendUnit):
         self.repeat_instruction = None
         state = self.pending_unpack
         self.pending_unpack = None
+        if self.cost_model is not None:
+            # The data phase, from the size and throttle config latched at
+            # decode; serial with the address phase, which is only still
+            # chargeable here when the unpack never blocked (``fresh``) — a
+            # resumed unpack paid it at issue.
+            address = self._address_phase_cycles() if fresh else 0
+            self._pending_occupancy = address + (state["data_phase_cycles"] or 0)
         self.perform_unpack_state(issue_thread, state)
 
     def read_unpack_state(self, issue_thread, instr_args):
@@ -1457,8 +1539,38 @@ class UnPackerUnit(TensixBackendUnit):
             outAddr,
         )
 
+        # The data-phase charge, priced while the throttle config that governs
+        # this UNPACR is in hand ("computed at issue"): transfer bytes over the
+        # documented fetch rate. ``None`` — charge nothing — with the model off
+        # or where the rate selection has no opinion (e.g. an untabulated
+        # throttle mode).
+        data_phase_cycles = None
+        model = self.cost_model
+        if model is not None:
+            throttle_mode = self.getConfigValue(
+                stateID, "THCON_SEC" + str(self.unpacker_id) + "_REG2_Throttle_mode"
+            )
+            default_overridden = True
+            if self.backend.blackhole:
+                # Blackhole-only bit, and the doc indexes THCON_SEC[0] for
+                # both unpackers. Clear (the tt-metal default) means the
+                # config mode is ignored in favour of x4/x8.
+                default_overridden = bool(
+                    self.getConfigValue(
+                        stateID, "THCON_SEC0_REG1_ovrd_default_throttle_mode"
+                    )
+                )
+            data_phase_cycles = model.unpack_data_phase_cycles(
+                inputNumDatums * datumSizeBytes,
+                throttle_mode,
+                datumSizeBytes,
+                tileize=bool(discontiguousInputRows),
+                default_throttle_overridden=default_overridden,
+            )
+
         return {
             "stateID": stateID,
+            "data_phase_cycles": data_phase_cycles,
             "whichContext": whichContext,
             "whichADC": whichADC,
             "multiContextMode": multiContextMode,

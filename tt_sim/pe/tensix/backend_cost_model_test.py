@@ -144,10 +144,12 @@ def _backend(cost_model):
 #: their key in both ``tensix_instructions.yaml`` and the cost table.
 WIRED = ("SFPU", "THCON", "PACK", "SYNC", "CFG")
 
-#: ``MATH`` is wired too, in ``matrix_cost_model_test.py``. ``UNPACK`` and
-#: ``XMOV`` are not: ``UNPACK``'s cost is the one genuinely non-constant entry
-#: in the file (a ">= 2" address phase plus a throttle-mode-dependent data
-#: phase), and ``XMOV``'s published 1 is issue cost only.
+#: ``MATH`` is wired too, in ``matrix_cost_model_test.py``, and so are
+#: ``UNPACK`` and ``XMOV`` since 2026-08-06 — in ``unpacker_cost_model_test.py``
+#: and ``mover_cost_model_test.py``, because neither is a flat table lookup:
+#: the unpacker's charge is a function of the transfer size and the throttle
+#: config, and the mover's is a function of the transfer size and the
+#: bandwidth table. ``TDMA`` is the only unit left unwired.
 
 
 # ---------------------------------------------------------------------------
@@ -381,15 +383,18 @@ def test_the_uncosted_opcodes_of_each_unit_are_charged_nothing():
 
 def test_the_units_left_unwired_still_have_no_opinion():
     """Wiring is per unit, so "the model is on" must not quietly mean "every
-    unit is costed". The unpackers and the mover keep the same-cycle retire
-    even with ``TT_SIM_COST_MODEL`` set."""
+    unit is costed".
+
+    Down to one unit since 2026-08-06: the Miscellaneous Unit (``TDMA``), whose
+    every op is one cycle by one blanket sentence, so charging it would move
+    nothing and the allow-list is more useful meaning "a unit somebody reasoned
+    about". The unpackers and the mover are now wired — see
+    ``unpacker_cost_model_test`` and ``mover_cost_model_test``.
+    """
     with _backend(True) as backend:
-        units = [backend.backend_units[n] for n in ("XMOV", "TDMA")]
-        units += list(backend.unpacker_units)
-        for unit in units:
-            assert unit.cost_model is None, unit.unit_name
-            assert unit.instruction_occupancy("UNPACR", 0) is None, unit.unit_name
-            assert unit.instruction_occupancy("XMOV", 0) is None, unit.unit_name
+        misc = backend.backend_units["TDMA"]
+        assert misc.cost_model is None, misc.unit_name
+        assert misc.instruction_occupancy("SETADCXY", 0) is None
 
 
 # ---------------------------------------------------------------------------

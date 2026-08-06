@@ -45,7 +45,9 @@
 #     GB/s ``bandwidth`` block itself, ``chip_level_bandwidth`` and the
 #     end-to-end reference -- is still unconsumed.
 #
-# The ``mover`` and ``l1`` sections have no consumer at all.
+# The ``mover`` section's ``transfer`` rates are consumed since 2026-08-06 by
+# ``MoverCostModel`` (tt_sim/perf/model.py): a Mover transfer holds the mover
+# unit for ceil(bytes / ideal rate) cycles. The ``l1`` section has no consumer.
 # See docs/plans/cost-model.md for the schema, the provenance convention, and
 # what calibration would take.
 #
@@ -797,7 +799,12 @@ mover:
     theoretical, and with both an ideal and a contended column. That is more
     honest than most of the table and is reproduced as-is. Neither ttsim (whose
     XMOV is an instantaneous memcpy) nor tt-metal has anything on the Mover, so
-    the ISA doc is the only source.
+    the ISA doc is the only source. CONSUMED since 2026-08-06 by MoverCostModel
+    (tt_sim/perf/model.py): a transfer holds the mover unit for
+    ceil(bytes * 8 * per_cycles / moved_bits) cycles at the IDEAL column --
+    charging the contended column would need a sourced rule for when
+    contention applies, which the page does not give, so the ideal rate is the
+    floor and the contended column is recorded, unconsumed.
   issue:
     occupancy: 1
     provenance: isa_doc

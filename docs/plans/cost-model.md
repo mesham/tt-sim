@@ -1,6 +1,6 @@
 # The cycle-cost tables
 
-Status: **data landed; six of the nine Tensix backend units wired, the baby
+Status: **data landed; eight of the nine Tensix backend units wired, the baby
 RISC-V load/store path, the NoC latency and bandwidth models, and both arches'
 DRAM access latency plus Wormhole's DRAM channel bandwidth.** Validated
 externally on the **NoC and memory path only** — the Tensix instruction costs
@@ -9,9 +9,15 @@ rest on provenance alone, and
 says why that is not going to change without silicon. Two YAML files and
 a tested loader, plus `tt_sim/perf/model.py`, which turns a table entry into
 the occupancy a unit is charged. The Tensix **matrix, vector (SFPU), scalar
-(ThCon), packer, sync and config** units read it, so do the **five baby RISC-V
-cores**, and so does the **NoC**, behind the `TT_SIM_COST_MODEL` opt-in; with
-the variable unset nothing loads and no timing changes. See ["The first
+(ThCon), packer, sync, config, unpacker and mover** units read it, so do the
+**five baby RISC-V cores**, and so does the **NoC**, behind the
+`TT_SIM_COST_MODEL` opt-in; with the variable unset nothing loads and no timing
+changes. The last two are the ones whose cost is not a per-opcode constant at
+all — see ["Unpacker and mover
+occupancy"](#unpacker-and-mover-occupancy-the-last-two-units-and-the-first-cost-that-is-a-function-of-the-transfer),
+which is also where a modelled charge first scales with a workload's *data*
+rather than with its instruction mix, and where the 80 B/cycle joint unpacker
+ceiling is refused for want of a sourced sharing rule. See ["The first
 consumer"](#the-first-consumer) below for what that cost in numbers — including
 the result that matters most: with all six Tensix units costed **not a single
 simulated cycle moves**. The config unit is the one that took two attempts:
@@ -101,13 +107,15 @@ is deliberate:
 | File | Holds |
 | --- | --- |
 | `tt_sim/pe/tensix/tensix_instruction_costs.yaml` | Per-instruction costs for the ten Tensix backend units |
-| `tt_sim/perf/unit_costs.yaml` | NoC, DRAM, baby RISC-V cores, Mover, L1 |
+| `tt_sim/perf/unit_costs.yaml` | NoC, DRAM, baby RISC-V cores, Mover, L1 (only `l1` has no consumer now) |
 | `tt_sim/perf/costs.py` | The loader, `load_costs(arch)` |
 | `tt_sim/perf/model.py` | The consumer-side policy: table entry → cycles to charge |
 | `tt_sim/perf/costs_test.py` | 48 tests: parse, provenance integrity, loader fidelity, coverage, "exactly these modules consume this", and the `corroboration` field's discipline |
 | `tt_sim/perf/model_test.py` | 12 tests: off by default, bound policy, fidelity phases |
 | `tt_sim/pe/tensix/matrix_cost_model_test.py` | 6 tests: the FPU driven with the model on and off |
 | `tt_sim/pe/tensix/backend_cost_model_test.py` | 21 tests: the SFPU, ThCon, packer, sync and config units, same treatment — including the config unit charging nothing on Wormhole, Blackhole's `CFGSHIFTMASK` 2, and its 2-cycle hold on the `Config` IPC group leaving `SETC16` free |
+| `tt_sim/pe/tensix/unpacker_cost_model_test.py` | 27 tests: the address phase at 2, the data phase at every throttle rate on both arches, the tileize-forces-x4 and Blackhole default-mode paths, a blocked unpacker charged nothing for waiting, and the two deliberate under-charges (the joint ceiling, the cross-unpacker hold) pinned by name |
+| `tt_sim/pe/tensix/mover_cost_model_test.py` | 13 tests: the transfer duration per kind against the doc's own arithmetic, the contended column recorded and unspent, the XMOV and TDMA paths both charged, and a transfer in flight reading as outstanding work |
 | `tt_sim/pe/tensix/frontend_backpressure_test.py` | 9 tests: the bounded front-end FIFO, the stalled `.ttinsn` store, the dvalid-twice wedge reaching the core, and the two licensed terms' arithmetic (push at 1.000, ThCon at 3.0, 3 threads at ~3× each) |
 | `tt_sim/pe/rv/cost.py` | The baby RISC-V consumer: address-region classifier, load-use scoreboard, L1 store rate limiter |
 | `tt_sim/pe/rv/cost_test.py` | 19 tests: off by default, the interlock, the unnamed regions, stores, multiply/divide |
@@ -314,9 +322,11 @@ pipeline description for the baby RISC-V cores.
   `CFGSHIFTMASK` at 2 cycles is the only entry in either that is not 1, and it
   is the one that made wiring the config unit a timing change.
 - **Miscellaneous unit** — one blanket sentence covers all nine ADC ops.
-- **Unpacker** — both halves: the ≥ 2-cycle address-calculation phase (exactly
-  2 uncompressed) during which no thread may start an `UNPACR`, and the
-  16/32/64 B-per-cycle throttle modes for the data phase.
+- **Unpacker** — both halves, and both now charged: the ≥ 2-cycle
+  address-calculation phase (exactly 2 uncompressed) during which no thread may
+  start an `UNPACR`, and the 16/32/64 B-per-cycle throttle modes for the data
+  phase, plus Blackhole's own x8 / x4-"2x" / default-mode rules stated in the
+  shared page's `TTArchitecture` conditionals.
 - **NoC** — per-hop latency (~5 NIU→router, 9 router→router, ~5 router→NIU) and
   one flit per cycle per axis. This is exactly the shape Phase 5 wants.
 - **DRAM bandwidth** — 24 GB/s per channel, 12 channels, 288 GB/s aggregate,
@@ -334,7 +344,9 @@ pipeline description for the baby RISC-V cores.
   address region, the sustained-load throughput formula, and store throughput
   (one L1 store every five cycles).
 - **Mover** — issue is 1 cycle; transfer rates are published as *measured*, with
-  both an ideal and a contended column (93.1 vs 32 bits/cycle for L1→L1).
+  both an ideal and a contended column (93.1 vs 32 bits/cycle for L1→L1). The
+  ideal column is charged as the mover unit's occupancy; the contended one is
+  recorded and not, because nothing sources when contention applies.
 - **L1** — 16 banks, 16 ports, 128 bits/bank/cycle, and the 5-cycle
   read-modify-write penalty that explains why RISC-V stores to L1 cost 5.
 
@@ -353,6 +365,11 @@ pipeline description for the baby RISC-V cores.
   ["The first consumer"](#the-first-consumer).
 - **Joint unpacker ceiling** of 80 B/cycle. The ISA docs' L1 page supplies the
   "five 128-bit reads per cycle" half; only the conversion to bytes is vendor.
+  Sourced and **deliberately unconsumed**: it is a limit *shared* between two
+  simultaneously streaming unpackers, and no source states how it divides per
+  transfer, so each unpacker is charged its own uncontended rate instead. See
+  ["Unpacker and mover
+  occupancy"](#unpacker-and-mover-occupancy-the-last-two-units-and-the-first-cost-that-is-a-function-of-the-transfer).
 - **Chip-level DRAM bandwidth**, 258 GB/s Wormhole and 512 GB/s Blackhole —
   the only DRAM bandwidth figure of any kind that exists for Blackhole, whose
   ISA-doc tree has no DRAM tile directory at all.
@@ -815,25 +832,28 @@ in the file and has no consumer.
   second pass"](#the-config-unit-on-the-second-pass). It stayed on this list
   through two separate reasons, both of which were eventually answered rather
   than argued away, which is the only reason it is kept here struck through.
-- **Unpacker (`UNPACK`).** The one unit whose cost is genuinely not a constant:
-  a ≥ 2-cycle address phase (exactly 2 uncompressed, more when compressed)
-  during which no thread may start an `UNPACR`, then a data phase whose length
-  is the byte count divided by a configured throttle mode (16 / 32 / 64 B per
-  cycle) and shared against an 80 B/cycle joint ceiling. The flat lookup the
-  units above use is the wrong shape for it, and doing it properly means
-  reading `THCON_SEC[n].Throttle_mode` and the transfer size at issue. It was
-  also under concurrent edit when this landed.
-- **Mover (`XMOV`).** Its 1-cycle entry is the *issue* cost once the mover is
-  free; the transfer duration is bandwidth-derived and lives in
-  `tt_sim/perf/unit_costs.yaml` under `mover`, alongside a measured ideal and
-  contended rate. Wiring the 1 would charge nothing and would imply the
-  interesting half was modelled.
+- ~~**Unpacker (`UNPACK`).**~~ **Wired 2026-08-06** — see ["Unpacker and mover
+  occupancy"](#unpacker-and-mover-occupancy-the-last-two-units-and-the-first-cost-that-is-a-function-of-the-transfer).
+  The reason it stayed here was right and is what the wiring had to answer: a
+  ≥ 2-cycle address phase (exactly 2 uncompressed, more when compressed) during
+  which no thread may start an `UNPACR`, then a data phase whose length is the
+  byte count divided by a configured throttle mode (16 / 32 / 64 B per cycle)
+  and shared against an 80 B/cycle joint ceiling. The flat lookup the units
+  above use is indeed the wrong shape, so the charge is computed at decode from
+  `THCON_SEC[n].Throttle_mode` and the transfer size; the joint ceiling is
+  still **not** charged, for want of a sourced sharing rule.
+- ~~**Mover (`XMOV`).**~~ **Wired 2026-08-06**, in the same instalment. Its
+  1-cycle entry is the *issue* cost once the mover is free; the transfer
+  duration is bandwidth-derived and lives in `tt_sim/perf/unit_costs.yaml`
+  under `mover`, alongside a measured ideal and contended rate. Both halves are
+  now charged — the ideal rate only, since nothing sources when contention
+  applies.
 - **Miscellaneous unit (`TDMA`) and `NONE`.** Every entry is one cycle by one
   blanket sentence in the docs. There is nothing to learn from charging it, and
   the allow-list in `costs_test.py` is more useful if it means "a unit somebody
   reasoned about" than "a unit somebody imported".
 
-`UNWIRED_UNITS` in `tt_sim/perf/costs_test.py` names the three that remain, and
+`UNWIRED_UNITS` in `tt_sim/perf/costs_test.py` names the one that remains, and
 a test asserts every unit in the table with a `backend:` file is on exactly one
 of the two lists — so a unit cannot fall off both.
 
@@ -4531,6 +4551,246 @@ always meant.
   under-charge notes updated to "the simulator now agrees".
 - `tt_sim/perf/costs_test.py` — the worktree-path repair to the
   consumer-pinning scan described under "The gate".
+
+## Unpacker and mover occupancy: the last two units, and the first cost that is a function of the transfer
+
+Landed 2026-08-06 — ROADMAP item "Unpacker and mover occupancy", the two
+Tensix backend units the cost tables have carried data for since the
+beginning and deliberately not charged. `UNWIRED_UNITS` in
+`tt_sim/perf/costs_test.py` is now **one entry** (`TDMA`, all-1-cycle by one
+blanket sentence, out on purpose), and eight of the nine units read their own
+costs. Both wirings needed something the six before them did not: neither
+unit's cost is a per-opcode constant, so neither could use the flat lookup
+`TensixBackendUnit.instruction_occupancy` hands every other unit.
+
+### The unpacker: an address phase plus bytes over a configured rate
+
+`UNPACR_Regular.md`'s Performance section publishes both halves in two
+sentences, and the wiring charges both, serially:
+
+> "An `UNPACR` instruction spends at least two cycles calculating the initial
+> input address: uncompressed data requires exactly two cycles, whereas
+> compressed data requires more. For the duration of these cycles, the issuing
+> thread cannot start its next instruction, nor any can other thread start an
+> `UNPACR` instruction. Once these cycles are complete, execution proceeds in a
+> pipelined fashion, with the primary bottleneck being the fetching of bytes
+> from L1."
+
+- **Address phase: 2 cycles.** The table's existing `occupancy: { cycles: 2,
+  bound: at_least }` (`isa_doc`), charged at its low end like every other
+  bound. Here the low end is not merely a floor: 2 is the *exact* published
+  figure for uncompressed data, and uncompressed is the only kind tt-sim
+  unpacks (`get_isUncompressed` returns `True` unconditionally and the
+  compressed walk raises).
+- **Data phase: `ceil(transfer_bytes / rate)`.** `rate` is the throttle mode in
+  effect — "x1 speed: Up to 16 bytes per cycle from L1", x2 32, x4 64, selected
+  by `ConfigState.THCON_SEC[WhichUnpacker].Throttle_mode` where "`0` means x1,
+  `1` means x2, and `2` means x4" (all `isa_doc`, the table's
+  `l1_bandwidth.throttle_modes`, which was recorded and unconsumed until now).
+
+That is the whole reason this unit needed its own shape. The charge is computed
+in `read_unpack_state` — where the transfer size (`InputNumDatums` ×
+`DatumSizeBytes`) and the throttle config have just been decoded — and armed by
+`clock_tick`. The base pre-handler hook is *declined* for `UNPACR` on purpose,
+and for a second reason as well: `UNPACR` is three instruction forms behind one
+opcode, and only the datum-moving one has a Performance section, so the
+increment-context-counter and flush-cache forms are charged **nothing** rather
+than inheriting the regular form's two cycles.
+
+**Two forced modes and one arch difference, all transcribed rather than
+inferred.** The doc constrains the throttle in five cases; four of them force
+modes of unpacks tt-sim rejects before moving a datum (compressed data,
+`UpsampleZeroes`, BFP2), so exactly one is reachable and it is charged:
+"tileize always runs at x4, regardless of `Throttle_mode`". Blackhole's
+differences come from the same file — the BlackholeA0 tree holds a stub saying
+architecture differences are "conditionalized inline using `TTArchitecture`" —
+and are three quoted pseudocode lines, now in `arch_overrides.blackhole` so
+that Wormhole can never read them:
+
+| Blackhole fact | The doc's line |
+| --- | --- |
+| mode 3 = x8 = 128 B/cycle | "x8 ThrottleMode is illegal on Wormhole" (so it is legal here), with `ThrottleBytes = 16u << ThrottleMode` |
+| x4 becomes 128 B/cycle for datums ≥ 2 bytes | "`ThrottleBytes = 128; // upgrade to x4 '2x'`" |
+| the configured mode is ignored unless `REG1_ovrd_default_throttle_mode` is set | "`ThrottleMode = (DatumSizeBytes == 1) ? 3 : 2; // 8-bit modes use x8, others use x4`" |
+
+The reference simulator (ttsim's `tensix.cpp`) carries the identical logic under
+`TT_ARCH_VERSION == 1`, which is a second reading of the same source rather
+than a second source. Not charging these would bill Blackhole's data phase at
+up to **twice** its documented rate — over-charging, which the bounds policy
+forbids as firmly as it forbids invention. They are not hypothetical, either:
+instrumenting `blackhole/six` shows every one of its `UNPACR`s asking for
+2,048 bytes (a whole 32×32 bf16 tile) with `Throttle_mode` 2 and
+`ovrd_default_throttle_mode` **clear** — the default path — so it is charged
+2,048 / 128 = 16 cycles rather than the 32 the shared x4 rate alone would
+have billed. Wormhole's `softplus`, by contrast, unpacks 512 bytes with the
+override bit set, at the shared x4: 512 / 64 = 8.
+
+### The 80 B/cycle joint ceiling is still not charged, and that is the honest answer
+
+The design constraint this instalment was given was explicit: model the shared
+ceiling only if the sharing rule can be sourced. It cannot, so it is not.
+
+What exists is a *number* (`joint_bandwidth`, 80 B/cycle, `vendor_source` from
+tt-metal, with the ISA docs' L1 page supplying the "five 128-bit reads per
+cycle" half) and a *qualitative* 3×3 table of what each unpacker gets when both
+are streaming at once. Neither is an arbitration rule: the 3×3 table gives
+sustained rates for two simultaneously-streaming units, not a per-transfer
+division, and tt-sim charges each transfer once at issue with no notion of two
+overlapping streams. Inventing the division would be exactly the failure the
+provenance convention exists to prevent. So **each unpacker is charged its own
+uncontended rate**, the ceiling is recorded in the table as unconsumed *with
+the reason*, and a test pins that it stays that way. The same applies to the
+cross-unpacker half of the address-phase sentence ("nor can any other thread
+start an `UNPACR`"): the hold is per unit, so unpacker 1 issues while unpacker 0
+is held. Both omissions are under-charges — the floor direction — and both are
+pinned by name in `unpacker_cost_model_test.py` so they cannot be mistaken for
+oversights.
+
+### Blocking: a blocked unit is waiting, not busy
+
+The unpacker is the one unit that legitimately blocks for thousands of cycles
+(worst measured in-tree: 3,528, from the `[UNIT STALL]` survey) waiting for the
+Matrix Unit to hand a `Src` bank back. Occupancy had to compose with that
+without double-counting it, and the doc's own ordering says how: the address
+phase happens *before* the wait ("spends at least two cycles calculating the
+initial input address", *then* the L1 fetch), so
+
+- the 2-cycle address phase is charged **once**, at the cycle the unpack was
+  accepted, even when the unpack then blocks;
+- every blocked re-run charges **nothing** — that is the unit waiting on
+  somebody else, which tt-sim already models functionally;
+- the data phase is charged from the cycle the transfer actually starts, i.e.
+  when the bank comes back.
+
+One mechanism fix fell out: the blocked path never reaches the base drain,
+which is the only place holds are released, so an address-phase hold armed just
+before a block would have outlived its deadline for the length of the wait.
+`UnPackerUnit.clock_tick` now releases expired holds on that path too. Nothing
+about `blocked_on()`, `hasInflightInstructionsFromThread` or the
+`[UNIT STALL]` / `[UNIT WEDGED]` machinery changed, and every replay guard
+passing is the proof that the composition is sound.
+
+### The mover: the table's 1 was never the interesting number
+
+`XMOV.md` splits the cost into two explicitly different quantities in one
+sentence — "The thread issuing an `XMOV` instruction will be automatically
+stalled until the mover is able to _start_ work, at which point `XMOV` will
+execute in a single cycle - the mover proceeds with the task in the background"
+— and the table has always held both halves in different files. The 1 is issue;
+the duration is `unit_costs.yaml`'s `mover.transfer`, whose rates the ISA doc
+publishes as *measured*, with an ideal and a contended column per transfer
+kind. `MoverCostModel` now spends them:
+
+| Transfer kind | XMOV modes | Ideal rate, as the doc states it | Charge |
+| --- | --- | --- | --- |
+| `l1_to_l1` | `XMOV_L1_TO_L1`, `XMOV_L1_TO_L0` | "eight 128b reads and eight 128b writes every 11 cycles i.e. 93.1 bits copied per cycle" | `ceil(bits × 11 / 1024)` — 1 KiB = 88 cycles |
+| `l1_memset` | `XMOV_L0_TO_L1` | one 128b write per cycle | `ceil(bytes / 16)` |
+| `non_l1_memset` | `XMOV_L0_TO_L0` | one 128b write per cycle | `ceil(bytes / 16)` |
+
+Charged as **unit occupancy**, because "stalled until the mover is able to
+start work" is precisely what the existing issue-refusal machinery models — no
+new mechanism was needed for the XMOV path, and the TDMA command queue (which
+bypasses the instruction path entirely) is charged where it runs. The mover is
+also the one unit where the transfer is visible to
+`checkForOutstandingInstructions`, and that asymmetry with the unpacker is
+deliberate: the doc frames the mover's transfer as a *background* task the
+thread explicitly waits for (`STALLWAIT` C12 on Wormhole, C9 on Blackhole),
+where it frames the unpacker's data phase as pipelined throughput.
+
+**The ideal column is charged and the contended one is not.** The page gives no
+rule for when its L1-port contention applies, so the ideal rate is the floor —
+the contended 32 bits/cycle would be ~2.9× the charge, and charging it on
+faith would be over-charging with a citation attached. Two paths that stay at
+the entry's 1: a transfer of no bytes, and a mode the table prices no rate for.
+
+### Measured, at 10-cycle poll resolution: the totals move, and by tens
+
+Pump-to-DONE cycles at shutdown (`PUMP_CHUNK` forced to 10), model on, before →
+after. The instrumented columns are this change's own: cycles charged by the
+two newly wired units, and issue attempts they refused.
+
+| guard | before | after | movement | unpacker cycles charged | issues refused | PCC / value |
+| --- | --- | --- | --- | --- | --- | --- |
+| `blackhole/six` (128³ bf16 matmul) | 83,890 | **83,890** | **0** | 2,304 (128 UNPACRs × 18 = 2 + 2048 B / 128) | 0 | PCC 0.9982, unmoved |
+| `blackhole/sfpumath` | 20,250 | **20,280** | **+30** | 120 | 74 | bit-exact, unmoved |
+| `blackhole/nine` (two-tile NoC dataflow) | 12,800 | **12,820** | **+20** | 128 | 24 | all 256 elements, unmoved |
+| `blackhole/tilize` (the tileize-x4 path) | 72,000 | **72,010** | **+10** | 78 | 12 | all 4,096 results, unmoved |
+| `wormhole/softplus` | 19,880 | **19,910** | **+30** | 80 (+ 57 mover) | 43 | bit-exact, unmoved |
+
+Model off: `blackhole/six` reads 27,170 before and after, and the whole
+`pytest tt_sim/ driver/` run is untouched.
+
+**This is less movement than the item predicted, and the instrumentation says
+why.** The ROADMAP expected this to be the first change to move a total
+substantially, on the reasoning that the front-end bound now lets a unit's
+occupancy reach the issuing core. The bound does reach it — the refusal counts
+above are real, 74 on `sfpumath` where the previous six units managed five
+across the whole tree — but a refused issue is only a *slower* run if nothing
+else was going to stall anyway, and on these workloads the dataflow cores have
+slack. `six` is the extreme case and the informative one: **2,304 charged
+cycles, zero refused issues**. Nothing in that kernel tries to start a second
+unpack within 18 cycles of the first, because the matmul's own unpack/math
+handshake is slower than the modelled fetch. The charge is armed, correct and
+invisible, which is the seventh time this file has had to report that answer
+and the first time it has had the refusal counts to say *how close* it came.
+
+What *did* change qualitatively: this is the first instalment where a Tensix
+unit's occupancy is a function of the workload's data rather than of its
+instruction mix. Doubling a kernel's tile size now doubles its unpacker charge,
+which no previous unit's table could express.
+
+### The gate
+
+Run whole, model on: **RESULT: PASS** — the unit stage under the model (1,003
+tests), all 36 budget-independent value guards (`six` PCC 0.9982 unmoved, both
+`pipestall`s, `twolaunch` clean, both `tilize`s and both `untilize`s — the
+tileize-x4 path this change added), and all three budget-dependent guards
+proven clean on the poll-budget ladder at **exactly the multiples they needed
+before it**: `blackhole/dramtop` 1×, `blackhole/two` 2×, `blackhole/offline`
+4×. Nothing moved onto a higher rung, which is the stronger statement: the
+ladder is the gate's only measure of *how much* slower a run got, and it did
+not register this change at all.
+
+Run outside the gate, each Blackhole guard as its own standalone main under the
+model, 26 of them: 24 pass; `blackhole/two` and `blackhole/offline` fail at the
+recorded 1× poll budget, which is what being budget-dependent *means* and which
+was verified to be true of the unchanged tree as well (both fail at 1× with the
+model on before this change, and the gate passes both at their usual multiple
+after it).
+
+Model off: the full `pytest tt_sim/ driver/` run is unchanged — 1,003 unit
+tests, all 39 driver guards, every byte-identical Wormhole replay unmodified —
+and `blackhole/six` reads the same 27,170 cycles before and after.
+
+### What changed in the repository
+
+- `tt_sim/pe/tensix/tensix_instruction_costs.yaml` — `UNPACK`'s
+  `l1_bandwidth` gains `tileize_forced_mode` and, under
+  `arch_overrides.blackhole`, the `blackhole_throttle` block (x8, the x4 "2x"
+  upgrade, the default-mode pair), each with its own quoted line;
+  `joint_bandwidth` gains the note saying it is unconsumed and why; the
+  `UNPACR` and `XMOV` entries record what is now charged and what is
+  deliberately not.
+- `tt_sim/perf/unit_costs.yaml` — prose only: `mover` now names its consumer
+  and says the ideal column is charged and the contended one is not. **No
+  cycle count, bound or provenance changed anywhere in either file.**
+- `tt_sim/perf/model.py` — `UnitCostModel.unpack_data_phase_cycles` (the
+  throttle-rate selection, transcribed in the pseudocode's own order) and the
+  new `MoverCostModel` / `mover_cost_model`.
+- `tt_sim/pe/tensix/backends/unpacker.py` — the cost model, the declined
+  pre-handler hook, the charge computed at decode and armed at retire, the
+  once-only address phase across a block, and the expired-hold release on the
+  blocked path.
+- `tt_sim/pe/tensix/backends/mover.py` — the two models, the mode→transfer-kind
+  map, the occupancy on both the XMOV and TDMA paths, and the in-flight
+  transfer reading as outstanding work.
+- `tt_sim/pe/tensix/unpacker_cost_model_test.py` (27 tests) and
+  `tt_sim/pe/tensix/mover_cost_model_test.py` (13 tests) — the charge
+  arithmetic at every throttle rate on both arches, the forced modes, the
+  blocking composition, the back-pressure, the TDMA queue, and the two
+  deliberate under-charges pinned by name.
+- `tt_sim/perf/costs_test.py` — `UNWIRED_UNITS` down to `TDMA`; four new
+  entries on the consumer allow-list.
 
 ## Using it, when the time comes
 

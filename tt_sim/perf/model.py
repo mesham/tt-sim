@@ -129,6 +129,37 @@ class UnitCostModel:
             if entry.scales_with == "fidelity_phases"
         )
         self._fidelity = unit_costs.extras.get("fidelity_phases")
+        # -- the unpacker's throttled data phase (UNPACK only by data) -------
+        # ``l1_bandwidth.throttle_modes`` maps the ``THCON_SEC[n].REG2_
+        # Throttle_mode`` config value to a fetch rate in bytes per cycle
+        # (16 / 32 / 64, ``isa_doc``); Blackhole adds ``blackhole_throttle``
+        # via the arch override (x8 = 128 B/cycle, the x4 "2x" upgrade for
+        # datums of two bytes and up, and the default modes used when
+        # ``THCON_SEC0_REG1_ovrd_default_throttle_mode`` is clear). The PACK
+        # unit also carries an ``l1_bandwidth`` block but no ``throttle_modes``,
+        # so every attribute here stays ``None`` for it and for every other
+        # unit, and :meth:`unpack_data_phase_cycles` charges nothing.
+        self._throttle_rates = None
+        self._tileize_mode_value = None
+        self._bh_throttle = None
+        bandwidth = unit_costs.extras.get("l1_bandwidth") or {}
+        if bandwidth.get("provenance") in SOURCED_PROVENANCE:
+            modes = bandwidth.get("throttle_modes") or {}
+            rates = {
+                entry["throttle_mode_value"]: entry["bytes_per_cycle"]
+                for entry in modes.values()
+            }
+            if rates:
+                self._throttle_rates = rates
+                forced = bandwidth.get("tileize_forced_mode")
+                if forced in modes:
+                    self._tileize_mode_value = modes[forced]["throttle_mode_value"]
+                bh = bandwidth.get("blackhole_throttle") or {}
+                if bh.get("provenance") in SOURCED_PROVENANCE:
+                    self._bh_throttle = bh
+                    x8 = bh.get("x8") or {}
+                    if x8:
+                        rates[x8["throttle_mode_value"]] = x8["bytes_per_cycle"]
 
     # -- per-instruction ---------------------------------------------------
     def occupancy(self, instruction_name):
@@ -223,6 +254,74 @@ class UnitCostModel:
         if not cycles_per_tile or not per_phase:
             return None
         return int(math.ceil(cycles_per_tile / (phases_in_use * per_phase)))
+
+    # -- the unpacker's data phase -----------------------------------------
+    def unpack_data_phase_cycles(
+        self,
+        transfer_bytes,
+        throttle_mode,
+        datum_bytes,
+        tileize=False,
+        default_throttle_overridden=True,
+    ):
+        """Cycles one UNPACR's L1 fetch takes at the throttle in effect, or ``None``.
+
+        The second half of the only genuinely non-constant cost in the Tensix
+        table (the first is the fixed address phase, which is the ``UNPACR``
+        entry's ordinary ``occupancy``): "execution proceeds in a pipelined
+        fashion, with the primary bottleneck being the fetching of bytes from
+        L1", at a documented rate selected by the ``Throttle_mode`` config
+        field — so the charge is ``ceil(transfer_bytes / rate)``, computed at
+        issue from the size and the config in effect, which is why this is a
+        method rather than a table lookup.
+
+        The rate selection is transcribed from ``UNPACR_Regular.md``, in the
+        pseudocode's own order:
+
+        * ``tileize`` (``DiscontiguousInputRows``) forces the mode the table
+          names in ``tileize_forced_mode`` — "tileize always runs at x4,
+          regardless of Throttle_mode". The other forced modes the doc lists
+          (compressed data, ``UpsampleZeroes``, BFP2) force modes of unpacks
+          tt-sim rejects before moving a datum, so they never reach this.
+        * On Blackhole with ``THCON_SEC[0].REG1_ovrd_default_throttle_mode``
+          clear (``default_throttle_overridden=False``), the config mode is
+          ignored: "8-bit modes use x8, others use x4".
+        * Otherwise the mode is the config value ("0 means x1, 1 means x2, and
+          2 means x4"; Blackhole adds 3 = x8, "illegal on Wormhole" — an
+          untabulated mode charges nothing rather than guessing).
+        * Blackhole upgrades x4 to 128 B/cycle for datums of two bytes and up
+          ("upgrade to x4 '2x'").
+
+        What is deliberately **not** here: the two unpackers' 3x3 interference
+        table and the joint 80 B/cycle L1 ceiling. Both are shared constraints
+        over two *simultaneously streaming* units, published as sustained
+        rates with no per-transfer arbitration rule, so each unpacker is
+        charged its own uncontended rate — the floor — and the ceiling is
+        recorded unconsumed in the table (``joint_bandwidth``).
+        """
+        rates = self._throttle_rates
+        if not rates or not transfer_bytes or transfer_bytes <= 0:
+            return None
+        bh = self._bh_throttle
+        mode = throttle_mode
+        if tileize and self._tileize_mode_value is not None:
+            mode = self._tileize_mode_value
+        elif bh is not None and not default_throttle_overridden:
+            default = bh.get("default_mode") or {}
+            mode = default.get(
+                "byte_datums_value" if datum_bytes == 1 else "wider_datums_value",
+                mode,
+            )
+        rate = rates.get(mode)
+        if rate is None:
+            return None
+        if bh is not None:
+            wide = bh.get("x4_wide") or {}
+            if mode == wide.get("throttle_mode_value") and datum_bytes >= wide.get(
+                "min_datum_bytes", math.inf
+            ):
+                rate = wide["bytes_per_cycle"]
+        return int(math.ceil(transfer_bytes / rate))
 
 
 _UNIT_MODELS = {}
@@ -930,3 +1029,96 @@ def dram_cost_model(arch):
         model = DramCostModel(load_costs(arch).sections, arch)
         _DRAM_MODELS[arch] = model if model.service_cycles else None
     return _DRAM_MODELS[arch]
+
+
+# ---------------------------------------------------------------------------
+# The Mover.
+# ---------------------------------------------------------------------------
+#
+# The XMOV entry in the Tensix table is 1 cycle, and that 1 is the *issue*
+# cost only: "The thread issuing an XMOV instruction will be automatically
+# stalled until the mover is able to start work, at which point XMOV will
+# execute in a single cycle - the mover proceeds with the task in the
+# background" (wh_xmov). The interesting half is how long the background task
+# runs, and that is bandwidth-derived from ``unit_costs.yaml``'s ``mover``
+# section -- whose numbers the ISA doc publishes as *measured*, with an ideal
+# and a contended column per transfer kind. "Stalled until the mover is able
+# to start work" is precisely what a unit occupancy models, so the transfer
+# duration is charged as mover-unit occupancy and the existing issue-refusal
+# machinery is the whole delivery mechanism.
+#
+# The ideal column is charged and the contended one is not: the page gives no
+# rule for when the L1-port contention it mentions applies, so the ideal rate
+# is the floor -- the same reasoning that charges every ``at_least`` at its
+# low end.
+
+
+class MoverCostModel:
+    """Transfer duration of one Mover command, in cycles, by transfer kind.
+
+    ``kind`` is a key of ``mover.transfer`` in ``unit_costs.yaml``:
+    ``l1_to_l1`` (the memcpy modes, ``XMOV_L1_TO_L1`` and ``XMOV_L1_TO_L0``),
+    ``l1_memset`` (``XMOV_L0_TO_L1``) or ``non_l1_memset``
+    (``XMOV_L0_TO_L0``). The mapping from an XMOV mode to a kind lives with
+    the mover backend, which owns the mode enum; this class only prices bytes.
+    """
+
+    def __init__(self, sections, arch):
+        self.arch = arch
+        transfer = (sections.get("mover") or {}).get("transfer") or {}
+        #: ``{kind: (bits moved per period, cycles per period)}`` from the
+        #: ideal column: "Eight 128b reads and eight 128b writes every 11
+        #: cycles" is 8 x 128 = 1024 bits copied per 11 cycles for the memcpy
+        #: modes; one 128-bit write per cycle for the memsets.
+        self._rates = {}
+        for kind, block in transfer.items():
+            if not isinstance(block, dict):
+                continue
+            if block.get("provenance") not in SOURCED_PROVENANCE:
+                continue
+            ideal = block.get("ideal") or {}
+            bits_each = ideal.get("bits_each")
+            per_cycles = ideal.get("per_cycles")
+            moves = ideal.get("reads") or ideal.get("writes")
+            if not (bits_each and per_cycles and moves):
+                continue
+            self._rates[kind] = (moves * bits_each, per_cycles)
+
+    @property
+    def transfer_modelled(self):
+        """True when at least one transfer kind has a sourced rate."""
+        return bool(self._rates)
+
+    def transfer_cycles(self, kind, payload_bytes):
+        """Cycles the mover is busy moving ``payload_bytes`` as ``kind``.
+
+        ``ceil(bits * cycles_per_period / bits_per_period)`` — the sustained
+        rate applied fractionally, which charges a transfer smaller than one
+        period less than a whole period. That is the floor reading of a rate
+        statement; rounding up to whole read/write bursts would charge a
+        16-byte memcpy the full 11 cycles the doc never claims for it.
+        ``None`` — charge nothing — for an unpriced kind or an empty transfer.
+        """
+        rate = self._rates.get(kind)
+        if rate is None or not payload_bytes or payload_bytes <= 0:
+            return None
+        bits_per_period, period_cycles = rate
+        return int(math.ceil(payload_bytes * 8 * period_cycles / bits_per_period))
+
+
+_MOVER_MODELS = {}
+
+
+def mover_cost_model(arch):
+    """The :class:`MoverCostModel` for ``arch``, cached, or ``None`` when off.
+
+    Same contract as the other four: ``None`` with the model off or when the
+    table prices no transfer at all, so the mover backend stores one ``None``
+    and every XMOV keeps its same-cycle memcpy.
+    """
+    if arch is None or not cost_model_enabled():
+        return None
+    if arch not in _MOVER_MODELS:
+        model = MoverCostModel(load_costs(arch).sections, arch)
+        _MOVER_MODELS[arch] = model if model.transfer_modelled else None
+    return _MOVER_MODELS[arch]

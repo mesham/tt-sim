@@ -7,10 +7,11 @@
 # side -- ``tensix_instructions.yaml`` says what an opcode *is*, this says what
 # it *costs*.
 #
-# NOTHING CONSUMES THIS YET. It is dead data plus a tested loader
-# (``tt_sim/perf/costs.py``); see ROADMAP.md section I "Per-unit cycle-cost
-# tables" and docs/plans/cost-model.md. Phase 5 of docs/plans/event-driven-pump.md
-# is where it becomes load-bearing.
+# CONSUMED, behind ``TT_SIM_COST_MODEL``, by eight of the nine backend units
+# (every unit but TDMA -- ``UNWIRED_UNITS`` in tt_sim/perf/costs_test.py names
+# it and why), through the loader (``tt_sim/perf/costs.py``) and the policy
+# layer (``tt_sim/perf/model.py``). See ROADMAP.md section I "Per-unit
+# cycle-cost tables" and docs/plans/cost-model.md.
 #
 # ---------------------------------------------------------------------------
 # PROVENANCE IS THE POINT
@@ -1198,15 +1199,28 @@ units:
         x1: { bytes_per_cycle: 16, throttle_mode_value: 0 }
         x2: { bytes_per_cycle: 32, throttle_mode_value: 1 }
         x4: { bytes_per_cycle: 64, throttle_mode_value: 2 }
+      # "tileize always runs at x4, regardless of Throttle_mode" -- the one
+      # forced mode tt-sim can reach (the others force modes tt-sim rejects:
+      # compressed data, UpsampleZeroes, BFP2). Named by mode key so the number
+      # is stated exactly once, in the table above.
+      tileize_forced_mode: x4
       provenance: isa_doc
       source: wh_unpacr#performance
       note: >
-        Selected by ConfigState.THCON_SEC[WhichUnpacker].Throttle_mode, but
-        constrained by mode: DiscontiguousInputRows always wants x4;
-        !IsUncompressed, UpsampleZeroes >= 3 and BFP2/BFP2a always want x1.
-        When both unpackers are active they interfere -- the ISA doc has a 3x3
-        table of what each actually gets, which is contention, not a per-op
-        cost, and so is not reproduced here.
+        Selected by ConfigState.THCON_SEC[WhichUnpacker].Throttle_mode ("0
+        means x1, 1 means x2, and 2 means x4"), but constrained by mode:
+        DiscontiguousInputRows always wants x4; !IsUncompressed,
+        UpsampleZeroes >= 3 and BFP2/BFP2a always want x1. When both unpackers
+        are active they interfere -- the ISA doc has a 3x3 table of what each
+        actually gets, which is contention, not a per-op cost, and so is not
+        reproduced here. CONSUMED since 2026-08-06 by
+        UnitCostModel.unpack_data_phase_cycles (tt_sim/perf/model.py): an
+        UNPACR's data phase is charged ceil(transfer_bytes / rate) as unit
+        occupancy, with the rate chosen exactly as this note describes. The
+        interference table stays unconsumed: it gives sustained rates for two
+        *simultaneously streaming* unpackers, and tt-sim charges each transfer
+        at issue with no arbitration between the two units -- charging each
+        unpacker its own uncontended rate is the floor.
     joint_bandwidth:
       bytes_per_cycle: 80
       provenance: vendor_source
@@ -1220,6 +1234,13 @@ units:
         says both unpackers together "can theoretically jointly achieve five
         128-bit reads from L1 per cycle" (wh_l1) -- so the *five reads* half is
         isa_doc and only the conversion to 80 B/cycle comes from the vendor.
+        DELIBERATELY UNCONSUMED by the 2026-08-06 wiring: it is a *shared*
+        constraint whose division between the two unpackers no source states
+        in a per-transfer form (the 3x3 interference table above is sustained
+        rates, not arbitration), so each unpacker is charged its own throttle
+        rate and the joint ceiling is recorded here as the known under-charge
+        -- the honest floor. See docs/plans/cost-model.md, "Unpacker and mover
+        occupancy".
     instructions:
       UNPACR:
         occupancy: { cycles: 2, bound: at_least }
@@ -1234,6 +1255,15 @@ units:
           occupancy for the uncompressed case and a floor for the compressed
           one. The subsequent data movement is pipelined at the
           ``l1_bandwidth`` rate above and is not part of this occupancy.
+          CONSUMED since 2026-08-06, with two scoping choices made where it is
+          charged (backends/unpacker.py): the 2 is charged to the datum-moving
+          UNPACR form only, because this Performance section is
+          UNPACR_Regular.md's -- the IncrementContextCounter and FlushCache
+          forms have no published timing and are charged nothing; and the
+          cross-unpacker half of the sentence ("nor can any other thread start
+          an UNPACR", i.e. on EITHER unpacker) is not modelled -- the charge
+          holds the issuing unpacker only, an under-charge in the floor
+          direction.
       UNPACR_NOP:
         occupancy: 1
         provenance: isa_doc
@@ -1266,7 +1296,12 @@ units:
           execute in a single cycle - the mover proceeds with the task in the
           background." So 1 cycle is the issue cost once the mover is free; the
           transfer duration is separate and is bandwidth-derived, and STALLWAIT
-          condition C12 is what waits for it.
+          condition C12 is what waits for it. Since 2026-08-06 the transfer
+          duration IS charged, as mover-unit occupancy, from the ``mover``
+          section of tt_sim/perf/unit_costs.yaml (MoverCostModel in
+          tt_sim/perf/model.py) -- "stalled until the mover is able to start
+          work" is exactly what a unit occupancy models. This entry's 1 stays
+          the floor for any transfer the rates cannot price.
 
   # -------------------------------------------------------------------------
   NONE:
@@ -1367,3 +1402,37 @@ arch_overrides:
           RMWCIB3: *bh_cfg_group
           RDCFG:
             ipc_group: Config
+      UNPACK:
+        l1_bandwidth:
+          # Blackhole's own fetch-speed differences, transcribed from the
+          # shared UNPACR_Regular.md functional model's explicit
+          # ``TTArchitecture == Blackhole`` conditionals (the BlackholeA0 tree
+          # holds a stub pointing at the Wormhole file, with arch differences
+          # "conditionalized inline using TTArchitecture"). The Performance
+          # prose itself lists only x1/x2/x4; these three facts are stated in
+          # the pseudocode, each with its own quoted line, and the reference
+          # simulator (ttsim, tensix.cpp) carries the identical logic under
+          # ``TT_ARCH_VERSION == 1``. Left out of the shared table above so
+          # that Wormhole -- where "x8 ThrottleMode is illegal" per the same
+          # pseudocode -- can never read them.
+          blackhole_throttle:
+            x8: { bytes_per_cycle: 128, throttle_mode_value: 3 }
+            x4_wide: { bytes_per_cycle: 128, throttle_mode_value: 2, min_datum_bytes: 2 }
+            default_mode: { byte_datums_value: 3, wider_datums_value: 2 }
+            provenance: isa_doc
+            source: wh_unpacr#functional-model
+            note: >
+              Three quoted lines, in the order the fields above record them:
+              "x8 ThrottleMode is illegal on Wormhole" (so mode 3 is legal on
+              Blackhole, and ThrottleBytes = 16u << ThrottleMode gives 128);
+              "ThrottleBytes = 128; // upgrade to x4 '2x'" when
+              "(TTArchitecture == Blackhole) && (ThrottleMode == 2) &&
+              (DatumSizeBytes >= 2)"; and "ThrottleMode = (DatumSizeBytes ==
+              1) ? 3 : 2; // 8-bit modes use x8, others use x4" when
+              "!ConfigState.THCON_SEC[0].REG1_ovrd_default_throttle_mode" (a
+              Blackhole-only config bit; note the doc indexes THCON_SEC[0]
+              for both unpackers). Consumed by
+              UnitCostModel.unpack_data_phase_cycles. Not charging these
+              would bill Blackhole's data phase at up to twice its documented
+              rate, which is the over-charging direction the bounds policy
+              forbids.
