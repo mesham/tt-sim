@@ -46,43 +46,35 @@ which is why cost-model fidelity and easily-consumed trace output
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **The rest of the RV memory path** — the load/store unit's
-   published queue limits and per-region throughput, all `isa_doc`
-   and all unconsumed. Successor to "cost the NIU register block",
-   which landed 2026-08-06.
-3. **Freeze the cheap guards**: `noc_tile_transfer`,
-   `optests/dramtop`, `vecadd_sharding` on Blackhole, Wormhole
-   `matmulidx`/`matmulblock` offline guards.
-4. **Smarter `TT_SIM_CYCLES_PER_POLL` default** — the fixed 100-cycle
-   pump after every wire message dominates at scale.
-
-### Tier 3 — medium-term
-
-5. **Issue-loop model** — worth more rung-2 dataset coverage than any
+2. **A cheaper live Tensix tile** — successor to "smarter
+   `TT_SIM_CYCLES_PER_POLL` default", which closed 2026-08-06: the pump is
+   free when nothing can advance, and what a wide grid costs is its live
+   workers.
+3. **Issue-loop model** — worth more rung-2 dataset coverage than any
    remaining congestion work.
-6. **DRAM residue** — endpoint occupancy first (pure model shape, no
+4. **DRAM residue** — endpoint occupancy first (pure model shape, no
    new data needed); the rest is measurement-blocked.
-7. **Next silicon session on the Blackhole box** — a bundle of cheap
+5. **Next silicon session on the Blackhole box** — a bundle of cheap
    probes once a card is in hand, including the first-ever Wormhole
    measurements.
-8. **Tensix issue latency & wait-gates**, then mover / PC-buffer
+6. **Tensix issue latency & wait-gates**, then mover / PC-buffer
     timing point fixes.
-9. **Numba on the pump's event heap, and the `nogil` threading
+7. **Numba on the pump's event heap, and the `nogil` threading
     revival** — the ranked JIT target now that pump Phase 4 exists.
-10. **Rung-4 calibration against silicon traces** — the eventual bar
+8. **Rung-4 calibration against silicon traces** — the eventual bar
     for claiming anything stronger than "estimator".
 
 ### Tier 4 — opportunistic / housekeeping
 
-11. **Tracing & observability follow-ups** — the perf-budget decision,
+9. **Tracing & observability follow-ups** — the perf-budget decision,
     `chip_id`, and the long tail.
-12. **Functional backlog** (pick up when a kernel demands it) — Tensix
+10. **Functional backlog** (pick up when a kernel demands it) — Tensix
     backend gaps, NoC registers/atomics, device/tile infrastructure,
     Blackhole ISA extensions.
-13. **Architectural clarity & quick wins** — module boundaries,
+11. **Architectural clarity & quick wins** — module boundaries,
     docstring audit, diagrams, ISA index; shellcheck,
     `MEM_BOOT_CODE_BASE`.
-14. **Parked decisions & re-measurements** — Wormhole reset fan-out,
+12. **Parked decisions & re-measurements** — Wormhole reset fan-out,
     the Blackhole watchdog A/B, re-timing the example sweep.
 
 ### Not to be started
@@ -102,6 +94,19 @@ which is why cost-model fidelity and easily-consumed trace output
   upstream (see `CLAUDE.md`); slow dispatch suffices.
 - **Quasar, L2CPU / Security tiles, harvesting** — out of scope by
   decision.
+- **Per-region RV request throughput** ("each memory region can
+  process at most one request per cycle", every region but L1) —
+  deferred on a census, not on provenance. The traffic it describes
+  does not occur: **zero same-cycle collisions on either NIU block
+  across seven guards and 138,936 MMIO requests**, because NoC 0 and
+  NoC 1 are separate memory-map entries and tt-metal gives BRISC one
+  and NCRISC the other. What does collide (tile control, PCBufs) is
+  worth 0.2–5.5 % as an *upper* bound. Against that it would be the
+  first RV cost state that is not per-core, and would sit outside the
+  firmware-parking fixed-point proof. **Revisit when a workload puts
+  two cores on one region** — a multi-core kernel sharing an L1
+  semaphore, showing as collisions on `0xFFE8`. Census and method are
+  in the `docs/plans/cost-model.md` instalment.
 - Watch item, not work: Tenstorrent may ship their own perf model or
   public cost tables at any time — if so, the headline goal needs
   re-evaluation. Watch ttsim and tt-metal release notes.
@@ -148,7 +153,7 @@ consumable end of the pipe:
   are the fields a code generator acts on — surfacing them in the
   trace output is what is left.
 - **Source-level attribution.** `DwarfIndex` function-name attribution
-  (currently in item 11's long tail — promote it here) so a hotspot
+  (currently in item 9's long tail — promote it here) so a hotspot
   names a kernel function and line, not a bare PC; kernel-ELF
   auto-discovery so the workflow needs no hand-holding.
 - **An entry-point workflow.** One documented invocation (env vars or
@@ -157,77 +162,43 @@ consumable end of the pipe:
   as the worked demonstration.
 - **Honest framing baked into the output.** Modelled numbers are
   floors built from published bounds, corroborated but not calibrated
-  against end-to-end silicon (item 10) — the report should say so, so
+  against end-to-end silicon (item 8) — the report should say so, so
   the team optimises against relative attribution, not absolute
   cycle promises.
 
 A first version is assemblable today — `six` already attributes ~75 %
 of its modelled cycles to a published number — and its fidelity
-improves automatically as items 2 and 5–8 land. The tracing
-overhead budget (item 11) matters doubly here, since the team will
+improves automatically as items 3–6 land. The tracing
+overhead budget (item 9) matters doubly here, since the team will
 run this at kernel scale.
 
-## 2. The rest of the RV memory path
+## 2. A cheaper live Tensix tile
 
-**"Cost the NIU register block" landed 2026-08-06 and was never
-provenance-blocked.** The ">= 7" row's cell names six things and two of
-them are "NoC 0 configuration and command" and "NoC 1 configuration and
-command", on both architectures; only this file's key name for the row
-(`tdma_tilectrl_pic_noc_overlay`) said otherwise. The blocks are
-charged, `docs/plans/cost-model.md` has the instalment, and the item
-7 probe it would have needed is off that list.
+**"Smarter `TT_SIM_CYCLES_PER_POLL` default" closed 2026-08-06, and the
+default did not change.** Its evidence — "at 80 workers a readback ran
+for an hour that finishes in seconds at `=10`" — predated firmware-loop
+parking and no longer reproduces: `vecadd_multi_core` at the full
+Wormhole 8x10 grid now PASSes in ~80 s at the default, and an
+interleaved A/B against `=10` puts the two inside each other's spread
+(the simulator does the same real work either way — 483 k vs 482 k live
+tile ticks). The residual per-message-per-tile term the item named is
+gone too: the pump now skips a window it has already proved nothing can
+happen in, and inlines the dormant tick, which at 80 tiles takes a
+quiescent `run(100)` from 58.7 µs to 6.1 µs and one-live-tile-among-80
+from 4382 µs to 2398 µs — with every guard's simulated cycle total
+byte-identical. Details in `docs/plans/event-driven-pump.md`
+(Phase 4b) and `driver/wormhole/docs/profiling.md`. The advice to set
+the knob by hand is retracted in both runbooks.
 
-What the census behind it found is the successor, and it is the same
-shape: **published, `isa_doc`, and consumed by nothing.**
+What that leaves is the other half of the same 2026-08-03 prediction,
+and it is now the whole of the wide-grid cost: **a live Tensix tile is
+expensive** (~150 µs per ticked tile, ~12 of them live at a time on the
+8x10 `vecadd_multi_core` run, 71 s of its 81 s). Nothing in the pump
+addresses that; it is the same target as item 9's JIT work and item 5's
+issue-loop model, approached from the wall-clock side. Rank it against
+those rather than treating it as pump work.
 
-- **`max_loads_in_flight`** — 8 for core-local RAM and **one shared
-  budget of 4** across every other region (the column's cell is a
-  four-row rowspan, which the YAML note had read as covering only the
-  mailbox group; corrected). Already in `unit_costs.yaml`, read by no
-  consumer, and a barrier poll loop is exactly the shape that hits an
-  in-flight cap.
-- **Per-region request throughput** — "Each memory region can process
-  at most one request per cycle" for every region but L1
-  (`BabyRISCV/MemoryOrdering.md`), which is the one term that would
-  make two cores hammering the *same* NIU cost more than one core
-  doing it. Not in the tables yet.
-- **Sustained-load throughput** — `riscv.load_throughput` holds the
-  docs' "four such loads every N - 1 cycles" formula, is corroborated
-  by silicon to 0.008 of a cycle (`rv_load_indep`), and is likewise
-  consumed by nothing.
-- Still genuinely unsourced, and staying that way: the "more in the
-  case of access conflicts" tail on the >= 7 row, and the three blocks
-  left in `RV_UNNAMED_REGIONS` (MOP expander config, NCRISC IRAM, the
-  Tensix instruction push buffers), none of which appears in any row
-  of either architecture's table.
-
-## 3. Freeze the cheap guards
-
-From the upstream sweep's own value ranking
-(`docs/upstream-examples-status.md`):
-
-- `noc_tile_transfer` — the only multi-core example with a real
-  self-check, both arches, 2 tiles, fast.
-- `optests/dramtop` — a one-liner now that the DRAM top-down
-  allocation fix is in.
-- `vecadd_sharding` on Blackhole — the only in-tree coverage of
-  L1-sharded buffers driven by a compute-only kernel (4 workers,
-  14 s; recipe is in the sweep doc).
-- `pad_multi_core` / `shard_data_rm` — 4-core sharded data movement;
-  no self-check, so freeze expected DRAM contents.
-- Wormhole offline guards for `optests/matmulidx` + `matmulblock`
-  (Blackhole has them; Wormhole is live-diff only).
-- `matmul_multi_core` @4x5 only if ~800 s of CI is acceptable.
-
-## 4. `TT_SIM_CYCLES_PER_POLL` default
-
-The bridge pumps `cycles_per_poll` (default 100) cycles after *every*
-wire message, including the pure host DMA of input/output buffers — at
-80 workers a readback ran for an hour that finishes in seconds at
-`=10`. Fix the default rather than documenting around it: skip the
-pump on host-DMA messages, or adapt it to grid size.
-
-## 5. Issue-loop model
+## 3. Issue-loop model
 
 The residual on every rung-2 prediction is one constant unmodelled
 issuing-core path (intercepts 77–94 cycles across four independent
@@ -235,7 +206,7 @@ series). An issue-loop term is worth more of the 8,140-point tt-metal
 NoC dataset than congestion was — 24 sole-cause entries vs 2 — so it
 is the ranked next step for widening rung-2 coverage.
 
-## 6. DRAM residue
+## 4. DRAM residue
 
 - **Endpoint occupancy** — a second request is not queued behind the
   first: latency without contention. Pure model shape; no new data
@@ -252,7 +223,7 @@ is the ranked next step for widening rung-2 coverage.
 - Bank conflicts / refresh windows — no DRAM bank model, nothing
   published; long-term.
 
-## 7. Next silicon session (Blackhole box)
+## 5. Next silicon session (Blackhole box)
 
 Cheap probes to bundle into one card session — plan and analyse here,
 run there:
@@ -287,7 +258,7 @@ run there:
   depth is a lower bound still growing at the longest burst; needed
   before the front-end bound's constant can ever be called calibrated.
 
-## 8. Tensix issue latency, wait-gates & PC-buffer timing
+## 6. Tensix issue latency, wait-gates & PC-buffer timing
 
 Wait-gate stalls on srcA/srcB availability and the documented per-op
 issue cadence, now expressible through the landed front-end bound.
@@ -300,7 +271,7 @@ cross-unpacker half of the address-phase interlock ("nor can any
 other thread start an `UNPACR`") — each needs a sourced arbitration
 rule that the docs do not currently give.
 
-## 9. Numba and the threading revival
+## 7. Numba and the threading revival
 
 Nothing has yet *needed* Numba; the ranked target is the event-driven
 pump **after Phase 4's** heap-of-(cycle, unit, event) shape — a
@@ -320,7 +291,7 @@ interop), C extension (last resort).
 - *Test:* re-run the 4-Tensix `four/`-derived benchmark with
   `TT_SIM_THREADED=1`; target wall clock **under** sequential.
 
-## 10. Rung-4 calibration
+## 8. Rung-4 calibration
 
 The bar for claiming anything stronger than "first-order estimator":
 match a captured silicon cycle trace within X %. Needs golden traces —
@@ -329,7 +300,7 @@ under `driver/wormhole/server/traces/`. Until then, no in-tree cycle
 count has ever been compared to silicon; say "performance estimator",
 not "cycle-accurate".
 
-## 11. Tracing & observability follow-ups
+## 9. Tracing & observability follow-ups
 
 - **Perf-budget decision**: the ~30 % tracing overhead target is not
   met on RV-bound workloads (counters/Perfetto ~2×, JSONL ~4×) —
@@ -361,7 +332,7 @@ not "cycle-accurate".
   L1/DRAM snapshots in state dumps, `SpikeCommitlogWriter` mem-access
   decoration, Jupyter template, NoC heatmap example, Pyright cleanup.
 
-## 12. Functional backlog
+## 10. Functional backlog
 
 Pick up when a kernel or example actually demands it; everything here
 fails loudly today. Grep for `NotImplementedError` in the named files.
@@ -427,7 +398,7 @@ in-tree kernel): `mret`, F single-precision execution, the V vector
 unit (TRISC2), Zfh's BF16 CSR mode, the L1 cache tag search
 accelerator. Wormhole's RV32IM-only set is complete and correct.
 
-## 13. Architectural clarity & quick wins
+## 11. Architectural clarity & quick wins
 
 - Module boundaries per hardware block — `frontend.py` mixes decode
   and dispatch; `tt_noc.py` bundles NIU + both NoCs + directory.
@@ -448,7 +419,7 @@ accelerator. Wormhole's RV32IM-only set is complete and correct.
   a captured trace whether tt-metal writes the `jal`; if not, the
   bridge should synthesise it.
 
-## 14. Parked decisions & re-measurements
+## 12. Parked decisions & re-measurements
 
 - **Wormhole NCRISC/TRISC reset fan-out**: the launch-message
   `enables` path is wired on Blackhole only; decide whether Wormhole
@@ -459,6 +430,11 @@ accelerator. Wormhole's RV32IM-only set is complete and correct.
   landed 3.9× / ~1000× figures use the trace-replay proxy, so the
   14 s → 255 s figure that motivated the work has never been
   re-measured end to end.
+- **`matmul_multi_core` @4x5 as a guard** — declined when the cheap
+  guards were frozen: ~800 s would roughly double the cost-model
+  gate's wall clock, and what it uniquely adds is *scale* (20 workers
+  of simultaneous DRAM I/O), not a new code path. Revisit if a
+  routing or contention bug of that class recurs.
 - **Watchdog cost A/B on Blackhole**: the original ran before the
   watchdog was wired there, so both arms were watchdog-free.
 - **Re-time the upstream example sweep** before quoting its numbers —
