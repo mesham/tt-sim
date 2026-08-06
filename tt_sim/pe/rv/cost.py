@@ -115,11 +115,48 @@ omission:
   in flight, and the interlock above already stalls on the dependent read,
   which is the first-order effect.
 * **Regions the table does not name** — see
-  :data:`tt_sim.perf.model.RV_UNNAMED_REGIONS`, which includes the NoC NIU
-  register block that every ``noc_async_*_barrier`` polls.
+  :data:`tt_sim.perf.model.RV_UNNAMED_REGIONS`. The NoC NIU register block
+  used to head that list and no longer does; see below.
 
 Every one of those under-charges, which is the direction the cost model's
 stated policy asks for: a modelled cycle count is a floor.
+
+**The NIU register block is charged, and the gap that said otherwise was a
+misreading of the table, not a missing number** (2026-08-06). The ROADMAP item
+"cost the NIU register block" recorded the busiest MMIO load in the tree —
+every ``noc_async_*_barrier`` polls a NIU counter at ``0xFFB20000`` /
+``0xFFB30000`` — as blocked on
+provenance, on the grounds that the ">= 7" row "covers the NoC *overlay* at
+``0xFFB40000``, a different block". The row does cover the overlay. It also
+covers the NIUs, by name, on both architectures, in the same cell:
+
+    TDMA-RISC configuration and command / Tile control / debug / status /
+    PIC configuration and status / **NoC 0 configuration and command** /
+    **NoC 1 configuration and command** / NoC overlay configuration and
+    command  ->  ">= 7 (more in the case of access conflicts)"
+
+(Wormhole ``BabyRISCV/README.md``; Blackhole's is identical bar TDMA, which
+moves to its ">= 4" row and which :data:`_LOAD_LATENCY_KEYS` already splits.)
+Each of "NoC 0 configuration and command" and "NoC 1 configuration and
+command" is its own line of that cell and both link to ``NoC/MemoryMap.md``,
+the NIU register block, while the overlay's line links to
+``NoC/Overlay/README.md``. So nothing had to be sourced, derived or measured:
+the number was already in the table this module reads, under a *key name* —
+``tdma_tilectrl_pic_noc_overlay`` — whose "noc_overlay" was read as one word.
+The keys are now ``..._noc0_noc1_overlay`` on both arches so the same
+misreading cannot recur.
+
+Two address ranges were reclassified, both to the region that row supplies:
+
+* ``0xFFB20000-0xFFB3FFFF``, the NoC 0 and NoC 1 NIU register blocks.
+* ``0xFFB50000-0xFFB7FFFF``, the upper three quarters of the NoC overlay.
+  ``NOC_OVERLAY_START_ADDR`` is ``0xFFB4_0000`` to ``0xFFB7_FFFF`` (64 stream
+  register spaces of 4 KiB, which is also exactly what ``NoCOverlay`` models
+  and what ``TensixTile`` maps), and this module's range ended at
+  ``0xFFB50000`` — one stream space — so overlay streams 16-63 were counted
+  as unnamed and charged nothing. That was a plain arithmetic slip in the
+  same classifier, found by the same census, and it is the larger of the two
+  on a matmul.
 """
 
 from __future__ import annotations
@@ -131,7 +168,7 @@ from tt_sim.perf.model import (
     RV_REGION_MAILBOX_GROUP,
     RV_REGION_TDMA,
     RV_REGION_TENSIX_GPR_CFG,
-    RV_REGION_TILECTRL_PIC_OVERLAY,
+    RV_REGION_TILECTRL_PIC_NOC,
     RV_REGION_UNNAMED,
     riscv_cost_model,
 )
@@ -143,9 +180,17 @@ _MMIO_BASE = 0xFFB00000
 _LOCAL_DATA_RAM_END = 0xFFB10000  # local data RAM is <= 8 KiB at 0xFFB00000
 _TDMA_BASE = 0xFFB11000
 _TILE_CTRL_BASE = 0xFFB12000
-_TILE_CTRL_END = 0xFFB13000
-_NOC_OVERLAY_BASE = 0xFFB40000
-_NOC_OVERLAY_END = 0xFFB50000
+# Tile control / debug / status is 0xFFB1_2000-0xFFB1_2FFF and the PIC
+# configuration and status registers are 0xFFB1_3000-0xFFB1_3FFF. The two are
+# one row of the load-latency table, so they are one region here; tt-sim maps
+# no PIC today, but classifying by the published map rather than by what
+# happens to be modelled is what stops the next block from being missed.
+_TILE_CTRL_END = 0xFFB14000
+# NoC 0 (0xFFB2_0000), NoC 1 (0xFFB3_0000) and the NoC overlay
+# (0xFFB4_0000-0xFFB7_FFFF) are three *consecutive* entries of the memory map
+# and all three are named by the same ">= 7" row, so one range covers them.
+_NOC_REGS_BASE = 0xFFB20000
+_NOC_OVERLAY_END = 0xFFB80000
 _TENSIX_GPR_BASE = 0xFFE00000
 _TENSIX_GPR_END = 0xFFE10000
 _PCBUF_TTSYNC_SEM_BASE = 0xFFE80000
@@ -168,9 +213,9 @@ def classify_address(addr):
     if _TDMA_BASE <= addr < _TILE_CTRL_BASE:
         return RV_REGION_TDMA
     if _TILE_CTRL_BASE <= addr < _TILE_CTRL_END:
-        return RV_REGION_TILECTRL_PIC_OVERLAY
-    if _NOC_OVERLAY_BASE <= addr < _NOC_OVERLAY_END:
-        return RV_REGION_TILECTRL_PIC_OVERLAY
+        return RV_REGION_TILECTRL_PIC_NOC
+    if _NOC_REGS_BASE <= addr < _NOC_OVERLAY_END:
+        return RV_REGION_TILECTRL_PIC_NOC
     if _TENSIX_GPR_BASE <= addr < _TENSIX_GPR_END:
         return RV_REGION_TENSIX_GPR_CFG
     if addr >= _TENSIX_CFG_BASE:

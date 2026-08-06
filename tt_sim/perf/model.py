@@ -377,7 +377,10 @@ RV_REGION_LOCAL_DATA_RAM = 1
 RV_REGION_MAILBOX_GROUP = 2
 RV_REGION_TENSIX_GPR_CFG = 3
 RV_REGION_TDMA = 4
-RV_REGION_TILECTRL_PIC_OVERLAY = 5
+#: Tile control / debug / status, the PIC, **both NIU register blocks** and the
+#: NoC overlay — one row of the load-latency table on both architectures, and
+#: named as six separate entries within that row's one cell.
+RV_REGION_TILECTRL_PIC_NOC = 5
 #: An address the load-latency table does not name. Charged nothing — see
 #: :data:`RV_UNNAMED_REGIONS` for which blocks these are and why that matters.
 RV_REGION_UNNAMED = 6
@@ -389,21 +392,32 @@ RV_REGION_NAMES = (
     "mailbox_group",
     "tensix_gpr_cfg",
     "tdma",
-    "tilectrl_pic_overlay",
+    "tilectrl_pic_noc",
     "unnamed",
 )
 
 #: The MMIO blocks tt-sim maps into a baby core's address space that the ISA
 #: docs' load-latency table does not have a row for, so nothing can be charged
-#: for them without inventing a number. Documented here rather than in a
-#: comment because one of them is load-bearing: the **NoC NIU registers**
-#: (0xFFB20000 / 0xFFB30000) are the target of every ``noc_async_*_barrier``
-#: poll in every tt-metal dataflow kernel, i.e. the busiest MMIO load in the
-#: tree, and the table's ">= 7" row names "TDMA / tile control / PIC / NoC
-#: *overlay*" — a different block. Charging the overlay's cost to the NIUs
-#: would be a guess dressed up as a citation.
+#: for them without inventing a number.
+#:
+#: **The NoC NIU register block used to head this list and does not any more**
+#: (2026-08-06). It was recorded here as the load-bearing gap — every
+#: ``noc_async_*_barrier`` in every tt-metal dataflow kernel polls a NIU
+#: counter, which makes it the busiest MMIO load in the tree — on the reading
+#: that the ">= 7" row named "TDMA / tile control / PIC / NoC *overlay*", a
+#: different block. It does not: that row's cell lists "NoC 0 configuration
+#: and command" and "NoC 1 configuration and command" as their own entries
+#: next to the overlay's, on both architectures, each linking to the NIU
+#: register block's own page. The number was in the table all along; what was
+#: wrong was this file's key name for the row. See ``tt_sim/pe/rv/cost.py``.
+#:
+#: What is left is genuinely unnamed. None of the three appears in any row of
+#: either architecture's load-latency table, and two of the three are not
+#: really load targets at all (the instruction push buffers are written, and
+#: NCRISC's IRAM is marked "not accessible by Load/Store Unit" in the memory
+#: map), which is why nothing in the tree loads from them in any measurable
+#: quantity.
 RV_UNNAMED_REGIONS = (
-    "noc niu registers (0xFFB20000 / 0xFFB30000)",
     "mop expander config (0xFFB80000)",
     "riscv instruction ram (0xFFC00000)",
     "tensix instruction push buffers (0xFFE40000-0xFFE60000)",
@@ -419,8 +433,8 @@ _LOAD_LATENCY_KEYS = {
         RV_REGION_LOCAL_DATA_RAM: "core_local_data_ram",
         RV_REGION_MAILBOX_GROUP: "mailboxes_pcbufs_ttsync_semaphores",
         RV_REGION_TENSIX_GPR_CFG: "tensix_gprs_and_backend_config",
-        RV_REGION_TDMA: "tdma_tilectrl_pic_noc_overlay",
-        RV_REGION_TILECTRL_PIC_OVERLAY: "tdma_tilectrl_pic_noc_overlay",
+        RV_REGION_TDMA: "tdma_tilectrl_pic_noc0_noc1_overlay",
+        RV_REGION_TILECTRL_PIC_NOC: "tdma_tilectrl_pic_noc0_noc1_overlay",
     },
     "blackhole": {
         # Blackhole has an L0 data cache in front of L1, so the table gives two
@@ -442,7 +456,7 @@ _LOAD_LATENCY_KEYS = {
         RV_REGION_MAILBOX_GROUP: "mailboxes_pcbufs_ttsync_semaphores",
         RV_REGION_TENSIX_GPR_CFG: "tensix_gprs_backend_config_tdma",
         RV_REGION_TDMA: "tensix_gprs_backend_config_tdma",
-        RV_REGION_TILECTRL_PIC_OVERLAY: "tilectrl_pic_noc_overlay",
+        RV_REGION_TILECTRL_PIC_NOC: "tilectrl_pic_noc0_noc1_overlay",
     },
 }
 

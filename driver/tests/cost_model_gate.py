@@ -71,9 +71,9 @@ What it does **not** establish
 
 * **Nothing about whether the modelled cycle counts are right.** The gate never
   compares a cycle count to anything. ``cost-model.md`` is explicit that a total
-  is not yet a prediction: DRAM answers instantly, the NIU register block a
-  dataflow kernel actually polls is uncosted, and there is no branch predictor
-  to charge a mispredict against. A green gate means "the model is value-safe",
+  is not yet a prediction: there is no branch predictor to charge a mispredict
+  against, no instruction-cache miss cost, and no router arbitration. A green
+  gate means "the model is value-safe",
   never "the model is calibrated". The poll-budget multiplier is not a cycle
   measurement either — "2x" only brackets the slowdown at ladder resolution.
 * Nothing about workloads with no in-tree guard.

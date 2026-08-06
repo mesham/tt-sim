@@ -1152,6 +1152,11 @@ Three things *are* occupancy and are charged as such:
   it. `RV_UNNAMED_REGIONS` in `tt_sim/perf/model.py` lists this and the three
   other unnamed blocks (MOP expander config, instruction RAM, the Tensix
   instruction push buffers).
+  **— Retracted 2026-08-06, and this whole bullet was wrong.** That row's cell
+  names "NoC 0 configuration and command" and "NoC 1 configuration and command"
+  as their own entries alongside the overlay's, on both architectures. The
+  block is charged the row's 7. See ["The NIU register
+  block"](#the-niu-register-block-the-number-was-in-the-table-under-the-wrong-key).
 - **Blackhole's L1 miss.** Blackhole's table gives L1 two latencies — 2 on an
   L0 d-cache hit, ≥ 8 on a miss — and tt-sim models no d-cache and no hit rate
   is published anywhere. The pair is charged at its **low end**, like every
@@ -1249,7 +1254,9 @@ total is not a prediction:
 - **DRAM answers instantly**, and its access latency is `unknown` in the table
   rather than merely unwired;
 - **the NIU register block is uncosted**, which is where a dataflow kernel's
-  polling actually lands;
+  polling actually lands (closed 2026-08-06, and it was never blocked on a
+  number — see ["The NIU register
+  block"](#the-niu-register-block-the-number-was-in-the-table-under-the-wrong-key));
 - **there is no predictor**, so no mispredict cost.
 
 The honest headline is narrower than "cycle counts moved": what moved is the
@@ -1475,7 +1482,9 @@ Still not a prediction, and the gaps are now few enough to name exactly:
   model"](#the-noc-bandwidth-model-where-a-packets-size-starts-to-matter).
   Congestion stays open, and for the same reason it always did.)
 - **The NIU register block is still uncosted** on the RV side, which is where
-  a dataflow kernel's barrier polling lands.
+  a dataflow kernel's barrier polling lands. (Closed 2026-08-06; see ["The NIU
+  register
+  block"](#the-niu-register-block-the-number-was-in-the-table-under-the-wrong-key).)
 - **No branch predictor**, so no mispredict cost.
 
 ### Rung 1 of the calibration ladder, which this is the first change able to climb
@@ -2404,9 +2413,11 @@ that exists is asking questions tt-sim cannot be asked yet.
 
 The model predicts the NoC round trip and the endpoint's service time. The
 measurement additionally contains the issuing core's own path, which tt-sim
-does not charge for at all — the NIU register block is on `RV_UNNAMED_REGIONS`,
-deliberately uncosted, and this harness drives the initiator's registers
-directly rather than running a kernel. So:
+does not charge for at all — the NIU register block was on
+`RV_UNNAMED_REGIONS` at the time, and this harness drives the initiator's
+registers directly rather than running a kernel. (The block is charged from
+2026-08-06, which moves nothing in this sweep: it drives the registers
+directly and so has no core path to charge either way.) So:
 
 > The residual is **not** expected to be zero. It is expected to be a
 > **constant**: one issuing-core path, the same in every row, independent of
@@ -4931,6 +4942,246 @@ in fixed chunks until the go message reads DONE, so an equal total is an equal
 number of chunks — the kernel finished on exactly the same cycle. What none of
 this establishes is anything about whether those cycle counts are *right*; that
 is the gate's own standing caveat and it is unaffected here.
+
+## The NIU register block: the number was in the table, under the wrong key
+
+Landed 2026-08-06 — the ROADMAP item "cost the NIU register block", which had
+stood as *blocked on provenance* and was queued to become a silicon probe.
+**No number was sourced, derived or measured, because none had to be.** The
+block's latency was already in `riscv.load_latency`, on a row this file's own
+key name mis-described. What changed is a classifier, two key names and two
+tests; every cycle count, bound and provenance in both YAML files is
+byte-identical to before.
+
+### The claim that was wrong, and what the page says
+
+The recorded reason not to charge it, in `RV_UNNAMED_REGIONS`, in `cost.py`'s
+docstring, in this file three times and in the ROADMAP:
+
+> The ">= 7" row covers "TDMA / tile control / PIC / NoC **overlay**" —
+> `0xFFB40000`, a different block. Charging the overlay's number to the NIUs
+> would be a guess with a citation stapled to it.
+
+The row does cover the overlay. Its cell also has five other entries, each on
+its own line, and two of them are the NIUs. Verbatim from
+`WormholeB0/TensixTile/BabyRISCV/README.md`:
+
+| Load address range | Load latency (cycles) | Max loads in flight |
+| --- | --- | --- |
+| TDMA-RISC configuration and command<br/>Tile control / debug / status<br/>PIC configuration and status<br/>**NoC 0 configuration and command**<br/>**NoC 1 configuration and command**<br/>NoC overlay configuration and command | ≥ 7 (more in the case of access conflicts) | 4 |
+
+The two bold lines link to `NoC/MemoryMap.md` — "Each NIU has an assortment of
+command and configuration and status registers mapped into the address space of
+the containing tile … `NIU_BASE` … `0xFFB2_0000` … `0xFFB3_0000`" — where the
+overlay's line links to `NoC/Overlay/README.md`. Blackhole's table has the same
+row with the same six entries and the same `≥ 7`, less TDMA, which its own `≥ 4`
+row takes and which `_LOAD_LATENCY_KEYS` already split correctly.
+
+So the gap was **one word in a key name**. `tdma_tilectrl_pic_noc_overlay`
+reads as "…, PIC, NoC overlay" and was written down, propagated and defended
+that way for as long as the row has been in the file. Both keys are now
+`…_noc0_noc1_overlay`, the region constant is `RV_REGION_TILECTRL_PIC_NOC`,
+and a test asserts the classification of `0xFFB20204` and `0xFFB30208` — the
+two counters the barriers actually spin on — by name.
+
+### A second, plainer bug in the same classifier
+
+`NOC_OVERLAY_START_ADDR` is `0xFFB4_0000` **to `0xFFB7_FFFF`**: 64 stream
+register spaces of 4 KiB, which is exactly what `NoCOverlay` models
+(`NOC_NUM_STREAMS = 64`, `NOC_STREAM_REG_SPACE_SIZE = 0x1000`) and exactly
+what `TensixTile` maps. `classify_address` ended the region at `0xFFB50000`
+— one stream space — so overlay streams 16-63 fell to `RV_REGION_UNNAMED` and
+were charged nothing. It is a slip, not a judgement, and it was found by the
+same census: `wormhole/reduce` makes 399 loads there, all of stream 16's
+registers 3 and 4, and `blackhole/six` makes 20,589.
+
+### The exposure, measured before anything was charged
+
+Every RV load in a guard run, classified by address block, `TT_SIM_COST_MODEL=1`
+and the NIU block still uncharged (so these are the counts the gap actually
+had):
+
+| guard | RV loads | MMIO loads | NIU loads | of all | of MMIO | overlay tail |
+| --- | --- | --- | --- | --- | --- | --- |
+| `blackhole/six` | 67,462 | 65,055 | **30,834** | 45.7 % | 47.4 % | 20,589 |
+| `blackhole/loopback` | 6,079 | 3,663 | 1,670 | 27.5 % | 45.6 % | 0 |
+| `blackhole/three` | 6,893 | 2,500 | 1,674 | 24.3 % | 67.0 % | 0 |
+| `blackhole/four` | 7,130 | 4,583 | 1,670 | 23.4 % | 36.4 % | 0 |
+| `blackhole/nine` | 11,173 | 5,645 | 2,047 | 18.3 % | 36.3 % | 0 |
+| `wormhole/reduce` | 4,684 | 2,980 | 1,254 | 26.8 % | 42.1 % | 399 |
+| `wormhole/softplus` | 12,429 | 9,767 | 429 | 3.5 % | 4.4 % | 0 |
+
+**The expected code path is confirmed rather than assumed.** Resolving each
+NIU load to its register offset: `NIU_MST_WR_ACK_RECEIVED` (`NIU_BASE + 0x204`)
+and `NIU_MST_RD_RESP_RECEIVED` (`+ 0x208`) are **97-99.5 %** of every guard's
+NIU traffic — `six` 27,300 + 3,368 of 30,834, `nine` 1,986 of 2,047. Those are
+the two counters `noc_async_read_barrier` and `noc_async_write_barrier` spin
+on, and nothing else in the block is touched more than a few hundred times.
+On `six` the two cores split the way the kernel does: NCRISC (the reader,
+27,431 NIU loads) is polling read responses, BRISC (3,403) write acks.
+
+`wormhole/softplus` is the useful low row: an SFPU-bound kernel whose TRISC2
+does 7,770 loads and whose NIU traffic is 429. The claim is about *dataflow*
+time, and a compute-bound guard shows the term almost absent, which is what
+makes the high rows mean something.
+
+### The sensitivity, and it is not linear, for a reason worth writing down
+
+Modelled cycles at DONE, `PUMP_CHUNK` forced to 10 for one-cycle-order
+resolution, model on. `before` is the tree as it stood; `charge N` reclassifies
+the NIU blocks and charges the load-use interlock `N`, everything else held at
+production. **7 is the shipped column** and the only one taken from a document.
+
+| guard | before | 0 | 1 | **7** | 20 | 50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `blackhole/six` | 83,890 | 83,900 | 83,900 | **85,780** (+2.25 %) | 89,260 (+6.4 %) | 99,400 (+18.5 %) |
+| `wormhole/reduce` | 9,500 | 9,580 | 9,580 | **9,690** (+2.00 %) | 9,840 (+3.6 %) | 10,310 (+8.5 %) |
+| `blackhole/nine` | 12,820 | 12,820 | 12,820 | **12,940** (+0.94 %) | 13,260 (+3.4 %) | 13,780 (+7.5 %) |
+| `blackhole/three` | 13,320 | 13,320 | 13,320 | **13,420** (+0.75 %) | 13,670 (+2.6 %) | 14,150 (+6.2 %) |
+| `blackhole/loopback` | 11,170 | 11,170 | 11,170 | **11,250** (+0.72 %) | 11,460 (+2.6 %) | 11,770 (+5.4 %) |
+| `blackhole/four` | 105,440 | 105,440 | 105,440 | **105,540** (+0.09 %) | 105,830 (+0.37 %) | 106,230 (+0.75 %) |
+| `wormhole/softplus` | 19,910 | 19,910 | 19,910 | **19,960** (+0.25 %) | 20,020 (+0.55 %) | 20,200 (+1.46 %) |
+
+Three things in that table are worth more than the numbers.
+
+**Charging 1 is exactly charging 0.** Identical to the cycle in all seven rows,
+because the interlock spends `latency - 1` and the docs' own floor is "the
+minimum possible load latency is two cycles". A one-cycle latency is below the
+mechanism's floor, not a small version of it.
+
+**The term is self-limiting, which is why 50 is not 7× worse than 7.** A
+barrier is a *waiting* loop: it iterates until the NoC answers, so making each
+iteration cost more makes it iterate fewer times, and the number of NIU loads
+falls roughly in inverse proportion to the charge (not exactly, because the
+loop body has other instructions in it). On `six`, NIU loads go **30,834 →
+7,988 → 3,252 → 1,578** at charges of 0, 7, 20 and 50 — a 32× charge for a 20×
+drop in count. The consequence is that this term's *error* is cheap: being
+wrong by a factor of seven (7 against 50) costs `six` 16 % and every other
+guard under 7 %, and being wrong low costs less again. That bears directly on
+"was this worth card time": the exposure justifies charging it, but a probe to
+pin the number would have ranked **low** in the silicon bundle even had the row
+genuinely been silent, because a plausible mis-charge moves a total by single
+percent. It is off that list because the row is not silent.
+
+**Charged is not delivered, again.** `six`'s charge is 50,220 extra RV stall
+cycles for 1,890 delivered — 3.7 %. Same story as every previous RV instalment:
+these runs are not issue-limited, they are waiting on each other.
+
+Which is also why `four` moves least (0.09 %) despite having the same 1,670 NIU
+loads as `three` and `loopback`. Its length is set by five cores' Tensix
+handshaking, and its barrier polling sits off the critical path entirely.
+
+### What this does not change: firmware-loop parking
+
+The parking recogniser (`tt_sim/pe/rv/spin.py`) rejects any candidate loop
+containing a load outside plain RAM, at RECORD, before a watch set is built —
+"MMIO is rejected wholesale, which is what keeps a wall-clock timeout loop, a
+mailbox pop, **an NIU-counter poll** or a PC-buffer wait from ever parking". So
+an NIU poll loop never parked before this change and does not park after it: the
+predicate is on the address class, not on any cost, and it must stay that way,
+because the whole point is that the loaded value changes with no write for the
+watch set to see.
+
+What *does* change is that the un-parkable loop now runs ~4× fewer iterations
+per unit of simulated time. No wall-clock claim is made here — that would need
+the interleaved frozen-worktree A/B the working rules require, and it was not
+run — but the direction is worth recording, because "NIU polling is the traffic
+that keeps a core awake" was true and is now less true per cycle.
+
+### Provenance: what was searched, including the dead ends
+
+The row settles it at `isa_doc` and nothing below that rank can improve on it,
+but the search was run to completion first, and two of its results are worth
+keeping.
+
+- **Both `BabyRISCV/README.md` pages** (WH and BH) — the answer, above. Also
+  `MemoryOrdering.md` on both, which adds an *unclaimed* term rather than a
+  number: "Each memory region can process at most one request per cycle" for
+  every region but L1. That is a throughput bound on the NIU block, tt-sim
+  models no per-region request queue, and it is now named in ROADMAP item 2.
+- **`NoC/MemoryMap.md`, `NoC/Counters.md`, `NoC/README.md`** (WH and BH): no
+  register-access latency anywhere. `NoC/README.md`'s hop table does give
+  "~5 cycles" for NIU↔router, which is a **flight** time between an NIU and a
+  router and is already consumed as `noc.hops`; it is not what a core pays to
+  read a register and confusing the two would double-count.
+- **ttsim** — clean negative, as expected and now concretely: `t_tile_mmio_rd32`
+  (`src/tile.cpp`) decodes NOC0/NOC1/overlay/TDMA/debug identically and every
+  one returns `{true, value}` in the same step; the only `{false, …}` returns in
+  the file are functional (a Tensix drain, an empty mailbox). Its `data/*/
+  tile_regs.json` carry names and offsets and no timing. Time is an externally
+  driven step counter (`libttsim_clock`), and the README lists cycle counters
+  among the things it does not reproduce.
+- **tt-metal** — no number, and one **corroboration worth recording**. Three
+  functions in `tt_metal/hw/inc/internal/tt-1xx/{blackhole,wormhole}/
+  noc_nonblocking_api.h` (`noc_local_state_init`, `dynamic_noc_local_state_init`,
+  `ncrisc_noc_counters_init`) issue five to ten `NOC_STATUS_READ_REG` of
+  `NIU_MST_*` counters back to back before consuming any of them, under the
+  comments `// Hide latency of NOC reg reads by reading first, writing second`
+  and `// Pipeline all register reads first to hide latency`. That is the ISA
+  docs' "N - 1 independent instructions need to follow the load" being obeyed
+  by the firmware, at exactly the batch size a latency of 7 calls for, and it
+  is independent evidence that the NIU read is a **slow-region** load rather
+  than a fast one. It is qualitative — no cycle count anywhere in the tree — so
+  it is `corroboration`, not provenance, and it changes no rank.
+  The LLK trees (`tt_llk_{wormhole_b0,blackhole,quasar}`) never touch the block;
+  `noc_estimator` measures end-to-end only and its YAML cannot separate the
+  issuing core's path from flight; the one harness that *does* isolate issue
+  cost (`tests/.../data_movement/noc_api_latency/`) times NoC cmd-buf **writes**
+  and ships no results.
+
+### What is still not charged, in this block specifically
+
+- **The "more in the case of access conflicts" tail** on the `≥ 7` row. Same
+  shape as every other `at_least` in these files: the low end is charged and
+  the tail is unquantified.
+- **Per-region request throughput** (one request per cycle, from
+  `MemoryOrdering.md`). tt-sim has no queue in front of an MMIO region, so two
+  cores hammering the same NIU cost what one does.
+- **`max_loads_in_flight`: 4 in aggregate**, which is in the YAML and read by
+  nothing. Re-reading the table for this change also corrected the note beside
+  it: that cell is a four-row **rowspan**, so the budget of 4 is shared across
+  every region *except* core-local data RAM — the mailbox group, the GPR/config
+  group, the `≥ 7` group and L1 together — where the note had it covering the
+  mailbox group alone. The number did not change and nothing consumes it. A
+  barrier poll loop is precisely the shape that would hit it.
+- **Stores** to the block, deliberately: "other memory regions can achieve a
+  throughput of one store every cycle" is what the simulator already does. The
+  ~6 NIU register writes per `noc_async_read` are therefore free and correctly
+  so.
+
+### The gate
+
+`driver/tests/cost_model_gate.py` **PASS**, every stage. `pytest tt_sim/ driver/`
+1,062 passed with the model off and again with `TT_SIM_COST_MODEL=1` (1,060
+before; two new tests). All 26 Blackhole replay guards pass standalone.
+`blackhole/six`'s PCC is **0.9982 at every charge in the sensitivity table**,
+including 50 — the values are untouched by any of this, which is what the
+sensitivity sweep was also checking.
+
+Model off is byte-identical by construction: `classify_address` is only ever
+called from `RiscvCostState.can_issue`, and `rv_cost` is `None` when the model
+is off.
+
+### What changed in the repository
+
+- `tt_sim/pe/rv/cost.py` — `classify_address` gains `0xFFB20000-0xFFB3FFFF`
+  and extends the overlay to its published `0xFFB7FFFF`; `_TILE_CTRL_END`
+  extended over the PIC's 4 KiB for the same reason; the docstring's "not
+  modelled" list loses the NIU entry and gains the account above.
+- `tt_sim/perf/model.py` — `RV_REGION_TILECTRL_PIC_OVERLAY` →
+  `RV_REGION_TILECTRL_PIC_NOC`, both `_LOAD_LATENCY_KEYS` entries renamed,
+  `RV_UNNAMED_REGIONS` down to three entries with the retraction recorded.
+- `tt_sim/perf/unit_costs.yaml` — the two row keys renamed and both notes
+  extended. **No cycle count, bound or provenance changed.**
+- `tt_sim/pe/rv/cost_test.py` — two new tests (the NIU rows on both arches by
+  counter address; the overlay's published extent), the unnamed-region tests
+  re-pointed at what is actually unnamed, and the PIC added to the memory-map
+  test.
+- `tt_sim/perf/noc_dataset_sweep.py`, `driver/tests/cost_model_gate.py` — prose
+  that named the NIU block as uncosted.
+- `ROADMAP.md` — item 2 replaced by its successor (the load/store unit's
+  published queue limits and per-region throughput); the conditional NIU probe
+  dropped from the silicon-session bundle.
 
 ## Using it, when the time comes
 

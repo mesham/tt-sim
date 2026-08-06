@@ -46,8 +46,10 @@ which is why cost-model fidelity and easily-consumed trace output
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **Cost the NIU register block** — the busiest MMIO load in the
-   tree; where dataflow kernels' time actually lands.
+2. **The rest of the RV memory path** — the load/store unit's
+   published queue limits and per-region throughput, all `isa_doc`
+   and all unconsumed. Successor to "cost the NIU register block",
+   which landed 2026-08-06.
 3. **Freeze the cheap guards**: `noc_tile_transfer`,
    `optests/dramtop`, `vecadd_sharding` on Blackhole, Wormhole
    `matmulidx`/`matmulblock` offline guards.
@@ -165,15 +167,39 @@ improves automatically as items 2 and 5–8 land. The tracing
 overhead budget (item 11) matters doubly here, since the team will
 run this at kernel scale.
 
-## 2. NIU register block cost
+## 2. The rest of the RV memory path
 
-Loads from the NIU register block (`0xFFB20000`/`0xFFB30000`) are
-uncosted (`RV_UNNAMED_REGIONS`), yet this is the busiest MMIO load in
-the tree — every `noc_async_*_barrier` polls it — and where dataflow
-kernels' time actually lands. Blocked on provenance: the ISA docs'
-"≥ 7" covers the NoC *overlay* at `0xFFB40000`, a different block. If
-no published number surfaces, this becomes a probe in the next silicon
-session (item 7).
+**"Cost the NIU register block" landed 2026-08-06 and was never
+provenance-blocked.** The ">= 7" row's cell names six things and two of
+them are "NoC 0 configuration and command" and "NoC 1 configuration and
+command", on both architectures; only this file's key name for the row
+(`tdma_tilectrl_pic_noc_overlay`) said otherwise. The blocks are
+charged, `docs/plans/cost-model.md` has the instalment, and the item
+7 probe it would have needed is off that list.
+
+What the census behind it found is the successor, and it is the same
+shape: **published, `isa_doc`, and consumed by nothing.**
+
+- **`max_loads_in_flight`** — 8 for core-local RAM and **one shared
+  budget of 4** across every other region (the column's cell is a
+  four-row rowspan, which the YAML note had read as covering only the
+  mailbox group; corrected). Already in `unit_costs.yaml`, read by no
+  consumer, and a barrier poll loop is exactly the shape that hits an
+  in-flight cap.
+- **Per-region request throughput** — "Each memory region can process
+  at most one request per cycle" for every region but L1
+  (`BabyRISCV/MemoryOrdering.md`), which is the one term that would
+  make two cores hammering the *same* NIU cost more than one core
+  doing it. Not in the tables yet.
+- **Sustained-load throughput** — `riscv.load_throughput` holds the
+  docs' "four such loads every N - 1 cycles" formula, is corroborated
+  by silicon to 0.008 of a cycle (`rv_load_indep`), and is likewise
+  consumed by nothing.
+- Still genuinely unsourced, and staying that way: the "more in the
+  case of access conflicts" tail on the >= 7 row, and the three blocks
+  left in `RV_UNNAMED_REGIONS` (MOP expander config, NCRISC IRAM, the
+  Tensix instruction push buffers), none of which appears in any row
+  of either architecture's table.
 
 ## 3. Freeze the cheap guards
 
@@ -253,7 +279,6 @@ run there:
 - **Wormhole, first measurements ever**: the store-coalescing pair
   (predicted identical on WH, measured 5.2× apart on BH) and the
   multiply pair are the cheapest cross-arch discriminators.
-- If item 2 stays provenance-blocked: an NIU-register-load probe.
 - A divide magnitude sweep (several dividend widths) — the only route
   to the 6–33 curve, since the docs publish no formula and one point
   cannot pin one (recorded as a negative result in the RV cost-fixes

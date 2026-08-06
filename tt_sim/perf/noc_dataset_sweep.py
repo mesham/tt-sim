@@ -190,8 +190,12 @@ The model predicts the NoC round trip and the endpoint's service time and
 nothing else. The measurement additionally contains the issuing RISC-V core's
 own path -- the DeviceZone entry, the ~6 NIU register stores per
 ``noc_async_read``, and the barrier's polling loop on
-``NIU_MST_REQS_OUTSTANDING`` -- none of which tt-sim charges for (the NIU
-register block is on ``RV_UNNAMED_REGIONS``, deliberately uncosted).
+``NIU_MST_REQS_OUTSTANDING``. Since 2026-08-06 tt-sim does charge part of
+that: the barrier's *load* of the NIU counter is the ">= 7" row of the
+load-latency table (the row names NoC 0 and NoC 1 alongside the overlay), so
+each poll iteration pays a six-cycle load-use interlock. The stores do not --
+"other memory regions can achieve a throughput of one store every cycle" is
+what the simulator already does -- and neither does the DeviceZone entry.
 
 So the residual is NOT expected to be zero. It is expected to be a CONSTANT:
 one issuing-core path, the same in every row, independent of transaction size,

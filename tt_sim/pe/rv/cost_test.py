@@ -39,7 +39,7 @@ from tt_sim.pe.rv.cost import (
     RV_REGION_MAILBOX_GROUP,
     RV_REGION_TDMA,
     RV_REGION_TENSIX_GPR_CFG,
-    RV_REGION_TILECTRL_PIC_OVERLAY,
+    RV_REGION_TILECTRL_PIC_NOC,
     RV_REGION_UNNAMED,
     classify_address,
     make_cost_state,
@@ -165,7 +165,7 @@ def test_on_an_l1_load_is_charged_the_documented_wormhole_latency():
         assert state.load_latency[RV_REGION_LOCAL_DATA_RAM] == 2
         assert state.load_latency[RV_REGION_MAILBOX_GROUP] == 3
         assert state.load_latency[RV_REGION_TENSIX_GPR_CFG] == 4
-        assert state.load_latency[RV_REGION_TILECTRL_PIC_OVERLAY] == 7
+        assert state.load_latency[RV_REGION_TILECTRL_PIC_NOC] == 7
 
 
 def test_a_dependent_read_stalls_for_latency_minus_one_cycles():
@@ -336,25 +336,24 @@ def test_wormhole_l1_loads_are_untouched_by_the_line_model():
 
 
 def test_the_regions_the_table_does_not_name_are_charged_nothing():
-    """The NIU register block is the one that matters — every
-    ``noc_async_*_barrier`` in every dataflow kernel polls it — and the ">= 7"
-    row names the NoC *overlay*, a different block. Charging the overlay's
-    number to the NIUs would be a guess with a citation stapled to it."""
+    """What is left after the NIU blocks moved out: the MOP expander config,
+    NCRISC's IRAM and the Tensix instruction push buffers. No row of either
+    architecture's table names any of them."""
     with _env(True):
         state = make_cost_state("wormhole")
-        assert classify_address(0xFFB20000 + 0x200) == RV_REGION_UNNAMED
-        assert classify_address(0xFFB30000 + 0x200) == RV_REGION_UNNAMED
+        assert classify_address(0xFFB80000) == RV_REGION_UNNAMED
         assert classify_address(0xFFC00000) == RV_REGION_UNNAMED
+        assert classify_address(0xFFE40000) == RV_REGION_UNNAMED
         assert state.load_latency[RV_REGION_UNNAMED] is None
 
 
 def test_an_uncosted_region_leaves_the_timing_alone():
     with _env(True):
-        cpu, _ = _core([_lui(10, 0xFFB20), _lw(15, 10, 0), _addi(14, 15, 1)])
-        # No memory is mapped at the NIU base in this harness, so the issue
-        # path is driven directly: the load is classified, charged nothing,
-        # and the dependent instruction does not stall.
-        cpu.register_file[10].write(conv_to_bytes(0xFFB20000))
+        cpu, _ = _core([_lui(10, 0xFFB80), _lw(15, 10, 0), _addi(14, 15, 1)])
+        # No memory is mapped at the MOP expander config base in this harness,
+        # so the issue path is driven directly: the load is classified, charged
+        # nothing, and the dependent instruction does not stall.
+        cpu.register_file[10].write(conv_to_bytes(0xFFB80000))
         state = cpu.rv_cost
         assert state.can_issue(_lw(15, 10, 0), 0, cpu.register_file)
         assert state.load_latency[RV_REGION_UNNAMED] is None
@@ -362,13 +361,50 @@ def test_an_uncosted_region_leaves_the_timing_alone():
         assert state.stall_cycles == 0
 
 
+def test_the_niu_register_blocks_are_the_documented_seven_cycle_row():
+    """The ROADMAP's "cost the NIU register block", and the answer turned out to
+    be in the table the model already reads.
+
+    The ">= 7" row's cell names six things, and two of them are "NoC 0
+    configuration and command" and "NoC 1 configuration and command" —
+    ``0xFFB2_0000`` and ``0xFFB3_0000``, the NIU register blocks every
+    ``noc_async_*_barrier`` polls — alongside, not instead of, the NoC overlay.
+    Both architectures publish it and both publish the same 7.
+    """
+    for arch in ("wormhole", "blackhole"):
+        with _env(True):
+            state = make_cost_state(arch)
+            assert state.load_latency[RV_REGION_TILECTRL_PIC_NOC] == 7
+    # NIU counter reads: NIU_MST_WR_ACK_RECEIVED and NIU_MST_RD_RESP_RECEIVED
+    # are the two the write and read barriers actually spin on.
+    assert classify_address(0xFFB20204) == RV_REGION_TILECTRL_PIC_NOC
+    assert classify_address(0xFFB30208) == RV_REGION_TILECTRL_PIC_NOC
+    # Both blocks whole, and nothing either side of them misclassified.
+    assert classify_address(0xFFB20000) == RV_REGION_TILECTRL_PIC_NOC
+    assert classify_address(0xFFB3FFFC) == RV_REGION_TILECTRL_PIC_NOC
+    assert classify_address(0xFFB1FFFC) != RV_REGION_TILECTRL_PIC_NOC
+
+
+def test_the_noc_overlay_is_classified_to_its_published_end():
+    """``NOC_OVERLAY_START_ADDR`` is ``0xFFB4_0000`` to ``0xFFB7_FFFF`` — 64
+    stream register spaces of 4 KiB, which is exactly what ``NoCOverlay``
+    models and what ``TensixTile`` maps. The classifier used to stop after the
+    first of the 64, so streams 16-63 were charged nothing."""
+    assert classify_address(0xFFB40000) == RV_REGION_TILECTRL_PIC_NOC  # stream 0
+    assert classify_address(0xFFB50000) == RV_REGION_TILECTRL_PIC_NOC  # stream 16
+    assert classify_address(0xFFB7F000) == RV_REGION_TILECTRL_PIC_NOC  # stream 63
+    assert classify_address(0xFFB80000) == RV_REGION_UNNAMED  # MOP expander cfg
+
+
 def test_every_named_region_is_classified_where_the_memory_map_puts_it():
     assert classify_address(0x0) == RV_REGION_L1
     assert classify_address(0x16E000) == RV_REGION_L1
     assert classify_address(LOCAL_RAM_BASE + 0x100) == RV_REGION_LOCAL_DATA_RAM
     assert classify_address(0xFFB11000) == RV_REGION_TDMA
-    assert classify_address(0xFFB121B0) == RV_REGION_TILECTRL_PIC_OVERLAY
-    assert classify_address(0xFFB40000) == RV_REGION_TILECTRL_PIC_OVERLAY
+    assert classify_address(0xFFB121B0) == RV_REGION_TILECTRL_PIC_NOC
+    # The PIC's own 4 KiB, 0xFFB1_3000-0xFFB1_3FFF, is the same row.
+    assert classify_address(0xFFB13000) == RV_REGION_TILECTRL_PIC_NOC
+    assert classify_address(0xFFB40000) == RV_REGION_TILECTRL_PIC_NOC
     assert classify_address(0xFFE00000) == RV_REGION_TENSIX_GPR_CFG
     assert classify_address(0xFFEF0000) == RV_REGION_TENSIX_GPR_CFG
     assert classify_address(0xFFE80000) == RV_REGION_MAILBOX_GROUP

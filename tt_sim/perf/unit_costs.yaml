@@ -636,7 +636,7 @@ riscv:
     core_local_data_ram: 2
     mailboxes_pcbufs_ttsync_semaphores: { cycles: 3, bound: at_least }
     tensix_gprs_and_backend_config: { cycles: 4, bound: at_least }
-    tdma_tilectrl_pic_noc_overlay: { cycles: 7, bound: at_least }
+    tdma_tilectrl_pic_noc0_noc1_overlay: { cycles: 7, bound: at_least }
     l1: { cycles: 8, bound: at_least }
     minimum: 2
     max_loads_in_flight: 8
@@ -650,8 +650,26 @@ riscv:
       The ">= 4" and ">= 7" rows say "more in the case of access conflicts";
       the L1 row says "more in the case of access port conflicts or bank
       conflicts". The in-flight limits come from the same table's "Maximum
-      loads in flight" column: 8 for local RAM, 4 in aggregate across the
-      mailbox/PCBuf/TTSync/semaphore regions.
+      loads in flight" column: 8 for local RAM, and one shared budget of "4 (in
+      aggregate across all of these regions)" whose cell spans EVERY other row
+      -- mailboxes/PCBufs/TTSync/semaphores, Tensix GPRs and backend config,
+      the >= 7 group and L1 alike. (This note used to say the 4 covered only
+      the mailbox group; it is a four-row rowspan, corrected 2026-08-06 while
+      re-reading the table for the NIU row below. The number is unchanged and
+      nothing consumes it.)
+
+      THE ">= 7" ROW'S KEY WAS RENAMED ON 2026-08-06 AND THAT RENAME IS THE
+      WHOLE OF ROADMAP ITEM 2. It used to read ``tdma_tilectrl_pic_noc_overlay``
+      and the trailing "noc_overlay" was read as one thing, so the NoC NIU
+      register blocks at 0xFFB2_0000 / 0xFFB3_0000 -- which every
+      ``noc_async_*_barrier`` in every dataflow kernel polls, the busiest MMIO
+      load in the tree -- were recorded as having no row and charged nothing.
+      The row's cell lists SIX entries, one per line, and two of them are "NoC
+      0 configuration and command" and "NoC 1 configuration and command",
+      linking to NoC/MemoryMap.md where the overlay's entry links to
+      NoC/Overlay/README.md. So this is one number covering three distinct NoC
+      blocks plus TDMA, tile control and the PIC, and the key now says so.
+      Nothing about the number, its bound or its provenance changed.
   load_throughput:
     one_per_cycle_if_latency_under: 5
     else_loads_per_window: 4
@@ -1322,7 +1340,7 @@ arch_overrides:
         l1_dcache_hit: 2
         mailboxes_pcbufs_ttsync_semaphores: { cycles: 3, bound: at_least }
         tensix_gprs_backend_config_tdma: { cycles: 4, bound: at_least }
-        tilectrl_pic_noc_overlay: { cycles: 7, bound: at_least }
+        tilectrl_pic_noc0_noc1_overlay: { cycles: 7, bound: at_least }
         core_local_data_ram_slow_path: { cycles: 8, bound: at_least }
         l1_dcache_miss: { cycles: 8, bound: at_least }
         l1_atomic: { cycles: 12, bound: at_least }
@@ -1336,6 +1354,14 @@ arch_overrides:
           the >= 4 group. Core-local data RAM gains a second, slow mapping
           (>= 8) reachable from any RISCV and over the NoC. The table does not
           repeat Wormhole's "Maximum loads in flight" column.
+
+          THE >= 7 ROW IS OTHERWISE IDENTICAL TO WORMHOLE'S, AND IT NAMES THE
+          NIUs: "Tile control / debug / status; PIC configuration and status;
+          NoC 0 configuration and command; NoC 1 configuration and command;
+          NoC overlay configuration and command". Both architectures publish
+          the NIU register block's latency and neither publishes it separately
+          from the overlay's -- see the base section's note for why that
+          mattered.
         corroboration: >
           MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase R of
           perfbench/riscvbench, as pointer chases so that the body is one
