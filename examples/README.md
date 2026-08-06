@@ -128,6 +128,16 @@ needs neither the tt-metal toolchain nor the live server:
 Recapture the traces after a tt-metal bump with the `--record` / `capture_traces.sh`
 commands above.
 
+Not every guard replays an example from this tree: some replay an `optests/`
+differential program, and four replay tt-metal's **upstream**
+`programming_examples/` (`noc_tile_transfer` on both arches; `vecadd_sharding`,
+`pad_multi_core` and `shard_data_rm` on Blackhole — see
+[`../docs/upstream-examples-status.md`](../docs/upstream-examples-status.md)).
+Those last four are recaptured with
+[`../driver/tests/capture_upstream_traces.sh`](../driver/tests/capture_upstream_traces.sh),
+which runs the prebuilt binaries out of the tt-metal checkout rather than
+building anything here.
+
 ## The examples
 
 Each `<name>/src/` is a host program (`<name>.cpp`), a `CMakeLists.txt`, and a

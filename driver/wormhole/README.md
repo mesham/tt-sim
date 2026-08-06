@@ -23,8 +23,8 @@ driver/wormhole/
 ├── tests/
 │   └── capture_traces.sh   build + run every shared example, record its wire trace
 ├── server/                 the wire-bridge server UMD talks to (run.sh spawns it)
-│   ├── examples_replay_test.py  poll-until-DONE offline replay of every example trace
-│   ├── offline_replay_test.py   poll-until-DONE replay of one.trace (the pinned baseline)
+│   ├── examples_replay_test.py  byte-identical offline replay of every example trace
+│   ├── offline_replay_test.py   byte-identical replay of one.trace (the pinned baseline)
 │   ├── sfpumath_replay_test.py  optests/sfpumath vs the ttsim-Wormhole golden
 │   └── traces/             one recorded wire trace per example (+ optests/sfpumath)
 ├── run.sh                  UMD entry point → `python -m driver.wormhole.server`
@@ -121,13 +121,10 @@ pytest examples/examples_test.py -v  # same, under pytest
 That harness needs the built tt-metal toolchain (it compiles and launches each
 example live). For a fast, dependency-free CI guard there is also **offline
 replay**: [`server/examples_replay_test.py`](server/examples_replay_test.py)
-replays a recorded wire trace per example (`server/traces/<name>.trace`) in the
-Blackhole guards' poll-until-DONE shape — pump the device until each worker's
-go-message reaches `RUN_MSG_DONE`, then assert every data READ reply (the
-result buffer included) reproduces bit-for-bit; only the spin-polled go-message
-itself and eth reads are exempt, so a legitimate timing change
-(`TT_SIM_COST_MODEL`) cannot fail it spuriously. Recapture the traces after a
-tt-metal bump with [`tests/capture_traces.sh`](tests/capture_traces.sh).
+replays a recorded wire trace per example (`server/traces/<name>.trace`) and
+asserts every host READ reply reproduces bit-for-bit — the Wormhole analogue of
+Blackhole's `server/*_replay_test.py`. Recapture the traces after a tt-metal
+bump with [`tests/capture_traces.sh`](tests/capture_traces.sh).
 
 Some guards are not examples but `optests/` programs, replayed the same way and
 checked on **values** against a frozen ttsim-Wormhole dump
@@ -140,6 +137,16 @@ tile built on-device by 16-bit BRISC stores). Recapture either with
 `TT_SIM_ARCH=wormhole TT_SIM_RECORD=driver/wormhole/server/traces/<name>.trace
 ./optests/diff.sh <name>` (and refresh `.expected` from that run's oracle
 output) — never to make the test pass, only when the trace itself is stale.
+
+A third family replays tt-metal's **upstream** `programming_examples/`:
+[`server/noc_tile_transfer_replay_test.py`](server/noc_tile_transfer_replay_test.py)
+moves one `uint16` tile DRAM → core (1,1) L1 → NoC → core (1,2) L1 → DRAM
+behind a cross-core semaphore, and asserts the program's own verdict
+(`Result = 14 : Expected = 14`) on all 1024 elements. Blackhole carries the
+same guard plus three more (`vecadd_sharding`, `pad_multi_core`,
+`shard_data_rm`). Recapture any of them with
+[`../tests/capture_upstream_traces.sh`](../tests/capture_upstream_traces.sh),
+which holds the binary names, worker coordinates and success lines.
 
 ## The examples
 

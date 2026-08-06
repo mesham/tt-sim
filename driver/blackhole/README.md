@@ -53,6 +53,16 @@ NoC + semaphore). Each has a socket-free replay guard in `server/*_replay_test.p
 Wormhole stays byte-identical throughout. See `docs/plans/blackhole-support.md` for the
 full port history.
 
+Those guards cover three families now: the shared `examples/` tree, the
+`optests/` differential programs, and — since the upstream sweep
+(`docs/upstream-examples-status.md`) — four of tt-metal's own
+`programming_examples/`: `noc_tile_transfer` (2 workers, semaphore-gated NoC
+tile hand-off, asserting the program's own `Result = 14`), `vecadd_sharding`
+(4 workers, L1-sharded buffers driven by a compute-only kernel),
+`pad_multi_core` and `shard_data_rm` (4 workers, page-granular interleaved and
+row-major sharded data movement, neither with a self-check of its own).
+Recapture their traces with `driver/tests/capture_upstream_traces.sh`.
+
 Modelled: device construction, the 17×12 NoC grid + NoC-1 mirror, Blackhole's NoC
 HI-register address encoding, ISA-faithful DST addressing, all **8 DRAM channels**,
 baby-core kernel execution across BRISC/NCRISC/TRISC, and the Tensix coprocessor

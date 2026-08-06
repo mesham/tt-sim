@@ -14,6 +14,11 @@ different server modes — e.g. `one_mocktensix.trace` is the same tt-metal
 run against `--mock-tensix` (all replies are zeros, useful as a transport
 regression).
 
+A trace may also be named after a tt-metal **upstream** `programming_examples/`
+program rather than an in-tree example — `noc_tile_transfer.trace` is the first
+— in which case it is recaptured with `driver/tests/capture_upstream_traces.sh`
+rather than by the scripts below.
+
 ## Capturing
 
 See the parent README's "Capturing a real tt-metal trace" section. Short
