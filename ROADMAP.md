@@ -37,11 +37,12 @@ which is why cost-model fidelity and easily-consumed trace output
 
 ### Tier 1 — load-bearing, start here
 
-1. **Firmware-loop parking under the cost model.** Parking landed and
-   made a full grid affordable (~3.9× at 80 workers, ~1000× post-launch
-   steady state), but it is disabled whenever `TT_SIM_COST_MODEL` is
-   on — which is exactly the configuration the perf-model and the
-   compiler team need at grid scale.
+1. ✅ **Firmware-loop parking under the cost model** — landed. Parking
+   made a full grid affordable (~3.9× at 80 workers, ~1000×
+   post-launch steady state) and now does so under
+   `TT_SIM_COST_MODEL` as well, cycle-identical on every guard. What
+   is left of the item is the tracing half, which turned out to be a
+   separate (event-stream) problem — see item 12.
 
 ### Tier 2 — high value, small-to-medium effort
 
@@ -128,39 +129,46 @@ possible:
 
 ---
 
-## 1. Firmware-loop parking under the cost model
+## 1. Firmware-loop parking under the cost model ✅ landed
 
-Full-grid affordability landed: a baby core whose wait loop is *proved*
-a pure memory fixed point (no stores, no MMIO reads, whole register
-file back at its anchor, verified twice and re-checked after every
-executed tick) now reports dormant, so its tile strides. The 80-worker
-`nine` replay went 162.7 s → 42.0 s (3.9×), the marginal cost of a
-never-launched worker 2.06 s → 0.52 s, and post-launch steady state
-~1000× (112–145 → 148,652 cycles/s) — the regime `matmul_single_core`
-lives in. Simulated cycles are identical on all 26 Blackhole guards.
-`TT_SIM_FIRMWARE_IDLE=0` disables; see
-`docs/plans/event-driven-pump.md`.
+Full-grid affordability landed first with the model off: a baby core
+whose wait loop is *proved* a pure memory fixed point (no stores, no
+MMIO reads, whole register file back at its anchor, verified twice and
+re-checked after every executed tick) reports dormant, so its tile
+strides. The 80-worker `nine` replay went 162.7 s → 42.0 s (3.9×), the
+marginal cost of a never-launched worker 2.06 s → 0.52 s, and
+post-launch steady state ~1000× (112–145 → 148,652 cycles/s) — the
+regime `matmul_single_core` lives in.
 
-**What is left, and why it matters here.** Parking is switched off
-whenever `TT_SIM_COST_MODEL` is on: the RV cost scoreboard carries
-absolute cycle numbers, so restoring a recorded trajectory across a
-skipped span needs a time-translation argument that has not been made.
-That is precisely the configuration the perf model and the compiler
-team (item 5) need at grid scale — cost-model runs get none of the
-~1000×. Options: translate the scoreboard's absolute cycles on unpark,
-or prove the parked loop charges nothing that can be observed after it.
-Either needs its own instalment and gate run.
+**It now works under `TT_SIM_COST_MODEL` too**, which is the
+configuration the perf model and the compiler team (item 5) actually
+run in. The recorded blocker — the scoreboard's absolute cycle numbers
+— was real but second: the *first* problem is that a stalled tick is a
+perfect one-tick fixed point (nothing retires, so no PC and no register
+moves), and a core that parks inside a stall on a tile with nothing
+else awake sleeps through the rest of it, measured at 41 loop
+iterations in 4,000 cycles against 399. Both are closed by widening the
+proof rather than repairing after it: the scoreboard's cycle-relative
+normal form joins the fixed point, so only loops whose *schedule*
+repeats can park, and for those an unpark is a plain time translation
+onto the wake cycle. Simulated cycles are identical parking on vs off
+on all 26 Blackhole guards, with the model on **and** off;
+`cost_model_gate.py` PASS. `TT_SIM_FIRMWARE_IDLE=0` still disables. See
+`docs/plans/event-driven-pump.md` and the `cost-model.md` instalment.
 
-Also still open, both smaller:
+Still open, both smaller:
 
 - Parking is suppressed while the trace bus or a core's snoop
-  diagnostics are on (a skipped cycle publishes no events) — which
-  collides with item 5's kernel-scale tracing; the same
-  time-translation question underlies it.
-- Loops longer than 64 ticks per iteration never park, and no live
-  `vecadd_sharding` measurement was taken (the landed numbers use the
-  trace-replay proxy), so the 14 s → 255 s figure that motivated the
-  work has not been re-measured end to end.
+  diagnostics are on, which collides with item 5's kernel-scale
+  tracing. This is **not** the time-translation question after all —
+  that is now settled. What is left is an event-stream decision:
+  replaying elided `InstrEvent`s at unpark is O(skipped cycles) and
+  hands the whole win back, so the answer is probably one *summary*
+  event per parked span, which is a new event kind plus consumer
+  changes. Belongs with item 12.
+- No live `vecadd_sharding` measurement was taken (the landed numbers
+  use the trace-replay proxy), so the 14 s → 255 s figure that
+  motivated the work has not been re-measured end to end.
 
 ## 2. NIU register block cost
 
@@ -353,6 +361,17 @@ not "cycle-accurate".
   stalled-cycles (the front-end bound makes refused issues real —
   74 on `sfpumath` alone). Still genuinely gated: L1 bank conflicts
   (L1 is flat memory) and NoC `vc` + VC occupancy (no VCs modelled).
+- **Parked spans in the event stream** (handed over by item 1). A core
+  the firmware-loop recogniser has parked is not traced, and the tile
+  is not stepped while it is dormant, so a skipped cycle publishes no
+  `InstrEvent` — which is why parking refuses whenever the bus or a
+  core's snoop is on, and why kernel-scale tracing at grid scale still
+  costs full price. Replaying the elided events at unpark is
+  O(skipped cycles) (4.6 M on an 80-worker `nine` replay) and hands
+  the entire win back, so the shape to design is one **summary event
+  per parked span** — core, loop extent, iterations, cycles — plus
+  whatever the Perfetto/Parquet consumers need to render it. New
+  event kind, so it is a schema decision, not a patch.
 - `chip_id` hard-coded to 0 (per-tile `core_y`/`core_x` already fan
   out) — multi-chip identity.
 - Long tail: inline-print migration, `DwarfIndex` function-name

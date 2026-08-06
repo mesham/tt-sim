@@ -327,6 +327,101 @@ class RiscvCostState:
         for i in range(len(tags)):
             tags[i] = -1
 
+    # -- firmware-loop parking ---------------------------------------------
+    #
+    # Three methods that let ``tt_sim/pe/rv/spin.py`` treat this scoreboard as
+    # part of the state its fixed-point proof covers, without knowing which of
+    # these fields are cycle numbers. That knowledge belongs here, next to the
+    # fields, which is the whole reason the split is drawn this way.
+    #
+    # The normal form is **cycle-relative**: every absolute-cycle field is
+    # reported as ``max(field - cycle, 0)``, i.e. "how many cycles into the
+    # future". Two facts make that lossless for anything the model can go on to
+    # do. First, every one of those fields is only ever read through a strict
+    # "is it still in the future" comparison against the current cycle
+    # (``cycle_num < self._stall_until``, ``at > cycle_num``,
+    # ``cycle_num < self._store_ready``), so any two values at or below the
+    # current cycle are indistinguishable from here on. Second, ``cycle_num``
+    # never decreases within a run — ``RiscvCostState.reset`` is the only thing
+    # that rewinds, and it zeroes everything. So a state restored from a
+    # signature drives the interpreter identically to the state that produced
+    # it, one cycle-shift later.
+
+    def spin_signature(self, cycle_num):
+        """This scoreboard's cycle-relative normal form at ``cycle_num``.
+
+        Everything ``can_issue`` will consult, and nothing else: the per-GPR
+        ready times, the issue and store-rate deadlines, the open coalescing
+        group (only while its drain is still live — once ``_store_ready`` is in
+        the past the group is unreachable), and the L0 line tags, which are not
+        cycle-valued but are state a loop's charges depend on.
+        """
+        ready = self._ready
+        rel_ready = tuple(r - cycle_num if r > cycle_num else 0 for r in ready)
+        stall = self._stall_until - cycle_num if self._stall_until > cycle_num else 0
+        store = self._store_ready - cycle_num if self._store_ready > cycle_num else 0
+        group = (self._group_block, self._group_lo, self._group_hi) if store else None
+        return (
+            rel_ready,
+            stall,
+            self._stall_reason,
+            store,
+            group,
+            tuple(self._l0_tags),
+        )
+
+    def spin_restore(self, signature, cycle_num):
+        """Re-base ``signature`` onto ``cycle_num`` — the time translation.
+
+        Called on the first tick after the pump skipped a span while the core
+        was parked, with the signature recorded for the trajectory phase the
+        unparked run would have reached.
+        """
+        rel_ready, stall, reason, store, group, tags = signature
+        ready = self._ready
+        for i in range(32):
+            rel = rel_ready[i]
+            ready[i] = cycle_num + rel if rel else 0
+        self._stall_until = cycle_num + stall if stall else 0
+        self._stall_reason = reason
+        self._store_ready = cycle_num + store if store else 0
+        if group is None:
+            self._group_block = -1
+        else:
+            self._group_block, self._group_lo, self._group_hi = group
+        self._l0_tags[:] = tags
+
+    def spin_counters(self):
+        """The accumulators, flat, in the layout :meth:`spin_add_counters`
+        expects. Not part of the signature — a counter cannot change what the
+        model does — but a parked span still has to be *charged* for the
+        iterations it skipped, or the §I report would under-count them."""
+        return (
+            self.stall_cycles,
+            self.l1_stores,
+            self.l0_hits,
+            self.l0_misses,
+            self.pending_stall,
+            *self.stall_by_reason,
+            *self.loads_by_region,
+        )
+
+    def spin_add_counters(self, delta):
+        """Add a :meth:`spin_counters` difference — the charges of the loop
+        iterations the pump skipped."""
+        self.stall_cycles += delta[0]
+        self.l1_stores += delta[1]
+        self.l0_hits += delta[2]
+        self.l0_misses += delta[3]
+        self.pending_stall += delta[4]
+        by_reason = self.stall_by_reason
+        for i in range(STALL_REASON_COUNT):
+            by_reason[i] += delta[5 + i]
+        by_region = self.loads_by_region
+        base = 5 + STALL_REASON_COUNT
+        for i in range(RV_REGION_COUNT):
+            by_region[i] += delta[base + i]
+
     # -- reporting ---------------------------------------------------------
     def take_pending_stall(self):
         """``(cycles, reason)`` this core was held before the instruction that

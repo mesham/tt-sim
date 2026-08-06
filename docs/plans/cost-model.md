@@ -4792,6 +4792,146 @@ and `blackhole/six` reads the same 27,170 cycles before and after.
 - `tt_sim/perf/costs_test.py` — `UNWIRED_UNITS` down to `TDMA`; four new
   entries on the consumer allow-list.
 
+## The scoreboard learns to be read as a schedule, so parking reaches the model
+
+Landed 2026-08-06 — ROADMAP item 1, "firmware-loop parking under the cost
+model". **No charge changed and no cycle count moved**; this instalment exists
+because the RV scoreboard grew three methods and because the house rule is that
+anything touching whole-tree timing gets its own gate run. It got one:
+`driver/tests/cost_model_gate.py` **PASS**, every stage, and the device cycle
+count at DONE on all 26 Blackhole guards is identical with parking on and off,
+guard for guard.
+
+### What the previous version got wrong about its own reason
+
+Firmware-loop parking (`tt_sim/pe/rv/spin.py`, `docs/plans/event-driven-pump.md`)
+was switched off whenever `TT_SIM_COST_MODEL` was set, and the recorded reason
+was that `RiscvCostState` carries **absolute cycle numbers** — `ready[rd] =
+cycle + latency`, `_stall_until`, `_store_ready` — so restoring a recorded
+trajectory across a skipped span needed a time-translation argument nobody had
+made. That is a real problem, and it is not the first one. Switching detection
+on and instrumenting it found something worse and much simpler:
+
+> A **stalled tick** is a perfect one-tick fixed point. `can_issue` returns
+> False, `RV32I.clock_tick` returns before executing anything, the PC does not
+> advance and no register changes — which is exactly the predicate SEEK,
+> RECORD and VERIFY were built to look for.
+
+On the `six` Blackhole guard with detection naively enabled, BRISC and the
+TRISCs parked every few hundred cycles in "pure poll loops of **1 ticks**",
+each one an L1-store-rate stall (`l1_store_period` 5 — the park/unpark pairs
+are five cycles apart, which is how the diagnosis was made). On those guards it
+happened to be harmless, because five cores share a tile and the other four
+kept it awake, so no stride ever began: the 26 cycle counts came out identical
+anyway. Put a core **alone** on a tile and it is a silent wrong answer — a
+BRISC in a store-rate loop executed **41 iterations in 4,000 cycles against the
+399** an unparked run executes, having slept through the rest of its own stall.
+That is the failure mode `event-driven-pump.md`'s risk section names: a
+too-eager idle predicate does not crash, it just returns different numbers.
+
+**Is the *already-landed* model-off parking exposed to the same thing? No, and
+the argument is short enough to check.** With the model off a tick can still
+retire nothing, via `ProcessingElement.PEStall`, and there are exactly three
+sources of it. Two are writes — a stalling `sw`, and a `.ttinsn` push whose
+front-end FIFO is full — and both reach `_ObservedMemory.write`, which aborts
+the attempt before delegating, so RECORD never completes. The third is a `lw`
+whose `read` returns `MemoryStall`, and the only components that do that are
+`Mailbox` and `TTSync`; neither is an `AddressableMemory` /
+`SparseAddressableMemory` leaf, so `_build_watch` refuses the span and the
+attempt aborts there instead. So the landed behaviour is safe, and this
+instalment fixes nothing that is live — but it is safe *incidentally*, by two
+unrelated rejections, which is why the reasoning is now written into
+`FirmwareSpin._advance` with the standing condition attached: if a plain-RAM
+read is ever given a stalling path, the fresh-arrival gate has to learn to see
+it with the model off too.
+
+### The fix extends the proof rather than repairing after it
+
+The scoreboard is not restored *after* a park; it is **part of what has to be
+proved periodic before one**. Three methods on `RiscvCostState`, placed there
+because which fields are cycle numbers is knowledge that belongs next to the
+fields:
+
+- `spin_signature(cycle)` — the **cycle-relative normal form**: every absolute
+  deadline as `max(field - cycle, 0)` ("how many cycles from now"), plus the L0
+  line tags and the store-coalescing group while its drain is still live. It is
+  lossless for anything the model can go on to do, and for exactly two reasons.
+  Every one of those fields is read only through a strict *is it still in the
+  future* test against the current cycle, so two values at or below it are
+  indistinguishable from here on; and the cycle number never decreases within a
+  run (`reset()` is the only rewind, and it zeroes everything).
+- `spin_restore(signature, cycle)` — the time translation, re-basing a
+  signature onto the wake cycle.
+- `spin_counters()` / `spin_add_counters(delta)` — the accumulators, so a
+  skipped span is *charged* rather than lost.
+
+`spin.py` records the signature alongside the register snapshot at every tick,
+requires it to match at the second anchor, and requires VERIFY to reproduce it
+tick for tick together with the exact per-tick charges. **A countdown fails
+that by construction**: a fixed deadline shrinks by one every cycle while a
+periodic schedule does not move. What survives is precisely the class of loops
+whose *schedule* repeats, not merely whose registers do — and for those, an
+unpark re-bases the phase's normal form onto the wake cycle and adds `laps`
+whole iterations' worth of charges plus the partial one. So the §I report comes
+out the same as an unparked run's, not only the cycle count;
+`spin_test.py::test_cost_model_parked_skips_are_cycle_exact_and_charge_the_same`
+asserts `rv_cost.summary()` equality directly, and the device-level test does
+the same across a real Blackhole tile.
+
+One half of the mechanism is not about the scoreboard at all. A stall also
+means the *next* tick is the same instruction being re-attempted rather than a
+fresh arrival at that PC, and anchoring on — or closing an iteration at — a
+re-attempt finds the wrong period. `spin.py` now gates both on "the previous
+tick retired something", read for free off `stall_cycles`. Without it the
+detector still never parks wrongly (the signature check catches it) but it
+mostly fails to park at all: on Wormhole, where the L1 load latency is `>= 8`
+and seven of every nine ticks of a poll loop are stalls, **zero** parks in 3,000
+cycles. With it, the same loop parks as the 9-tick period it is.
+
+### What the model does to a loop, measured
+
+The model makes the same firmware go-wait several times longer in ticks, which
+is a scope statement worth writing down because the recogniser has a cap:
+
+| loop | model off | model on |
+| --- | --- | --- |
+| Blackhole BRISC go-wait (18 instructions) | 18 ticks | 46 |
+| Blackhole NCRISC idle | 8 | 15 |
+| Blackhole TRISC go-waits | 3–7 | 10–13 |
+| Wormhole BRISC go-wait | 18 | **49** |
+
+49 against a 64-*tick* recognition budget is not enough headroom — a firmware
+revision with a slightly longer go-wait would silently stop parking under the
+model while still parking with it off, which is the quiet kind of regression.
+Scaling the budget under the model was the first attempt and it was wrong in
+the other direction: `cost_model_gate.py` caught it, because a 100-instruction
+NOP loop that the model-off budget rejects became recognisable under the model,
+and the deadlock watchdog started reporting a wedge in one configuration and
+not the other (`deadlock_test.py::test_quiet_on_a_loop_whose_period_is_the_
+sample_interval`). The budget is now counted in **retired instructions**
+(`MAX_LOOP_INSTRUCTIONS`), with a tick backstop that only a pathologically
+stalled attempt can reach. That makes the two configurations agree on *which
+loops are recognisable* in both directions: an 18-instruction go-wait is in
+budget whether it takes 18 ticks or 49, and a 100-instruction loop is out of
+budget either way.
+
+### The gate, and what it does and does not establish
+
+`driver/tests/cost_model_gate.py` **PASS** on every stage. `pytest tt_sim
+driver` 1,060 passed with the model off and again with `TT_SIM_COST_MODEL=1`.
+All 26 Blackhole replay guards pass standalone; Wormhole `offline_replay_test`
+reproduces its data READs as before.
+
+The load-bearing check is not any of those, and it was run explicitly rather
+than inferred: **the device cycle count at DONE on all 26 Blackhole guards is
+identical with parking on and off, under the model** (`four` 107,400,
+`six` 85,500, `tilize` 73,200, `pipestall` 36,400, …) and, separately, with the
+model off (unchanged from the landed numbers, guard for guard). The guards pump
+in fixed chunks until the go message reads DONE, so an equal total is an equal
+number of chunks — the kernel finished on exactly the same cycle. What none of
+this establishes is anything about whether those cycle counts are *right*; that
+is the gate's own standing caveat and it is unaffected here.
+
 ## Using it, when the time comes
 
 ```python

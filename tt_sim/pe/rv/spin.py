@@ -48,6 +48,33 @@ Only then does the core park. The watch set is the union of every load range
 and every fetched instruction word of the loop, merged into a handful of
 (component, offset, size, snapshot) spans resolved once.
 
+Under ``TT_SIM_COST_MODEL`` the fixed point covers the cost scoreboard too
+-------------------------------------------------------------------------
+
+With the model on, "the register file came back to its anchor" stops being
+enough to call an iteration a fixed point, and it is not close: a **stalled**
+tick retires nothing, so the PC and every register are trivially unchanged, and
+a detector that only watches registers reads a five-cycle L1-store-rate stall as
+a perfect one-tick loop. Measured on the ``six`` Blackhole guard, BRISC and the
+TRISCs parked in "pure poll loops of 1 ticks" every few hundred cycles; on a
+tile with nothing else awake to keep it ticking, such a core sleeps through the
+rest of its own stall — 41 loop iterations in 4,000 cycles where the unparked
+run executes 399.
+
+So the proof is *extended* rather than repaired afterwards. The scoreboard's
+**cycle-relative normal form** (``RiscvCostState.spin_signature``: every
+absolute deadline expressed as "cycles from now", plus the L0 line tags and the
+live store-coalescing group) is recorded alongside the registers at every tick,
+must match at the second anchor, and must be reproduced tick for tick by VERIFY
+together with the exact per-tick charges. A countdown fails that by
+construction — a fixed deadline shrinks by one every cycle, a periodic schedule
+does not move — so what survives is exactly the class of loops whose *schedule*
+repeats, not merely whose registers do. For those, restoring across a gap is a
+**time translation**: the phase's recorded normal form is re-based onto the wake
+cycle (``RiscvCostState.spin_restore``) and the accumulators are charged for the
+whole iterations the gap contained, so the §I report comes out the same as an
+unparked run's as well as the cycle count.
+
 Cycle-exactness (why this cannot move a replay by even one poll)
 ----------------------------------------------------------------
 
@@ -62,23 +89,23 @@ Cycle-exactness (why this cannot move a replay by even one poll)
   it is consulted (i.e. after every executed tick) and refuses dormancy the
   moment any byte differs from the snapshot, so a stride can never begin, or
   survive, a change to anything the loop can observe.
-* On the first tick after a gap the core's registers are **restored from the
-  recorded trajectory** at the exact phase the unparked run would have
-  reached: the loop is a verified fixed point over memory that provably did
-  not change during the gap, so state at wake is bit-identical to having
-  executed every skipped iteration.
+* On the first tick after a gap the core's registers — and, with the cost
+  model on, the scoreboard — are **restored from the recorded trajectory** at
+  the exact phase the unparked run would have reached: the loop is a verified
+  fixed point over memory that provably did not change during the gap, so
+  state at wake is bit-identical to having executed every skipped iteration.
 
 Deliberate scope limits (each falls back to today's behaviour, never to a
 wrong answer):
 
-* Detection is skipped while ``TT_SIM_COST_MODEL`` is active — the RV cost
-  scoreboard carries absolute cycle numbers, so trajectory restore would need
-  a time-translation argument this first version does not attempt.
 * Detection is skipped while the structured trace bus is enabled or the
   core's snoop diagnostics are on — a skipped cycle publishes no events, and
   a user watching instructions should see the spin.
-* Loops longer than :data:`MAX_LOOP_TICKS` ticks per iteration are never
-  parked (the observed firmware loops are 8–18).
+* Loops longer than :data:`MAX_LOOP_INSTRUCTIONS` **retired instructions** per
+  iteration are never parked (the observed firmware loops are 8–18). The budget
+  counts instructions rather than ticks precisely so that the cost model, which
+  turns an 18-instruction loop into 46–49 ticks, does not change which loops
+  are recognisable.
 
 Kill switch: ``TT_SIM_FIRMWARE_IDLE=0`` disables everything (default on,
 following the ``TT_SIM_PUMP_STRIDE`` precedent). ``TT_SIM_FIRMWARE_IDLE_DEBUG``
@@ -101,12 +128,27 @@ SPIN_RECORD = 2
 SPIN_VERIFY = 3
 SPIN_PARKED = 4
 
-#: Longest loop (in ticks per iteration) that will be considered for parking.
-#: The observed firmware wait loops are 8-18 ticks; this is generous headroom
-#: while still aborting quickly on straight-line kernel code.
-MAX_LOOP_TICKS = 64
-#: Ticks SEEK waits for the anchor PC to come round again.
-SEEK_BUDGET = MAX_LOOP_TICKS + 16
+#: Longest loop that will be considered for parking, counted in **retired
+#: instructions** rather than ticks. The observed firmware wait loops are 8-18
+#: instructions; this is generous headroom while still aborting quickly on
+#: straight-line kernel code.
+#:
+#: Retired instructions, not ticks, because under ``TT_SIM_COST_MODEL`` a tick
+#: is not an instruction: the model makes the *same* loop take several times as
+#: many ticks (measured on the real firmware go-waits — Blackhole's BRISC loop
+#: 18 instructions in 46 ticks, Wormhole's 18 in 49), so a tick budget would
+#: silently recognise fewer loops with the model on than off. Counting what the
+#: loop actually *does* makes the two configurations agree on which loops are
+#: recognisable, in both directions: the 18-instruction go-wait is in budget
+#: either way, and a 100-instruction loop is out of budget either way.
+MAX_LOOP_INSTRUCTIONS = 64
+#: Retired instructions SEEK waits for the anchor PC to come round again.
+SEEK_BUDGET = MAX_LOOP_INSTRUCTIONS + 16
+#: Hard backstop on the *ticks* an attempt may span, so a pathologically
+#: stalled loop cannot record an unbounded trajectory. Only reachable with the
+#: cost model on (with it off every tick retires, so the instruction budget
+#: always bites first).
+MAX_ATTEMPT_TICKS = 8 * (MAX_LOOP_INSTRUCTIONS + SEEK_BUDGET)
 #: Maximum merged watch spans; more than this means the loop is too weird.
 MAX_WATCH_RANGES = 8
 #: Ticks between detection attempts while running unparked.
@@ -138,6 +180,18 @@ def firmware_idle_debug_from_env(env=None):
     if env is None:
         env = os.environ
     return _truthy(env.get("TT_SIM_FIRMWARE_IDLE_DEBUG"), False)
+
+
+def _sub(a, b):
+    """Elementwise ``a - b`` over two :meth:`RiscvCostState.spin_counters`
+    tuples."""
+    return tuple(x - y for x, y in zip(a, b))
+
+
+def _counter_advance(loop_delta, laps, to_phase, from_phase):
+    """What ``laps`` whole loop iterations plus the move from ``from_phase`` to
+    ``to_phase`` charge, as a :meth:`RiscvCostState.spin_add_counters` delta."""
+    return tuple(d * laps + t - f for d, t, f in zip(loop_delta, to_phase, from_phase))
 
 
 class _ObservedMemory:
@@ -178,7 +232,13 @@ class FirmwareSpin:
         "debug",
         "anchor_pc",
         "budget",
+        "tick_budget",
+        "stalled",
         "traj",
+        "cost_sigs",
+        "cost_counts",
+        "cost_loop_delta",
+        "cost_verify_base",
         "loads",
         "load_seen",
         "violation",
@@ -206,11 +266,28 @@ class FirmwareSpin:
         self.debug = debug
         self.anchor_pc = None
         self.budget = 0
+        #: Ticks left in the current attempt: see :data:`MAX_ATTEMPT_TICKS`.
+        self.tick_budget = 0
+        #: True when the tick just observed failed to issue (cost model only),
+        #: so the next tick is a re-attempt of the same instruction rather than
+        #: a fresh arrival at that PC. See :meth:`_advance`.
+        self.stalled = False
         #: Recorded trajectory: one ``(pc_bytes, regs_tuple)`` per tick of the
         #: iteration, where ``regs_tuple`` is every register's raw bytes bar
         #: x0 (GPRs 1-31, PC, next-PC, and the FP file when allocated). Entry
         #: ``i`` is the state at the *start* of tick ``i``.
         self.traj = []
+        #: Cost-model state, when ``TT_SIM_COST_MODEL`` is on (empty otherwise).
+        #: ``cost_sigs[i]`` is the scoreboard's cycle-relative normal form
+        #: (``RiscvCostState.spin_signature``) at the start of tick ``i``, and
+        #: ``cost_counts[i]`` its accumulators' cumulative delta from the
+        #: anchor; ``cost_loop_delta`` is that delta over the whole iteration.
+        #: The signatures are part of the fixed point VERIFY proves, and are
+        #: what an unpark re-bases onto the wake cycle.
+        self.cost_sigs = []
+        self.cost_counts = []
+        self.cost_loop_delta = None
+        self.cost_verify_base = None
         self.loads = []
         self.load_seen = set()
         self.violation = None
@@ -248,9 +325,9 @@ class FirmwareSpin:
 
     def begin_seek(self, core, cycle):
         """Start a detection attempt. Called from the IDLE hot path."""
-        if core.snoop or core.bus.enabled or core.rv_cost is not None:
-            # See the module docstring: diagnostics want to see the spin, and
-            # the cost model's absolute-cycle scoreboard is out of scope.
+        if core.snoop or core.bus.enabled:
+            # See the module docstring: a skipped cycle publishes no events,
+            # and a user watching instructions should see the spin.
             self.next_attempt = cycle + self.interval
             return
         if not core.active:
@@ -261,7 +338,53 @@ class FirmwareSpin:
             return
         self.state = SPIN_SEEK
         self.anchor_pc = None
+        # Nothing is known about the tick before this one, so assume it stalled
+        # and let the first observed tick establish the truth. Costs one tick
+        # of the SEEK budget, and only with the cost model on: with it off no
+        # tick ever stalls and this is False forever.
+        self.stalled = core.rv_cost is not None
         self.budget = SEEK_BUDGET
+        self.tick_budget = MAX_ATTEMPT_TICKS
+
+    def _spend(self, cycle):
+        """Charge one tick of the attempt. True when it is out of budget.
+
+        The instruction budget is only charged for a tick that *retired*, so a
+        loop costs the same against it whether or not the cost model is
+        stalling the core through it; the tick budget is the backstop that
+        bounds a pathologically stalled attempt.
+        """
+        if not self.stalled:
+            self.budget -= 1
+        self.tick_budget -= 1
+        return self.budget <= 0 or self.tick_budget <= 0
+
+    def _advance(self, core, cycle, cost):
+        """Run the core's real tick and note whether it retired anything.
+
+        A stalled tick leaves the PC where it was, so the *next* tick is the
+        same instruction being re-attempted rather than a fresh arrival at that
+        PC. Anchoring on, or closing an iteration at, a re-attempt is what makes
+        a stall look like a one-tick loop, so :attr:`stalled` gates both.
+
+        **With the model off this stays False, and that is a claim about the
+        rest of the tree, so it is written down.** ``ProcessingElement.PEStall``
+        — the only other way a tick can retire nothing — is returned from
+        exactly three places, and RECORD already rejects every one of them
+        before a watch is ever built: a stalling ``sw`` and a stalling
+        ``.ttinsn`` push both reach :class:`_ObservedMemory.write` first, which
+        aborts the attempt outright, and a stalling ``lw`` can only be a load
+        from ``Mailbox`` or ``TTSync`` (the sole ``MemoryStall`` sources on a
+        read path), neither of which is a plain-RAM leaf, so
+        :meth:`_build_watch` refuses it. If a *plain-RAM* read is ever given a
+        stalling path, this gate has to learn to see it with the model off too.
+        """
+        if cost is None:
+            core._base_tick(cycle)
+            return
+        before = cost.stall_cycles
+        core._base_tick(cycle)
+        self.stalled = cost.stall_cycles != before
 
     def tick(self, core, cycle):
         """Drive one clock tick for any non-IDLE state.
@@ -270,49 +393,74 @@ class FirmwareSpin:
         only observes (SEEK/RECORD/VERIFY) or restores-then-executes (PARKED).
         """
         state = self.state
+        cost = core.rv_cost
         if state == SPIN_PARKED:
-            self._parked_tick(core, cycle)
+            self._parked_tick(core, cycle, cost)
             return
         if not core.active:
             # Stopped mid-observation (a driver called stop() directly):
             # nothing is executing, so there is nothing to observe.
             self._abort(core, cycle)
-            core._base_tick(cycle)
+            self._advance(core, cycle, cost)
             return
         pc_bytes = core.pc_register.value
+        # True when this tick is the same instruction the last one failed to
+        # issue. Always False with the cost model off.
+        rerun = self.stalled
         if state == SPIN_SEEK:
             anchor = self.anchor_pc
             if anchor is None:
-                self.anchor_pc = pc_bytes
-            elif pc_bytes == anchor:
+                if not rerun:
+                    self.anchor_pc = pc_bytes
+            elif pc_bytes == anchor and not rerun:
                 # Anchor came round: record one full iteration through the
                 # proxy, starting with this tick.
                 self.state = SPIN_RECORD
                 self.traj = [(pc_bytes, self._regs_snapshot(core))]
+                if cost is None:
+                    self.cost_sigs = []
+                    self.cost_counts = []
+                else:
+                    self.cost_sigs = [cost.spin_signature(cycle)]
+                    self.cost_counts = [cost.spin_counters()]
                 self.loads = []
                 self.load_seen = set()
                 self.violation = None
                 self.unknown_at_start = core.unknown_instructions
-                self.budget = MAX_LOOP_TICKS
+                self.budget = MAX_LOOP_INSTRUCTIONS
                 core._exec_memory = _ObservedMemory(self, core.visible_memory)
-                core._base_tick(cycle)
+                self._advance(core, cycle, cost)
                 if self.violation is not None:
                     self._abort(core, cycle)
                 return
-            core._base_tick(cycle)
-            self.budget -= 1
-            if self.budget <= 0 and self.state == SPIN_SEEK:
+            self._advance(core, cycle, cost)
+            if self._spend(cycle) and self.state == SPIN_SEEK:
                 self._abort(core, cycle)
             return
         if state == SPIN_RECORD:
-            if pc_bytes == self.anchor_pc:
+            if pc_bytes == self.anchor_pc and not rerun:
                 # Second anchor arrival: the iteration is complete. It is a
                 # candidate only if it returned every register to its anchor
-                # value — a fixed point.
+                # value — a fixed point — and, under the cost model, only if
+                # the scoreboard came back to its anchor value *in the
+                # cycle-relative normal form*: an iteration that leaves a
+                # deadline sitting at a fixed absolute cycle is not repeating,
+                # it is counting down. That is what rejects a stalled tick,
+                # which otherwise looks like a perfect one-tick fixed point
+                # (nothing retires, so no register and no PC moves).
                 if self._regs_snapshot(core) != self.traj[0][1]:
                     self._abort(core, cycle)
-                    core._base_tick(cycle)
+                    self._advance(core, cycle, cost)
                     return
+                if cost is not None:
+                    if cost.spin_signature(cycle) != self.cost_sigs[0]:
+                        self._abort(core, cycle)
+                        self._advance(core, cycle, cost)
+                        return
+                    base = self.cost_counts[0]
+                    self.cost_verify_base = cost.spin_counters()
+                    self.cost_loop_delta = _sub(self.cost_verify_base, base)
+                    self.cost_counts = [_sub(c, base) for c in self.cost_counts]
                 self.loop_len = len(self.traj)
                 self.state = SPIN_VERIFY
                 self.verify_i = 0
@@ -322,30 +470,44 @@ class FirmwareSpin:
                 # stale. Build the watch first; it can abort.
                 if not self._build_watch(core):
                     self._abort(core, cycle)
-                    core._base_tick(cycle)
+                    self._advance(core, cycle, cost)
                     return
-                self._verify_tick(core, cycle)
+                self._verify_tick(core, cycle, cost)
                 return
             self.traj.append((pc_bytes, self._regs_snapshot(core)))
-            core._base_tick(cycle)
-            self.budget -= 1
-            if self.violation is not None or (
-                self.budget <= 0 and self.state == SPIN_RECORD
-            ):
+            if cost is not None:
+                self.cost_sigs.append(cost.spin_signature(cycle))
+                self.cost_counts.append(cost.spin_counters())
+            self._advance(core, cycle, cost)
+            spent = self._spend(cycle)
+            if self.violation is not None or (spent and self.state == SPIN_RECORD):
                 self._abort(core, cycle)
             return
         # SPIN_VERIFY
-        self._verify_tick(core, cycle)
+        self._verify_tick(core, cycle, cost)
 
-    def _verify_tick(self, core, cycle):
+    def _verify_tick(self, core, cycle, cost):
         i = self.verify_i
         pc_bytes = core.pc_register.value
         entry = self.traj[i]
         if pc_bytes != entry[0] or self._regs_snapshot(core) != entry[1]:
             self._abort(core, cycle)
-            core._base_tick(cycle)
+            self._advance(core, cycle, cost)
             return
-        core._base_tick(cycle)
+        if cost is not None:
+            # The scoreboard must repeat tick for tick too, in normal form, and
+            # charge exactly the same amount over the same prefix — otherwise
+            # the per-phase re-basing an unpark does would be extrapolating from
+            # one iteration that happened not to represent the next.
+            if (
+                cost.spin_signature(cycle) != self.cost_sigs[i]
+                or _sub(cost.spin_counters(), self.cost_verify_base)
+                != self.cost_counts[i]
+            ):
+                self._abort(core, cycle)
+                self._advance(core, cycle, cost)
+                return
+        self._advance(core, cycle, cost)
         if self.violation is not None or core.unknown_instructions != (
             self.unknown_at_start
         ):
@@ -387,7 +549,7 @@ class FirmwareSpin:
             )
         core.spin_parked = True
 
-    def _parked_tick(self, core, cycle):
+    def _parked_tick(self, core, cycle, cost):
         traj = self.traj
         loop_len = self.loop_len
         gap = cycle - self.last_cycle
@@ -400,19 +562,36 @@ class FirmwareSpin:
             # point — restore the exact state it would have reached.
             steps = gap - 1
             self.skipped_cycles += steps
-            phase = (phase + steps) % loop_len
+            was = phase
+            laps, phase = divmod(was + steps, loop_len)
             self.phase = phase
             registers = core.register_file.registers
             snapshot = traj[phase][1]
             for i in range(1, len(registers)):
                 registers[i].value = snapshot[i - 1]
+            if cost is not None:
+                # The scoreboard's turn. Its deadlines are absolute cycle
+                # numbers, so they are restored by re-basing the phase's
+                # recorded normal form onto this cycle — the time translation
+                # the loop's proved periodicity licences. Its accumulators are
+                # charged for what the skipped span executed: ``laps`` whole
+                # iterations plus the change across the partial one, so a
+                # parked span costs the §I report exactly what an unparked one
+                # would.
+                counts = self.cost_counts
+                cost.spin_add_counters(
+                    _counter_advance(
+                        self.cost_loop_delta, laps, counts[phase], counts[was]
+                    )
+                )
+                cost.spin_restore(self.cost_sigs[phase], cycle)
         if core.pc_register.value != traj[phase][0]:
             # The loop exited (a watched value changed and the previous tick
             # branched out). Back to normal execution.
             self._unpark(core, cycle, "left the recorded loop")
-            core._base_tick(cycle)
+            self._advance(core, cycle, cost)
             return
-        core._base_tick(cycle)
+        self._advance(core, cycle, cost)
         self.phase = (phase + 1) % loop_len
         self.last_cycle = cycle
 
@@ -424,6 +603,12 @@ class FirmwareSpin:
         probe), so a stride can neither begin nor survive a change to
         anything the loop can observe.
         """
+        if core.bus.enabled or core.snoop:
+            # ``begin_seek`` refuses to *start* an attempt while anything is
+            # watching, but a subscriber that arrives after a core has already
+            # parked would otherwise see a silent gap where the spin should be.
+            self._unpark(core, cycle, "an observer arrived")
+            return cycle + 1
         for component, offset, size, snapshot in self.watch:
             if component.read(offset, size) != snapshot:
                 self._unpark(core, cycle, "watched value changed")
@@ -436,6 +621,8 @@ class FirmwareSpin:
         core.spin_parked = False
         self.state = SPIN_IDLE
         self.traj = []
+        self.cost_sigs = []
+        self.cost_counts = []
         self.watch = ()
         self.interval = BASE_ATTEMPT_INTERVAL
         self.next_attempt = BASE_ATTEMPT_INTERVAL
@@ -465,6 +652,8 @@ class FirmwareSpin:
         core._exec_memory = core.visible_memory
         self.state = SPIN_IDLE
         self.traj = []
+        self.cost_sigs = []
+        self.cost_counts = []
         self.loads = []
         self.load_seen = set()
         self.violation = None
