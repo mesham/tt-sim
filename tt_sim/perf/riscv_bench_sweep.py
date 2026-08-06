@@ -181,12 +181,19 @@ QUEUE_DRAIN_DATASET = "riscvbench-qdrain.csv"
 RESOLUTION_SIGMA = 2.0
 
 #: Which probes ``tt_sim/pe/rv/cost.py`` actually charges today. Its module
-#: docstring is the authority and lists three things it models -- the load-use
-#: interlock, the L1 store rate and the integer unit's multiply/divide -- and
-#: four it deliberately does not: branch mispredicts ("neither the docs nor
-#: tt-sim describe the predictor"), instruction fetch and i-cache misses,
-#: sustained-load throughput, and regions the load-latency table does not name.
-#: Nothing anywhere charges the ``.ttinsn`` push.
+#: docstring is the authority and lists four things it models -- the load-use
+#: interlock, the sustained-load rate, the L1 store rate and the integer
+#: unit's multiply/divide -- and four it deliberately does not: branch
+#: mispredicts ("neither the docs nor tt-sim describe the predictor"),
+#: instruction fetch and i-cache misses, per-region request throughput, and
+#: regions the load-latency table does not name. Nothing anywhere charges the
+#: ``.ttinsn`` push.
+#:
+#: ``rv_load_indep`` joined this set on 2026-08-06, when
+#: ``riscv.load_throughput`` gained its consumer: it is the one probe in the
+#: benchmark whose body is four independent loads in rotation, which is the
+#: shape the sustained-load rate limits and the shape the load-use interlock
+#: cannot see.
 #:
 #: This is what makes the sweep's "wired" axis mean something: a probe can carry
 #: a perfectly good table prediction and still be a measurement of tt-sim's
@@ -197,6 +204,7 @@ TT_SIM_CHARGES = frozenset(
         "rv_mul_dep",
         "rv_div",
         "rv_load_chase",
+        "rv_load_indep",
         "rv_load_stack",
         "rv_store_spread",
         "rv_store_coalesce",

@@ -15,7 +15,12 @@
 #     -- the load-latency table is spent as a load-use interlock, not as
 #     occupancy, because the ISA docs define it as "N - 1 independent
 #     instructions need to follow the load if the latency is to be entirely
-#     hidden".
+#     hidden". ``load_throughput`` is consumed since 2026-08-06 as the other
+#     half of the same paragraph: a rate limiter of four in-flight slots, each
+#     held N - 1 cycles, which is the docs' "four such loads every N - 1
+#     cycles" and is ALSO what the table's "Maximum loads in flight" column
+#     says, so that column stays unconsumed rather than being charged twice.
+#     See its entry, and docs/plans/cost-model.md.
 #   * ``noc.hops`` -> tt_sim/network/tt_noc.py, as the flight time of a packet:
 #     ``endpoint + per_hop * hops``, with the hop count a forward distance on
 #     each NoC's own (directional, wrapping) torus. ``noc.flit_bits`` and the
@@ -655,8 +660,24 @@ riscv:
       -- mailboxes/PCBufs/TTSync/semaphores, Tensix GPRs and backend config,
       the >= 7 group and L1 alike. (This note used to say the 4 covered only
       the mailbox group; it is a four-row rowspan, corrected 2026-08-06 while
-      re-reading the table for the NIU row below. The number is unchanged and
-      nothing consumes it.)
+      re-reading the table for the NIU row below.)
+
+      THE IN-FLIGHT COLUMN IS STILL CONSUMED BY NOTHING, AND THAT IS NOW A
+      DECISION RATHER THAN A GAP (2026-08-06). It is the same mechanism as
+      ``load_throughput`` below, which IS consumed: four loads in flight
+      sustaining "four such loads every N - 1 cycles" is a residency of
+      exactly N - 1 (Little's law), so the two published statements are one
+      queue described twice and charging both would bill it twice. Which of
+      the two to spend is settled by arithmetic rather than taste -- for every
+      row in this table the cap of 4 is unreachable except in the regime the
+      formula already limits. A stream at one load per cycle with residency
+      N - 1 has min(N - 1, 4) loads in flight, so the cap binds only when
+      N >= 5, which is exactly the branch ``one_per_cycle_if_latency_under``
+      switches the formula on at. The 8 for core-local data RAM is inert under
+      either reading: at a latency of 2 that stream never has more than one
+      load in flight. Blackhole's table does not repeat this column at all,
+      which is a second reason the consumed number is the formula's own "four"
+      and not this one.
 
       THE ">= 7" ROW'S KEY WAS RENAMED ON 2026-08-06 AND THAT RENAME IS THE
       WHOLE OF ROADMAP ITEM 2. It used to read ``tdma_tilectrl_pic_noc_overlay``
@@ -682,6 +703,31 @@ riscv:
       throughput of sustained loads is four such loads every N - 1 cycles."
       ``else_window_cycles_offset`` is the "- 1" of that formula, kept as data
       rather than as a magic number in whatever consumes this.
+
+      CONSUMED since 2026-08-06 by tt_sim/pe/rv/cost.py, in the shape the
+      sentence has rather than as a rate: ``else_loads_per_window`` slots, each
+      held for the region's N + ``else_window_cycles_offset`` cycles, and a
+      load that finds no free slot stalls until one frees. On a stream of one
+      latency that IS the sentence; on a stream of mixed latencies -- which
+      the sentence does not cover and a real kernel always is -- it is the only
+      reading that reduces to the sentence on every uniform stream. Rows below
+      ``one_per_cycle_if_latency_under`` take no slot at all, because one load
+      per cycle is what a single-issue core does anyway.
+
+      This is the SAME queue as ``load_latency.max_loads_in_flight_mmio_group``
+      and it is charged once, through this entry; see that note for the
+      Little's-law argument and for why the cap is unreachable outside the
+      regime this formula already limits.
+
+      WHAT IT IS WORTH, MEASURED RATHER THAN ASSUMED: 4 to 9 charged stall
+      cycles per in-tree replay guard, delivering 0 to 4 cycles to the totals.
+      Nothing in the tree issues sustained independent loads -- every load's
+      result is read within a few instructions, so the load-use interlock
+      stalls the core long before four loads are in flight. The path that does
+      hit it is tt-metal's own ``noc_local_state_init``, which pipelines five
+      to ten NIU counter reads back to back to hide exactly this latency. The
+      term is wired because it is published, sourced and corroborated, not
+      because it moved a total.
   store_throughput:
     l1_period_cycles: 5
     other_regions_period_cycles: 1
@@ -1155,6 +1201,23 @@ arch_overrides:
           valid. The companion --blocks 8 run reads 0.995 for the same probes,
           the 0.004 being its shorter baseline rather than the device.
       load_throughput:
+        note: >
+          NO NUMBER IS OVERRIDDEN HERE AND ONE THING ABOUT THAT IS WORTH
+          SAYING OUT LOUD, because this entry is consumed as of 2026-08-06 and
+          the arch merge is what makes it apply on Blackhole. Blackhole's
+          BabyRISCV page rewrote the Load/Store Unit section and, in doing so,
+          carries neither the sustained-load sentence nor the "Maximum loads in
+          flight" column that Wormhole's does. It keeps the statement the
+          formula is about ("a latency of N cycles means that N - 1 independent
+          instructions need to follow the load if the latency is to be entirely
+          hidden") and adds an eight-entry retire-order queue with the advice
+          to "use distinct destination registers for each of the seven
+          instructions following a load instruction" -- the same 8 and the same
+          7. So the base section applying here is the file's ordinary
+          convention (overrides carry differences, not repetitions) rather than
+          a Wormhole number pushed into a Blackhole gap, and the corroboration
+          below is a direct measurement of this formula ON Blackhole, which is
+          the strongest statement available about whether it belongs there.
         corroboration: >
           MEASURED ON BLACKHOLE SILICON, 2026-08-05, phase R of
           perfbench/riscvbench, and it is the one number here that comes out of

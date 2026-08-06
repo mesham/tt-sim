@@ -12,8 +12,9 @@ more here than anywhere else in the tree: the RV interpreter is the hottest path
 in the simulator and was optimised ~2.3x by removing exactly this kind of
 per-instruction overhead (see ``driver/wormhole/docs/profiling.md``).
 
-**What is modelled, and what each thing is.** The three costs come from three
-different kinds of statement in the ISA docs, and conflating them would be the
+**What is modelled, and what each thing is.** The four costs come from four
+different kinds of statement in the ISA docs — a latency, a queue's throughput,
+a unit's occupancy and a unit's blocking — and conflating them would be the
 error the SFPU wiring already caught once:
 
 1. **Load-use interlock.** The load-latency table is a *latency* table. The doc
@@ -48,13 +49,37 @@ error the SFPU wiring already caught once:
    this model charges 8; before the line model every L1 load charged the hit
    row's 2. Wormhole publishes no L0 at all (its single L1 row is >= 8), so
    the model never engages there.
-2. **L1 store throughput.** "Throughput of sustained stores to L1 is at most
+2. **Sustained load throughput.** The load table's other half, and the one
+   term that costs a *stream* of loads rather than a dependent pair: "the
+   throughput of sustained loads is one per cycle if the load latency is less
+   than five cycles. Otherwise, when the load latency is ``N`` cycles, the
+   throughput of sustained loads is four such loads every ``N - 1`` cycles."
+   Four slots, each held ``N - 1`` cycles; a load that finds no free slot
+   stalls until one frees. Rows below the five-cycle threshold (core-local
+   RAM, an L0 d-cache hit) take no slot, because one per cycle is what a
+   single-issue core does anyway.
+
+   **This is the same hazard as ``max_loads_in_flight`` and is charged once.**
+   The table's "Maximum loads in flight" column says 4 in aggregate across
+   every region but core-local RAM, and four loads in flight sustaining four
+   loads per ``N - 1`` cycles is a residency of exactly ``N - 1`` — Little's
+   law on two numbers printed a paragraph apart. So the queue depth and the
+   throughput formula are one mechanism written down twice, and charging both
+   would bill it twice; :attr:`~tt_sim.perf.model.RiscvCostModel.load_slots`
+   reads the formula's own "four", not the in-flight column, and the column
+   stays unconsumed. The other half of that column — 8 for core-local data
+   RAM — is inert under either reading: at a latency of 2 the formula gives
+   one per cycle, which is the issue width. Silicon agrees with the charged
+   rate to eight thousandths of a cycle: ``rv_load_indep`` (four rotating
+   destination registers, so nothing is ever read early) reads **1.742**
+   cycles per load where four slots of 7 cycles give 1.750.
+3. **L1 store throughput.** "Throughput of sustained stores to L1 is at most
    one store every five cycles" *is* an occupancy of the load/store unit, and
    is charged as one. Blackhole's coalescing store queue is modelled with the
    docs' own predicate (same 16-byte aligned region of L1, start addresses
    within +/-4), because charging its 5 to a coalescable run would over-charge
    by 5x against a document that says the opposite.
-3. **Integer unit multiply/divide.** The one place the docs state blocking
+4. **Integer unit multiply/divide.** The one place the docs state blocking
    outright: "multiply instructions occupy the Integer Unit for two cycles, and
    the next instruction cannot enter the unit until the multiply instruction
    has finished". That is Wormhole. Blackhole's multiply *pipelines* instead —
@@ -110,10 +135,20 @@ omission:
   taken branch would be a fabrication.
 * **Instruction fetch / i-cache misses.** The table gives the fetch *period*
   (one 128-bit L1 read per four instructions) but no miss cost.
-* **Sustained-load throughput** (four loads per N-1 cycles) and
-  ``max_loads_in_flight``. Both are queue-depth statements about loads already
-  in flight, and the interlock above already stalls on the dependent read,
-  which is the first-order effect.
+* **Per-region request throughput.** "Each memory region can process at most
+  one request per cycle" for every region but L1
+  (``BabyRISCV/MemoryOrdering.md``, both arches). It is the one published term
+  that would make *two* cores hammering one NIU cost more than one core doing
+  it, and it is not charged: the state it needs is per tile and per region,
+  shared by five cores, where every other RV cost in this module is per core.
+  Measured before it was declined — see ``docs/plans/cost-model.md``.
+* **The instruction queue in the Load/Store Unit** (Wormhole: "up to eight
+  instructions ... the oldest non-retired load, plus (up to) the next seven";
+  Blackhole states the same 8 as a retire-order queue). A third view of the
+  same 8 that the load-use interlock's ``N - 1`` already spends on every row
+  the tables publish — at ``N <= 8`` a load leaves before the queue behind it
+  can fill — so it can only bite on the ``>= 12`` atomic row, which no
+  in-tree kernel reaches.
 * **Regions the table does not name** — see
   :data:`tt_sim.perf.model.RV_UNNAMED_REGIONS`. The NoC NIU register block
   used to head that list and no longer does; see below.
@@ -257,8 +292,11 @@ for _op in (0x07, 0x27):  # FLH / FSH: the address register is a GPR
 STALL_LOAD_USE = 0
 STALL_STORE_RATE = 1
 STALL_INTEGER_UNIT = 2
-STALL_REASON_COUNT = 3
-STALL_REASON_NAMES = ("load_use", "store_rate", "integer_unit")
+#: No free slot in the load queue — the sustained-load rate, which is a
+#: property of the *stream* rather than of any one load's dependants.
+STALL_LOAD_RATE = 3
+STALL_REASON_COUNT = 4
+STALL_REASON_NAMES = ("load_use", "store_rate", "integer_unit", "load_rate")
 
 _LOAD_OPCODE = 0x03
 _STORE_OPCODE = 0x23
@@ -289,6 +327,9 @@ class RiscvCostState:
         "divide_trivial",
         "divide_int_min",
         "l1_miss_latency",
+        "load_slot_cycles",
+        "l1_miss_slot_cycles",
+        "_load_slots",
         "_l0_enabled",
         "_l0_shift",
         "_l0_tags",
@@ -324,6 +365,16 @@ class RiscvCostState:
         self.divide_general = model.divide_general
         self.divide_trivial = model.divide_trivial
         self.divide_int_min = model.divide_int_min
+        # The sustained-load rate: ``load_slots`` slots, each held for the
+        # region's ``N - 1``. A ``None`` window means the row is below the
+        # docs' five-cycle threshold (one load per cycle, which the core
+        # cannot beat) or is a region the table does not name; an empty slot
+        # list means the entry is not sourced and nothing is charged.
+        self.load_slot_cycles = model.load_slot_cycles
+        self.l1_miss_slot_cycles = model.l1_miss_slot_cycles
+        # Sorted ascending, so slot 0 is always the next to free and the
+        # check is one comparison.
+        self._load_slots = [0] * (model.load_slots or 0)
         # The L0 data-cache line model — Blackhole only, by data: the tables
         # publish the geometry (4 lines of 16 bytes) and an L1 hit/miss
         # latency pair there and nothing of the kind on Wormhole. Tags only,
@@ -368,6 +419,9 @@ class RiscvCostState:
         self._store_ready = 0
         self._group_block = -1
         self.pending_stall = 0
+        slots = self._load_slots
+        for i in range(len(slots)):
+            slots[i] = 0
         tags = self._l0_tags
         for i in range(len(tags)):
             tags[i] = -1
@@ -398,8 +452,11 @@ class RiscvCostState:
         Everything ``can_issue`` will consult, and nothing else: the per-GPR
         ready times, the issue and store-rate deadlines, the open coalescing
         group (only while its drain is still live — once ``_store_ready`` is in
-        the past the group is unreachable), and the L0 line tags, which are not
-        cycle-valued but are state a loop's charges depend on.
+        the past the group is unreachable), the load-queue slots (cycle-valued
+        like the rest, and order-preserving under the clamp because a sorted
+        list stays sorted when its past entries collapse onto 0), and the L0
+        line tags, which are not cycle-valued but are state a loop's charges
+        depend on.
         """
         ready = self._ready
         rel_ready = tuple(r - cycle_num if r > cycle_num else 0 for r in ready)
@@ -413,6 +470,7 @@ class RiscvCostState:
             store,
             group,
             tuple(self._l0_tags),
+            tuple(s - cycle_num if s > cycle_num else 0 for s in self._load_slots),
         )
 
     def spin_restore(self, signature, cycle_num):
@@ -422,7 +480,7 @@ class RiscvCostState:
         was parked, with the signature recorded for the trajectory phase the
         unparked run would have reached.
         """
-        rel_ready, stall, reason, store, group, tags = signature
+        rel_ready, stall, reason, store, group, tags, slots = signature
         ready = self._ready
         for i in range(32):
             rel = rel_ready[i]
@@ -435,6 +493,7 @@ class RiscvCostState:
         else:
             self._group_block, self._group_lo, self._group_hi = group
         self._l0_tags[:] = tags
+        self._load_slots[:] = [cycle_num + s if s else 0 for s in slots]
 
     def spin_counters(self):
         """The accumulators, flat, in the layout :meth:`spin_add_counters`
@@ -547,11 +606,34 @@ class RiscvCostState:
                 imm -= 0x1000
             addr = (register_file[(instr >> 15) & 0x1F].read_uint() + imm) & 0xFFFFFFFF
             region = classify_address(addr)
-            self.loads_by_region[region] += 1
+            tag = -1
+            line = -2  # "no L0 lookup was made", as against -1 for a miss
             if region == RV_REGION_L1 and self._l0_enabled:
-                latency = self._l0_load(addr)
+                tag = addr >> self._l0_shift
+                line = self._l0_probe(tag)
+                if line < 0:
+                    latency = self.l1_miss_latency
+                    window = self.l1_miss_slot_cycles
+                else:
+                    latency = self.load_latency[RV_REGION_L1]
+                    window = self.load_slot_cycles[RV_REGION_L1]
             else:
                 latency = self.load_latency[region]
+                window = self.load_slot_cycles[region]
+            if window is not None:
+                # The sustained-load rate. Slot 0 is the next to free, so a
+                # full queue is one comparison; taking a slot is a write and a
+                # four-element sort. Nothing above this point has mutated
+                # anything, which is what lets the stall be re-offered.
+                slots = self._load_slots
+                free = slots[0]
+                if free > cycle_num:
+                    return self._stall(free, STALL_LOAD_RATE)
+                slots[0] = cycle_num + window
+                slots.sort()
+            self.loads_by_region[region] += 1
+            if line != -2:
+                self._l0_commit(tag, line)
             rd = (instr >> 7) & 0x1F
             if rd:
                 # The value is written architecturally in this tick (tt-sim's
@@ -607,11 +689,25 @@ class RiscvCostState:
                     ready[rd] = cycle_num + self.multiply_latency
         return True
 
-    def _l0_load(self, addr):
-        """Hit or miss latency for one L1 load, updating the line tags.
+    def _l0_probe(self, tag):
+        """Which line ``tag`` is resident in, or ``-1`` for a miss. Read-only.
 
         The tag array is ordered most-recently-loaded first, so index 0 is the
         streak case (successive loads off one line) and costs one comparison.
+        Split from :meth:`_l0_commit` because a load can still be refused
+        after its latency is known — the sustained-load rate is checked
+        against that latency — and ``can_issue``'s contract is that a stalled
+        cycle leaves the model exactly as it found it. A probe that evicted a
+        line and was then re-offered next cycle would evict a second one.
+        """
+        tags = self._l0_tags
+        if tag == tags[0]:
+            return 0
+        return tags.index(tag) if tag in tags else -1
+
+    def _l0_commit(self, tag, line):
+        """Install ``tag`` at the head, given :meth:`_l0_probe`'s answer.
+
         Replacement is least-recently-loaded because the page publishes no
         policy and this is the generous choice: with 4 lines it never misses
         on a working set that fits and always misses on a cyclic walk over
@@ -620,20 +716,17 @@ class RiscvCostState:
         count a floor. The tag is the *start* address's line; a load that
         straddles two lines is charged as one, the cheaper reading.
         """
+        if line == 0:
+            self.l0_hits += 1
+            return
         tags = self._l0_tags
-        tag = addr >> self._l0_shift
-        if tag == tags[0]:
+        if line > 0:
+            del tags[line]
             self.l0_hits += 1
-            return self.load_latency[RV_REGION_L1]
-        if tag in tags:
-            tags.remove(tag)
-            tags.insert(0, tag)
-            self.l0_hits += 1
-            return self.load_latency[RV_REGION_L1]
-        tags.pop()
+        else:
+            tags.pop()
+            self.l0_misses += 1
         tags.insert(0, tag)
-        self.l0_misses += 1
-        return self.l1_miss_latency
 
     def _l0_store_invalidate(self, addr):
         """ "Stores to L1 flush the containing line, so the cache is never

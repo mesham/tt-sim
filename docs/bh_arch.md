@@ -427,6 +427,11 @@ probe's access pattern actually reaches — and, since 2026-08-06, by
 to any L1 load whose line is not resident (so this chase pays 8 per load in
 simulation too).
 
+The *rate* half of that reading is charged too, since 2026-08-06: the docs'
+formula is consumed as four in-flight load slots each held N − 1 cycles, so a
+stream of miss-row loads runs at 1.750 cycles per load in simulation against
+this 1.742 on the card (`docs/plans/cost-model.md`, "The load queue").
+
 **What is still not established** is `rv_load_indep`. Its four addresses span
 exactly four 16-byte lines — *exactly* the published capacity — and it still
 reads the miss row's sustained rate. Associativity, indexing, replacement policy

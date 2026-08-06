@@ -516,6 +516,14 @@ class RiscvCostModel:
       every L1 access.
     * :attr:`l1_store_period` / :attr:`l1_coalesced_store_period` — the
       sustained store rate, which *is* an occupancy of the load/store unit.
+    * :attr:`load_slots` / :attr:`load_slot_cycles` — the sustained *load*
+      rate, which is an occupancy of a queue rather than of the unit: the
+      docs give "four such loads every N - 1 cycles" for a load latency of
+      N >= 5, and one per cycle below that. Expressed here as what it is —
+      a fixed number of in-flight slots, each held for N - 1 cycles — so a
+      stream of mixed latencies has an answer at all. See
+      :attr:`load_slot_cycles` for why that shape is the published one
+      rather than a generalisation of it.
     * :attr:`multiply` / the divide costs — the integer unit's own blocking,
       the one place the docs say outright that "the next instruction cannot
       enter the unit until the multiply instruction has finished". On an
@@ -576,6 +584,7 @@ class RiscvCostModel:
                 self.l0_lines = lines
                 self.l0_line_bytes = line_bytes
                 self.l1_load_miss_latency = miss
+        self._load_throughput(riscv)
         integer = riscv.get("integer_unit") or {}
         int_prov = integer.get("provenance")
         self.multiply = _sourced_cycles(integer.get("multiply"), int_prov)
@@ -610,6 +619,63 @@ class RiscvCostModel:
         self.branch_mispredict_observed = _sourced_cycles(
             integer.get("branch_mispredict_observed"), int_prov
         )
+
+    def _load_throughput(self, riscv):
+        """The sustained-load rate, turned into slots and slot occupancies.
+
+        The entry is one sentence — "throughput of sustained loads is one per
+        cycle if the load latency is less than five cycles. Otherwise, when the
+        load latency is ``N`` cycles, the throughput of sustained loads is four
+        such loads every ``N - 1`` cycles" — and the shape it is stored in here
+        is a **rate limiter with four slots, each held ``N - 1`` cycles**, which
+        is that sentence and not a generalisation of it:
+
+        * For a stream of one latency it *is* the sentence: four slots, each
+          freed ``N - 1`` cycles after it was taken, admits four loads every
+          ``N - 1`` cycles and no more.
+        * The four is also the number the same page's table prints in its
+          "Maximum loads in flight" column ("4 (in aggregate across all of
+          these regions)"), so the two published statements are one mechanism
+          seen twice, and ``N - 1`` is what Little's law reads off them
+          together: four loads in flight sustaining four per ``N - 1`` cycles
+          is a residency of exactly ``N - 1``. That is why
+          :data:`riscv.load_latency.max_loads_in_flight` is **not** separately
+          charged — charging both would bill one queue twice. See
+          ``docs/plans/cost-model.md``.
+        * A stream of mixed latencies is the case the sentence does not cover,
+          and the slot form answers it in the only way that reduces to the
+          sentence on every uniform stream.
+
+        Loads whose latency is below ``one_per_cycle_if_latency_under`` take no
+        slot at all: the doc gives them one per cycle, which a single-issue
+        core already cannot beat, so the fast rows (core-local RAM, an L0
+        d-cache hit) are charged nothing by this term.
+        """
+        #: How many loads may be in flight at the sustained rate, or ``None``
+        #: when the entry is not sourced (and then nothing is charged).
+        self.load_slots = None
+        #: Per region, the cycles one load holds a slot, or ``None`` where the
+        #: region's latency is below the "one per cycle" threshold (or unnamed).
+        self.load_slot_cycles = (None,) * RV_REGION_COUNT
+        #: The same, for an L1 load that missed the L0 data cache.
+        self.l1_miss_slot_cycles = None
+        throughput = riscv.get("load_throughput") or {}
+        if throughput.get("provenance") not in SOURCED_PROVENANCE:
+            return
+        slots = throughput.get("else_loads_per_window")
+        under = throughput.get("one_per_cycle_if_latency_under")
+        offset = throughput.get("else_window_cycles_offset")
+        if not slots or under is None or offset is None:
+            return
+
+        def window(latency):
+            if latency is None or latency < under:
+                return None
+            return max(latency + offset, 0) or None
+
+        self.load_slots = slots
+        self.load_slot_cycles = tuple(window(c) for c in self.load_latency)
+        self.l1_miss_slot_cycles = window(self.l1_load_miss_latency)
 
     @staticmethod
     def _load_latencies(riscv, arch):

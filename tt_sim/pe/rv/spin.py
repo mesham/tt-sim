@@ -63,8 +63,9 @@ run executes 399.
 
 So the proof is *extended* rather than repaired afterwards. The scoreboard's
 **cycle-relative normal form** (``RiscvCostState.spin_signature``: every
-absolute deadline expressed as "cycles from now", plus the L0 line tags and the
-live store-coalescing group) is recorded alongside the registers at every tick,
+absolute deadline expressed as "cycles from now", plus the L0 line tags, the
+live store-coalescing group and the load queue's slots) is recorded alongside
+the registers at every tick,
 must match at the second anchor, and must be reproduced tick for tick by VERIFY
 together with the exact per-tick charges. A countdown fails that by
 construction — a fixed deadline shrinks by one every cycle, a periodic schedule

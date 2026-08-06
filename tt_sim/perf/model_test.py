@@ -143,6 +143,50 @@ def test_the_l1_dcache_miss_row_is_charged_only_through_the_line_model():
         assert wh.l0_line_bytes is None
 
 
+def test_the_sustained_load_rate_reads_the_formula_not_the_in_flight_column():
+    """The two published statements are one mechanism, and only one is read.
+
+    ``riscv.load_throughput`` gives four loads every ``N - 1`` cycles above a
+    five-cycle threshold; ``riscv.load_latency.max_loads_in_flight_mmio_group``
+    gives a queue depth of 4 for the same regions. Four in flight at four per
+    ``N - 1`` cycles is a residency of exactly ``N - 1`` (Little's law), so
+    charging both would bill one queue twice. The model reads the throughput
+    entry — which Blackhole's overrides leave in force, adding only a silicon
+    corroboration — and never the column, which Blackhole's table does not
+    repeat. That the two agree at 4 is the evidence that they are one
+    mechanism, so it is asserted here rather than argued in a comment.
+    """
+    from tt_sim.perf.model import (
+        RV_REGION_L1,
+        RV_REGION_LOCAL_DATA_RAM,
+        RV_REGION_TILECTRL_PIC_NOC,
+        riscv_cost_model,
+    )
+
+    riscv = load_costs("wormhole").section("riscv")
+    assert riscv["load_throughput"]["else_loads_per_window"] == 4
+    assert riscv["load_throughput"]["one_per_cycle_if_latency_under"] == 5
+    assert riscv["load_throughput"]["else_window_cycles_offset"] == -1
+    assert riscv["load_latency"]["max_loads_in_flight_mmio_group"] == 4
+    assert riscv["load_latency"]["max_loads_in_flight"] == 8
+    with _env("1"):
+        for arch in ("wormhole", "blackhole"):
+            model = riscv_cost_model(arch)
+            assert model.load_slots == 4, arch
+            # Under the threshold: no slot, not a shorter one.
+            assert model.load_slot_cycles[RV_REGION_LOCAL_DATA_RAM] is None, arch
+            assert model.load_slot_cycles[RV_REGION_TILECTRL_PIC_NOC] == 6, arch
+        assert riscv_cost_model("wormhole").load_slot_cycles[RV_REGION_L1] == 7
+        # Blackhole's L1 pair: the hit row is under the threshold, the miss
+        # row is the same 7 as Wormhole's single row.
+        assert riscv_cost_model("blackhole").load_slot_cycles[RV_REGION_L1] is None
+        assert riscv_cost_model("blackhole").l1_miss_slot_cycles == 7
+    # The in-flight column's other half (8, core-local data RAM) is inert
+    # under either reading: that row's latency is 2, which the threshold makes
+    # one load per cycle, which is already the issue width.
+    assert riscv["load_latency"]["core_local_data_ram"] == 2
+
+
 def test_the_multiply_latency_is_published_on_blackhole_only():
     """Blackhole's multiply pipelines ("exactly one cycle in EX1, and then
     exactly one cycle in EX2"): occupancy 1, result latency 1 + 1 = 2, spent

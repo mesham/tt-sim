@@ -5,7 +5,7 @@ same split as the Tensix cost-model tests: ``tt_sim/perf/model_test.py`` pins
 what the tables *say*, this pins what the RV interpreter *does* with what they
 say.
 
-Five claims:
+Six claims:
 
 1. With ``TT_SIM_COST_MODEL`` unset a core has no cost state at all and
    retires one instruction per cycle exactly as it always has. That is the
@@ -20,10 +20,14 @@ Five claims:
    publishes no L0, is untouched by it. Likewise Blackhole's pipelined
    multiply spends its 2-cycle result latency as a scoreboard entry where
    Wormhole's blocking multiply keeps its occupancy charge.
-4. The bound / provenance policy is honoured — regions the table does not name
+4. A *stream* of loads is held to the docs' sustained rate — four in-flight
+   slots, each held ``N - 1`` cycles, so four loads every ``N - 1`` cycles
+   above the five-cycle threshold and one per cycle below it. The same
+   mechanism as the "Maximum loads in flight" column, charged once.
+5. The bound / provenance policy is honoured — regions the table does not name
    are charged nothing, the ``>=`` rows are charged at their low end, and the
    divide stays at its band's floor at any dividend magnitude.
-5. Stores to L1 are rate-limited at the documented one-every-five-cycles, and
+6. Stores to L1 are rate-limited at the documented one-every-five-cycles, and
    stores anywhere else are not.
 """
 
@@ -41,6 +45,7 @@ from tt_sim.pe.rv.cost import (
     RV_REGION_TENSIX_GPR_CFG,
     RV_REGION_TILECTRL_PIC_NOC,
     RV_REGION_UNNAMED,
+    STALL_LOAD_RATE,
     classify_address,
     make_cost_state,
 )
@@ -269,9 +274,13 @@ def test_blackhole_a_chase_beyond_the_l0_capacity_misses_every_time():
     with _env(True):
         lines = [0x40, 0x50, 0x60, 0x70, 0x80]
         cpu, _ = _core([_lw(15, 0, a) for a in lines + lines], arch="blackhole")
-        _run(cpu, 10)
+        # Ten miss-row loads no longer fit in ten cycles: the miss row is >= 8,
+        # which is above the "one per cycle" threshold, so the sustained-load
+        # rate admits four every seven cycles and the tenth issues at 15.
+        _run(cpu, 16)
         assert cpu.rv_cost.l0_misses == 10
         assert cpu.rv_cost.l0_hits == 0
+        assert cpu.rv_cost.stall_by_reason[STALL_LOAD_RATE] == 6
 
 
 def test_blackhole_a_hot_loop_within_four_lines_hits_after_warm_up():
@@ -328,6 +337,138 @@ def test_wormhole_l1_loads_are_untouched_by_the_line_model():
         assert cpu.rv_cost.l0_misses == 0
         assert cpu.rv_cost.l0_hits == 0
         assert cpu.rv_cost.stall_cycles == 7 + 7
+
+
+# ---------------------------------------------------------------------------
+# 2c. The sustained-load rate.
+# ---------------------------------------------------------------------------
+
+
+def test_the_load_rate_is_the_published_formula_and_nothing_else():
+    """ "Throughput of sustained loads is one per cycle if the load latency is
+    less than five cycles. Otherwise, when the load latency is N cycles, the
+    throughput of sustained loads is four such loads every N - 1 cycles."
+
+    Four slots; a slot is held N - 1 cycles; rows under the five-cycle
+    threshold take no slot at all. The threshold does real work here — it is
+    what makes core-local RAM (2) and Blackhole's L0 hit row (2) free while
+    the mailbox row (3) is free and the GPR row (4) is *also* free, the first
+    charged row being the >= 7 group."""
+    with _env(True):
+        wormhole = make_cost_state("wormhole")
+        assert wormhole.model.load_slots == 4
+        windows = wormhole.load_slot_cycles
+        assert windows[RV_REGION_LOCAL_DATA_RAM] is None  # 2 < 5
+        assert windows[RV_REGION_MAILBOX_GROUP] is None  # 3 < 5
+        assert windows[RV_REGION_TENSIX_GPR_CFG] is None  # 4 < 5
+        assert windows[RV_REGION_TILECTRL_PIC_NOC] == 6  # >= 7 -> 7 - 1
+        assert windows[RV_REGION_L1] == 7  # >= 8 -> 8 - 1
+        assert windows[RV_REGION_UNNAMED] is None  # no row, no opinion
+
+        blackhole = make_cost_state("blackhole")
+        assert blackhole.model.load_slots == 4
+        # Blackhole's L1 row is a pair: the L0 hit's 2 is under the threshold
+        # and free, the miss's >= 8 is charged the same 7 as Wormhole's L1.
+        assert blackhole.load_slot_cycles[RV_REGION_L1] is None
+        assert blackhole.l1_miss_slot_cycles == 7
+        assert wormhole.l1_miss_slot_cycles is None
+
+
+def test_four_independent_loads_go_back_to_back_and_the_fifth_waits():
+    with _env(True):
+        cpu, _ = _core([_lw(15, 0, 0x40 + i * 0x40) for i in range(10)])
+        _run(cpu, 16)
+        # Issued at 0, 1, 2, 3 | 7, 8, 9, 10 | 14, 15 — four every seven
+        # cycles, so six of the sixteen cycles are stalled and all six are
+        # attributed to the rate rather than to a dependent read.
+        assert cpu.register_file["pc"].read_uint() == 0x100 + 10 * 4
+        assert cpu.rv_cost.stall_by_reason[STALL_LOAD_RATE] == 6
+        assert cpu.rv_cost.stall_by_reason[0] == 0  # load_use
+        assert cpu.rv_cost.take_pending_stall()[1] == "load_rate"
+
+
+def test_a_sustained_stream_settles_at_the_documented_four_per_seven():
+    """The rate ``rv_load_indep`` measured on Blackhole silicon at 1.742
+    cycles per load, against 7 / 4 = 1.750 here. The 37th load issues on cycle
+    63 exactly: nine full groups of four at seven cycles each."""
+    with _env(True):
+        cpu, _ = _core([_lw(15, 0, 0x40)] * 37, arch="wormhole")
+        _run(cpu, 63)
+        assert cpu.register_file["pc"].read_uint() == 0x100 + 36 * 4
+        cpu.clock_tick(63)
+        assert cpu.register_file["pc"].read_uint() == 0x100 + 37 * 4
+        assert 63 / 36 == 1.75
+
+
+def test_a_fast_row_is_one_load_per_cycle_however_long_the_stream():
+    """ "One per cycle if the load latency is less than five cycles" — and a
+    single-issue core cannot beat one per cycle, so the fast rows are charged
+    nothing at all rather than a smaller version of the same thing."""
+    with _env(True):
+        program = [_lui(10, LOCAL_RAM_BASE >> 12)] + [_lw(15, 10, 0)] * 12
+        cpu, _ = _core(program)
+        _run(cpu, 13)
+        assert cpu.rv_cost.stall_cycles == 0
+        assert cpu.rv_cost.loads_by_region[RV_REGION_LOCAL_DATA_RAM] == 12
+
+
+def test_blackhole_l0_hits_are_not_rate_limited_and_misses_are():
+    """The same twelve-load stream, on the same architecture, differing only
+    in whether it walks one 16-byte line or five: the hit row is under the
+    threshold and free, the miss row is four every seven cycles."""
+    with _env(True):
+        hot, _ = _core([_lw(15, 0, 0x40)] * 12, arch="blackhole")
+        _run(hot, 12)
+        assert hot.rv_cost.stall_cycles == 0
+        assert hot.rv_cost.l0_hits == 11
+
+        lines = [0x40, 0x50, 0x60, 0x70, 0x80]
+        cold, _ = _core([_lw(15, 0, lines[i % 5]) for i in range(12)], "blackhole")
+        _run(cold, 18)
+        assert cold.rv_cost.l0_misses == 12
+        assert cold.rv_cost.stall_by_reason[STALL_LOAD_RATE] == 6
+
+
+def test_a_load_refused_by_the_rate_does_not_disturb_the_l0_tags():
+    """``can_issue``'s contract: a stalled cycle leaves the model exactly as it
+    found it. The L0 lookup happens *before* the rate check (the rate depends
+    on which of the two L1 rows the load pays), so probing and committing had
+    to be split — a probe that evicted a line and was then re-offered on the
+    next cycle would evict a fresh line every cycle it stalled."""
+    with _env(True):
+        lines = [0x40, 0x50, 0x60, 0x70, 0x80]
+        cpu, _ = _core([_lw(15, 0, a) for a in lines], arch="blackhole")
+        _run(cpu, 4)
+        assert cpu.rv_cost.l0_misses == 4
+        resident = list(cpu.rv_cost._l0_tags)
+        # Cycles 4, 5 and 6 are stalled on the rate with the fifth load
+        # pending; nothing may move in the tag array while it waits.
+        for cycle in (4, 5, 6):
+            cpu.clock_tick(cycle)
+            assert list(cpu.rv_cost._l0_tags) == resident
+            assert cpu.rv_cost.l0_misses == 4
+        cpu.clock_tick(7)
+        assert cpu.rv_cost.l0_misses == 5
+        assert list(cpu.rv_cost._l0_tags) != resident
+
+
+def test_the_load_rate_is_identical_on_both_architectures():
+    """It is the one term here that does *not* differ between the chips, and
+    that is worth pinning because the surrounding rows all do. The charge comes
+    from ``riscv.load_throughput``, which Blackhole's overrides leave alone
+    (adding only the silicon corroboration), not from the "Maximum loads in
+    flight" column, which Blackhole's table does not repeat at all — see
+    ``tt_sim/perf/model_test.py`` for the entry-level half of that claim."""
+    with _env(True):
+        wormhole = make_cost_state("wormhole")
+        blackhole = make_cost_state("blackhole")
+        assert wormhole.model.load_slots == blackhole.model.load_slots == 4
+        # Same window on the >= 7 row, which both publish identically, and on
+        # the L1 miss path, which Wormhole reaches through its single L1 row.
+        assert wormhole.load_slot_cycles[RV_REGION_TILECTRL_PIC_NOC] == 6
+        assert blackhole.load_slot_cycles[RV_REGION_TILECTRL_PIC_NOC] == 6
+        assert wormhole.load_slot_cycles[RV_REGION_L1] == 7
+        assert blackhole.l1_miss_slot_cycles == 7
 
 
 # ---------------------------------------------------------------------------
@@ -574,8 +715,8 @@ def main():
             fn()
     print(
         "rv cost_test OK: no cost state by default, load latency spent as a "
-        "load-use interlock, unnamed regions charged nothing, L1 stores rate "
-        "limited"
+        "load-use interlock, sustained loads held to four per N - 1 cycles, "
+        "unnamed regions charged nothing, L1 stores rate limited"
     )
 
 

@@ -5183,6 +5183,272 @@ is off.
   published queue limits and per-region throughput); the conditional NIU probe
   dropped from the silicon-session bundle.
 
+## The load queue: two published statements, one mechanism, charged once
+
+Landed 2026-08-06 — ROADMAP item 2, "the rest of the RV memory path", the
+successor the NIU census produced. Three terms were named, all `isa_doc` and
+all consumed by nothing. The outcome is one wired, one shown to be the *same*
+term as the one wired (so charging it too would double-count), and one
+measured and declined. No number was sourced, derived or invented; the only
+value that moves in either YAML file is a note.
+
+### The double-count question, settled by arithmetic rather than by taste
+
+The two candidates sit a paragraph apart on the same page
+(`WormholeB0/TensixTile/BabyRISCV/README.md`):
+
+> **Maximum loads in flight** — 8 for core-local data RAM; "4 (in aggregate
+> across all of these regions)" as a four-row rowspan over every other row.
+
+> "Throughput of sustained loads is one per cycle if the load latency is less
+> than five cycles. Otherwise, when the load latency is `N` cycles, the
+> throughput of sustained loads is four such loads every `N - 1` cycles."
+
+**They are one queue described twice.** Little's law reads the residency
+straight off them: four loads in flight sustaining four loads per `N - 1`
+cycles is a mean residency of exactly `N - 1` cycles per load. And the
+converse is what settles which one to spend, because it is not a matter of
+preference — *for every row either architecture publishes, the in-flight cap
+is unreachable except in the regime the formula already limits*. A stream
+issuing at the core's one load per cycle with a residency of `N - 1` has
+`min(N - 1, 4)` loads in flight, so the cap of 4 binds only when `N >= 5` —
+which is exactly the threshold `one_per_cycle_if_latency_under: 5` switches
+the formula on at. Below it (core-local RAM at 2, the mailbox row at `>= 3`,
+the GPR/config row at `>= 4`, Blackhole's L0 hit row at 2) the queue never
+holds more than three, and the cap of 8 on core-local RAM is inert twice over.
+
+So the formula is charged and the column is not. The formula is also the one
+of the two that Blackhole's own silicon has been measured against
+(`rv_load_indep`, below), and the one whose "four" is a number rather than a
+table cell Blackhole does not print.
+
+### What is charged
+
+`RiscvCostModel.load_slots` = 4 slots; a load to a region whose latency is at
+or above the five-cycle threshold takes the earliest-freeing slot and holds it
+for `latency - 1` cycles; a load that finds every slot busy stalls until one
+frees, under a new stall reason `load_rate`. Rows below the threshold take no
+slot at all — "one per cycle" is what a single-issue core does anyway, and
+charging them a smaller version of the same thing would be an invention.
+
+The slot form is the sentence, not a generalisation of it: on a stream of one
+latency it admits four loads every `N - 1` cycles and no more, which is
+verbatim what is published; on a stream of *mixed* latencies — which the
+sentence does not cover and every real kernel is — it is the only reading that
+reduces to the sentence on every uniform stream. The unit tests pin the
+uniform case at both ends (`4` back to back then a stall; the 37th load of a
+sustained stream issuing on cycle 63, i.e. 1.75 cycles per load exactly).
+
+Silicon: `rv_load_indep` — four rotating destination registers, so no load is
+ever read early — reads **1.742** cycles per load on a Blackhole card where
+four slots of seven cycles give **1.750**. That is a corroboration of the
+charged mechanism, not its provenance, and it was already recorded on the
+entry before this change consumed it.
+
+One implementation note, because it was a real bug for a few minutes: on
+Blackhole the *rate* depends on which of the two L1 rows a load pays, so the
+L0 line lookup has to happen **before** the rate check, and `can_issue`'s
+contract is that a refused cycle leaves the model exactly as it found it. A
+lookup that evicted a line and was then re-offered on the next cycle would
+evict a fresh line every cycle it stalled. `_l0_load` is therefore split into
+`_l0_probe` (read-only) and `_l0_commit`, with a test that walks the tag array
+across three stalled cycles.
+
+### What it is worth: 4-9 cycles charged, 0-4 delivered
+
+A/B on one binary — the same guards run twice, the second time with
+`RiscvCostModel._load_throughput` stubbed off, so the two arms differ in this
+term and nothing else — at `PUMP_CHUNK = 1`, i.e. one-cycle resolution:
+
+| guard | cycles, term off | cycles, term on | delivered | charged |
+| --- | --- | --- | --- | --- |
+| `blackhole/three` | 13,415 | 13,415 | **0** | 4 |
+| `blackhole/loopback` | 11,246 | 11,246 | **0** | 4 |
+| `blackhole/nine` | 12,936 | 12,936 | **0** | 6 |
+| `blackhole/six` | 85,778 | 85,780 | **+2** | 4 |
+| `blackhole/four` | 105,534 | 105,534 | **0** | 4 |
+| `wormhole/reduce` | 9,682 | 9,684 | **+2** | 9 |
+| `wormhole/softplus` | 19,951 | 19,955 | **+4** | 9 |
+
+At the `PUMP_CHUNK = 10` resolution the NIU instalment's table used, all seven
+totals are unchanged to the cycle (85,780 / 105,540 / 12,940 / 13,420 /
+11,250 / 9,690 / 19,960). `blackhole/six`'s PCC is **0.9982**, the same figure
+as before the term existed.
+
+**Why it is this small, and it is not a bug.** The load-use interlock gets
+there first. Nothing in the tree issues sustained *independent* loads: a
+barrier polls a counter and immediately compares it, a kernel loads an operand
+and immediately uses it, so the core is already stalled on the dependent read
+long before four loads are in flight. The four slots are reached only where
+firmware deliberately batches independent loads — and there is exactly such a
+path, named in the NIU instalment: tt-metal's `noc_local_state_init` and
+friends issue five to ten `NOC_STATUS_READ_REG`s back to back "to hide latency
+of NOC reg reads". That runs a handful of times per launch, and a handful of
+stall cycles is what it costs.
+
+Wormhole delivers most where Blackhole delivers least, for a documented reason: Blackhole
+has an L0 data cache in front of L1, so most of its L1 loads pay the hit row's
+2 and take no slot at all, while every Wormhole L1 load is `>= 8` and every one
+of them is rate-eligible.
+
+This is the fourth RV instalment in a row where charged and delivered differ
+by an order of magnitude or more, and the ratio is now the *point* rather than
+a footnote: these runs are not issue-limited, they are waiting on each other.
+
+### Per-region request throughput: measured, and declined
+
+> "If two clients are interacting through a memory region *other* than L1,
+> then each client will be emitting its own stream of read/write requests
+> against that region, and those streams will be combined into a single
+> ordered stream as they reach the memory region. **Each memory region can
+> process at most one request per cycle**" — `BabyRISCV/MemoryOrdering.md`,
+> identically on both architectures.
+
+This is the term the ROADMAP item described as "the one term that would make
+two cores hammering the *same* NIU cost more than one core doing it". It is
+not wired, and the first reason is that the workload it describes **does not
+occur anywhere in the tree**.
+
+Every MMIO request (loads *and* stores) in seven guard runs, keyed by tile,
+by 64 KiB memory-map block — which separates NoC 0 at `0xFFB2` from NoC 1 at
+`0xFFB3`, the mailboxes from the PCBufs, and so on — and by cycle. A
+"collision" is two cores of one tile requesting the same region on the same
+cycle, which is the only shape this term can ever charge:
+
+| guard | MMIO requests | collisions | of requests | busiest region | NIU collisions |
+| --- | --- | --- | --- | --- | --- |
+| `wormhole/reduce` | 5,201 | 536 | 10.3 % | `0xFFE8` PCBufs/TTSync (341) | **0** |
+| `blackhole/nine` | 12,662 | 689 | 5.4 % | `0xFFE8` (233) | **0** |
+| `blackhole/loopback` | 6,864 | 233 | 3.4 % | `0xFFB1` tile control (112) | **0** |
+| `blackhole/three` | 5,365 | 179 | 3.3 % | `0xFFB1` (112) | **0** |
+| `blackhole/four` | 7,858 | 243 | 3.1 % | `0xFFB1` (112) | **0** |
+| `wormhole/softplus` | 12,100 | 242 | 2.0 % | `0xFFB1` (112) | **0** |
+| `blackhole/six` | 88,886 | 675 | 0.8 % | `0xFFE4` push buffers (375) | **0** |
+
+**Zero collisions on either NIU register block, in any guard, over 138,936
+MMIO requests.** The reason is structural rather than lucky: "NoC 0
+configuration and command" and "NoC 1 configuration and command" are two
+memory-map entries and therefore two regions, and tt-metal gives BRISC NoC 0
+and NCRISC NoC 1. Resolved per core on `blackhole/three`: BRISC makes 299
+requests to `0xFFB2` and 20 to `0xFFB3`; NCRISC makes 246 to `0xFFB3` and 1 to
+`0xFFB2`. The two busiest MMIO pollers in every dataflow kernel in the tree
+are polling *different regions*, so the term that would serialise them charges
+nothing.
+
+What is left is real but is neither what the item predicted nor large: tile
+control / debug / status (`0xFFB1`), which every core touches during launch,
+and the PCBufs/TTSync block (`0xFFE8`) on the two guards with the busiest
+TRISC handshaking. **Charging one cycle per collision — the most this term
+could conceivably deliver, which no RV term in this document has ever come
+close to — is an upper bound of 0.2 % to 5.5 % of a guard's total**, and the
+measured delivery of the term wired above (0-50 % of what it charged) says the
+realised figure would be a small fraction of that.
+
+Against that, the cost of building it, which is the second reason:
+
+- **It is the first RV cost that is not per-core.** Every other quantity in
+  `RiscvCostState` is one core's own; a region's request port is per tile and
+  shared by five cores, so it needs a new shared object owned by `TensixTile`
+  and threaded through `BabyRISCV.__init__` → `make_cost_state` on both
+  arches, plus a decision about eth tiles and about cores built outside a
+  device.
+- **It puts cost state outside the parking proof.** `tt_sim/pe/rv/spin.py`
+  parks a firmware loop by proving its state is a one-tick fixed point, over
+  a signature that is by construction the *core's own* state
+  (`RiscvCostState.spin_signature`). A charge that depends on what another
+  core did this cycle is not in that signature, so a parked core's replayed
+  charges could differ from what it would have been charged awake. Today the
+  recogniser rejects any candidate loop containing an MMIO load outright,
+  which happens to save the proof — but that would make the soundness of one
+  module depend on an unrelated predicate in another staying exactly as it is,
+  and that dependency deserves to be written down before it is relied on.
+- **The single-core half is inert.** A single-issue core cannot issue two
+  requests in one cycle, so there is no part of this term visible to one core
+  in isolation: it is all-or-nothing on the cross-core plumbing.
+
+So: deferred, with the census above as the reason rather than an intuition.
+The measurement is cheap to repeat if a future workload puts two cores on one
+region — a multi-core kernel sharing a semaphore is the obvious candidate, and
+it would show up as collisions on `0xFFE8`.
+
+### Arch scope, stated because the two pages differ here
+
+Wormhole publishes both statements. **Blackhole's page publishes neither** —
+it rewrote the Load/Store Unit section and dropped both the in-flight column
+and the sustained-load sentence. What it keeps is the statement the formula is
+about ("a latency of `N` cycles means that `N - 1` independent instructions
+need to follow the load"), plus an eight-entry retire-order queue and the
+advice to "use distinct destination registers for each of the seven
+instructions following a load instruction": the same 8 and the same 7 as
+Wormhole's "up to eight instructions ... the oldest non-retired load, plus (up
+to) the next seven".
+
+The term is charged on both, which is the file's ordinary deep-merge
+convention (an override carries differences, not repetitions) and not a
+Wormhole number pushed into a Blackhole gap — and the entry's Blackhole
+corroboration is a direct measurement *of this formula on a Blackhole card*,
+which is the strongest available statement that it belongs there. The
+in-flight column, which Blackhole really does not print, is read on neither.
+Both facts are now in the YAML notes rather than only here.
+
+### What is still not charged, in this block
+
+- **The Load/Store Unit's instruction queue** (8 deep on both arches, by two
+  different descriptions). A third view of the same 8, and the load-use
+  interlock's `N - 1` already spends it: at `N <= 8` the load leaves before
+  the queue behind it can fill. It could only bite on Blackhole's `>= 12` L1
+  atomic row, which no in-tree kernel reaches.
+- **The "more in the case of access conflicts" tails** on the `>= 4` and
+  `>= 7` rows, and "access port conflicts or bank conflicts" on L1. Still
+  unquantified, and the per-region term above is the closest thing to a
+  quantification of the first — one more reason it is worth revisiting if a
+  workload ever makes it matter.
+- **The three blocks in `RV_UNNAMED_REGIONS`** (MOP expander config, NCRISC
+  IRAM, the Tensix instruction push buffers). None appears in any row of
+  either table. Worth noting that the push buffers are the busiest colliding
+  region on `six` — 375 of its 675 collisions — so if that block ever gains a
+  published latency it arrives with a contention question attached.
+
+### The gate
+
+`driver/tests/cost_model_gate.py --jobs 4` **PASS**, all 44 guards it
+discovers, and every poll-budget multiplier is the one recorded before it:
+`blackhole/dramtop` 1×, `blackhole/two` 2×, `blackhole/offline` 4×. Nothing
+moved onto a higher rung — the ladder is the gate's only measure of how much
+slower a run got, and it did not register this change at all.
+
+`pytest tt_sim/ driver/` 1,071 passed both with the model off and with
+`TT_SIM_COST_MODEL=1` (1,063 before; eight new tests).
+
+Run outside the gate, each of the 30 Blackhole guards as its own standalone
+main under the model: 28 pass; `blackhole/two` and `blackhole/offline` fail at
+the recorded 1× poll budget, which is what being budget-dependent *means*.
+Both were re-run with this term stubbed off and fail **identically** without it
+(`offline` the same 3 of 220 READ replies, `two` the same 100 of 100 elements),
+so neither failure is this change's; the gate clears both at their usual
+multiple.
+
+Model off is byte-identical by construction: every line of this change is
+inside `RiscvCostState`, which is `None` when the model is off.
+
+### What changed in the repository
+
+- `tt_sim/perf/model.py` — `RiscvCostModel._load_throughput`, giving
+  `load_slots`, `load_slot_cycles` (per region) and `l1_miss_slot_cycles`;
+  the class docstring's third bullet.
+- `tt_sim/pe/rv/cost.py` — the slot check in `can_issue`, the `load_rate`
+  stall reason, `_l0_load` split into `_l0_probe` / `_l0_commit`, the slots in
+  the spin signature and its restore, and a docstring that now carries the
+  double-count argument and the two declined terms.
+- `tt_sim/perf/unit_costs.yaml` — `load_throughput` marked consumed with the
+  measured worth, `load_latency`'s in-flight note rewritten as a decision, and
+  a Blackhole note recording what that page does and does not print. **No
+  cycle count, bound or provenance changed.**
+- `tt_sim/pe/rv/cost_test.py`, `tt_sim/perf/model_test.py` — the new charge's
+  arithmetic on both arches, the fast-row exemption, the stalled-load tag
+  invariant, and the two published fours asserted equal.
+- `ROADMAP.md` — item 2 rewritten to what is actually left.
+
 ## Using it, when the time comes
 
 ```python
