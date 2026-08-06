@@ -31,9 +31,18 @@ class MemoryMap:
         # sorted (range, value) entries). Invalidated (set to None) whenever
         # the map is mutated and rebuilt on the next locate().
         self._index = None
+        # Last-hit cache for locate(): (low, high, addr_range, value) of the
+        # most recently matched range. Consecutive accesses overwhelmingly hit
+        # the same range (an RV core streaming through L1, a NoC burst), so a
+        # two-int compare skips the bisect. Only ever set from a successful
+        # full lookup and cleared on any mutation, so it can never serve a
+        # stale or shadowed range; misses never populate it, so the
+        # out-of-range path is untouched.
+        self._last_hit = None
 
     def _invalidate_index(self):
         self._index = None
+        self._last_hit = None
 
     def _build_index(self):
         entries = sorted(self.memory_map.items(), key=lambda kv: kv[0].low)
@@ -45,6 +54,9 @@ class MemoryMap:
         """Return the (AddressRange, value) covering ``addr`` via binary
         search over the non-overlapping ranges, or (None, None) if no range
         matches. Ranges are guaranteed non-overlapping by ``verify()``."""
+        hit = self._last_hit
+        if hit is not None and hit[0] <= addr <= hit[1]:
+            return hit[2], hit[3]
         index = self._index
         if index is None:
             index = self._build_index()
@@ -54,6 +66,7 @@ class MemoryMap:
         if idx >= 0:
             addr_range, value = entries[idx]
             if addr <= addr_range.high:
+                self._last_hit = (addr_range.low, addr_range.high, addr_range, value)
                 return addr_range, value
         return None, None
 

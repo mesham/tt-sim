@@ -2359,3 +2359,136 @@ pstats.Stats('/tmp/idle8.prof').sort_stats('tottime').print_stats(8)"
 #   timeit DeadlockDetector._sample (after) / .tick (before), and
 #   timeit .tick with _next_sample_cycle set past the horizon.
 ```
+
+# What landed: target 5, a last-hit range cache on `MemoryMap`
+
+**Measured 2026-08-06** against `24403ae`, machine as elsewhere in this
+document (12th Gen Core i7-12700H, 16 threads, CPython 3.12, `TT_SIM_THREADED`
+unset). This is ranked target 5 — "`MemoryMap` interval lookup /
+`MemorySpace.read`", quoted at 3–7 % across workloads — and §L's note that the
+win there is **caching the last-hit range, not a JIT** (the polymorphic
+`mem_mapable` dispatch is Numba-hostile).
+
+## The change
+
+Ten lines in `tt_sim/memory/memory_map.py`. `MemoryMap.locate` keeps a
+`_last_hit` tuple `(low, high, addr_range, value)` from the most recent
+successful lookup and answers from it when `low <= addr <= high`, before
+touching the `bisect_right` index. `_invalidate_index` clears it alongside
+`_index`, so the one mutation path (`__setitem__` / `__delitem__`) drops the
+cache too.
+
+Correctness rests on three facts, all checked rather than assumed:
+
+- **Only a successful full lookup populates the cache.** A miss leaves it
+  untouched, so the out-of-mapped-range `IndexError` path in
+  `MemorySpace._locate_memory_space` is bit-for-bit the code it was.
+- **Ranges cannot shadow one another.** `MemoryMap.verify()` rejects any
+  overlap, so the cached range is the *only* range that can cover its own
+  addresses — a hit can never be a stale answer for a range that has since
+  been shadowed.
+- **Nothing remaps after construction.** Instrumenting `__setitem__` /
+  `__delitem__` and splitting by phase: every workload measured shows
+  **50 mutations during device construction and 0 during the pumped run**
+  (`four`, `six`, `two` alike). The invalidation hook is belt-and-braces, not
+  load-bearing.
+
+Thread safety is by construction: each tile builds its own `MemoryMap` in
+`TensixTile.__init__` (and `DRAMTile` / `EthTile`), so a per-instance cache is
+per-tile, and `TT_SIM_THREADED=1` gives one worker per *tile*. No `MemoryMap`
+is shared across worker threads, so no lock is needed and none was added.
+
+## Does the cache actually hit?
+
+Deterministic, machine-load independent — classify every `locate` call:
+
+| workload | `locate` calls | cache hit | full lookup | miss |
+|---|---|---|---|---|
+| `four` | 671,485 | **98.1 %** | 13,073 | 0 |
+| `nine` | 125,229 | 81.9 % | 22,687 | 0 |
+| `two` | 39,897 | 74.4 % | 10,205 | 0 |
+| `six` | 187,962 | 74.0 % | 48,883 | 0 |
+| `softplus` | 112,852 | 69.3 % | 34,622 | 0 |
+
+The premise holds — consecutive accesses do run in the same range — and **no
+workload ever misses**, which is the other half of "exactly transparent".
+
+`locate` itself, replaying each workload's real captured `(map, addr)` stream
+through the real device maps (8 distinct maps, 1–16 ranges each), interleaved
+5 rounds:
+
+| | base | change |
+|---|---|---|
+| real stream, real maps | 488 ns/locate (median) | 400 ns/locate (median) |
+
+Change wins 5/5 rounds, ≈ **−18 % on `locate`**, ~110 ns/call. A one-shot
+un-interleaved version of this same benchmark measured the *opposite* sign;
+it is recorded here as a reminder that nothing on this machine is measurable
+without interleaving.
+
+## The A/B
+
+Two frozen `git archive` exports of `24403ae` differing **only** in
+`tt_sim/memory/memory_map.py` (`diff -r` verified), alternating order every
+round, paired within-round. `%` is the paired median of
+`(change − base) / base`; the CI is on the paired mean.
+
+| workload | rounds | base median (s) | change median (s) | paired median | 95 % CI on mean | change wins |
+|---|---|---|---|---|---|---|
+| `four` (RV-bound, 98 % hit) | 18 | 12.94 / 12.43 | 11.92 / 12.23 | **−6.66 %** | **−5.16 % ± 3.51** | 16/18 |
+| `six` (matmul) | 10 | 8.56 | 8.53 | −2.46 % | −0.71 % ± 5.38 | 6/10 |
+| `two` (NoC/L1 smoke) | 15 | 1.57 | 1.66 | −0.70 % | +0.34 % ± 9.51 | 7/15 |
+| `softplus` (SFPU) | 15 | 3.27 | 3.29 | +3.05 % | +1.99 % ± 6.06 | 6/15 |
+| `idle` control (0 `locate` calls) | 15 | 2.14 | 2.21 | −2.07 % | +0.35 % ± 5.20 | 7/15 |
+| **null control** (base vs *identical copy*) | 9 | 13.70 | 13.58 | −0.88 % | +0.69 % ± 3.28 | 5/9 |
+
+**Verdict: a real but modest win on the one workload where `locate` is hot
+(`four`, ~5 %), and an honest null everywhere else.** Only `four` has a CI
+that excludes zero. The null control — base against a byte-identical copy of
+itself — lands on 5/9 wins and a CI straddling zero, which is what licenses
+reading `four`'s 16/18 as signal rather than harness bias.
+
+Two caveats stated as measured, not smoothed over:
+
+- **The `four` point estimate is soft.** Its two independent 9-round runs gave
+  −8.31 % and −3.48 %; pooling them is the honest summary and the CI
+  (−1.7 % to −8.7 %) is wide. Quote "a few percent on RV-bound workloads", not
+  −5.2 %.
+- **The magnitude exceeds what the mechanism explains, and that is
+  unresolved.** 671,485 calls × ~110 ns saved ≈ 0.07 s, which is ~0.6 % of
+  `four`'s ~12.9 s — an order of magnitude below the measured −5 %. Either the
+  per-call saving is larger in situ than the replay-loop microbenchmark
+  captures, or some of the −5 % is machine drift the null control did not
+  happen to sample. Do not treat the end-to-end figure as mechanism-verified.
+- The `idle` control was *verified* zero, not assumed: instrumenting `locate`
+  during its timed window counts **0 calls**. (It needs
+  `TT_SIM_PUMP_STRIDE=0`; with striding on, the pump skips idle cycles and
+  300 k of them finish in 1.5 ms.)
+
+The ROADMAP's 3–7 % was always the ceiling for
+`convert_addr_to_target_range` + `locate` + `_publish_mem_event` *together*;
+this change addresses only the middle term, and only its hit path. The other
+two are untouched and remain available.
+
+## Gates
+
+`pytest tt_sim/ driver/` **983 passed**; all **26/26** Blackhole replay guards
+pass standalone (each validates its own DRAM result, so identical output is
+proven, not asserted by eye); `ruff check` / `ruff format` clean.
+
+## Reproducing
+
+```bash
+# two frozen trees differing only in memory_map.py
+git archive HEAD | tar -x -C /tmp/ab/base
+git archive HEAD | tar -x -C /tmp/ab/change && cp memory_map.py /tmp/ab/change/tt_sim/memory/
+
+# interleave: odd rounds base-first, even rounds change-first, pair within round
+for r in $(seq 1 9); do ...; done   # >=9 rounds; report the paired median
+
+# always run the null control too — base against a copy of base
+cp -a /tmp/ab/base /tmp/ab/base2    # any signal here is harness bias
+
+# hit rate (deterministic, load-independent): wrap MemoryMap.locate and
+# classify each call as cached / full-lookup / miss.
+```
