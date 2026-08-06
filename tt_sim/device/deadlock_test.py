@@ -30,6 +30,7 @@ from tt_sim.device.deadlock import (
     _WEDGE_CONFIRM_CYCLES,
     DEFAULT_UNIT_STALL_THRESHOLD,
     DeadlockDetector,
+    UnitWedgedError,
     deadlock_config_from_env,
     unit_stall_config_from_env,
 )
@@ -521,7 +522,8 @@ def test_a_wedged_unit_does_not_retract_its_report(capsys):
 
     ``[UNIT WEDGED]`` is the authoritative signal and nothing may walk it back:
     printing ``[UNIT STALL CLEARED]`` after it would tell the user the proof was
-    a false alarm.
+    a false alarm. (The raise terminates a real run; a harness that catches it
+    and keeps pumping — as this test does — must still not see a retraction.)
     """
     detector, state = _detector_with_a_fake_tile(in_reset=False)
     unit = _FakeBlockedUnit()
@@ -529,7 +531,9 @@ def test_a_wedged_unit_does_not_retract_its_report(capsys):
 
     at = _pump_from(detector, 0, 2 * UNIT_STALL_THRESHOLD)
     state.set(True)
-    at = _pump_from(detector, at, 2 * _WEDGE_CONFIRM_CYCLES)
+    with pytest.raises(UnitWedgedError):
+        _pump_from(detector, at, 2 * _WEDGE_CONFIRM_CYCLES)
+    at += 2 * _WEDGE_CONFIRM_CYCLES
     unit.blocked = False
     _pump_from(detector, at, 4)
 
@@ -655,9 +659,10 @@ def test_reports_a_unit_left_blocked_when_the_whole_tile_goes_into_reset(capsys)
 
     Handing a Src bank back takes an instruction and no thread can issue one
     from reset, so a unit still blocked here can never be satisfied. That is a
-    proof rather than a heuristic, and it fires immediately — which is what
-    makes a *short* wedge reproduction (one that ends long before any cycle
-    threshold could elapse) visible at all.
+    proof rather than a heuristic, it fires immediately — which is what makes
+    a *short* wedge reproduction (one that ends long before any cycle
+    threshold could elapse) visible at all — and it **raises**, so a run with a
+    wedged unit behind it cannot report success (ROADMAP item 1).
     """
     detector, state = _detector_with_a_fake_tile(in_reset=False)
     _watch(detector, _FakeBlockedUnit())
@@ -667,8 +672,9 @@ def test_reports_a_unit_left_blocked_when_the_whole_tile_goes_into_reset(capsys)
         detector.tick(cycle)
     assert "[UNIT WEDGED" not in capsys.readouterr().err
     state.set(True)
-    for cycle in range(half, 2 * half):
-        detector.tick(cycle)
+    with pytest.raises(UnitWedgedError, match="Unpacker 1.*wedged"):
+        for cycle in range(half, 2 * half):
+            detector.tick(cycle)
 
     err = capsys.readouterr().err
     assert "[UNIT WEDGED" in err, err
@@ -720,7 +726,8 @@ def test_a_really_wedged_unpacker_on_a_reset_tile_is_reported_at_once(
     detector.unit_stall_arm_interval = UNIT_STALL_THRESHOLD // 8
     _watch(detector, _wedged_unpacker(), coord=coord)
 
-    device.run(4 * _WEDGE_CONFIRM_CYCLES)  # << UNIT_STALL_THRESHOLD
+    with pytest.raises(UnitWedgedError, match="wedged"):
+        device.run(4 * _WEDGE_CONFIRM_CYCLES)  # << UNIT_STALL_THRESHOLD
 
     err = capsys.readouterr().err
     assert "[UNIT WEDGED" in err, err

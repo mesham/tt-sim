@@ -297,23 +297,28 @@ def test_a_three_cycle_thcon_op_holds_the_unit_and_stalls_the_thread():
         assert thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0)
         thcon.clock_tick(0)
         # The instruction itself retires in the cycle it issued; what the cost
-        # buys is that the *unit* is unavailable for two more.
+        # buys is that the *unit* is unavailable afterwards. The hold runs
+        # from the cycle the instruction was *accepted* — one before this
+        # retire tick, since backend units tick before the wait gates — so a
+        # 3-cycle occupancy means "the next instruction enters 3 cycles after
+        # this one did", deadline 2. Anchoring at retire made every ThCon op
+        # cost 4 cycles at the issuing thread where silicon measures 2.97.
         assert gprs[2] == 1
-        assert thcon.busy_until == 3
+        assert thcon.busy_until == 2
 
         gprs[0] = 10
-        for cycle in (1, 2):
-            assert not thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0), cycle
-            thcon.clock_tick(cycle)
-            assert gprs[2] == 1, cycle
+        assert not thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0)
+        thcon.clock_tick(1)
+        assert gprs[2] == 1
+        assert not thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0)
 
         # The deadline cycle: backend units tick before the frontend issues, so
         # the deadline tick clears the occupancy and the retry lands the same
         # cycle rather than one late.
-        thcon.clock_tick(3)
+        thcon.clock_tick(2)
         assert thcon.busy_until is None
         assert thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0)
-        thcon.clock_tick(4)
+        thcon.clock_tick(3)
         assert gprs[2] == 11
 
 
@@ -322,10 +327,11 @@ def test_an_occupied_thcon_tells_the_pump_when_to_come_back():
         thcon = backend.backend_units["THCON"]
         assert thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0)
         thcon.clock_tick(0)
-        assert thcon.next_wake_cycle(0) == 3
-        assert thcon.next_wake_cycle(2) == 3
-        thcon.clock_tick(3)
-        assert thcon.next_wake_cycle(3) is None
+        # Deadline 2, not 3: the hold runs from the acceptance cycle.
+        assert thcon.next_wake_cycle(0) == 2
+        assert thcon.next_wake_cycle(1) == 2
+        thcon.clock_tick(2)
+        assert thcon.next_wake_cycle(2) is None
 
 
 def test_a_busy_unit_refuses_every_thread_not_just_the_issuing_one():
@@ -498,19 +504,19 @@ def test_a_multi_cycle_config_op_does_not_delay_the_batch_beside_it():
         )
         assert not config.next_instruction
 
-        # The cost is still charged: the unit is held for the two cycles, and
-        # the back-pressure lands where it belongs — on the *next* instruction,
+        # The cost is still charged: the unit is held (from the acceptance
+        # cycle, one before the retire tick — deadline 1, not 2), and the
+        # back-pressure lands where it belongs — on the *next* instruction,
         # which the wait gate then retries, keeping each thread in order.
-        assert config.busy_until == 2
+        assert config.busy_until == 1
         assert not config.issueInstruction(setc16_math_offset(0), 1)
         config.clock_tick(1)
         assert (
             backend.getThreadConfigValue(1, "DEST_TARGET_REG_CFG_MATH_Offset") == 0x200
         )
-        config.clock_tick(2)
         assert config.busy_until is None
         assert config.issueInstruction(setc16_math_offset(0), 1)
-        config.clock_tick(3)
+        config.clock_tick(2)
         assert backend.getThreadConfigValue(1, "DEST_TARGET_REG_CFG_MATH_Offset") == 0
 
 
@@ -555,25 +561,29 @@ def test_a_held_ipc_group_still_lets_a_different_group_through():
         config.setConfig(0, RDCFG_SOURCE_INDEX, RDCFG_SOURCE_VALUE)
         assert config.issueInstruction(CFGSHIFTMASK_CFG41_SCRATCH0, 0)
         config.clock_tick(0)
-        # Two cycles, charged to Config and to Config only.
-        assert config.busy_groups == {"Config": 2}
-        assert config.busy_until == 2
+        # Two cycles, charged to Config and to Config only — counted from the
+        # acceptance cycle (one before the retire tick), hence deadline 1.
+        assert config.busy_groups == {"Config": 1}
+        assert config.busy_until == 1
 
-        # The cycle after. The Config group is held...
+        # While held: the Config group refuses...
         assert not config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
-        # ...and ThreadConfig is not. THIS is the assertion the whole-unit hold
-        # failed: SETC16 is outside the held group and the hardware takes it.
+        # ...and ThreadConfig does not. THIS is the assertion the whole-unit
+        # hold failed: SETC16 is outside the held group and the hardware takes
+        # it.
         assert config.issueInstruction(setc16_math_offset(0x200), 1)
         config.clock_tick(1)
         assert config.get_threadConfig_entry(1, 1) == 0x200
-        # Retired in the cycle it was accepted for, and the Config hold stands.
+        # Retired in the cycle it was accepted for, and the hold released on
+        # schedule at its deadline tick.
         assert not config.next_instruction
-        assert config.busy_groups == {"Config": 2}
-
-        # And the held group is released on schedule, not early.
-        config.clock_tick(2)
         assert config.busy_groups == {}
         assert config.busy_until is None
+        # The RDCFG is still refused for one more cycle — the unit's own
+        # SETC16-retired-last-cycle rule, nothing to do with the occupancy —
+        # and then goes through.
+        assert not config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
+        config.clock_tick(2)
         assert config.issueInstruction(RDCFG_G5_FROM_CFG12, 0)
         config.clock_tick(3)
         assert backend.gpr.getRegisters(0)[5] == RDCFG_SOURCE_VALUE
@@ -602,7 +612,7 @@ def test_an_ungrouped_unit_still_holds_the_whole_unit():
 
         assert thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, 0)
         thcon.clock_tick(0)
-        assert thcon.busy_groups == {None: 3}
+        assert thcon.busy_groups == {None: 2}
         # Nothing at all gets in, from any thread, for the whole hold.
         for thread in range(3):
             assert not thcon.issueInstruction(ADDDMAREG_G2_EQ_G0_PLUS_1, thread)
@@ -619,8 +629,9 @@ def test_a_batch_is_held_for_the_longest_cost_in_it():
         assert config.issueInstruction(setc16_math_offset(0x200), 1)
         assert config.issueInstruction(setc16_math_offset(0x200), 2)
         config.clock_tick(0)
-        # The 1-cycle SETC16s do not shorten the RDCFG's hold...
-        assert config.busy_until == 4
+        # The 1-cycle SETC16s do not shorten the RDCFG's hold (4 cycles from
+        # the batch's acceptance cycle, i.e. deadline 3)...
+        assert config.busy_until == 3
         # ...and none of them was pushed past it.
         assert not config.next_instruction
         for thread in (1, 2):

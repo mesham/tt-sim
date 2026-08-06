@@ -108,6 +108,7 @@ is deliberate:
 | `tt_sim/perf/model_test.py` | 12 tests: off by default, bound policy, fidelity phases |
 | `tt_sim/pe/tensix/matrix_cost_model_test.py` | 6 tests: the FPU driven with the model on and off |
 | `tt_sim/pe/tensix/backend_cost_model_test.py` | 21 tests: the SFPU, ThCon, packer, sync and config units, same treatment — including the config unit charging nothing on Wormhole, Blackhole's `CFGSHIFTMASK` 2, and its 2-cycle hold on the `Config` IPC group leaving `SETC16` free |
+| `tt_sim/pe/tensix/frontend_backpressure_test.py` | 9 tests: the bounded front-end FIFO, the stalled `.ttinsn` store, the dvalid-twice wedge reaching the core, and the two licensed terms' arithmetic (push at 1.000, ThCon at 3.0, 3 threads at ~3× each) |
 | `tt_sim/pe/rv/cost.py` | The baby RISC-V consumer: address-region classifier, load-use scoreboard, L1 store rate limiter |
 | `tt_sim/pe/rv/cost_test.py` | 19 tests: off by default, the interlock, the unnamed regions, stores, multiply/divide |
 | `tt_sim/network/tt_noc.py` | The NoC consumer: `noc_hop_count`, `NUI.send_to`, and the in-flight packet queue |
@@ -4230,6 +4231,137 @@ Nothing else broke. 983 tests pass (967 before, 16 added), ruff is clean, and
   `unknown`** — and it is still `unknown` *for* virtual-channel arbitration,
   which §4.3 measured at one fiftieth of this effect and which nothing here
   models.
+
+## The front end, bounded: the first mechanism the whole Tensix half was waiting on
+
+Landed 2026-08-06 — ROADMAP item 1, and the change ["The front end,
+measured"](#the-front-end-measured-what-may-now-be-modelled-and-what-may-not)
+licensed. `TensixFrontend` was an unbounded list append and a `.ttinsn` store
+returned the same tick, so no Tensix unit could ever back-pressure the core
+that fed it. Now a thread's frontend path is **bounded**: a core-facing push
+into a frontend holding `CORE_PUSH_INFLIGHT_BOUND` instructions (MOP + replay
++ wait-gate FIFOs) returns `MemoryStall`, and both push paths — the `.ttinsn`
+extension and a plain `sw` to the push buffer, which already had the
+`MemoryStall → PEStall` plumbing from the mailboxes — stall the core on the
+same instruction with the PC unmoved. The mechanism is **active regardless of
+`TT_SIM_COST_MODEL`**, because it is a correctness property first: on silicon
+a thread's FIFO fills behind a permanently blocked backend instruction and
+the core wedges; tt-sim used to run the kernel to completion past the wedged
+unit (the `UNPACR_NOP` acquire-without-release case).
+
+**The bound is a mechanism parameter, not a calibration, and its comment says
+so at length.** Blackhole silicon absorbs ~31–32 instructions at one issuing
+thread — a *lower bound*, still growing at the longest burst run
+(`riscv-front-end-benchmark.md`, the untimed-drain estimator) — so the bound
+is 64: safely above the measured floor, in the model's charge-at-the-low-end
+direction (a too-small bound would invent back-pressure; a too-large one only
+fails to model some), and finite, which is the whole point. When the longer
+burst sweep runs on a card, calibrate it there; until then no depth in
+entries is claimed anywhere.
+
+### Exactly two cost terms, both already licensed, no new table entries
+
+With `TT_SIM_COST_MODEL=1` the two terms the measurement instalment licensed
+become observable at the core, and nothing else was added:
+
+1. **The `.ttinsn` push costs one cycle per core.** Structural rather than
+   charged: the core is single-issue and the frontend dequeues one per thread
+   per cycle, so an uncontended push stream retires at exactly 1.000 —
+   `test_a_ttinsn_push_costs_one_cycle_at_the_core_with_the_model_on` pins it
+   against silicon's `tt_nop` at 0.996–1.029 across thread counts.
+2. **A backend unit back-pressures the issuing core at its documented
+   occupancy.** The occupancy machinery already existed (`occupy_for`, issue
+   refusal, wait-gate retry); the bound is what lets it reach the core. A
+   sustained `ADDDMAREG` burst now costs the issuing thread **3.000
+   cycles/instruction** in the steady state where silicon measures 2.972/2.973
+   on two instruments — and read 1.000 before, the number `tensixbench`'s
+   harness printed as *forced*. Three threads sharing the 1-IPC SFPU each
+   converge on ~3 cycles/instruction, silicon's 0.998 / 1.968 / 2.973 shape.
+
+No cost-table entry was added or changed; the YAML is untouched.
+
+### Two mechanism fixes the arithmetic forced
+
+- **The occupancy hold now runs from acceptance, not from retire.** Backend
+  units tick before the wait gates within a cycle, so an accepted instruction
+  retires one tick later — and arming `occupy_for` at the retire tick made
+  every multi-cycle occupancy cost one extra cycle at the issuing thread: 4
+  for ThCon's documented 3, where silicon reads 2.97. That was invisible while
+  nothing could observe a unit's rate from the core, and it is over-charging,
+  the direction the floor policy forbids. `clock_tick` now arms from
+  `cycle_num - 1` (the batch's acceptance cycle); the pinned windows in
+  `backend_cost_model_test` / `matrix_cost_model_test` moved by exactly one
+  cycle each and say why.
+- **Single-slot units grant round-robin under contention.** The wait gates
+  tick in fixed thread order, so once a refused thread can stall its core, a
+  thread sustaining one instruction per cycle at a shared unit would win the
+  slot every cycle and *starve* the other threads' cores for ever — a deadlock
+  no silicon has, and the difference between per-thread 3.0× and 1×/∞/∞.
+  `TensixBackendUnit.issueInstruction` now yields a free slot to a
+  less-recently-granted waiting thread (safe without timestamps because a
+  refused wait gate re-offers every cycle). The multi-slot units (config,
+  sync, misc) keep their own published acceptance rules unchanged.
+
+Folded in from the same ROADMAP item: **`[UNIT WEDGED]` is now a raise**
+(`UnitWedgedError`), after printing its full report. The survey stands — 41
+workloads plus every `pipestall` configuration, no unit ever ends a launch
+blocked — and with the core now able to stall for ever, most wedges never
+reach it: the *global* watchdog reports the deadlock, which is the
+silicon-matching behaviour. The terminal raise remains the path for a kernel
+with no further work behind the blocked instruction.
+
+### Measured, at one-cycle poll resolution: the totals did not move, and why that is the right answer
+
+`six` (the 128³ bf16 matmul), pump-to-DONE re-measured at one-cycle
+resolution, before and after this change:
+
+| | model off | model on |
+| --- | --- | --- |
+| before (2026-08-06 tree) | 17,968 | 74,604 (64,304 pumped) |
+| after | **17,968** | **74,604 (64,304 pumped)** |
+
+PCC unmoved at 0.9982. Zero movement, model off *and on*, and both zeros are
+informative. Model off: the bound never bites on a healthy stream — every
+Wormhole byte-identical replay passes unmodified, so no guard needed
+converting and ROADMAP item 3 is untouched. Model on: a launch's completion
+was already gated on the backend draining (`CoprocessorDoneCheck` holds the
+end-of-thread sync until the coprocessor is done), so the *total* was already
+charged; what the bound changes is when the **core** retires its
+instructions, i.e. what a kernel's own timed region sees. That is precisely
+the quantity `tensixbench` phase A measures — the row that read a forced
+1.000 against tt-sim now reads the unit's occupancy, which was the entire
+point of ROADMAP item 1. The instalment that makes a *total* move is item 5
+(unpacker and mover occupancy), which this unblocks: those units' costs land
+on the dataflow path, not behind a drain the total already waits for.
+
+### The gate
+
+Run whole, model on: **PASS** — 954 unit tests under the model, all 33
+budget-independent value guards (`six` PCC 0.9982, both `pipestall`s with the
+stall hint behaving, `twolaunch` clean), and every budget-dependent guard
+proven completely clean on the poll-budget ladder: `dramtop` at 1×,
+`blackhole/two` and both offlines at 2–4×, the eleven Wormhole example traces
+at 2–8× (`six` the 8×, as the heaviest compute), `wormhole/one` excluded as
+always (its trace is proven via `wormhole/offline`). Model off: all 954 unit
+tests, all 38 driver pytest guards (including every byte-identical Wormhole
+example replay, unmodified), all 26 Blackhole value guards.
+
+### What changed in the repository
+
+- `tt_sim/pe/tensix/frontend.py` — `CORE_PUSH_INFLIGHT_BOUND` (the documented
+  uncalibrated bound) and the refusing `TensixFrontend.write`.
+- `tt_sim/pe/rv/isa/tt_isa.py` — a `.ttinsn` store whose write returns
+  `MemoryStall` returns `PEStall`; the `sw` path already did.
+- `tt_sim/pe/tensix/backends/backend_base.py` — acceptance-anchored occupancy
+  arming; round-robin grant under contention.
+- `tt_sim/device/deadlock.py` — `UnitWedgedError`, raised by the terminal
+  wedge check after its report.
+- `tt_sim/pe/tensix/frontend_backpressure_test.py` — 9 tests: the bound, the
+  never-refused internal pushes, the PEStall translation, the ROADMAP-named
+  dvalid-twice-blocks-the-core case, and the licensed arithmetic (push at
+  1.000, ThCon at 3.0, model-off control at 1.0, three threads at ~3× each).
+- **Zero new cost-table entries, zero `estimated` provenance, no queue depth
+  claimed in entries anywhere.**
 
 ## Using it, when the time comes
 

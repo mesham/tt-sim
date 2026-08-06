@@ -159,23 +159,27 @@ def test_a_multi_cycle_cost_holds_the_unit_and_back_pressures_the_thread():
         assert matrix.issueInstruction(INCRWC_A1, 0)
         matrix.clock_tick(0)
         assert rwc.SrcA == 1  # the first one retires in the cycle it issued
-        assert matrix.busy_until == 3
+        # The hold runs from *acceptance* (the cycle before this retire tick,
+        # since backend units tick before the wait gates): a 3-cycle occupancy
+        # admits the next instruction 3 cycles after this one entered, so the
+        # deadline is 2, not 3 — anchoring it at retire charged 4 cycles per
+        # instruction where silicon measures 2.97. See clock_tick's arming.
+        assert matrix.busy_until == 2
         # The wait gates read this; it is the back-pressure signal.
         assert not matrix.issueInstruction(INCRWC_A1, 0)
 
-        for cycle in (1, 2):
-            matrix.clock_tick(cycle)
-            assert rwc.SrcA == 1, cycle
-            assert not matrix.issueInstruction(INCRWC_A1, 0), cycle
+        matrix.clock_tick(1)
+        assert rwc.SrcA == 1
+        assert not matrix.issueInstruction(INCRWC_A1, 0)
 
         # Backend units tick before the frontend issues, so the deadline tick
         # frees the unit and the retry lands on the deadline cycle itself.
-        matrix.clock_tick(3)
+        matrix.clock_tick(2)
         assert matrix.busy_until is None
         assert matrix.issueInstruction(INCRWC_A1, 0)
-        matrix.clock_tick(4)
+        matrix.clock_tick(3)
         assert rwc.SrcA == 2
-        assert matrix.busy_until == 7
+        assert matrix.busy_until == 5
 
 
 def test_an_occupied_unit_tells_the_pump_when_to_come_back():
@@ -187,10 +191,12 @@ def test_an_occupied_unit_tells_the_pump_when_to_come_back():
         matrix.cost_model = _FixedCost(4)
         assert matrix.issueInstruction(INCRWC_A1, 0)
         matrix.clock_tick(0)
-        assert matrix.next_wake_cycle(0) == 4
-        assert matrix.next_wake_cycle(3) == 4
-        matrix.clock_tick(4)
-        assert matrix.next_wake_cycle(4) is None
+        # Deadline 3, not 4: the 4-cycle hold runs from the acceptance cycle
+        # (one before the retire tick), so the pump comes back one earlier.
+        assert matrix.next_wake_cycle(0) == 3
+        assert matrix.next_wake_cycle(2) == 3
+        matrix.clock_tick(3)
+        assert matrix.next_wake_cycle(3) is None
 
 
 def main():

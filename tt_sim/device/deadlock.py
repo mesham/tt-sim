@@ -230,9 +230,15 @@ that as ``[UNIT WEDGED]`` after a short grace period
 the reset landed). It needs no threshold, so it fires on a reproduction far too
 short for the cycle check, and it cannot fire on a correct kernel: across the
 41 surveyed workloads plus every ``pipestall`` configuration above, no unit has
-ever ended a launch still blocked. It is the check that should eventually
-*raise*; it stays a warning until it has run a while over the tree without
-firing, which is the same discipline the cycle threshold got.
+ever ended a launch still blocked. Having run over the whole tree without a
+false positive, it now **raises** :class:`UnitWedgedError` after printing its
+report (ROADMAP item 1): a wedged unit must not let a run report success. Note
+that with the front-end FIFO bound in place
+(``tt_sim/pe/tensix/frontend.CORE_PUSH_INFLIGHT_BOUND``) most wedges never get
+this far — the issuing core stalls on its next push and the *global* watchdog
+reports the deadlock, which is the silicon-matching behaviour; the terminal
+wedge remains the report path for a kernel with no further pushes behind the
+blocked instruction.
 
 * ``TT_SIM_UNIT_STALL`` — falsy disables both per-unit checks. Default on.
 * ``TT_SIM_UNIT_STALL_THRESHOLD`` — consecutive blocked cycles before an
@@ -288,6 +294,18 @@ _CONFIRM_SETTLE_TICKS = _CONFIRM_TICKS // 2
 # by an order of magnitude and costs nothing (it is reached only when a unit is
 # blocked at teardown, which no correct workload in the tree ever is).
 _WEDGE_CONFIRM_CYCLES = 64
+
+
+class UnitWedgedError(RuntimeError):
+    """A Tensix backend unit is blocked with every baby core on its tile in
+    soft reset, so its wait can never be satisfied.
+
+    Raised (after the full ``[UNIT WEDGED]`` report is printed to stderr) so a
+    run with a wedged unit behind it cannot report success. This is a proof,
+    not a threshold: no correct kernel can reach it — surveyed across 41
+    workloads and every ``pipestall`` configuration. ``TT_SIM_UNIT_STALL=0``
+    disables the check (and with it this exception).
+    """
 
 
 def _truthy(val):
@@ -788,6 +806,12 @@ class DeadlockDetector:
                 ]
             ),
             file=sys.stderr,
+        )
+        raise UnitWedgedError(
+            f"{name} at tile {coord} is wedged: {opcode} from thread {thread} "
+            f"is waiting for {which} bank {bank}, and every baby core on the "
+            f"tile is in soft reset so nothing can ever hand it back "
+            f"(TT_SIM_UNIT_STALL=0 to disable this check)"
         )
 
     def _report_unit_stall(self, key, waiting, blocked_cycles, cycle):

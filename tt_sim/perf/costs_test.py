@@ -1037,7 +1037,11 @@ def test_the_cost_tables_have_exactly_the_consumers_we_expect():
     for path in sorted(_REPO_ROOT.rglob("*.py")):
         if "tt_sim/perf/" in path.as_posix():
             continue
-        if any(part in {".git", "build", "__pycache__"} for part in path.parts):
+        # ``.claude`` can hold agent worktrees — whole copies of this repo —
+        # whose files are not new consumers, just this tree seen twice.
+        if any(
+            part in {".git", ".claude", "build", "__pycache__"} for part in path.parts
+        ):
             continue
         text = path.read_text(errors="ignore")
         if "tt_sim.perf" in text or "tensix_instruction_costs" in text:

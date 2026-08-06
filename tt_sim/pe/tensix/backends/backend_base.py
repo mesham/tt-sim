@@ -94,6 +94,25 @@ class TensixBackendUnit(Clockable, ABC):
         # otherwise, which is the default and keeps every existing cycle count
         # byte-identical. See ``instruction_occupancy``.
         self.cost_model = None
+        # Cross-thread grant fairness for the single-slot issue queue below.
+        # ``None`` until a refusal ever happens (the common case pays one falsy
+        # check); thereafter the set of threads refused since their last grant.
+        # ``_grant_lru`` orders the three threads least-recently-granted first.
+        #
+        # This exists because the front-end FIFO bound
+        # (``tt_sim/pe/tensix/frontend.CORE_PUSH_INFLIGHT_BOUND``) lets a
+        # refused thread stall its issuing baby core: the wait gates tick in a
+        # fixed thread order, so without rotation a thread sustaining one
+        # instruction per cycle at a shared unit would win the slot every
+        # cycle and *starve* the other threads' cores for ever — a deadlock no
+        # silicon has (hardware round-robins) and, less dramatically, the
+        # reason three threads sharing a 1-IPC unit measure 3.0x each on
+        # silicon rather than 1x/inf/inf. A thread that was refused keeps
+        # re-offering every cycle (the wait gate retries its head instruction
+        # until accepted), which is what makes the waiting set safe to trust
+        # without timestamps.
+        self._starved_threads = None
+        self._grant_lru = [0, 1, 2]
 
     def issueInstruction(self, instruction, from_thread):
         # The default issuing of instructions here, which applies to most
@@ -103,20 +122,46 @@ class TensixBackendUnit(Clockable, ABC):
         # ``busy_until is not None`` first: with the cost model off (the
         # default) nothing is ever armed, so this is one attribute read and the
         # group is never even looked up.
+        starved = self._starved_threads
         if self.busy_until is not None and self.is_occupied(
             self.issue_group(instruction)
         ):
+            if starved is None:
+                starved = self._starved_threads = set()
+            starved.add(from_thread)
             return False
-        if len(self.next_instruction) == 0:
-            self.next_instruction.append(
-                (
-                    instruction,
-                    from_thread,
-                )
+        if self.next_instruction:
+            if starved is None:
+                starved = self._starved_threads = set()
+            starved.add(from_thread)
+            return False
+        # The slot is free. Yield it when a thread granted less recently than
+        # this one is also waiting: that thread's gate re-offers every cycle,
+        # so the grant rotates rather than following wait-gate tick order.
+        if starved and self._must_yield(from_thread, starved):
+            starved.add(from_thread)
+            return False
+        self.next_instruction.append(
+            (
+                instruction,
+                from_thread,
             )
-            return True
-        else:
-            return False
+        )
+        if starved:
+            starved.discard(from_thread)
+        lru = self._grant_lru
+        if lru[-1] != from_thread:
+            lru.remove(from_thread)
+            lru.append(from_thread)
+        return True
+
+    def _must_yield(self, from_thread, starved):
+        """True when a less-recently-granted thread is waiting for this unit."""
+        lru = self._grant_lru
+        for other in lru[: lru.index(from_thread)]:
+            if other in starved:
+                return True
+        return False
 
     def getDiagnosticSettings(self):
         return self.backend.getDiagnosticSettings()
@@ -427,7 +472,19 @@ class TensixBackendUnit(Clockable, ABC):
                 )
         if batch is not None:
             for group, cycles in batch.items():
-                self.occupy_for(cycle_num, cycles, group)
+                # The hold runs from *acceptance*, not from this retire tick.
+                # Everything in this batch was accepted in the previous cycle
+                # (backend units tick before the wait gates within a cycle, so
+                # a gate's issue lands in the unit's next tick), and an
+                # occupancy is the minimum interval between acceptances: a
+                # 3-cycle ThCon op must let the next one in 3 cycles after
+                # this one entered, not 3 cycles after it retired. Arming from
+                # ``cycle_num`` made every multi-cycle occupancy cost one
+                # extra cycle at the issuing thread — 4 for ThCon's
+                # documented 3, where Blackhole silicon measures 2.97 — which
+                # is over-charging, the direction the cost model's floor
+                # policy forbids.
+                self.occupy_for(cycle_num - 1, cycles, group)
 
     def getThreadConfigValue(self, issue_thread, key):
         return self.backend.getThreadConfigValue(issue_thread, key)

@@ -2,11 +2,39 @@ from abc import ABC
 
 from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.memory.memory import MemoryStall
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
 from tt_sim.trace import DispatchEvent, EventCategory, get_bus
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
+
+#: Instructions one thread may have in flight inside its frontend (MOP FIFO +
+#: replay FIFO + wait-gate FIFO) before a *core* push is refused and the
+#: issuing baby RISC-V core stalls on its ``.ttinsn`` store / ``sw`` to the
+#: instruction push buffer.
+#:
+#: This is a **conservative, uncalibrated mechanism bound — not a silicon
+#: calibration**. Blackhole silicon measures ~31–32 instructions absorbed at
+#: one issuing thread (``docs/plans/riscv-front-end-benchmark.md``, phase Q's
+#: untimed-drain estimator), and that figure is a *lower bound* on the true
+#: per-thread depth (the backlog was still growing at the longest burst run).
+#: 64 is chosen to sit safely above that lower bound so the model never
+#: invents back-pressure the hardware does not have (the cost model's
+#: charge-at-the-low-end direction), while still being finite — which is the
+#: whole point: a permanently blocked backend instruction now wedges the
+#: issuing core, exactly as on silicon, instead of the kernel running to
+#: completion past a wedged unit (ROADMAP item 1, the ``UNPACR_NOP``
+#: acquire-without-release case). Do not present this number as measured; when
+#: the longer burst sweep runs on a card, calibrate it there.
+#:
+#: The count deliberately includes the MOP/replay expansions already inside
+#: the frontend, not just words the core pushed: tt-sim's expanders emit a
+#: whole template in one tick rather than one instruction per cycle, so the
+#: expansion products are the only honest proxy for the work in flight ahead
+#: of the next push. Internal pushes (expander output) are never refused —
+#: only the core-facing write is.
+CORE_PUSH_INFLIGHT_BOUND = 64
 
 
 class TensixFrontend(MemMapable):
@@ -41,6 +69,14 @@ class TensixFrontend(MemMapable):
             len(self.mop_instruction_fifo) > 0
             or len(self.replay_instruction_fifo)
             or len(self.wait_gate_instruction_fifo)
+        )
+
+    def inflight_count(self):
+        """Instructions queued anywhere in this thread's frontend path."""
+        return (
+            len(self.mop_instruction_fifo)
+            + len(self.replay_instruction_fifo)
+            + len(self.wait_gate_instruction_fifo)
         )
 
     def MOPExpanderDoneCheck(self):
@@ -90,6 +126,16 @@ class TensixFrontend(MemMapable):
     def write(self, addr, value, size=None):
         instruction = conv_to_uint32(value)
         if TensixInstructionDecoder.isInstructionRecognised(instruction):
+            # Bounded, so a backed-up path into the backend back-pressures the
+            # issuing baby core: :class:`MemoryStall` propagates up through the
+            # memory dispatch and both push paths — the ``.ttinsn`` extension
+            # (``pe/rv/isa/tt_isa.py``) and a plain ``sw`` to the push buffer
+            # (``handle_s_store``) — turn it into a ``PEStall``, so the core
+            # retries the same store on the next cycle with the PC unmoved.
+            # On hardware this is the instruction FIFO filling; see
+            # :data:`CORE_PUSH_INFLIGHT_BOUND` for what the bound is and is not.
+            if self.inflight_count() >= CORE_PUSH_INFLIGHT_BOUND:
+                return MemoryStall
             self.push_mop_instruction(instruction)
         else:
             opcode = extract_bits(instruction, 8, 24)

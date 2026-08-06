@@ -1,3 +1,5 @@
+from tt_sim.memory.memory import MemoryStall
+from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
 from tt_sim.util.conversion import conv_to_bytes
@@ -23,7 +25,19 @@ class RV_TT_ISA(RV_ISA):
             """
 
             constant = RV_TT_ISA.rotate_right(instr, 2)
-            memory_space.write(0xFFE40000, conv_to_bytes(constant))
+            result = memory_space.write(0xFFE40000, conv_to_bytes(constant))
+            if result is MemoryStall:
+                # The thread's frontend FIFO is full behind a backed-up (or
+                # permanently blocked) path into the Tensix backend. On
+                # hardware the write to the instruction push buffer stalls the
+                # core when the FIFO is full; PEStall makes the core retry this
+                # same .ttinsn next cycle with the PC unmoved. See
+                # ``TensixFrontend.CORE_PUSH_INFLIGHT_BOUND``.
+                if snoop:
+                    RV_ISA.print_snoop(
+                        snoop, f"ttinst {hex(constant)}", "push FIFO full"
+                    )
+                return ProcessingElement.PEStall
             if snoop:
                 inst_info = TensixInstructionDecoder.getInstructionInfo(constant)
                 info_msg = (
