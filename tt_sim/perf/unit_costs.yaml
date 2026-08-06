@@ -1232,7 +1232,11 @@ arch_overrides:
           EX2" means, and it is the one probe in this benchmark whose answer
           differs between the two chips for a documented reason -- Wormhole's
           multiply blocks the integer unit, so both readings would be 2.0
-          there. Nothing has run this on Wormhole.
+          there. Nothing has run this on Wormhole. As of 2026-08-06
+          tt_sim/pe/rv/cost.py spends ``multiply`` + ``multiply_ex2`` as a
+          scoreboard entry on the result register, so a dependent chain in
+          tt-sim reads 2.000 against this 1.985 where it previously read 1.000
+          (the occupancy was charged, the latency was not).
 
           THE DIVIDE LANDS AT THE TOP OF ITS RANGE, not the bottom. 33.001 is
           the ``max`` of the documented 6-33, for one dividend/divisor pair
@@ -1284,22 +1288,28 @@ arch_overrides:
           L1 flush the containing line, so the cache is never dirty.
 
           ASSOCIATIVITY, INDEXING AND REPLACEMENT ARE NOT PUBLISHED, which is
-          why only the capacity is recorded. What the capacity ALONE settles is
-          one-sided, and the one-sidedness is the point: a working set LARGER
-          than 64 bytes cannot be resident, so it reaches ``l1_dcache_miss``
-          however the cache is organised. A working set at or below 64 bytes is
-          NOT thereby predicted to hit -- that would need the organisation this
-          page does not give, and the ~0.8 % periodic flush on top of it.
+          why only the capacity and line geometry are recorded. What the
+          capacity ALONE settles is one-sided, and the one-sidedness is the
+          point: a working set LARGER than 64 bytes cannot be resident, so it
+          reaches ``l1_dcache_miss`` however the cache is organised. A working
+          set at or below 64 bytes is NOT thereby predicted to hit -- that
+          would need the organisation this page does not give, and the ~0.8 %
+          periodic flush on top of it.
 
-          NOTHING CHARGES THIS, and it is not a hit rate. tt_sim/pe/rv/cost.py
-          models no cache and charges ``l1_dcache_hit`` for every L1 load, the
-          low end of the pair, which is the same "a modelled count is a floor"
-          policy as every other two-ended cost in this file (see
-          ``_LOAD_LATENCY_KEYS`` in tt_sim/perf/model.py). The capacity is read
-          by tt_sim/perf/riscv_bench_sweep.py, which has to answer a different
-          question -- which row a BENCHMARK PROBE of known working set reaches
-          -- and cannot answer it from a policy chosen for kernels whose hit
-          rate nobody publishes.
+          TWO CONSUMERS, AND NEITHER IS A HIT RATE. Since 2026-08-06
+          tt_sim/pe/rv/cost.py keeps a per-core line-tag model built from this
+          geometry -- ``lines`` tags of ``line_bytes``, no data -- and charges
+          an L1 load ``l1_dcache_hit`` when its line's tag is resident and
+          ``l1_dcache_miss`` when it is not, with the documented flushes
+          (stores flush the containing line; fence/atomic flushes all of it)
+          applied and the unpublished properties all resolved in the generous
+          direction (fully associative, least-recently-loaded replacement, no
+          periodic flush) so the modelled count stays a floor. Before that,
+          every L1 load charged the hit row outright and a pointer chase read
+          ~2 where silicon reads 8.098. The other consumer is
+          tt_sim/perf/riscv_bench_sweep.py, which reads only the capacity to
+          pick which row a BENCHMARK PROBE of known working set is predicted
+          against.
       load_latency:
         core_local_data_ram: 2
         l1_dcache_hit: 2
@@ -1340,7 +1350,11 @@ arch_overrides:
           row by construction and no organisation of the cache could change
           that. The measurement is the reason the capacity was looked up, not
           the reason the row applies. ``rv_load_indep`` agrees from a different
-          construction: see ``load_throughput`` above.
+          construction: see ``load_throughput`` above. Since 2026-08-06 the
+          simulator agrees too: tt_sim/pe/rv/cost.py's L0 line model charges
+          this row to any L1 load whose line is not among the tracked tags, so
+          the same chase in tt-sim now pays 8 per load where it used to pay
+          the hit row's 2.
 
           WHAT IS NOT EXPLAINED is ``rv_load_indep``: its four addresses span
           exactly four 16-byte lines, i.e. exactly the published capacity, and

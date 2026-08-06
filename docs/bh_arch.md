@@ -422,7 +422,10 @@ under any organisation, so `l1_dcache_miss` is the row it reaches *by
 construction*. This was not looked up until the measurement forced the question,
 and the capacity is now recorded as `riscv.l0_data_cache` in
 `tt_sim/perf/unit_costs.yaml` and read by `riscv_bench_sweep` to pick the row a
-probe's access pattern actually reaches.
+probe's access pattern actually reaches — and, since 2026-08-06, by
+`tt_sim/pe/rv/cost.py`, whose per-core L0 line-tag model charges the miss row
+to any L1 load whose line is not resident (so this chase pays 8 per load in
+simulation too).
 
 **What is still not established** is `rv_load_indep`. Its four addresses span
 exactly four 16-byte lines — *exactly* the published capacity — and it still

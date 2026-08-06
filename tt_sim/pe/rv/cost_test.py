@@ -5,7 +5,7 @@ same split as the Tensix cost-model tests: ``tt_sim/perf/model_test.py`` pins
 what the tables *say*, this pins what the RV interpreter *does* with what they
 say.
 
-Four claims:
+Five claims:
 
 1. With ``TT_SIM_COST_MODEL`` unset a core has no cost state at all and
    retires one instruction per cycle exactly as it always has. That is the
@@ -14,9 +14,16 @@ Four claims:
    at, and that latency is spent as a **load-use interlock** rather than as
    occupancy: independent instructions after the load run for free, and only a
    dependent read stalls.
-3. The bound / provenance policy is honoured — regions the table does not name
-   are charged nothing, and the ``>=`` rows are charged at their low end.
-4. Stores to L1 are rate-limited at the documented one-every-five-cycles, and
+3. On Blackhole, *which* L1 latency a load is charged — the L0 d-cache hit
+   row or the miss row — is decided per load by the four-line-tag model,
+   including the documented store/fence/atomic flushes; Wormhole, which
+   publishes no L0, is untouched by it. Likewise Blackhole's pipelined
+   multiply spends its 2-cycle result latency as a scoreboard entry where
+   Wormhole's blocking multiply keeps its occupancy charge.
+4. The bound / provenance policy is honoured — regions the table does not name
+   are charged nothing, the ``>=`` rows are charged at their low end, and the
+   divide stays at its band's floor at any dividend magnitude.
+5. Stores to L1 are rate-limited at the documented one-every-five-cycles, and
    stores anywhere else are not.
 """
 
@@ -208,24 +215,119 @@ def test_overwriting_a_pending_load_register_retires_the_hazard():
         assert cpu.rv_cost.stall_cycles == 0
 
 
-def test_blackhole_charges_the_l0_hit_because_the_miss_rate_is_unpublished():
+def test_blackhole_charges_the_l0_hit_row_only_for_a_resident_line():
     """Blackhole's table gives L1 two latencies (2 on an L0 d-cache hit, >= 8
-    on a miss). tt-sim models no d-cache and no hit rate is published, so the
-    pair is charged at its low end like every other two-ended cost in the file
-    — under-charging, which is the direction the policy asks for."""
+    on a miss), and since 2026-08-06 which one a load pays is decided per load
+    by the four-line-tag model: the hit row is the *default* row (the low end,
+    what an unknown access pattern is charged) and the miss row is reached
+    when the loaded line is provably not resident. Wormhole publishes no L0 at
+    all, so its single L1 row stands and the line model never engages."""
     with _env(True):
         wormhole = make_cost_state("wormhole")
         blackhole = make_cost_state("blackhole")
         assert wormhole.load_latency[RV_REGION_L1] == 8
         assert blackhole.load_latency[RV_REGION_L1] == 2
+        assert blackhole.l1_miss_latency == 8
+        assert blackhole._l0_enabled
+        assert not wormhole._l0_enabled
+        assert wormhole.l1_miss_latency is None
         # Blackhole moves the TDMA registers from the ">= 7" group to ">= 4".
         assert wormhole.load_latency[RV_REGION_TDMA] == 7
         assert blackhole.load_latency[RV_REGION_TDMA] == 4
-        # The MISS row must stay out of this. `riscv_bench_sweep` gained a
-        # separate mapping to it on 2026-08-05, for predicting a benchmark
-        # probe of known working set; the guard that it never leaks into
-        # charging is in tt_sim/perf/model_test.py, which may import the model
-        # directly (this file deliberately may not).
+
+
+# ---------------------------------------------------------------------------
+# 2b. The Blackhole L0 data-cache line model.
+# ---------------------------------------------------------------------------
+
+
+def test_blackhole_a_cold_l1_load_misses_and_a_reload_of_the_line_hits():
+    """The first touch of a line charges the miss row's >= 8; touching the
+    same 16-byte line again charges the hit row's 2. The stalls say so: the
+    first dependent read waits 7 cycles, the second waits 1."""
+    with _env(True):
+        cpu, _ = _core(
+            [
+                _lw(15, 0, 0x40),
+                _addi(14, 15, 1),
+                _lw(15, 0, 0x44),  # same 16-byte line, different word
+                _addi(13, 15, 1),
+            ],
+            arch="blackhole",
+        )
+        _run(cpu, 12)
+        assert cpu.rv_cost.l0_misses == 1
+        assert cpu.rv_cost.l0_hits == 1
+        assert cpu.rv_cost.stall_cycles == 7 + 1
+        assert cpu.register_file["pc"].read_uint() == 0x110
+
+
+def test_blackhole_a_chase_beyond_the_l0_capacity_misses_every_time():
+    """A cyclic walk over five distinct lines against four tags misses on
+    every load however the (unpublished) replacement works — the one-sided
+    capacity argument, and the regime ``rv_load_chase`` measures at 8.098."""
+    with _env(True):
+        lines = [0x40, 0x50, 0x60, 0x70, 0x80]
+        cpu, _ = _core([_lw(15, 0, a) for a in lines + lines], arch="blackhole")
+        _run(cpu, 10)
+        assert cpu.rv_cost.l0_misses == 10
+        assert cpu.rv_cost.l0_hits == 0
+
+
+def test_blackhole_a_hot_loop_within_four_lines_hits_after_warm_up():
+    """Four distinct lines is what the cache can hold, and under the model's
+    least-recently-loaded replacement a working set that fits never misses
+    again once warm."""
+    with _env(True):
+        lines = [0x40, 0x50, 0x60, 0x70]
+        cpu, _ = _core([_lw(15, 0, a) for a in lines + lines + lines], arch="blackhole")
+        _run(cpu, 12)
+        assert cpu.rv_cost.l0_misses == 4
+        assert cpu.rv_cost.l0_hits == 8
+
+
+def test_blackhole_an_l1_store_flushes_the_containing_line():
+    """ "Stores to L1 flush the containing line, so the cache is never dirty"
+    — a reload of a stored-to line is a documented miss, not a hit."""
+    with _env(True):
+        cpu, _ = _core(
+            [_lw(15, 0, 0x40), _sw(0, 0, 0x44), _lw(14, 0, 0x40)],
+            arch="blackhole",
+        )
+        _run(cpu, 3)
+        assert cpu.rv_cost.l0_misses == 2
+        assert cpu.rv_cost.l0_hits == 0
+
+
+def test_blackhole_a_fence_flushes_the_whole_l0():
+    """ "The entire L0 data cache will be flushed by any fence or atomic
+    instruction." ``fence`` executes as a nop on these cores; its flush is
+    still architectural."""
+    with _env(True):
+        fence = 0x0000000F
+        cpu, _ = _core([_lw(15, 0, 0x40), fence, _lw(14, 0, 0x40)], arch="blackhole")
+        _run(cpu, 3)
+        assert cpu.rv_cost.l0_misses == 2
+        assert cpu.rv_cost.l0_hits == 0
+
+
+def test_wormhole_l1_loads_are_untouched_by_the_line_model():
+    """Wormhole's L1 row is a single >= 8 with no L0 in front of it; the same
+    program that hits on Blackhole charges 8 both times on Wormhole."""
+    with _env(True):
+        cpu, _ = _core(
+            [
+                _lw(15, 0, 0x40),
+                _addi(14, 15, 1),
+                _lw(15, 0, 0x44),
+                _addi(13, 15, 1),
+            ],
+            arch="wormhole",
+        )
+        _run(cpu, 18)
+        assert cpu.rv_cost.l0_misses == 0
+        assert cpu.rv_cost.l0_hits == 0
+        assert cpu.rv_cost.stall_cycles == 7 + 7
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +443,8 @@ def test_a_multiply_occupies_the_integer_unit_for_the_documented_cycles():
     """The one place the docs state blocking outright: "multiply instructions
     occupy the Integer Unit for two cycles, and the next instruction cannot
     enter the unit until the multiply instruction has finished". Blackhole
-    pipelines it into EX1 + EX2, so it costs nothing there."""
+    pipelines it into EX1 + EX2, so an *independent* successor costs nothing
+    there — only a dependent read pays (the next test)."""
     with _env(True):
         wormhole, _ = _core([_mul(10, 0, 0), _addi(11, 0, 1)], arch="wormhole")
         _run(wormhole, 3)
@@ -350,6 +453,36 @@ def test_a_multiply_occupies_the_integer_unit_for_the_documented_cycles():
         blackhole, _ = _core([_mul(10, 0, 0), _addi(11, 0, 1)], arch="blackhole")
         _run(blackhole, 3)
         assert blackhole.rv_cost.stall_cycles == 0
+
+
+def test_blackhole_a_dependent_multiply_chain_pays_the_ex2_latency():
+    """ "Exactly one cycle in EX1, and then exactly one cycle in EX2": on
+    Blackhole a multiply's occupancy is 1 but its result latency is 2, spent
+    as a scoreboard entry like a load's. A dependent chain therefore runs at
+    2 cycles per multiply — silicon's ``rv_mul_dep`` reads 1.985 where tt-sim
+    read 1.000 before the entry existed. Wormhole publishes no multiply
+    latency (its multiply *blocks*, charged as occupancy already), so its
+    dependent chain is unchanged at the same 2 it always cost."""
+    with _env(True):
+        assert make_cost_state("blackhole").multiply_latency == 2
+        assert make_cost_state("wormhole").multiply_latency is None
+
+        # A reader in the very next slot waits exactly one cycle.
+        pair, _ = _core([_mul(10, 12, 12), _addi(11, 10, 1)], arch="blackhole")
+        _run(pair, 3)
+        assert pair.rv_cost.stall_cycles == 1
+
+        # A chain of three dependent multiplies retires one every two cycles.
+        chain, _ = _core([_mul(10, 10, 10)] * 3, arch="blackhole")
+        _run(chain, 5)
+        assert chain.rv_cost.stall_cycles == 2
+        assert chain.register_file["pc"].read_uint() == 0x100 + 3 * 4
+
+        # Wormhole's chain: same total, all of it integer-unit occupancy.
+        wh_chain, _ = _core([_mul(10, 10, 10)] * 3, arch="wormhole")
+        _run(wh_chain, 5)
+        assert wh_chain.rv_cost.stall_cycles == 2
+        assert wh_chain.register_file["pc"].read_uint() == 0x100 + 3 * 4
 
 
 def test_a_divide_by_one_costs_the_documented_special_case_not_the_general_one():
@@ -367,6 +500,36 @@ def test_a_divide_by_one_costs_the_documented_special_case_not_the_general_one()
         general, _ = _core([_addi(12, 0, 7), _div(10, 12, 12), _addi(11, 0, 1)])
         _run(general, 8)
         assert general.rv_cost.stall_cycles == 5
+
+
+def test_the_divide_charge_is_the_floor_at_any_dividend_magnitude():
+    """The benchmark's own operands — ``0x12345678 / 3``, a 29-significant-bit
+    dividend — cost 33.001 cycles on Blackhole silicon and are still charged
+    the documented band's floor of 6 here, deliberately: "between six and 33
+    cycles ... dependent upon the magnitude of the dividend" is a data
+    dependence whose *function* neither BabyRISCV page publishes (re-searched
+    2026-08-06 — no iteration rule, no bits-per-cycle, no formula), so any
+    per-magnitude charge would be a curve fitted to one silicon point. The
+    module docstring records the decision; this pins that the charge really
+    is operand-independent above the documented special cases."""
+    with _env(True):
+        # lui+addi materialise 0x12345678: lui 0x12345, addi 0x678 (< 0x800,
+        # so no sign-extension correction is needed).
+        program = [
+            _lui(12, 0x12345),
+            _addi(12, 12, 0x678),
+            _addi(13, 0, 3),
+            _div(10, 12, 13),
+            _addi(11, 0, 1),
+        ]
+        for arch in ("wormhole", "blackhole"):
+            cpu, _ = _core(program, arch=arch)
+            _run(cpu, 10)
+            # Three setup cycles, the divide, five stalled cycles (the 6-cycle
+            # floor), then the successor: 27 fewer stalls than the silicon
+            # reading at this operand, and recorded as such.
+            assert cpu.rv_cost.stall_cycles == 5
+            assert cpu.register_file["pc"].read_uint() == 0x100 + 5 * 4
 
 
 def main():

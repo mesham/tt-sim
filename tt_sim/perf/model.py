@@ -325,12 +325,19 @@ _LOAD_LATENCY_KEYS = {
     },
     "blackhole": {
         # Blackhole has an L0 data cache in front of L1, so the table gives two
-        # numbers: 2 on a hit, >= 8 on a miss. tt-sim models no such cache and
-        # no hit rate is published anywhere, so the pair is treated exactly
-        # like the file's other two-ended costs and charged at its **low end**
-        # — the same "a modelled count is a floor" policy as `at_least` and
-        # `range`. Charging the miss instead would invent a 100 % miss rate,
-        # which is both unsourced and the over-charging direction.
+        # numbers: 2 on a hit, >= 8 on a miss. This mapping names the row an
+        # L1 load is charged **when its line is resident** in the per-core L0
+        # line model (:attr:`RiscvCostModel.l0_lines` and friends, consumed by
+        # ``tt_sim/pe/rv/cost.py``); a load whose line is not resident is
+        # charged the miss row instead. The residency test is licensed by the
+        # published geometry alone (``riscv.l0_data_cache``: 64 bytes, 4 lines
+        # of 16, ``isa_doc``) — no hit *rate* is published anywhere, and none
+        # is invented: the model tracks the four line tags and answers
+        # per-load. Before 2026-08-06 every L1 load was charged this hit row
+        # outright, the low end of the two-ended pair; silicon reads the miss
+        # row on any working set the L0 cannot hold (`rv_load_chase` 8.098,
+        # corroborated by `rv_load_indep` 1.742 via the docs' throughput
+        # formula), which is what made the per-line model worth building.
         RV_REGION_L1: "l1_dcache_hit",
         RV_REGION_LOCAL_DATA_RAM: "core_local_data_ram",
         RV_REGION_MAILBOX_GROUP: "mailboxes_pcbufs_ttsync_semaphores",
@@ -344,15 +351,15 @@ _LOAD_LATENCY_KEYS = {
 #: hold its working set, or ``None`` on an architecture with no L0 cache (where
 #: L1 has a single row and the question does not arise).
 #:
-#: Deliberately *not* used for charging. :data:`_LOAD_LATENCY_KEYS` above is
-#: what the simulator charges, and it names the hit row because no hit rate is
-#: published and the low end of a two-ended cost is what every other bound in
-#: these files is charged at. This mapping exists for the one caller that knows
-#: something the simulator does not: ``tt_sim/perf/riscv_bench_sweep`` compares
-#: individual benchmark probes whose working sets are known exactly, and a
-#: probe whose working set exceeds ``riscv.l0_data_cache.capacity_bytes``
-#: reaches the miss row whatever the cache's (unpublished) organisation. Both
-#: mappings live here so the two can never name rows the other does not have.
+#: Two consumers, both of which know something a bare address does not carry:
+#: ``tt_sim/perf/riscv_bench_sweep`` compares individual benchmark probes whose
+#: working sets are known exactly, and a probe whose working set exceeds
+#: ``riscv.l0_data_cache.capacity_bytes`` reaches this row whatever the
+#: cache's (unpublished) organisation; and, since 2026-08-06,
+#: :attr:`RiscvCostModel.l1_load_miss_latency` feeds it to the per-core L0
+#: line model in ``tt_sim/pe/rv/cost.py``, which charges it to a load whose
+#: line is not among the tracked line tags. Both mappings live here so the two
+#: can never name rows the other does not have.
 _L1_DCACHE_MISS_KEYS = {
     "wormhole": None,
     "blackhole": "l1_dcache_miss",
@@ -389,11 +396,19 @@ class RiscvCostModel:
     * :attr:`load_latency` — cycles from a load issuing to its destination
       register being readable, by address region. A *scoreboard* input, not an
       occupancy: the core keeps issuing and only stalls on a dependent read.
+      Where the tables publish an L0 data cache (Blackhole), the L1 row is a
+      hit/miss pair: :attr:`l0_lines` / :attr:`l0_line_bytes` carry the
+      published geometry and :attr:`l1_load_miss_latency` the miss row, so the
+      consumer can answer residency per load instead of picking one row for
+      every L1 access.
     * :attr:`l1_store_period` / :attr:`l1_coalesced_store_period` — the
       sustained store rate, which *is* an occupancy of the load/store unit.
     * :attr:`multiply` / the divide costs — the integer unit's own blocking,
       the one place the docs say outright that "the next instruction cannot
-      enter the unit until the multiply instruction has finished".
+      enter the unit until the multiply instruction has finished". On an
+      architecture whose multiply *pipelines* instead of blocking, the
+      published stage split becomes :attr:`multiply_latency` — a scoreboard
+      input like the load table, not an occupancy.
 
     Anything the tables do not name is ``None`` and is charged nothing.
     """
@@ -421,9 +436,51 @@ class RiscvCostModel:
         self.other_store_period = _sourced_cycles(
             stores.get("other_regions_period_cycles"), store_prov
         )
+        # -- the L0 data-cache line model (Blackhole only by data) ---------
+        # Engaged only when the tables publish all three of: an L0 geometry
+        # (``riscv.l0_data_cache``: 64 bytes, 4 lines of 16, isa_doc), a hit
+        # row *and* a miss row for L1. Wormhole publishes none of them — its
+        # L1 has a single ``>= 8`` row — so every attribute is ``None`` there
+        # and ``cost.py`` never builds the tag array. What the geometry
+        # licenses is exactly a residency test: a line among the last
+        # ``l0_lines`` distinct lines loaded can be resident, anything else
+        # cannot (the capacity argument is one-sided, and the model takes the
+        # generous side of every unpublished property — see ``cost.py`` for
+        # the replacement-policy discussion).
+        self.l0_lines = None
+        self.l0_line_bytes = None
+        self.l1_load_miss_latency = None
+        l0 = riscv.get("l0_data_cache") or {}
+        miss_key = _L1_DCACHE_MISS_KEYS.get(arch)
+        if l0.get("provenance") in SOURCED_PROVENANCE and miss_key is not None:
+            miss = _sourced_cycles(
+                self._table.get(miss_key), self._table.get("provenance")
+            )
+            lines = l0.get("lines")
+            line_bytes = l0.get("line_bytes")
+            hit = self.load_latency[RV_REGION_L1]
+            if miss is not None and hit is not None and lines and line_bytes:
+                self.l0_lines = lines
+                self.l0_line_bytes = line_bytes
+                self.l1_load_miss_latency = miss
         integer = riscv.get("integer_unit") or {}
         int_prov = integer.get("provenance")
         self.multiply = _sourced_cycles(integer.get("multiply"), int_prov)
+        #: Cycles from a multiply issuing to its result being readable, or
+        #: ``None`` where the tables publish only a blocking occupancy.
+        #: Blackhole's page splits the pipeline — "exactly one cycle in EX1,
+        #: and then exactly one cycle in EX2" — so its multiply has occupancy
+        #: 1 and result latency 1 + 1 = 2, and a dependent chain pays the
+        #: latency (silicon: ``rv_mul_dep`` 1.985). Wormhole publishes no
+        #: ``multiply_ex2`` (its multiply *blocks* the integer unit for two
+        #: cycles, which :attr:`multiply` already charges as occupancy), so
+        #: this stays ``None`` there and nothing changes.
+        multiply_ex2 = _sourced_cycles(integer.get("multiply_ex2"), int_prov)
+        self.multiply_latency = (
+            None
+            if self.multiply is None or multiply_ex2 is None
+            else self.multiply + multiply_ex2
+        )
         self.divide_general = _sourced_cycles(integer.get("divide_general"), int_prov)
         self.divide_trivial = _sourced_cycles(
             integer.get("divide_by_zero_or_one"), int_prov

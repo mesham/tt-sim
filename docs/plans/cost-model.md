@@ -4370,6 +4370,168 @@ example replay, unmodified), all 26 Blackhole value guards.
 - **Zero new cost-table entries, zero `estimated` provenance, no queue depth
   claimed in entries anywhere.**
 
+## The three silicon-backed RV cost fixes: two charges move, one deliberately does not
+
+Landed 2026-08-06 — ROADMAP item "Silicon-backed RV cost fixes", the three
+under-charges `perfbench/riscvbench` found on Blackhole silicon
+(`docs/plans/riscv-front-end-benchmark.md`). Each is small, each is in
+`tt_sim/pe/rv/cost.py` territory, and they share one gate run because they
+share one instalment; nothing else moved. All three are Blackhole-scoped by
+*data* rather than by an arch string: each mechanism engages only where the
+tables publish what it needs, and Wormhole publishes none of it — its
+guards' modelled cycles are the control, and they moved zero.
+
+### 1. The Blackhole multiply latency, spent as a scoreboard entry
+
+`integer_unit.multiply: 1` + `multiply_ex2: 1` ("exactly one cycle in EX1,
+and then exactly one cycle in EX2", `isa_doc`) is an occupancy of 1 and a
+result **latency** of 2 — and `cost.py` charged the occupancy with no
+scoreboard entry for the result, so a dependent multiply chain read 1.000
+where silicon reads **1.985**. `RiscvCostModel.multiply_latency` now carries
+`multiply + multiply_ex2` (`None` wherever `multiply_ex2` is unpublished),
+and a pipelined multiply writes `ready[rd] = cycle + 2` exactly as a load
+does: a dependent chain reads 2.000, independent successors stay free.
+Wormhole publishes no multiply latency — its multiply *blocks* the integer
+unit for two cycles, already charged as occupancy — so `multiply_latency` is
+`None` there and its chain still costs the same 2 it always did, by the
+mechanism it always did.
+
+### 2. Dependent-chain loads: a minimal L0 d-cache line model
+
+The model charged every Blackhole L1 load the `l1_dcache_hit` row's 2;
+silicon's `rv_load_chase` — a 1 KiB pointer ring — reads **8.098**, the
+`l1_dcache_miss` row, with `rv_load_indep` (1.742) corroborating latency 8
+through the docs' own sustained-throughput formula. The row pair is not a
+bound to be resolved at its low end — it is two rows, and which one a load
+reaches is decidable per load from published facts. `cost.py` now keeps a
+per-core line-tag model built entirely from `riscv.l0_data_cache`
+(`isa_doc`: "a mere 64 bytes: 4 lines of 16 bytes each"): four tags, no
+data, hit row when the loaded line's tag is resident, miss row when it is
+not. The documented flushes are honoured — an L1 store invalidates its
+containing line, a `fence` or atomic flushes all four — because skipping
+them would mis-charge with a citation available. Every property the page
+does *not* publish is resolved in the generous direction, and the choice is
+recorded rather than implied: fully associative, least-recently-loaded
+replacement, no modelling of the "~0.8 % chance of flushing the entire
+cache" on a hit. With four lines that organisation never misses on a
+working set that fits and always misses on a cyclic walk over more than
+four lines — the two regimes the silicon probes pin — and any stricter
+organisation could only miss more, so the modelled count remains a floor.
+The charge itself needs no new provenance: `l1_dcache_miss: >= 8` was
+already in the table at `isa_doc`, charged at its low end; what changed is
+*which loads reach it*. Wormhole publishes no L0 (its single L1 row is
+`>= 8` and was already charged), so the model never engages there.
+
+### 3. Divide: still at the floor, and here is the search that kept it there
+
+Silicon reads **33.001** for `divu 0x12345678, 3` — one point, at the top
+of the documented 6–33 band — and the roadmap's open half was the
+magnitude-dependent *curve*, the charge-the-floor policy having been
+reviewed and kept on 2026-08-05. The curve was investigated and **does not
+exist to transcribe**: both BabyRISCV pages (`WormholeB0` and
+`BlackholeA0`) were searched whole for an iteration rule — bits per cycle,
+a radix, a leading-zeros term, any formula or table relating an operand to
+a cycle count — and neither publishes anything beyond "between six and 33
+cycles are required, dependent upon the magnitude of the dividend"; ttsim
+is functional-only and has no timing to borrow. Nor does the one silicon
+point pin even the obvious one-bit-per-cycle family:
+`cycles = significant_bits + 4` fits 33.001 at 29 bits but gives 36 at a
+full 32-bit dividend, past the documented cap — the simplest candidate
+contradicts the band it would be fitted inside. So the divide stays at the
+documented floor of 6, the silicon point stays a `corroboration` on the
+YAML entry, and `cost_test.py` now pins that the charge is
+operand-independent above the documented special cases — at the benchmark's
+own operands, with the 27-cycle under-charge stated in the test. The
+exposure measurement stands: in-tree kernels divide 9–12-bit values 0–2
+times per 40,000–80,000-instruction launch.
+
+### The policy question, answered deliberately
+
+Does "charge every bound at its low end" survive these numbers? **Yes —
+because none of the three was ever a bound-resolution problem, and the two
+that moved are the two where a published fact decides the case per
+operand.** The rule resolves *one* two-ended cost (`>= 8`, "3 or 4", 6–33)
+to the end that cannot invent back-pressure, and every `at_least` in the
+RV section came out of the silicon run respected. What the multiply and the
+load fix have in common is that the docs publish **two separate quantities**
+(an occupancy and a latency; a hit row and a miss row) plus the mechanism
+that selects between them (the EX1/EX2 split; the line geometry) — charging
+only the smaller quantity was not floor policy, it was leaving a documented
+mechanism unmodelled. Divide is the counter-case that proves the rule: there
+the selector (the magnitude function) is genuinely unpublished, so the floor
+stands. The rule applied throughout: **model a published mechanism; never
+fit an unpublished one; where only a band remains, charge its low end.**
+
+### Measured: the guard totals, and the control
+
+Pump-to-DONE cycles at shutdown (`PUMP_CHUNK` forced to 10 for resolution),
+model on, before → after all three fixes:
+
+| guard | before | after | movement |
+| --- | --- | --- | --- |
+| `blackhole/six` (128³ bf16 matmul) | 83,810 | 83,890 | **+80** |
+| `blackhole/softplus` (SFPU chain) | 18,330 | 18,410 | **+80** |
+| `blackhole/nine` (two-tile NoC dataflow) | 12,700 | 12,800 | **+100** |
+| `wormhole/softplus` (the control) | 19,880 | 19,880 | **0** |
+
+Tens of cycles per launch, not thousands, and that smallness is itself the
+measured claim from the exposure analysis: kernel time on these cores lands
+on MMIO polls (the NIU block, charged nothing by name) and the Tensix drain,
+not on L1 data loads in dependent chains, multiplies, or divides. The
+Wormhole zero is load-bearing: all three mechanisms are engaged by published
+Blackhole table entries, so nothing on Wormhole may move, and nothing did.
+Model off is byte-identical everywhere by construction (`rv_cost` is never
+built) — re-verified: all 39 driver guards and the full unit suite pass
+unmodified.
+
+Against the silicon rows the three probes now read, in simulation:
+`rv_mul_dep`-shaped chains 2.000 (silicon 1.985, was 1.000);
+`rv_load_chase`-shaped chases 8 per load (silicon 8.098, was ~2); `rv_div`
+still 6 at any magnitude (silicon 33.001 at the benchmark's operand,
+deliberately). `riscv_bench_sweep`'s predictions are unchanged by
+construction — they read the YAML, which gained no number — and its two
+notes claiming tt-sim under-charges the first two rows are updated to say
+the simulator now agrees.
+
+### The gate
+
+Run whole, model on: **PASS** — the unit stage under the model (963 tests),
+all 36 budget-independent value guards (`six` PCC 0.9982 unmoved, both
+`pipestall`s, `twolaunch` clean), and all three budget-dependent guards
+proven clean on the poll-budget ladder (`dramtop` at 1×, `two` at 2×,
+`blackhole/offline` at 4× — the same multiples as the previous instalment).
+Model off: the full `pytest tt_sim/ driver/` run is untouched — 39 driver
+guards, every byte-identical Wormhole replay unmodified. One repair to the
+gate's own instrument, found because this run tripped it:
+`test_the_cost_tables_have_exactly_the_consumers_we_expect` filtered agent
+worktrees out of its scan on the *absolute* path, so run from inside one it
+excluded every file and compared an empty scan against the allow-list; the
+filter now runs on the repo-relative path, which is what the exclusion
+always meant.
+
+### What changed in the repository
+
+- `tt_sim/perf/model.py` — `RiscvCostModel.multiply_latency`,
+  `l0_lines` / `l0_line_bytes` / `l1_load_miss_latency` (each `None` where
+  unpublished); the `_LOAD_LATENCY_KEYS` / `_L1_DCACHE_MISS_KEYS` comments
+  now describe the residency split.
+- `tt_sim/pe/rv/cost.py` — the four-tag L0 line model (`_l0_load`, store
+  invalidation, fence/atomic flush, `l0_hits`/`l0_misses` in `summary()`),
+  the multiply scoreboard entry, and the re-search of the divide formula
+  recorded in the module docstring.
+- `tt_sim/pe/rv/cost_test.py` / `tt_sim/perf/model_test.py` — pins for all
+  three: chain at 2 on BH and unchanged on WH; cold miss / warm hit / 5-line
+  chase always-miss / 4-line loop always-hit / store flush / fence flush /
+  WH untouched; divide at the floor at the benchmark's own 29-bit operand.
+- `tt_sim/perf/unit_costs.yaml` — prose only (the `l0_data_cache` note's
+  "NOTHING CHARGES THIS" is no longer true and now names both consumers; the
+  multiply and L1-row corroborations record what the simulator now reads
+  against them). **No cycle count, bound or provenance changed.**
+- `tt_sim/perf/riscv_bench_sweep.py` prose, `docs/bh_arch.md` §1.6 — the
+  under-charge notes updated to "the simulator now agrees".
+- `tt_sim/perf/costs_test.py` — the worktree-path repair to the
+  consumer-pinning scan described under "The gate".
+
 ## Using it, when the time comes
 
 ```python

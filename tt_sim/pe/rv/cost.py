@@ -23,6 +23,31 @@ error the SFPU wiring already caught once:
    destination register N cycles later, and an in-order single-issue core
    stalls only when the *next reader of that register* arrives too early.
    That is a scoreboard, and it is what this class mostly is.
+
+   On Blackhole the L1 row is a **pair** — 2 on an L0 d-cache hit, >= 8 on a
+   miss — and which of the two a given load pays is decided by a minimal
+   per-core L0 line model: the ``riscv.l0_data_cache`` block publishes the
+   geometry ("a mere 64 bytes: 4 lines of 16 bytes each", ``isa_doc``), so the
+   model keeps four line *tags* per core (no data — tt-sim's loads stay
+   functionally instantaneous) and charges the hit row when the loaded line's
+   tag is resident, the miss row when it is not. The published flushes are
+   honoured too, because they are documented and skipping them would
+   mis-charge in both directions: an L1 store invalidates its containing line
+   ("stores to L1 flush the containing line"), and a ``fence`` or atomic
+   flushes all four ("the entire L0 data cache will be flushed by any fence
+   or atomic instruction"). What is *not* published is the organisation —
+   associativity, indexing, replacement, and a "~0.8 % chance of flushing the
+   entire cache" on a hit — so the model takes the generous side of each:
+   fully associative, least-recently-loaded replacement, no random flush.
+   Every one of those choices under-charges relative to any stricter
+   organisation the hardware might have, which keeps the modelled count a
+   floor; what the capacity *does* settle — one-sidedly, and it is the whole
+   licence — is that a working set larger than 64 bytes cannot be resident,
+   so a chase over it charges the miss row however the real cache is
+   organised. Silicon: ``rv_load_chase`` (a 1 KiB ring) reads 8.098 where
+   this model charges 8; before the line model every L1 load charged the hit
+   row's 2. Wormhole publishes no L0 at all (its single L1 row is >= 8), so
+   the model never engages there.
 2. **L1 store throughput.** "Throughput of sustained stores to L1 is at most
    one store every five cycles" *is* an occupancy of the load/store unit, and
    is charged as one. Blackhole's coalescing store queue is modelled with the
@@ -32,7 +57,16 @@ error the SFPU wiring already caught once:
 3. **Integer unit multiply/divide.** The one place the docs state blocking
    outright: "multiply instructions occupy the Integer Unit for two cycles, and
    the next instruction cannot enter the unit until the multiply instruction
-   has finished".
+   has finished". That is Wormhole. Blackhole's multiply *pipelines* instead —
+   "exactly one cycle in EX1, and then exactly one cycle in EX2" — which is an
+   occupancy of 1 and a result **latency** of 2, so on Blackhole a multiply
+   writes a scoreboard entry (:attr:`RiscvCostState.multiply_latency`) exactly
+   like a load does, and only a dependent read pays the second cycle. Silicon
+   confirms the split to a hundredth: ``rv_mul_indep`` 0.999, ``rv_mul_dep``
+   1.985 (tt-sim read 1.000 for both before the scoreboard entry existed).
+   Wormhole publishes no multiply latency — only the blocking occupancy, which
+   is already charged — so its ``multiply_latency`` is ``None`` and nothing
+   there moved.
 
    **The divide is charged 6, which is the low end of a 6-33 band, and that
    was re-decided rather than inherited on 2026-08-05.** The band is a *data*
@@ -53,6 +87,19 @@ error the SFPU wiring already caught once:
    magnitude below the benchmark's. 27 under-charged cycles twice per launch is
    under 0.15 % of a launch even at the worst-case operand, and these operands
    are not that.
+
+   **Re-checked on 2026-08-06, when the other two silicon-backed fixes landed:
+   the decision stands because the function is still unpublished.** Both
+   BabyRISCV pages were searched whole for an iteration rule — bits per cycle,
+   a radix, a leading-zeros term, any formula or table relating an operand to
+   a count — and neither carries one; ttsim is functional-only and has no
+   timing to borrow. The single silicon point does not even pin the obvious
+   one-bit-per-cycle family: ``cycles = significant_bits + 4`` fits 33.001 at
+   29 bits but gives 36 at a full 32-bit dividend, past the documented cap of
+   33 — so the simplest candidate curve contradicts the band it would be
+   fitted inside, and choosing a different family is exactly the free
+   parameter one point cannot pin. The floor stays, and the point stays
+   recorded as corroboration on the YAML entry rather than becoming a charge.
 
 **What is deliberately not modelled** — each an honest gap rather than an
 omission:
@@ -171,6 +218,8 @@ STALL_REASON_NAMES = ("load_use", "store_rate", "integer_unit")
 _LOAD_OPCODE = 0x03
 _STORE_OPCODE = 0x23
 _OP_OPCODE = 0x33
+_FENCE_OPCODE = 0x0F  # MISC-MEM: fence flushes the whole L0 data cache
+_AMO_OPCODE = 0x2F  # Zaamo atomics: "any fence or atomic instruction"
 _MULDIV_FUNCT7 = 0x01
 _INT_MIN = 0x80000000
 
@@ -190,9 +239,14 @@ class RiscvCostState:
         "l1_store_period",
         "coalesced_stores",
         "multiply",
+        "multiply_latency",
         "divide_general",
         "divide_trivial",
         "divide_int_min",
+        "l1_miss_latency",
+        "_l0_enabled",
+        "_l0_shift",
+        "_l0_tags",
         "_ready",
         "_stall_until",
         "_stall_reason",
@@ -204,6 +258,8 @@ class RiscvCostState:
         "stall_by_reason",
         "loads_by_region",
         "l1_stores",
+        "l0_hits",
+        "l0_misses",
         "pending_stall",
     )
 
@@ -216,9 +272,26 @@ class RiscvCostState:
         # arch name string compared on the hot path.
         self.coalesced_stores = model.l1_coalesced_store_period is not None
         self.multiply = model.multiply
+        # ``None`` on Wormhole, whose multiply blocks rather than pipelines;
+        # 2 on Blackhole ("exactly one cycle in EX1, and then exactly one
+        # cycle in EX2"), spent as a scoreboard entry on the result register.
+        self.multiply_latency = model.multiply_latency
         self.divide_general = model.divide_general
         self.divide_trivial = model.divide_trivial
         self.divide_int_min = model.divide_int_min
+        # The L0 data-cache line model — Blackhole only, by data: the tables
+        # publish the geometry (4 lines of 16 bytes) and an L1 hit/miss
+        # latency pair there and nothing of the kind on Wormhole. Tags only,
+        # no data; -1 is "invalid" (no L1 byte address shifts to it).
+        self.l1_miss_latency = model.l1_load_miss_latency
+        self._l0_enabled = bool(
+            self.l1_miss_latency is not None
+            and model.l0_lines
+            and model.l0_line_bytes
+            and model.l0_line_bytes & (model.l0_line_bytes - 1) == 0
+        )
+        self._l0_shift = model.l0_line_bytes.bit_length() - 1 if self._l0_enabled else 0
+        self._l0_tags = [-1] * model.l0_lines if self._l0_enabled else []
         # Cycle at which each GPR's value becomes readable. 0 = ready now, and
         # x0 is never written so index 0 stays 0 forever.
         self._ready = [0] * 32
@@ -232,6 +305,8 @@ class RiscvCostState:
         self.stall_by_reason = [0] * STALL_REASON_COUNT
         self.loads_by_region = [0] * RV_REGION_COUNT
         self.l1_stores = 0
+        self.l0_hits = 0
+        self.l0_misses = 0
         # Stalls accumulated since the last instruction retired, drained by
         # :meth:`take_pending_stall`. Only the trace path reads it, so it is
         # written on the stall path (which is already the slow path) and never
@@ -248,6 +323,9 @@ class RiscvCostState:
         self._store_ready = 0
         self._group_block = -1
         self.pending_stall = 0
+        tags = self._l0_tags
+        for i in range(len(tags)):
+            tags[i] = -1
 
     # -- reporting ---------------------------------------------------------
     def take_pending_stall(self):
@@ -278,6 +356,8 @@ class RiscvCostState:
             },
             "loads_by_region": list(self.loads_by_region),
             "l1_stores": self.l1_stores,
+            "l0_hits": self.l0_hits,
+            "l0_misses": self.l0_misses,
         }
 
     # -- the hot path ------------------------------------------------------
@@ -328,7 +408,10 @@ class RiscvCostState:
             addr = (register_file[(instr >> 15) & 0x1F].read_uint() + imm) & 0xFFFFFFFF
             region = classify_address(addr)
             self.loads_by_region[region] += 1
-            latency = self.load_latency[region]
+            if region == RV_REGION_L1 and self._l0_enabled:
+                latency = self._l0_load(addr)
+            else:
+                latency = self.load_latency[region]
             rd = (instr >> 7) & 0x1F
             if rd:
                 # The value is written architecturally in this tick (tt-sim's
@@ -352,6 +435,13 @@ class RiscvCostState:
                 return True
             return self._issue_l1_store(addr, cycle_num)
 
+        if (opcode == _FENCE_OPCODE or opcode == _AMO_OPCODE) and self._l0_enabled:
+            # "The entire L0 data cache will be flushed by any fence or atomic
+            # instruction." A documented flush, so the misses it causes are a
+            # sourced charge rather than an invented one.
+            tags = self._l0_tags
+            for i in range(len(tags)):
+                tags[i] = -1
         if flags & _F_RD:
             rd = (instr >> 7) & 0x1F
             if rd:
@@ -366,7 +456,55 @@ class RiscvCostState:
                 # for the rest, so the next issue is at cycle + occupancy.
                 self._stall_until = cycle_num + occupancy
                 self._stall_reason = STALL_INTEGER_UNIT
+            elif self.multiply_latency is not None and not (instr & 0x4000):
+                # A pipelined multiply (Blackhole: one cycle in EX1, one in
+                # EX2) does not block the unit; it makes its *result* late,
+                # exactly like a load. The scoreboard entry is what a
+                # dependent chain pays — silicon's rv_mul_dep at 1.985 —
+                # while independent instructions after it stay free.
+                rd = (instr >> 7) & 0x1F
+                if rd:
+                    ready[rd] = cycle_num + self.multiply_latency
         return True
+
+    def _l0_load(self, addr):
+        """Hit or miss latency for one L1 load, updating the line tags.
+
+        The tag array is ordered most-recently-loaded first, so index 0 is the
+        streak case (successive loads off one line) and costs one comparison.
+        Replacement is least-recently-loaded because the page publishes no
+        policy and this is the generous choice: with 4 lines it never misses
+        on a working set that fits and always misses on a cyclic walk over
+        more than 4 lines — the two regimes the silicon probes pin — and any
+        stricter organisation could only miss more, which keeps the modelled
+        count a floor. The tag is the *start* address's line; a load that
+        straddles two lines is charged as one, the cheaper reading.
+        """
+        tags = self._l0_tags
+        tag = addr >> self._l0_shift
+        if tag == tags[0]:
+            self.l0_hits += 1
+            return self.load_latency[RV_REGION_L1]
+        if tag in tags:
+            tags.remove(tag)
+            tags.insert(0, tag)
+            self.l0_hits += 1
+            return self.load_latency[RV_REGION_L1]
+        tags.pop()
+        tags.insert(0, tag)
+        self.l0_misses += 1
+        return self.l1_miss_latency
+
+    def _l0_store_invalidate(self, addr):
+        """ "Stores to L1 flush the containing line, so the cache is never
+        dirty" — the next load of a stored-to line is a documented miss.
+        Called only once the store actually issues, so a stalled cycle leaves
+        the tags exactly as it found them (``can_issue``'s contract)."""
+        if self._l0_enabled:
+            tag = addr >> self._l0_shift
+            tags = self._l0_tags
+            if tag in tags:
+                tags[tags.index(tag)] = -1
 
     def _issue_l1_store(self, addr, cycle_num):
         if self.coalesced_stores:
@@ -381,6 +519,7 @@ class RiscvCostState:
                     # have a throughput of one store every cycle".
                     self._group_lo, self._group_hi = lo, hi
                     self.l1_stores += 1
+                    self._l0_store_invalidate(addr)
                     return True
             if cycle_num < self._store_ready:
                 return self._stall(self._store_ready, STALL_STORE_RATE)
@@ -390,6 +529,7 @@ class RiscvCostState:
             return self._stall(self._store_ready, STALL_STORE_RATE)
         self._store_ready = cycle_num + self.l1_store_period
         self.l1_stores += 1
+        self._l0_store_invalidate(addr)
         return True
 
     def _muldiv_occupancy(self, instr, register_file):

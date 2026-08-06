@@ -510,7 +510,10 @@ def predictions(arch, meta=None):
                 derivation=f"{mul} (EX1) + {ex2} (EX2) = {mul + ex2}. Blackhole's "
                 "multiply pipelines across two stages, so its OCCUPANCY is one "
                 "cycle but its LATENCY is two, and a dependent chain pays the "
-                "latency. tt-sim charges the occupancy only.",
+                "latency. tt-sim charges both since 2026-08-06: the latency is "
+                "a scoreboard entry on the result register (see "
+                "tt_sim/pe/rv/cost.py), so a tt-sim dependent chain reads 2.000 "
+                "against silicon's 1.985.",
             )
     div, div_bound = _cycles_of(integer.get("divide_general"))
     if div is not None:
@@ -545,11 +548,11 @@ def predictions(arch, meta=None):
             f"of {capacity} (riscv.l0_data_cache.capacity_bytes), so it cannot be "
             "resident and this is the row it reaches whatever the cache's "
             "unpublished organisation. The hit row is not a conservative reading "
-            "of this probe -- it is a different row. NOTE that tt-sim charges "
-            "the HIT row for every L1 load, so against a tt-sim dataset this "
-            "probe reads ~2 against a prediction of 8: an under-charge by the "
-            "simulator of exactly the kind `rv_mul_dep` records, not an "
-            "over-prediction by the table.",
+            "of this probe -- it is a different row. tt-sim agrees since "
+            "2026-08-06: its per-core L0 line model (tt_sim/pe/rv/cost.py) "
+            "charges the miss row to any L1 load whose line is not resident, so "
+            "this chase pays 8 per load in simulation too, where it used to pay "
+            "the hit row's ~2.",
         )
     indep_set = L1_WORKING_SET_BYTES["rv_load_indep"]
     indep_key, indep_row = _l1_load_row(riscv, arch, indep_set)

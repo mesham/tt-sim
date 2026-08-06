@@ -1035,17 +1035,23 @@ def test_the_cost_tables_have_exactly_the_consumers_we_expect():
     change to the thing those guards measure and should be reviewed as one."""
     consumers = set()
     for path in sorted(_REPO_ROOT.rglob("*.py")):
-        if "tt_sim/perf/" in path.as_posix():
+        relative = path.relative_to(_REPO_ROOT)
+        if "tt_sim/perf/" in relative.as_posix():
             continue
         # ``.claude`` can hold agent worktrees — whole copies of this repo —
-        # whose files are not new consumers, just this tree seen twice.
+        # whose files are not new consumers, just this tree seen twice. The
+        # filter runs on the *relative* path: this repo may itself be such a
+        # worktree, and matching the absolute path would exclude every file
+        # and vacuously pass an empty scan (it asserted ``set() == expected``
+        # and failed, which is how the bug was found).
         if any(
-            part in {".git", ".claude", "build", "__pycache__"} for part in path.parts
+            part in {".git", ".claude", "build", "__pycache__"}
+            for part in relative.parts
         ):
             continue
         text = path.read_text(errors="ignore")
         if "tt_sim.perf" in text or "tensix_instruction_costs" in text:
-            consumers.add(path.relative_to(_REPO_ROOT).as_posix())
+            consumers.add(relative.as_posix())
     assert consumers == EXPECTED_CONSUMERS
 
 

@@ -107,17 +107,19 @@ def test_bounded_costs_are_charged_at_their_low_end():
     assert modelled_occupancy(CycleCost(1.5)) == 2
 
 
-def test_the_l1_dcache_miss_row_never_reaches_the_charging_path():
-    """Two mappings from "an L1 load" to a table row, and only one charges.
+def test_the_l1_dcache_miss_row_is_charged_only_through_the_line_model():
+    """Two mappings from "an L1 load" to a table row, and a licence for each.
 
-    ``_LOAD_LATENCY_KEYS`` is what a kernel is charged, and on Blackhole it
-    names the d-cache HIT row: no hit rate is published, so the two-ended cost
-    is charged at its low end like every other bound in the file.
-    ``l1_dcache_miss_key`` was added on 2026-08-05 for ``riscv_bench_sweep``,
-    which knows a benchmark probe's working set exactly and has to predict
-    against the row that probe actually reaches — a reporting question, not a
-    charging one. If the miss row ever leaks into the charge, every simulated
-    cycle count in the tree moves at once, so the separation is pinned here.
+    ``_LOAD_LATENCY_KEYS`` names the d-cache HIT row on Blackhole — the
+    *default* charge, the low end of the pair. The miss row reaches the charge
+    only through the residency question: ``l1_load_miss_latency`` (with the
+    published ``l0_lines`` / ``l0_line_bytes`` geometry) feeds the per-core
+    line-tag model in ``tt_sim/pe/rv/cost.py``, which charges it to a load
+    whose line is provably not resident, and ``l1_dcache_miss_key`` remains
+    what ``riscv_bench_sweep`` predicts a known-working-set probe against.
+    Wormhole publishes no L0, so every one of those is ``None`` there and its
+    single L1 row is untouched. The behavioural pins (a chase misses, a hot
+    loop hits, stores and fences flush) are in ``tt_sim/pe/rv/cost_test.py``.
     """
     from tt_sim.perf.model import (
         _LOAD_LATENCY_KEYS,
@@ -130,7 +132,29 @@ def test_the_l1_dcache_miss_row_never_reaches_the_charging_path():
     assert l1_dcache_miss_key("blackhole") == "l1_dcache_miss"
     assert l1_dcache_miss_key("wormhole") is None
     with _env("1"):
-        assert riscv_cost_model("blackhole").load_latency[RV_REGION_L1] == 2
+        bh = riscv_cost_model("blackhole")
+        assert bh.load_latency[RV_REGION_L1] == 2
+        assert bh.l1_load_miss_latency == 8
+        assert bh.l0_lines == 4
+        assert bh.l0_line_bytes == 16
+        wh = riscv_cost_model("wormhole")
+        assert wh.l1_load_miss_latency is None
+        assert wh.l0_lines is None
+        assert wh.l0_line_bytes is None
+
+
+def test_the_multiply_latency_is_published_on_blackhole_only():
+    """Blackhole's multiply pipelines ("exactly one cycle in EX1, and then
+    exactly one cycle in EX2"): occupancy 1, result latency 1 + 1 = 2, spent
+    as a scoreboard entry. Wormhole publishes only the blocking occupancy of
+    2, so its latency is ``None`` and nothing there changed."""
+    from tt_sim.perf.model import riscv_cost_model
+
+    with _env("1"):
+        assert riscv_cost_model("blackhole").multiply == 1
+        assert riscv_cost_model("blackhole").multiply_latency == 2
+        assert riscv_cost_model("wormhole").multiply == 2
+        assert riscv_cost_model("wormhole").multiply_latency is None
 
 
 def test_a_charged_number_knows_whether_it_was_exact():
