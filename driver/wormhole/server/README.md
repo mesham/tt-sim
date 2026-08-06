@@ -176,9 +176,11 @@ PYTHONPATH=. python3 -m driver.wormhole.server.tensix_smoke_test
 # Wormhole + TensixCore + DramCore + cycle pump (Phase 3)
 
 PYTHONPATH=. python3 -m driver.wormhole.server.one_replay_test
-# replay the captured tt-metal "one" trace; verifies every recorded
-# reply (including the kernel's result buffer at (0,11):0x360)
-# reproduces bit-for-bit. Skips cleanly if traces/one.trace is absent.
+# replay the captured tt-metal "one" trace over the nng socket; re-polls
+# the spin-polled go-message until it reaches its final recorded value
+# (RUN_MSG_DONE), then verifies every data reply (including the kernel's
+# result buffer) reproduces bit-for-bit. Skips cleanly if
+# traces/one.trace is absent.
 ```
 
 ## Stub-out / extension points

@@ -6,8 +6,17 @@ socket — so it runs in restricted environments where IPC transport is
 unavailable, and pins the wire path (translated-coord routing, the cycle pump,
 reset handling, the tt-sim Wormhole itself) against real captured traffic.
 
-Every READ in the trace carries the reply the live server produced; a clean run
-means every one reproduces bit-for-bit through ``Transport._handle``.
+The assertion strategy is the Blackhole guards' *poll-until-DONE* shape: the
+recorded host->device traffic replays exactly as captured, but rather than
+requiring the kernel to finish within the host's recorded poll count, the
+device is pumped until the worker's go-message reaches ``RUN_MSG_DONE``
+(bounded), and *then* every data READ reply — including the host's final
+result-buffer read-back, which the trace places after the last go-poll — must
+reproduce bit-for-bit. Only the go-message mailbox itself (whose intermediate
+poll values are timing, not data) and Ethernet-core reads (the trace predates
+``EthTile``) are exempt from the comparison, so the guard survives a
+legitimate timing change (``TT_SIM_COST_MODEL``) while still failing on any
+wrong value.
 
 Run::  python3 -m driver.wormhole.server.offline_replay_test
 """
@@ -34,15 +43,11 @@ TRACE = REPO / "driver" / "wormhole" / "server" / "traces" / "one.trace"
 # The "one" program launches a single worker at translated coord (1, 1).
 TENSIX_POOL = [(1, 1)]
 
-# The captured trace predates two things, so a handful of READ replies no longer
-# reproduce byte-for-byte. Neither reflects the compute path — the DRAM result
-# buffer still matches exactly — so they are reported but not failed:
-#   * Ethernet coords: the trace was recorded before EthTile existed, when eth
-#     coords were NullCore zero-fills; they now read real eth L1.
-#   * Address 0x2a0: the go-message mailbox the host spin-polls waiting for
-#     RUN_MSG_DONE. Its intermediate poll values depend on cycle-exact firmware
-#     timing the functional sim does not reproduce across code revisions.
-_TRANSIENT_ADDRS = {0x2A0}
+GO_MSG_ADDR = 0x4A0
+RUN_MSG_GO = 0x80
+RUN_MSG_DONE = 0x00
+PUMP_CHUNK = 2000
+PUMP_CAP = 600_000
 
 
 def _build_fabric():
@@ -57,6 +62,10 @@ def _build_fabric():
         device.ensure_tensix_tile(physical)
         fabric.register(physical, TensixCore(device, unified))
     return device, fabric
+
+
+def _go_signal(device, core):
+    return device.tt_device.read(TENSIX_COORD_MAP[core], GO_MSG_ADDR, 4)[3]
 
 
 def main():
@@ -85,12 +94,38 @@ def main():
             n_msgs += 1
             if parsed["cmd"] != proto.CMD_READ or parsed["reply"] is None:
                 continue
+            # Pump the worker until its go-message reports DONE (bounded):
+            # this is where the recorded poll budget stops mattering.
+            if (
+                parsed["address"] == GO_MSG_ADDR
+                and parsed["core"] in TENSIX_POOL
+                and _go_signal(device, parsed["core"]) == RUN_MSG_GO
+            ):
+                pumped = 0
+                while (
+                    _go_signal(device, parsed["core"]) != RUN_MSG_DONE
+                    and pumped < PUMP_CAP
+                ):
+                    device.tt_device.run(PUMP_CHUNK)
+                    pumped += PUMP_CHUNK
+                if _go_signal(device, parsed["core"]) != RUN_MSG_DONE:
+                    raise AssertionError(
+                        f"worker {parsed['core']} go-message never reached "
+                        f"RUN_MSG_DONE within {PUMP_CAP} pumped cycles replaying "
+                        f"{TRACE.name}"
+                    )
             n_reads += 1
+            # Compare first: an exempt read that happens to match still counts
+            # as verified (model off, everything reproduces). A mismatch is
+            # tolerated only for the worker's go-message polls (timing, not
+            # data) and eth reads (the trace predates EthTile); everything
+            # else must reproduce bit-for-bit.
             if bytes(reply) == bytes(parsed["reply"]):
                 verified += 1
                 continue
-            # A mismatch is tolerated only where the trace is known-stale.
-            if parsed["core"] in eth_coords or parsed["address"] in _TRANSIENT_ADDRS:
+            if parsed["core"] in eth_coords or (
+                parsed["address"] == GO_MSG_ADDR and parsed["core"] in TENSIX_POOL
+            ):
                 tolerated += 1
                 continue
             mismatches += 1
@@ -105,12 +140,13 @@ def main():
     device.tt_device.shutdown()
     if mismatches:
         raise AssertionError(
-            f"{mismatches}/{n_reads} READ replies mismatched (beyond known-stale "
-            f"eth/mailbox reads) replaying {TRACE.name}"
+            f"{mismatches}/{n_reads} data READ replies mismatched after "
+            f"pump-to-DONE replaying {TRACE.name}"
         )
     print(
-        f"offline_replay test OK ({n_msgs} messages; {verified}/{n_reads} READs "
-        f"reproduced bit-for-bit, {tolerated} known-stale eth/mailbox reads tolerated)"
+        f"offline_replay test OK ({n_msgs} messages; pumped to DONE; "
+        f"{verified}/{n_reads} data READs reproduced bit-for-bit, "
+        f"{tolerated} go-message/eth reads exempt)"
     )
     return 0
 

@@ -1,14 +1,25 @@
-"""Byte-identical offline replay of every captured Wormhole example trace.
+"""Offline value replay of every captured Wormhole example trace.
 
-The Blackhole side guards each example with a per-example *value* test
-(``driver/blackhole/server/<name>_replay_test.py``, which pumps the kernel and
-checks the result buffer). Wormhole instead uses the **byte-identical** style of
-``offline_replay_test.py``, generalised here to every example: replay the
-captured wire trace and assert that every host READ reply reproduces bit-for-bit
-against the live run. Because the live run validated its own result and the host
-reads the result buffer back over the wire, a byte-identical replay is a full
-correctness guard — and it needs no per-example coord translation or result
-address (the trace carries the expected replies).
+Mirrors the Blackhole guards' *poll-until-DONE* shape: replay the captured
+host->device traffic (writes, resets) exactly as recorded, but instead of
+requiring the device to finish the kernel within the host's recorded poll
+count, pump the device until each launched worker's go-message reaches
+``RUN_MSG_DONE`` (bounded — a hung kernel fails loudly rather than spinning),
+*then* verify values. That makes the guard independent of the recorded poll
+budget, so a legitimate timing change (``TT_SIM_COST_MODEL``) cannot fail it
+spuriously; a wrong value still can.
+
+Value coverage is not weakened relative to the old byte-identical style: every
+non-spin-polled READ reply is still asserted bit-for-bit against the recording
+— crucially including the host's final result-buffer read-back, which in every
+captured trace happens after the last go-poll and therefore reads settled
+post-DONE state. The only replies exempted are the go-message mailbox (whose
+intermediate values are literally "how far had the kernel got when the host
+looked" — unreproducible under any timing change, in either direction) and
+Ethernet-core reads (the traces predate ``EthTile``). Because the live run
+validated its own result and the host read that result back over the wire, the
+recorded replies double as the frozen expected data — no separate ``.expected``
+blob is needed.
 
 Traces are captured by ``driver/wormhole/tests/capture_traces.sh`` (build + run
 each shared example against ``driver/wormhole`` with ``TT_SIM_RECORD``). Missing
@@ -43,13 +54,20 @@ EXAMPLES = [
     "loopback",
 ]
 
-# The go-message mailbox the host spin-polls waiting for RUN_MSG_DONE; its
-# intermediate poll values depend on cycle-exact firmware timing the functional
-# sim need not reproduce, so mismatches at these addresses are tolerated (as are
-# Ethernet reads). 0x2a0 is the older tt-metal go-message offset, 0x4a0 the
-# current one — tolerate both so the test survives a tt-metal bump.
+# The go-message mailbox the host spin-polls waiting for RUN_MSG_DONE. Its
+# intermediate poll values depend on cycle-exact timing no timing model need
+# reproduce, so replies at these addresses are never compared (on any core: the
+# non-worker cores get a single setup read here too, and 0x2a0 is the older
+# tt-metal go-message offset — tolerate both so the test survives a tt-metal
+# bump). Completion is instead asserted directly: each launched worker is
+# pumped until its go-message reads RUN_MSG_DONE.
 GO_MSG_ADDR = 0x4A0
 _TRANSIENT_ADDRS = {0x2A0, 0x4A0}
+
+RUN_MSG_GO = 0x80
+RUN_MSG_DONE = 0x00
+PUMP_CHUNK = 2000
+PUMP_CAP = 600_000
 
 
 def _discover_pool(trace):
@@ -67,8 +85,26 @@ def _discover_pool(trace):
     return sorted(core for core, n in counts.items() if n > 1)
 
 
+def _go_signal(device, core):
+    return device.tt_device.read(TENSIX_COORD_MAP[core], GO_MSG_ADDR, 4)[3]
+
+
+def _pump_until_done(device, core, name):
+    """Pump the device until ``core``'s go-message reads DONE (bounded)."""
+    pumped = 0
+    while _go_signal(device, core) != RUN_MSG_DONE and pumped < PUMP_CAP:
+        device.tt_device.run(PUMP_CHUNK)
+        pumped += PUMP_CHUNK
+    if _go_signal(device, core) != RUN_MSG_DONE:
+        raise AssertionError(
+            f"{name}: worker {core} go-message never reached RUN_MSG_DONE "
+            f"within {PUMP_CAP} pumped cycles (still "
+            f"{_go_signal(device, core):#04x})"
+        )
+
+
 def replay(name):
-    """Byte-identical replay of one example trace; returns a result dict or None."""
+    """Poll-until-DONE value replay of one example trace; a dict or None."""
     trace = TRACES / f"{name}.trace"
     if not trace.exists():
         return None
@@ -79,7 +115,8 @@ def replay(name):
         fabric.register(translated, DramCore(device, unified))
     for translated, unified in ETH_COORD_MAP.items():
         fabric.register(translated, EthCore(device, unified))
-    for physical in _discover_pool(trace):
+    pool = _discover_pool(trace)
+    for physical in pool:
         device.ensure_tensix_tile(physical)
         fabric.register(physical, TensixCore(device, TENSIX_COORD_MAP[physical]))
 
@@ -104,7 +141,18 @@ def replay(name):
             )
             if p["cmd"] != proto.CMD_READ or p["reply"] is None:
                 continue
+            # Pump the worker until its go-message reports DONE (bounded):
+            # this is where the recorded poll budget stops mattering.
+            if (
+                p["address"] == GO_MSG_ADDR
+                and p["core"] in pool
+                and _go_signal(device, p["core"]) == RUN_MSG_GO
+            ):
+                _pump_until_done(device, p["core"], name)
             reads += 1
+            # Compare first: an exempt read that happens to match still counts
+            # as verified (model off, everything reproduces). The exemption
+            # only decides what a mismatch means.
             if bytes(reply) == bytes(p["reply"]):
                 verified += 1
             elif p["core"] in eth or p["address"] in _TRANSIENT_ADDRS:
@@ -132,12 +180,12 @@ def _check(name):
         return "skip", f"{name}: trace not present"
     if r["mismatches"]:
         return "fail", (
-            f"{name}: {r['mismatches']}/{r['reads']} READ replies mismatched "
-            f"(beyond tolerated eth/mailbox)\n    " + "\n    ".join(r["first"])
+            f"{name}: {r['mismatches']}/{r['reads']} data READ replies mismatched "
+            f"after pump-to-DONE\n    " + "\n    ".join(r["first"])
         )
     return "ok", (
-        f"{name}: {r['verified']}/{r['reads']} READs bit-for-bit "
-        f"({r['tolerated']} eth/mailbox tolerated)"
+        f"{name}: pumped to DONE; {r['verified']}/{r['reads']} data READs "
+        f"bit-for-bit ({r['tolerated']} go-message/eth reads exempt)"
     )
 
 

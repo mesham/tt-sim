@@ -1289,6 +1289,13 @@ carry forward is that **byte-identical replay cannot be the acceptance gate for
 a timing model**, and a cost model that ships on by default would need the
 Wormhole guards converted to the Blackhole pump-until-done shape first.
 
+*(That conversion has since landed: `examples_replay_test`,
+`offline_replay_test` and `one_replay_test`/`replay.py` now pump to
+`RUN_MSG_DONE` — or, over the socket, re-poll the spin-polled go-message to its
+final recorded value — before asserting every data reply bit-for-bit, so all
+three pass with the model on and the only remaining timing-pinned guard is
+the Blackhole `offline_replay_test`.)*
+
 That finding is what ["The gate"](#the-gate) below turns into something
 runnable, and in doing so **supersedes the re-run-and-pump argument recorded
 above**. Pumping after a replay is only valid while the replay is still going;

@@ -7,6 +7,16 @@ spawns the simulator). For READ messages, the server's reply is compared
 against the recorded reply; mismatches print to stderr and exit non-zero
 unless ``--no-verify`` is given.
 
+Spin-polled READs — a (core, address) the host reads many times over, i.e. the
+go-message mailbox it polls waiting for ``RUN_MSG_DONE`` — are replayed the way
+a live host behaves rather than verbatim: the READ is re-sent until the reply
+reaches the *final* value the recording captured for that location (bounded).
+Each re-sent READ pumps the server its usual cycles-per-message, so a device
+whose timing legitimately differs from the recording (``TT_SIM_COST_MODEL``)
+simply gets polled longer, exactly as tt-metal itself would poll it. All other
+READs — the result buffer included, which the host reads only after its poll
+loop saw DONE — must still reproduce bit-for-bit.
+
 Typical usage:
 
     # Terminal 1
@@ -21,7 +31,6 @@ Typical usage:
 import argparse
 import os
 import sys
-import time
 
 import pynng
 
@@ -31,19 +40,56 @@ _REPO = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from driver.wormhole.server.trace import parse_trace_line  # noqa: E402
-
 from tt_sim.bridge import protocol as proto  # noqa: E402
+from tt_sim.bridge.trace import parse_trace_line  # noqa: E402
+
+#: READs from the same core at the same address, this many times or more, are a
+#: spin-poll (matching driver/tests/cost_model_gate.py: in the captured traces
+#: the polled go-message is read 30+ times and every other address once).
+SPIN_POLL_READS = 8
+#: Extra polls allowed per spin-polled READ before declaring the device hung.
+#: Each poll advances the server its usual cycles-per-message (default 100),
+#: so this bounds the wait at ~2M extra cycles — generous, and it fails
+#: loudly rather than spinning for ever.
+POLL_RETRY_CAP = 20_000
 
 
-def _dial_with_retry(addr, timeout_s=10.0):
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            return pynng.Pair1(dial=addr, block_on_dial=False)
-        except pynng.exceptions.ConnectionRefused:
-            time.sleep(0.1)
-    return None
+def _spin_poll_finals(trace_path):
+    """Map each spin-polled (core, address) to its final recorded reply.
+
+    The final recorded reply is the settled state the recorded host's poll
+    loop was waiting for (RUN_MSG_DONE in the go-message); replaying "poll
+    until the reply reaches it" is timing-independent where replaying the
+    recorded poll count verbatim is not.
+    """
+    finals = {}
+    counts = {}
+    with open(trace_path) as f:
+        for raw in f:
+            entry = parse_trace_line(raw)
+            if entry is None or entry["cmd"] != proto.CMD_READ:
+                continue
+            if entry["reply"] is None:
+                continue
+            key = (entry["core"], entry["address"])
+            counts[key] = counts.get(key, 0) + 1
+            finals[key] = entry["reply"]
+    return {k: v for k, v in finals.items() if counts[k] >= SPIN_POLL_READS}
+
+
+def _listen(addr):
+    """Bind the host side of the pair socket.
+
+    The wire protocol's host (UMD, or this replayer standing in for it) is the
+    LISTENER; the simulator server is the DIALER (see
+    ``tt_sim/bridge/transport.py``). The server's dial retries until a
+    listener appears, so binding after the server started is fine.
+    """
+    try:
+        return pynng.Pair1(listen=addr)
+    except pynng.exceptions.NNGException as exc:
+        print(f"error: could not listen on {addr}: {exc}", file=sys.stderr)
+        return None
 
 
 def main(argv=None):
@@ -80,9 +126,8 @@ def main(argv=None):
         )
         return 2
 
-    sock = _dial_with_retry(addr)
+    sock = _listen(addr)
     if sock is None:
-        print(f"error: could not dial server at {addr}", file=sys.stderr)
         return 1
 
     with sock:
@@ -96,6 +141,7 @@ def main(argv=None):
         if not args.quiet:
             print("[replay] received EXIT ack")
 
+        finals = _spin_poll_finals(args.trace)
         sent = 0
         mismatches = 0
         with open(args.trace) as f:
@@ -118,6 +164,32 @@ def main(argv=None):
 
                 if entry["cmd"] == proto.CMD_READ:
                     reply = proto.parse(sock.recv())
+                    key = (entry["core"], entry["address"])
+                    final = finals.get(key)
+                    if final is not None:
+                        # A spin-polled location: poll like a live host would,
+                        # until the reply reaches the recording's final value
+                        # (bounded). Intermediate values are timing, not data.
+                        polls = 0
+                        while (
+                            reply.data[: len(final)] != final and polls < POLL_RETRY_CAP
+                        ):
+                            sock.send(msg)
+                            reply = proto.parse(sock.recv())
+                            polls += 1
+                        if reply.data[: len(final)] != final:
+                            mismatches += 1
+                            if not args.quiet:
+                                print(
+                                    f"[replay] line {lineno}: spin-polled READ "
+                                    f"core={entry['core']} "
+                                    f"addr=0x{entry['address']:x} never reached "
+                                    f"its final recorded value {final.hex()} "
+                                    f"after {polls} extra polls "
+                                    f"(last {reply.data[: len(final)].hex()})",
+                                    file=sys.stderr,
+                                )
+                        continue
                     expected = entry["reply"]
                     if expected is not None and not args.no_verify:
                         actual = reply.data[: len(expected)]

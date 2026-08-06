@@ -109,8 +109,18 @@ def test_value_guards_are_runnable_as_modules(guards):
     "source,expected",
     [
         ('if bytes(reply) == bytes(p["reply"]):', gate.TIMING_PINNED),
-        ('REPLAY = REPO / "wormhole" / "replay.py"', gate.TIMING_PINNED),
+        # replay.py is itself poll-until-DONE (it re-polls a spin-polled READ
+        # until the reply reaches its final recorded value), so delegating to
+        # it is budget-independent.
+        ('REPLAY = REPO / "wormhole" / "replay.py"', gate.VALUE_PUMPED),
         ("while go != RUN_MSG_DONE: device.tt_device.run(2000)", gate.VALUE_PUMPED),
+        # A reply comparison guarded by a pump-to-DONE loop compares settled
+        # state, not the recorded poll budget.
+        (
+            'if bytes(reply) == bytes(p["reply"]): pass\n'
+            "while go != RUN_MSG_DONE and pumped < PUMP_CAP: pump()",
+            gate.VALUE_PUMPED,
+        ),
         ("result = device.read(COORD, ADDR, 400)", gate.VALUE_POLL_BUDGET),
     ],
 )

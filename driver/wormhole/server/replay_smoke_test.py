@@ -13,7 +13,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 import pynng
@@ -28,14 +27,10 @@ def _run_server(addr, fabric, tracer, ready):
     transport.serve(fabric)
 
 
-def _dial(addr, timeout_s=5.0):
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            return pynng.Pair1(dial=addr, block_on_dial=False)
-        except pynng.exceptions.ConnectionRefused:
-            time.sleep(0.05)
-    raise RuntimeError(f"could not dial {addr}")
+def _listen(addr):
+    """Bind the host side: UMD (or a stand-in like this test) is the LISTENER;
+    the simulator server is the DIALER and retries until a listener appears."""
+    return pynng.Pair1(listen=addr)
 
 
 # A canned conversation that exercises every command and a few coords.
@@ -78,7 +73,7 @@ def _record_phase(addr, trace_path):
             target=_run_server, args=(addr, fabric, tracer, ready), daemon=True
         )
         srv.start()
-        with _dial(addr) as sock:
+        with _listen(addr) as sock:
             _drive(sock)
         srv.join(timeout=2.0)
         assert not srv.is_alive(), "record-phase server did not shut down"

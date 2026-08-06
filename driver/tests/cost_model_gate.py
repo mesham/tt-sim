@@ -6,13 +6,20 @@ Why this exists
 §I's cycle-cost model (``docs/plans/cost-model.md``) is a **timing**
 perturbation: with ``TT_SIM_COST_MODEL=1`` the baby RISC-V cores stall on a
 load-use interlock and five Tensix units hold themselves occupied, so simulated
-cycle counts move. That breaks this project's strongest correctness guard by
-construction. The Wormhole ``examples_replay_test`` / ``offline_replay_test``
-family replays a captured wire conversation *verbatim* — including the number of
-times the tt-metal host polled the go-message before reading the result back —
-so a device that reaches the same answer one poll later reads a partially
-written buffer and the replay mismatches. **Byte-identical replay is a timing
-pin: any change to timing makes it fail, whether or not a value went wrong.**
+cycle counts move. A guard that replays a captured wire conversation *verbatim*
+— including the number of times the tt-metal host polled the go-message before
+reading the result back — breaks by construction: a device that reaches the
+same answer one poll later reads a partially written buffer and the replay
+mismatches. **Byte-identical replay at the recorded poll count is a timing pin:
+any change to timing makes it fail, whether or not a value went wrong.**
+
+The Wormhole guards that used to have that shape
+(``examples_replay_test`` / ``offline_replay_test``, and ``one_replay_test``
+via ``replay.py``) have since been converted to poll-until-DONE: they still
+assert every *data* READ reply bit-for-bit, but they pump the device to
+``RUN_MSG_DONE`` first and exempt only the spin-polled go-message itself, so
+their verdict no longer depends on the recorded poll budget. The one remaining
+timing-pinned guard is ``blackhole/offline``.
 
 The property that decides how a guard must be treated is therefore not what it
 asserts but **whether its verdict depends on the recorded poll budget**:
@@ -124,7 +131,7 @@ BUDGET_INDEPENDENT = (VALUE_PUMPED,)
 
 #: The classification validated by hand at this tree state. Discovery drives the
 #: run; this is the tripwire that stops a reclassification happening silently.
-BASELINE_TREE = "1ab9e3b"
+BASELINE_TREE = "24403ae (+ the Wormhole poll-until-DONE guard conversion)"
 BASELINE = {
     "blackhole/dramtop": VALUE_POLL_BUDGET,
     "blackhole/eight": VALUE_PUMPED,
@@ -152,11 +159,11 @@ BASELINE = {
     "blackhole/twolaunch": VALUE_PUMPED,
     "blackhole/untilize": VALUE_PUMPED,
     "blackhole/where": VALUE_PUMPED,
-    "wormhole/examples": TIMING_PINNED,
+    "wormhole/examples": VALUE_PUMPED,
     "wormhole/matmulblock": VALUE_PUMPED,
     "wormhole/matmulidx": VALUE_PUMPED,
-    "wormhole/offline": TIMING_PINNED,
-    "wormhole/one": TIMING_PINNED,
+    "wormhole/offline": VALUE_PUMPED,
+    "wormhole/one": VALUE_PUMPED,
     "wormhole/pipestall": VALUE_PUMPED,
     "wormhole/reduce": VALUE_PUMPED,
     "wormhole/reduceneg": VALUE_PUMPED,
@@ -169,17 +176,10 @@ BASELINE = {
 
 #: Budget-dependent guards the prover does not drive, and why. Kept as prose
 #: rather than a bare set: an exclusion without a reason is how an exclusion
-#: list rots into a way of not looking.
-UNPROVABLE = {
-    "wormhole/one": (
-        "drives the server over an nng socket via replay.py, so proving it means "
-        "spawning a second process pair rather than re-running in place. The "
-        "server does expose --cycles-per-poll, so this is a choice and not an "
-        "impossibility — but it replays traces/one.trace, which wormhole/offline "
-        "replays in-process, so the same trace is already proven with no IPC "
-        "dependency and no duplicated server bring-up."
-    ),
-}
+#: list rots into a way of not looking. Currently empty — the last entry
+#: (``wormhole/one``) left when replay.py itself became poll-until-DONE, which
+#: made the guard budget-independent and runnable under the model directly.
+UNPROVABLE = {}
 
 #: The bridge's recorded default: cycles the device advances per host message.
 #: The captured traces were all taken at this value.
@@ -215,12 +215,19 @@ class Guard:
 def classify(source):
     """Classify a guard from its source. See the module docstring for the rules.
 
-    A guard is timing-pinned exactly when it compares a replayed reply against
-    the reply recorded in the trace — which in this tree means it indexes the
-    parsed trace line's ``["reply"]`` field — or when it delegates to
-    ``replay.py``, which does the same comparison in a subprocess.
+    A guard that pumps the device to ``RUN_MSG_DONE`` (the ``PUMP_CAP`` loop)
+    is budget-independent even when it *also* compares recorded replies:
+    everything it compares outside the spin-polled go-message is settled state
+    once the kernel is DONE. Delegating to ``replay.py`` is the same shape —
+    replay.py re-sends a spin-polled READ until the reply reaches its final
+    recorded value, which is poll-until-DONE driven from the host side. A
+    guard is timing-pinned when it compares replayed replies against the
+    recording — indexes the parsed trace line's ``["reply"]`` field — with no
+    such pump.
     """
-    if re.search(r"""\[["']reply["']\]""", source) or "replay.py" in source:
+    if "PUMP_CAP" in source or "replay.py" in source:
+        return VALUE_PUMPED
+    if re.search(r"""\[["']reply["']\]""", source):
         return TIMING_PINNED
     return VALUE_PUMPED if "RUN_MSG_DONE" in source else VALUE_POLL_BUDGET
 
@@ -381,27 +388,6 @@ def _prove_trace(label, trace, build, tolerated):
     }
 
 
-def _wormhole_fabric(pool, cycles_per_poll):
-    from driver.wormhole.server.coords import (
-        DRAM_COORD_MAP,
-        ETH_COORD_MAP,
-        TENSIX_COORD_MAP,
-    )
-    from driver.wormhole.server.wh_device import make_device
-    from tt_sim.bridge import DramCore, EthCore, Fabric, TensixCore
-
-    device = make_device(cycles_per_poll=cycles_per_poll)
-    fabric = Fabric()
-    for translated, unified in DRAM_COORD_MAP.items():
-        fabric.register(translated, DramCore(device, unified))
-    for translated, unified in ETH_COORD_MAP.items():
-        fabric.register(translated, EthCore(device, unified))
-    for physical in pool:
-        device.ensure_tensix_tile(physical)
-        fabric.register(physical, TensixCore(device, TENSIX_COORD_MAP[physical]))
-    return device, fabric
-
-
 def _blackhole_fabric(pool, cycles_per_poll):
     from driver.blackhole.server.bh_device import make_device
     from driver.blackhole.server.coords import DRAM_COORD_MAP, TENSIX_COORD_MAP
@@ -415,55 +401,6 @@ def _blackhole_fabric(pool, cycles_per_poll):
         device.ensure_tensix_tile(physical)
         fabric.register(physical, TensixCore(device, TENSIX_COORD_MAP[physical]))
     return device, fabric
-
-
-def _prove_wormhole_examples():
-    """The captured example traces ``wormhole/examples`` replays."""
-    from driver.wormhole.server import examples_replay_test as mod
-    from driver.wormhole.server.coords import ETH_COORD_MAP
-
-    eth = set(ETH_COORD_MAP)
-
-    def tolerated(p):
-        return p["core"] in eth or p["address"] in mod._TRANSIENT_ADDRS
-
-    reports = []
-    for name in mod.EXAMPLES:
-        trace = mod.TRACES / f"{name}.trace"
-        if not trace.exists():
-            reports.append({"label": f"examples:{name}", "skipped": "trace absent"})
-            continue
-        pool = mod._discover_pool(trace)
-        reports.append(
-            _prove_trace(
-                f"examples:{name}",
-                trace,
-                lambda cpp, pool=pool: _wormhole_fabric(pool, cpp),
-                tolerated,
-            )
-        )
-    return reports
-
-
-def _prove_wormhole_offline():
-    from driver.wormhole.server import offline_replay_test as mod
-    from driver.wormhole.server.coords import ETH_COORD_MAP
-
-    eth = set(ETH_COORD_MAP)
-
-    def tolerated(p):
-        return p["core"] in eth or p["address"] in mod._TRANSIENT_ADDRS
-
-    if not mod.TRACE.exists():
-        return [{"label": "offline", "skipped": "trace absent"}]
-    return [
-        _prove_trace(
-            "offline",
-            mod.TRACE,
-            lambda cpp: _wormhole_fabric(mod.TENSIX_POOL, cpp),
-            tolerated,
-        )
-    ]
 
 
 def _prove_blackhole_offline():
@@ -534,8 +471,6 @@ def _prove_value_guard(key):
 #: else budget-dependent falls through to :func:`_prove_value_guard`, which
 #: needs no per-guard knowledge at all.
 PROVERS = {
-    "wormhole/examples": _prove_wormhole_examples,
-    "wormhole/offline": _prove_wormhole_offline,
     "blackhole/offline": _prove_blackhole_offline,
 }
 

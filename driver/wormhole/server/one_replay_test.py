@@ -1,10 +1,18 @@
 """Regression test: replay the captured tt-metal "one" wire trace.
 
 Spawns a fresh server (real ``Wormhole`` behind translated coords (1,1) and
-(0,11)), then runs ``replay.py`` against ``server/traces/one.trace``.
-``replay.py`` exits non-zero on any READ-reply mismatch, so a clean run means
-every captured reply — including the kernel's result buffer at (0,11):0x360 —
-reproduces bit-for-bit.
+(0,11)), then runs ``replay.py`` against ``server/traces/one.trace``. This is
+the guard for the *socket* path — the same trace's values are pinned socket-
+free by ``offline_replay_test``.
+
+``replay.py`` replays spin-polled READs (the go-message the host polls waiting
+for ``RUN_MSG_DONE``) the way a live host behaves — re-polling until the reply
+reaches its final recorded value, bounded — and exits non-zero if any *other*
+READ reply mismatches or a poll never settles. A clean run therefore means the
+kernel ran to DONE and every data reply — the result buffer included —
+reproduced bit-for-bit, independent of the recorded poll budget (so a
+legitimate timing change such as ``TT_SIM_COST_MODEL`` cannot fail it
+spuriously).
 
 Skips with a clear message if the trace hasn't been captured yet. To capture::
 
@@ -73,7 +81,7 @@ def main():
             env=env,
             capture_output=True,
             text=True,
-            timeout=120.0,
+            timeout=300.0,  # a slower device (cost model on) polls longer
         )
         elapsed = time.monotonic() - t0
 
