@@ -20,16 +20,15 @@ the **cycle-approximate performance estimator**, hackability,
 observability tooling, differential testing, and education. The
 priority list below is shaped by the first lane: the Tensix front-end
 bound, the poll-until-DONE guard conversion, the silicon-backed RV cost
-fixes, firmware-loop parking and the last two Tensix unit costs have
-all landed, so what remains is making the wall-clock wins reach the
-cost-model configuration the model is actually exercised in, closing
-the few remaining uncosted terms, and getting the attribution out to
-the people who will act on it.
+fixes, the last two Tensix unit costs and firmware-loop parking (with
+and without the cost model) have all landed, so what remains is getting
+that attribution out to the people who will act on it, and closing the
+few uncosted terms that are left.
 The first named external consumer is the **compiler team**: they will
 drive kernels through tt-sim to trace where cycles go — instruction
 mix, data movement, stalls — and generate more efficient code from it,
 which is why cost-model fidelity and easily-consumed trace output
-(item 5) carry the weight they do here.
+(item 1) carry the weight they do here.
 
 ---
 
@@ -37,12 +36,13 @@ which is why cost-model fidelity and easily-consumed trace output
 
 ### Tier 1 — load-bearing, start here
 
-1. ✅ **Firmware-loop parking under the cost model** — landed. Parking
-   made a full grid affordable (~3.9× at 80 workers, ~1000×
-   post-launch steady state) and now does so under
-   `TT_SIM_COST_MODEL` as well, cycle-identical on every guard. What
-   is left of the item is the tracing half, which turned out to be a
-   separate (event-stream) problem — see item 12.
+1. **Bottleneck-attribution workflow for the compiler team** — a
+   documented, stable path from "run this kernel" to "ranked
+   bottleneck report" over the Perfetto/Parquet outputs. Promoted:
+   the fidelity work it depended on has landed (stall reasons are
+   real, data movement is costed, grid-scale runs are affordable), so
+   what remains is packaging the attribution for the people who will
+   act on it.
 
 ### Tier 2 — high value, small-to-medium effort
 
@@ -53,39 +53,34 @@ which is why cost-model fidelity and easily-consumed trace output
    `matmulidx`/`matmulblock` offline guards.
 4. **Smarter `TT_SIM_CYCLES_PER_POLL` default** — the fixed 100-cycle
    pump after every wire message dominates at scale.
-5. **Bottleneck-attribution workflow for the compiler team** — a
-   documented, stable path from "run this kernel" to "ranked
-   bottleneck report" over the Perfetto/Parquet outputs, so the
-   compiler team can consume the model's attribution without reading
-   tt-sim internals.
 
 ### Tier 3 — medium-term
 
-6. **Issue-loop model** — worth more rung-2 dataset coverage than any
+5. **Issue-loop model** — worth more rung-2 dataset coverage than any
    remaining congestion work.
-7. **DRAM residue** — endpoint occupancy first (pure model shape, no
+6. **DRAM residue** — endpoint occupancy first (pure model shape, no
    new data needed); the rest is measurement-blocked.
-8. **Next silicon session on the Blackhole box** — a bundle of cheap
+7. **Next silicon session on the Blackhole box** — a bundle of cheap
    probes once a card is in hand, including the first-ever Wormhole
    measurements.
-9. **Tensix issue latency & wait-gates**, then mover / PC-buffer
+8. **Tensix issue latency & wait-gates**, then mover / PC-buffer
     timing point fixes.
-10. **Numba on the pump's event heap, and the `nogil` threading
+9. **Numba on the pump's event heap, and the `nogil` threading
     revival** — the ranked JIT target now that pump Phase 4 exists.
-11. **Rung-4 calibration against silicon traces** — the eventual bar
+10. **Rung-4 calibration against silicon traces** — the eventual bar
     for claiming anything stronger than "estimator".
 
 ### Tier 4 — opportunistic / housekeeping
 
-12. **Tracing & observability follow-ups** — the perf-budget decision,
+11. **Tracing & observability follow-ups** — the perf-budget decision,
     `chip_id`, and the long tail.
-13. **Functional backlog** (pick up when a kernel demands it) — Tensix
+12. **Functional backlog** (pick up when a kernel demands it) — Tensix
     backend gaps, NoC registers/atomics, device/tile infrastructure,
     Blackhole ISA extensions.
-14. **Architectural clarity & quick wins** — module boundaries,
+13. **Architectural clarity & quick wins** — module boundaries,
     docstring audit, diagrams, ISA index; shellcheck,
     `MEM_BOOT_CODE_BASE`.
-15. **Parked decisions & re-measurements** — Wormhole reset fan-out,
+14. **Parked decisions & re-measurements** — Wormhole reset fan-out,
     the Blackhole watchdog A/B, re-timing the example sweep.
 
 ### Not to be started
@@ -129,46 +124,46 @@ possible:
 
 ---
 
-## 1. Firmware-loop parking under the cost model ✅ landed
+## 1. Bottleneck attribution for the compiler team
 
-Full-grid affordability landed first with the model off: a baby core
-whose wait loop is *proved* a pure memory fixed point (no stores, no
-MMIO reads, whole register file back at its anchor, verified twice and
-re-checked after every executed tick) reports dormant, so its tile
-strides. The 80-worker `nine` replay went 162.7 s → 42.0 s (3.9×), the
-marginal cost of a never-launched worker 2.06 s → 0.52 s, and
-post-launch steady state ~1000× (112–145 → 148,652 cycles/s) — the
-regime `matmul_single_core` lives in.
+The cost model's first named external consumer: the compiler team will
+run generated kernels through tt-sim to find where cycles go —
+instruction mix, data movement, stalls — and use that to emit more
+efficient code. The pieces mostly exist; what's missing is the
+consumable end of the pipe:
 
-**It now works under `TT_SIM_COST_MODEL` too**, which is the
-configuration the perf model and the compiler team (item 5) actually
-run in. The recorded blocker — the scoreboard's absolute cycle numbers
-— was real but second: the *first* problem is that a stalled tick is a
-perfect one-tick fixed point (nothing retires, so no PC and no register
-moves), and a core that parks inside a stall on a tile with nothing
-else awake sleeps through the rest of it, measured at 41 loop
-iterations in 4,000 cycles against 399. Both are closed by widening the
-proof rather than repairing after it: the scoreboard's cycle-relative
-normal form joins the fixed point, so only loops whose *schedule*
-repeats can park, and for those an unpark is a plain time translation
-onto the wake cycle. Simulated cycles are identical parking on vs off
-on all 26 Blackhole guards, with the model on **and** off;
-`cost_model_gate.py` PASS. `TT_SIM_FIRMWARE_IDLE=0` still disables. See
-`docs/plans/event-driven-pump.md` and the `cost-model.md` instalment.
+- **A documented, stable trace schema.** Perfetto (visual timelines)
+  and the Parquet counter/NoC datasets (machine-readable) already
+  carry the model's attribution — NoC flight and bandwidth, unit
+  occupancy, RV stalls. Write the schema down (field meanings, units,
+  stability expectations) so the team can build tooling against it
+  without reading tt-sim internals; treat schema changes as breaking
+  from then on.
+- **Stall *reasons*, not just stall counts.** The front-end bound has
+  made refused issues real, so the FPU/SFPU stalled-cycles and
+  wait-reason fields are now expressible, and the unpacker wiring has
+  made packer back-pressure and unpacker idle cycles real too. These
+  are the fields a code generator acts on — surfacing them in the
+  trace output is what is left.
+- **Source-level attribution.** `DwarfIndex` function-name attribution
+  (currently in item 11's long tail — promote it here) so a hotspot
+  names a kernel function and line, not a bare PC; kernel-ELF
+  auto-discovery so the workflow needs no hand-holding.
+- **An entry-point workflow.** One documented invocation (env vars or
+  a small driver) from "here is my kernel" to a ranked report of
+  where modelled cycles went, with the Jupyter/NoC-heatmap examples
+  as the worked demonstration.
+- **Honest framing baked into the output.** Modelled numbers are
+  floors built from published bounds, corroborated but not calibrated
+  against end-to-end silicon (item 10) — the report should say so, so
+  the team optimises against relative attribution, not absolute
+  cycle promises.
 
-Still open, both smaller:
-
-- Parking is suppressed while the trace bus or a core's snoop
-  diagnostics are on, which collides with item 5's kernel-scale
-  tracing. This is **not** the time-translation question after all —
-  that is now settled. What is left is an event-stream decision:
-  replaying elided `InstrEvent`s at unpark is O(skipped cycles) and
-  hands the whole win back, so the answer is probably one *summary*
-  event per parked span, which is a new event kind plus consumer
-  changes. Belongs with item 12.
-- No live `vecadd_sharding` measurement was taken (the landed numbers
-  use the trace-replay proxy), so the 14 s → 255 s figure that
-  motivated the work has not been re-measured end to end.
+A first version is assemblable today — `six` already attributes ~75 %
+of its modelled cycles to a published number — and its fidelity
+improves automatically as items 2 and 5–8 land. The tracing
+overhead budget (item 11) matters doubly here, since the team will
+run this at kernel scale.
 
 ## 2. NIU register block cost
 
@@ -178,7 +173,7 @@ the tree — every `noc_async_*_barrier` polls it — and where dataflow
 kernels' time actually lands. Blocked on provenance: the ISA docs'
 "≥ 7" covers the NoC *overlay* at `0xFFB40000`, a different block. If
 no published number surfaces, this becomes a probe in the next silicon
-session (item 8).
+session (item 7).
 
 ## 3. Freeze the cheap guards
 
@@ -206,48 +201,7 @@ wire message, including the pure host DMA of input/output buffers — at
 `=10`. Fix the default rather than documenting around it: skip the
 pump on host-DMA messages, or adapt it to grid size.
 
-## 5. Bottleneck attribution for the compiler team
-
-The cost model's first named external consumer: the compiler team will
-run generated kernels through tt-sim to find where cycles go —
-instruction mix, data movement, stalls — and use that to emit more
-efficient code. The pieces mostly exist; what's missing is the
-consumable end of the pipe:
-
-- **A documented, stable trace schema.** Perfetto (visual timelines)
-  and the Parquet counter/NoC datasets (machine-readable) already
-  carry the model's attribution — NoC flight and bandwidth, unit
-  occupancy, RV stalls. Write the schema down (field meanings, units,
-  stability expectations) so the team can build tooling against it
-  without reading tt-sim internals; treat schema changes as breaking
-  from then on.
-- **Stall *reasons*, not just stall counts.** The front-end bound has
-  made refused issues real, so the FPU/SFPU stalled-cycles and
-  wait-reason fields are now expressible, and the unpacker wiring has
-  made packer back-pressure and unpacker idle cycles real too. These
-  are the fields a code generator acts on — surfacing them in the
-  trace output is what is left.
-- **Source-level attribution.** `DwarfIndex` function-name attribution
-  (currently in item 12's long tail — promote it here) so a hotspot
-  names a kernel function and line, not a bare PC; kernel-ELF
-  auto-discovery so the workflow needs no hand-holding.
-- **An entry-point workflow.** One documented invocation (env vars or
-  a small driver) from "here is my kernel" to a ranked report of
-  where modelled cycles went, with the Jupyter/NoC-heatmap examples
-  as the worked demonstration.
-- **Honest framing baked into the output.** Modelled numbers are
-  floors built from published bounds, corroborated but not calibrated
-  against end-to-end silicon (item 11) — the report should say so, so
-  the team optimises against relative attribution, not absolute
-  cycle promises.
-
-A first version is assemblable today — `six` already attributes ~75 %
-of its modelled cycles to a published number — and its fidelity
-improves automatically as items 2 and 6–9 land. The tracing
-overhead budget (item 12) matters doubly here, since the team will
-run this at kernel scale.
-
-## 6. Issue-loop model
+## 5. Issue-loop model
 
 The residual on every rung-2 prediction is one constant unmodelled
 issuing-core path (intercepts 77–94 cycles across four independent
@@ -255,7 +209,7 @@ series). An issue-loop term is worth more of the 8,140-point tt-metal
 NoC dataset than congestion was — 24 sole-cause entries vs 2 — so it
 is the ranked next step for widening rung-2 coverage.
 
-## 7. DRAM residue
+## 6. DRAM residue
 
 - **Endpoint occupancy** — a second request is not queued behind the
   first: latency without contention. Pure model shape; no new data
@@ -272,7 +226,7 @@ is the ranked next step for widening rung-2 coverage.
 - Bank conflicts / refresh windows — no DRAM bank model, nothing
   published; long-term.
 
-## 8. Next silicon session (Blackhole box)
+## 7. Next silicon session (Blackhole box)
 
 Cheap probes to bundle into one card session — plan and analyse here,
 run there:
@@ -308,7 +262,7 @@ run there:
   depth is a lower bound still growing at the longest burst; needed
   before the front-end bound's constant can ever be called calibrated.
 
-## 9. Tensix issue latency, wait-gates & PC-buffer timing
+## 8. Tensix issue latency, wait-gates & PC-buffer timing
 
 Wait-gate stalls on srcA/srcB availability and the documented per-op
 issue cadence, now expressible through the landed front-end bound.
@@ -321,7 +275,7 @@ cross-unpacker half of the address-phase interlock ("nor can any
 other thread start an `UNPACR`") — each needs a sourced arbitration
 rule that the docs do not currently give.
 
-## 10. Numba and the threading revival
+## 9. Numba and the threading revival
 
 Nothing has yet *needed* Numba; the ranked target is the event-driven
 pump **after Phase 4's** heap-of-(cycle, unit, event) shape — a
@@ -341,7 +295,7 @@ interop), C extension (last resort).
 - *Test:* re-run the 4-Tensix `four/`-derived benchmark with
   `TT_SIM_THREADED=1`; target wall clock **under** sequential.
 
-## 11. Rung-4 calibration
+## 10. Rung-4 calibration
 
 The bar for claiming anything stronger than "first-order estimator":
 match a captured silicon cycle trace within X %. Needs golden traces —
@@ -350,7 +304,7 @@ under `driver/wormhole/server/traces/`. Until then, no in-tree cycle
 count has ever been compared to silicon; say "performance estimator",
 not "cycle-accurate".
 
-## 12. Tracing & observability follow-ups
+## 11. Tracing & observability follow-ups
 
 - **Perf-budget decision**: the ~30 % tracing overhead target is not
   met on RV-bound workloads (counters/Perfetto ~2×, JSONL ~4×) —
@@ -361,7 +315,8 @@ not "cycle-accurate".
   stalled-cycles (the front-end bound makes refused issues real —
   74 on `sfpumath` alone). Still genuinely gated: L1 bank conflicts
   (L1 is flat memory) and NoC `vc` + VC occupancy (no VCs modelled).
-- **Parked spans in the event stream** (handed over by item 1). A core
+- **Parked spans in the event stream** (handed over by the
+  firmware-loop parking work). A core
   the firmware-loop recogniser has parked is not traced, and the tile
   is not stepped while it is dormant, so a skipped cycle publishes no
   `InstrEvent` — which is why parking refuses whenever the bus or a
@@ -381,7 +336,7 @@ not "cycle-accurate".
   L1/DRAM snapshots in state dumps, `SpikeCommitlogWriter` mem-access
   decoration, Jupyter template, NoC heatmap example, Pyright cleanup.
 
-## 13. Functional backlog
+## 12. Functional backlog
 
 Pick up when a kernel or example actually demands it; everything here
 fails loudly today. Grep for `NotImplementedError` in the named files.
@@ -447,7 +402,7 @@ in-tree kernel): `mret`, F single-precision execution, the V vector
 unit (TRISC2), Zfh's BF16 CSR mode, the L1 cache tag search
 accelerator. Wormhole's RV32IM-only set is complete and correct.
 
-## 14. Architectural clarity & quick wins
+## 13. Architectural clarity & quick wins
 
 - Module boundaries per hardware block — `frontend.py` mixes decode
   and dispatch; `tt_noc.py` bundles NIU + both NoCs + directory.
@@ -468,13 +423,17 @@ accelerator. Wormhole's RV32IM-only set is complete and correct.
   a captured trace whether tt-metal writes the `jal`; if not, the
   bridge should synthesise it.
 
-## 15. Parked decisions & re-measurements
+## 14. Parked decisions & re-measurements
 
 - **Wormhole NCRISC/TRISC reset fan-out**: the launch-message
   `enables` path is wired on Blackhole only; decide whether Wormhole
   should use it (needs the WH L1 offset for
   `kernel_config_msg_t.enables`). *Test:* a disabled-BRISC-bit variant
   asserting the core never leaves reset.
+- **Live `vecadd_sharding` measurement of firmware-loop parking**: the
+  landed 3.9× / ~1000× figures use the trace-replay proxy, so the
+  14 s → 255 s figure that motivated the work has never been
+  re-measured end to end.
 - **Watchdog cost A/B on Blackhole**: the original ran before the
   watchdog was wired there, so both arms were watchdog-free.
 - **Re-time the upstream example sweep** before quoting its numbers —
