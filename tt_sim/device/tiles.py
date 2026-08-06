@@ -347,7 +347,10 @@ class EthTile(TTDeviceTile):
         return [self.noc0_router, self.noc1_router, self.erisc]
 
     def next_wake_cycle(self, cycle_num):
-        if self.erisc.soft_active:
+        # A running core needs the next cycle — unless the firmware-loop
+        # recogniser has it parked, in which case its own probe (in the
+        # generic sweep below) decides.
+        if self.erisc.soft_active and not self.erisc.spin_parked:
             return cycle_num + 1
         return TTDeviceTile.next_wake_cycle(self, cycle_num)
 
@@ -707,16 +710,24 @@ class TensixTile(TTDeviceTile):
         ]
 
     def next_wake_cycle(self, cycle_num):
-        # Fast reject first: a tile with any baby core out of soft reset needs
-        # the very next cycle, and five attribute reads settle that. Only when
-        # the whole tile is in reset do we pay for the full sweep over ~20
-        # coprocessor / NoC / TDMA probes.
+        # Fast reject first: a tile with any baby core genuinely running needs
+        # the very next cycle, and a few attribute reads settle that. A core
+        # the firmware-loop recogniser has parked (``spin_parked`` — see
+        # ``tt_sim/pe/rv/spin.py``) is exempt: its own ``next_wake_cycle``
+        # probe in the generic sweep below verifies the watched memory and
+        # decides. ``spin_parked`` is False for any running core, so the
+        # common live-tile path still short-circuits on the first conjunct.
+        brisc = self.brisc
+        ncrisc = self.ncrisc
+        trisc0 = self.trisc0
+        trisc1 = self.trisc1
+        trisc2 = self.trisc2
         if (
-            self.brisc.soft_active
-            or self.ncrisc.soft_active
-            or self.trisc0.soft_active
-            or self.trisc1.soft_active
-            or self.trisc2.soft_active
+            (brisc.soft_active and not brisc.spin_parked)
+            or (ncrisc.soft_active and not ncrisc.spin_parked)
+            or (trisc0.soft_active and not trisc0.spin_parked)
+            or (trisc1.soft_active and not trisc1.spin_parked)
+            or (trisc2.soft_active and not trisc2.spin_parked)
         ):
             return cycle_num + 1
         return TTDeviceTile.next_wake_cycle(self, cycle_num)

@@ -896,6 +896,25 @@ class DeadlockDetector:
             pcs = list(self.recent_pcs[(coord, core.core_type)])
             if not pcs:
                 continue
+            if getattr(core, "spin_parked", False):
+                # The firmware-loop recogniser (tt_sim/pe/rv/spin.py) has this
+                # core parked in a verified pure poll loop, so its PC samples
+                # are frozen at one phase — say what is actually happening
+                # rather than reporting "frozen".
+                spin = core._spin
+                lo = min(int.from_bytes(p, "little") for p, _ in spin.traj)
+                hi = max(int.from_bytes(p, "little") for p, _ in spin.traj)
+                what = (
+                    "polling a value nothing has written"
+                    if spin.loads
+                    else "an idle spin retiring nothing (`j .`-style)"
+                )
+                lines.append(
+                    f"  {'tile=' + str(coord) + ' ' if len(self.tile_cores) > 1 else ''}"
+                    f"{core.core_type.name}: parked in a recognised firmware "
+                    f"wait loop [{hex(lo)}, {hex(hi)}] — {what}"
+                )
+                continue
             pc_lo, pc_hi = min(pcs), max(pcs)
             span = pc_hi - pc_lo
             if span == 0:

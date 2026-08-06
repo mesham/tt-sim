@@ -7,6 +7,12 @@ from tt_sim.pe.rv.isa.b_isa import RV_ZBA_ISA, RV_ZBB_ISA
 from tt_sim.pe.rv.isa.guard_isa import RV_F_GUARD_ISA, RV_V_GUARD_ISA
 from tt_sim.pe.rv.isa.zfh_isa import RV_ZFH_ISA
 from tt_sim.pe.rv.rv32 import RV32IM_TT
+from tt_sim.pe.rv.spin import (
+    SPIN_IDLE,
+    FirmwareSpin,
+    firmware_idle_debug_from_env,
+    firmware_idle_enabled_from_env,
+)
 from tt_sim.pe.tensix.util import TensixConfigurationConstants
 from tt_sim.util.bits import get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
@@ -42,6 +48,12 @@ class BabyRISCVCoreType(IntEnum):
 
 
 class BabyRISCV(RV32IM_TT):
+    #: True while the firmware-loop recogniser has this core parked in a
+    #: verified pure poll loop (see ``tt_sim/pe/rv/spin.py``). Read by the
+    #: tile-level ``next_wake_cycle`` fast reject, so it is a plain class
+    #: attribute that costs nothing until a core actually parks.
+    spin_parked = False
+
     # Reset bit position within ``RISCV_DEBUG_REG_SOFT_RESET_0`` (at offset
     # 0xFFB121B0 in each tile's tile-control region). Each tile has its own
     # register, so ERISC (in eth tiles) reuses bit 11 — the same constant
@@ -117,6 +129,16 @@ class BabyRISCV(RV32IM_TT):
         # cores built outside a device (driver/simple, the ISA unit tests) are
         # never charged. See tt_sim/pe/rv/cost.py.
         self.rv_cost = make_cost_state(arch)
+        # Firmware-loop recognition (``tt_sim/pe/rv/spin.py``): parks a core
+        # spinning in a verified pure poll loop so its tile can go dormant.
+        # ``None`` when killed via TT_SIM_FIRMWARE_IDLE=0.
+        self._spin = (
+            FirmwareSpin(debug=firmware_idle_debug_from_env())
+            if firmware_idle_enabled_from_env()
+            else None
+        )
+        # Bound once: the plain RV32I tick the spin state machine drives.
+        self._base_tick = super().clock_tick
 
     def get_start_address(self):
         """
@@ -239,6 +261,20 @@ class BabyRISCV(RV32IM_TT):
             return False
         return self._read_soft_reset() & self.soft_reset_mask != 0
 
+    def initialise_core(self):
+        super().initialise_core()
+        if self._spin is not None:
+            self._spin.on_reset(self)
+
+    def next_wake_cycle(self, cycle_num):
+        # A parked core is dormant exactly while every byte its loop can
+        # observe still equals the parking snapshot; the check itself unparks
+        # (and answers "next cycle") the moment anything differs, so a stride
+        # can neither begin nor survive a change. See tt_sim/pe/rv/spin.py.
+        if self.spin_parked:
+            return self._spin.wake_check(self, cycle_num)
+        return super().next_wake_cycle(cycle_num)
+
     def clock_tick(self, cycle_num):
         # These cores have a soft reset that they need to check
         is_in_reset = self._read_soft_reset() & self.soft_reset_mask != 0
@@ -247,7 +283,17 @@ class BabyRISCV(RV32IM_TT):
                 # About to be restarted, move into the resetted state
                 self.initialise_core()
                 self.soft_active = True
-            super().clock_tick(cycle_num)
+            spin = self._spin
+            if spin is None:
+                super().clock_tick(cycle_num)
+            elif spin.state == SPIN_IDLE:
+                super().clock_tick(cycle_num)
+                if cycle_num >= spin.next_attempt:
+                    spin.checkpoint(self, cycle_num)
+            else:
+                spin.tick(self, cycle_num)
         else:
             if self.soft_active:
                 self.soft_active = False
+                if self._spin is not None:
+                    self._spin.on_reset(self)

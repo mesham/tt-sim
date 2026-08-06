@@ -140,8 +140,35 @@ def _spin_across_a_bucket_boundary():
 
 
 @DEVICES
-def test_fires_on_a_spinning_wedge_that_straddles_a_pc_bucket(capsys, device_class):
-    """The live-spin case: a core looping, not frozen, and getting nowhere."""
+def test_fires_on_a_spinning_wedge_that_straddles_a_pc_bucket(
+    capsys, device_class, monkeypatch
+):
+    """The live-spin case: a core looping, not frozen, and getting nowhere.
+
+    With firmware-loop recognition on (the default), the pure spin is parked
+    and the report names the recognised wait loop — the watchdog must still
+    fire (an idled spinning core may not hide a genuine deadlock), it just
+    says what is actually happening. The un-parked footprint machinery is
+    pinned separately below with the kill switch set. Recognition is
+    suppressed under TT_SIM_COST_MODEL, so pin the default environment.
+    """
+    monkeypatch.delenv("TT_SIM_COST_MODEL", raising=False)
+    device, coord, _detector = _device_with_watchdog(device_class)
+    _launch_brisc(device, coord, _spin_across_a_bucket_boundary())
+
+    device.run(6 * THRESHOLD)
+
+    err = capsys.readouterr().err
+    assert "[DEADLOCK" in err, err
+    assert "BRISC: parked in a recognised firmware wait loop [0x38, 0x44]" in err, err
+
+
+@DEVICES
+def test_spinning_wedge_still_reported_with_firmware_idle_off(
+    capsys, device_class, monkeypatch
+):
+    """The pre-recognition footprint signature, pinned under the kill switch."""
+    monkeypatch.setenv("TT_SIM_FIRMWARE_IDLE", "0")
     device, coord, _detector = _device_with_watchdog(device_class)
     _launch_brisc(device, coord, _spin_across_a_bucket_boundary())
 
@@ -171,7 +198,27 @@ def test_quiet_on_a_tight_loop_that_is_making_progress(capsys, device_class):
 
 
 @DEVICES
-def test_fires_on_a_wedged_device(capsys, device_class):
+def test_fires_on_a_wedged_device(capsys, device_class, monkeypatch):
+    # A `j .` is a pure 1-tick loop, so firmware-loop recognition (default on)
+    # parks it and the report names the recognised loop rather than "frozen".
+    # Recognition is suppressed under TT_SIM_COST_MODEL; pin the default env.
+    monkeypatch.delenv("TT_SIM_COST_MODEL", raising=False)
+    device, coord, _detector = _device_with_watchdog(device_class)
+    _launch_brisc(device, coord, WEDGE)
+
+    device.run(THRESHOLD + 4 * _CONFIRM_TICKS)
+
+    err = capsys.readouterr().err
+    assert "[DEADLOCK" in err, err
+    assert "BRISC: parked in a recognised firmware wait loop [0x0, 0x0]" in err, err
+    assert "TT_SIM_DEADLOCK=0" in err
+
+
+@DEVICES
+def test_fires_on_a_wedged_device_with_firmware_idle_off(
+    capsys, device_class, monkeypatch
+):
+    monkeypatch.setenv("TT_SIM_FIRMWARE_IDLE", "0")
     device, coord, _detector = _device_with_watchdog(device_class)
     _launch_brisc(device, coord, WEDGE)
 

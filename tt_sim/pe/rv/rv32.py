@@ -157,6 +157,11 @@ class RV32I(ProcessingElement):
             self.visible_memory = memory_spaces[0]
         else:
             self.visible_memory = VisibleMemory.merge(*memory_spaces)
+        # What the ISA executors are handed as their memory. Normally the
+        # visible memory itself; the firmware-loop recogniser (BabyRISCV,
+        # ``tt_sim/pe/rv/spin.py``) swaps in a recording proxy for the few
+        # ticks of a detection attempt. One attribute read on the hot path.
+        self._exec_memory = self.visible_memory
 
     def print_snoop(self, pc, nextpc, actioned):
         addr = pc.read_uint()
@@ -210,8 +215,9 @@ class RV32I(ProcessingElement):
 
         actioned = False
         pe_stall = False
+        exec_memory = self._exec_memory
         for isa in self.isas:
-            actioned = isa.run(register_file, self.visible_memory, self.snoop, instr)
+            actioned = isa.run(register_file, exec_memory, self.snoop, instr)
             pe_stall = actioned == ProcessingElement.PEStall
             if actioned or pe_stall:
                 break
