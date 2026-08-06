@@ -330,7 +330,7 @@ class TT_Device(Device):
         stay dormant on the strength of a pre-reset quiescence decision.
         """
         for tile in self.tile_directory.values():
-            tile.clock.awake = True
+            tile.clock.wake()
         super().reset(reset_number)
 
     def shutdown(self):
@@ -351,13 +351,13 @@ class TT_Device(Device):
         # dormant tile (see ``TileClock``). Reads are woken too: they are rare
         # relative to cycles, and it removes any need to reason about which
         # MMIO reads have side effects.
-        tile.clock.awake = True
+        tile.clock.wake()
         return tile.read(address, size)
 
     def write(self, coordinate_pair, address, value, size=None):
         assert coordinate_pair in self.tile_directory
         tile = self.tile_directory[coordinate_pair]
-        tile.clock.awake = True
+        tile.clock.wake()
         tile.write(address, value, size)
 
     def deassert_soft_reset(self, coordinate_pair=None, core_type=None):
@@ -386,7 +386,7 @@ class TT_Device(Device):
         scoped variant.
         """
         tile = self.tile_directory[coordinate_pair]
-        tile.clock.awake = True
+        tile.clock.wake()
         for core in tile.get_resets():
             core.reset()
 

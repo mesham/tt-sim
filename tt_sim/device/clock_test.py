@@ -359,3 +359,87 @@ def test_a_fully_dormant_device_is_still_visited_for_the_watchdog(monkeypatch):
     device.run(1_000_000)
 
     assert device.clocks[0].stride_skipped_cycles == 1_000_000 - 1
+
+
+def test_a_second_quiescent_window_costs_no_ticks_at_all(monkeypatch):
+    """The ``cycles_per_poll`` term: a pump call on a device that cannot advance.
+
+    The wire bridge pumps after *every* host message, and a DMA readback is
+    thousands of messages during which the grid is parked in its firmware wait
+    loop. The first such window still ticks its opening cycle (that is where
+    the horizon comes from); every window after it is skipped whole, so the
+    cost stops scaling with either the poll budget or the number of
+    materialised tiles.
+    """
+    monkeypatch.setenv("TT_SIM_PUMP_STRIDE", "1")
+    monkeypatch.setenv("TT_SIM_DEADLOCK", "0")
+    device = _blackhole_with_tensix()
+    pump = device.clocks[0]
+
+    device.run(100)
+    assert pump.quiescent_until == float("inf")
+    ticked_before = [
+        tile.clock.clock_tick_num - tile.clock.dormant_cycles
+        for tile in device.tile_directory.values()
+    ]
+
+    device.run(100)
+
+    assert pump.clock_tick_num == 200
+    assert pump.stride_skipped_cycles == 200 - 1  # only the very first cycle
+    for tile, before in zip(device.tile_directory.values(), ticked_before):
+        assert tile.clock.clock_tick_num == 200
+        # ...and the accounting invariant still adds up to every cycle.
+        assert tile.clock.dormant_cycles == 200 - 1
+        assert tile.clock.clock_tick_num - tile.clock.dormant_cycles == before
+
+
+def test_a_wake_invalidates_the_cached_quiescence_horizon(monkeypatch):
+    """A host access to any tile puts the next window back on the slow path."""
+    monkeypatch.setenv("TT_SIM_PUMP_STRIDE", "1")
+    monkeypatch.setenv("TT_SIM_DEADLOCK", "0")
+    device = _blackhole_with_tensix()
+    pump = device.clocks[0]
+    device.run(100)
+    assert pump.quiescent_until is not None
+
+    device.read(TENSIX_COORD, WALL_CLOCK_L_ADDR, 4)
+
+    assert pump.quiescent_until is None
+    device.run(100)
+    # The woken tile got its cycle; nothing was skipped over on its behalf.
+    assert device.tile_directory[TENSIX_COORD].clock.dormant_cycles == 200 - 2
+
+
+def test_no_module_wakes_a_tile_clock_by_assigning_the_flag():
+    """``TileClock.wake`` is the only way to wake a tile, and it is checkable.
+
+    ``MultiTileClock`` caches "nothing can happen before cycle N" across
+    ``run`` calls and ``wake()`` is what invalidates it, so setting a tile
+    clock's ``awake`` flag directly anywhere in the tree would leave the pump
+    free to skip the very window the waker wanted simulated. The plan doc
+    (``docs/plans/event-driven-pump.md``, "Wake-hook completeness") calls this
+    a claim about the whole tree rather than a local one; this makes it a
+    checked one.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    # Assignment *through another object* — ``self.awake = ...`` inside a class
+    # that implements the flag (``TileClock``, or a stub standing in for one)
+    # is the implementation, not a wake.
+    pattern = re.compile(r"(?<!\bself)\.awake\s*=\s*(\S+)")
+    offenders = []
+    sources = [p for d in ("tt_sim", "driver") for p in (root / d).rglob("*.py")]
+    for path in sorted(sources):
+        if path.name == "clock.py" and path.parent.name == "device":
+            continue  # the implementation itself
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            match = pattern.search(line)
+            if match is not None and match.group(1) != "False":
+                offenders.append(f"{path.relative_to(root)}:{lineno}: {line.strip()}")
+    assert not offenders, (
+        "wake a tile clock with TileClock.wake(), not by assigning .awake:\n"
+        + "\n".join(offenders)
+    )

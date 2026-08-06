@@ -261,11 +261,27 @@ All are read from the environment and work in this tt-metal-driven flow.
 | --- | --- |
 | `TT_SIM_LOG_PROTOCOL=1` | print every wire message (READ/WRITE/RESET) to stderr |
 | `TT_SIM_RECORD=<file>` | record every wire message **and READ reply data** to `<file>` (text) |
-| `TT_SIM_CYCLES_PER_POLL=N` | sim cycles to run after each wire message (default 100) |
+| `TT_SIM_CYCLES_PER_POLL=N` | sim cycles to run after each wire message (default 100) — leave it alone; see below |
 | `TT_SIM_MOCK_TENSIX=1` | skip building the Wormhole; every core is a NullCore (fast, for wire-level debugging only) |
 | `TT_SIM_PUMP_STRIDE=0` | disable the pump's time-skipping (on by default) — see below |
 | `TT_SIM_COST_MODEL=1` | charge each op the cycle cost the ISA-doc tables give it (off by default) — see below |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS=1` | accept NoC transfers whose source and destination addresses are not congruent, which hardware treats as undefined behaviour |
+
+`TT_SIM_CYCLES_PER_POLL=N` is how many simulated cycles the device advances
+after each host message — the simulator's stand-in for "the host waited a
+while before polling again". **The default of 100 is the right value at every
+grid width; do not lower it.** Older notes here and in
+[`docs/upstream-examples-status.md`](upstream-examples-status.md) told you to
+set `=10` on wide grids, because the pump used to cost real time per message
+per materialised tile even when nothing on the device could advance. Firmware
+loop parking (a worker spinning on a go-message poll is recognised and parked)
+and the pump's quiescent-window skip have between them removed that cost: at
+the full Wormhole 8×10 grid, `programming_examples/vecadd_multi_core` now
+passes in ~80 s at the default and measures the same at `=10`. Lowering it
+only buys the device less time per message, which at the small end starts
+breaking runs outright — the simulator misses the window a kernel needed and
+the host reads a half-written buffer. Raise it if you want; that is only ever
+"the host waited longer".
 
 `TT_SIM_PUMP_STRIDE=0` turns off the event-driven pump's ability to jump
 straight to the next cycle any tile actually needs, making it tick every cycle

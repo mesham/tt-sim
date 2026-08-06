@@ -1,3 +1,4 @@
+import math
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -120,7 +121,7 @@ class TileClock(Clock):
     Waking is *pushed* by the only three things that can act on a dormant
     tile from outside: a NoC message landing in one of its NIUs
     (``NUI.transmit``), a host read/write through ``TT_Device``, and a reset.
-    Each sets :attr:`awake` directly.
+    Each calls :meth:`wake`.
 
     Falling asleep is a *pull*, evaluated **after** the tick so the decision
     is made against post-tick state. Phase 4 replaced the boolean
@@ -139,6 +140,14 @@ class TileClock(Clock):
     ``wake()`` only ever sets ``awake``, so a wake racing a dormancy decision
     (a NoC ``transmit`` from a tile ticked later in the same cycle) always
     wins over an armed deadline.
+
+    **Wake through :meth:`wake`, never by assigning ``awake``.** The owning
+    :class:`MultiTileClock` caches "nothing on this device needs attention
+    before cycle N" between ``run`` calls, and ``wake()`` is what invalidates
+    that cache. A bare ``clock.awake = True`` would set the flag and leave the
+    stale cache in place, so the pump could skip the very window the waker
+    wanted simulated. ``clock_test.py`` asserts no such assignment exists
+    outside this module.
     """
 
     def __init__(
@@ -175,11 +184,16 @@ class TileClock(Clock):
 
     def wake(self):
         self.awake = True
+        pump = self.pump
+        if pump is not None:
+            # The device is no longer known-quiescent; see
+            # ``MultiTileClock.quiescent_until``.
+            pump.quiescent_until = None
 
     def reset(self):
         super().reset()
-        self.awake = True
         self.wake_at = None
+        self.wake()
 
     def next_event_cycle(self, cycle):
         """Earliest cycle after ``cycle`` at which this clock must run again.
@@ -279,6 +293,18 @@ class MultiTileClock(Clock):
     ``next_event_cycle`` does, so the pump cannot jump past a cycle it asked
     for. The deadlock watchdog is the one in-tree user; see
     ``tt_sim/device/deadlock.py``.
+
+    **Quiescent windows (the ``cycles_per_poll`` term).** Striding removes the
+    *per-cycle* cost of a sleeping grid but not the *per-call* one: the loop
+    below still ticks the window's first cycle and then probes every tile for
+    a deadline, so a wire bridge that pumps after every host message pays
+    O(tiles) for each message even when the device provably cannot advance —
+    which is the whole of a host DMA readback, thousands of messages long, at
+    whatever grid width the program declared. :attr:`quiescent_until` closes
+    that: the horizon computed by the last stride is remembered, and a ``run``
+    that ends before it skips the window outright. Simulated time still
+    advances by exactly ``num_iterations``; what is skipped is a set of cycles
+    in which every tile had already declared nothing can happen.
     """
 
     def __init__(self, on_tick=None, *, force_sequential=False, stride=None):
@@ -304,6 +330,12 @@ class MultiTileClock(Clock):
         self._stride_safe = True
         #: Cycles the pump jumped over rather than ticking — diagnostics only.
         self.stride_skipped_cycles = 0
+        #: Earliest cycle at which *anything* on the device needs a tick, as
+        #: computed by the last strided run; ``math.inf`` when nothing does and
+        #: ``None`` for "unknown", the conservative answer that simply declines
+        #: the fast path. Invalidated by :meth:`TileClock.wake` — the single
+        #: funnel every external stimulus goes through.
+        self.quiescent_until = None
         #: The cycle currently being simulated; between ``run`` calls this is
         #: ``clock_tick_num`` (i.e. one past the last cycle executed). Read
         #: lazily by ``TensixTileControl`` for the wall-clock registers.
@@ -341,13 +373,20 @@ class MultiTileClock(Clock):
             )
         self._tile_clocks.append(tile_clock)
         tile_clock.pump = self
-        if getattr(tile_clock, "always_items", None) or not hasattr(
-            tile_clock, "next_event_cycle"
+        # A new tile starts awake, so no cached horizon survives it. Matters:
+        # the wire bridge materialises workers lazily, mid-run.
+        self.quiescent_until = None
+        if (
+            getattr(tile_clock, "always_items", None)
+            or getattr(tile_clock, "on_tick", None) is not None
+            or not hasattr(tile_clock, "next_event_cycle")
         ):
             # An always-list is "tick me on literally every cycle", which is
-            # the one thing striding cannot honour. Phase 2 emptied the only
-            # in-tree always-list (the wall clock is read lazily now), so this
-            # is a guard for out-of-tree tiles rather than a live path.
+            # the one thing striding cannot honour; a per-tile ``on_tick``
+            # says the same in a different way. Phase 2 emptied the only
+            # in-tree always-list (the wall clock is read lazily now) and no
+            # in-tree tile clock carries an ``on_tick``, so this is a guard for
+            # out-of-tree tiles rather than a live path.
             self._stride_safe = False
         if heavy:
             self._heavy_tile_clocks.append(tile_clock)
@@ -370,6 +409,7 @@ class MultiTileClock(Clock):
 
     def clock_tick(self, cycle):
         self.current_cycle = cycle
+        self.quiescent_until = None
         for tile_clock in self._tile_clocks:
             tile_clock.clock_tick(cycle)
         if self.on_tick is not None:
@@ -378,6 +418,7 @@ class MultiTileClock(Clock):
     def reset(self):
         super().reset()
         self.current_cycle = 0
+        self.quiescent_until = None
         for tile_clock in self._tile_clocks:
             tile_clock.clock_tick_num = 0
 
@@ -390,13 +431,43 @@ class MultiTileClock(Clock):
             or self._heavy_clock_count <= 1
         ):
             if self._striding_enabled and self._stride_safe:
-                self._run_strided(num_iterations)
+                horizon = self.quiescent_until
+                if (
+                    horizon is not None
+                    and horizon >= self.clock_tick_num + num_iterations
+                ):
+                    self._skip_quiescent_window(num_iterations)
+                else:
+                    self._run_strided(num_iterations)
             else:
                 self._run_sequential(num_iterations)
             return
         self._run_threaded(num_iterations)
 
+    def _skip_quiescent_window(self, num_iterations):
+        """Advance a window in which nothing on the device can happen.
+
+        Only reachable with a live :attr:`quiescent_until` covering the whole
+        window, i.e. every tile clock and the ``on_tick`` consumer already said
+        they need no attention before its end and nothing has woken since. The
+        state this leaves behind is exactly what ``_run_strided`` would have
+        left: the same simulated time, the same ``dormant_cycles`` credit, and
+        one more skipped cycle (the window's first, which the strided loop
+        ticks unconditionally and which is by construction a no-op here).
+
+        The horizon survives untouched — no tick means nothing can have
+        changed — so a readback's thousandth message is as cheap as its first.
+        """
+        end = self.clock_tick_num + num_iterations
+        self.stride_skipped_cycles += num_iterations
+        for tile_clock in self._tile_clocks:
+            tile_clock.dormant_cycles += num_iterations
+            tile_clock.clock_tick_num = end
+        self.clock_tick_num = end
+        self.current_cycle = end
+
     def _run_sequential(self, num_iterations):
+        self.quiescent_until = None
         for i in range(num_iterations):
             cycle = i + self.clock_tick_num
             self.current_cycle = cycle
@@ -428,6 +499,17 @@ class MultiTileClock(Clock):
         the "still busy" direction only costs a stride, never correctness, so
         the fast path may read a stale ``awake``; the exact pass below re-reads
         it and so sees a wake pushed by a tile ticked later in the same cycle.
+
+        The tick pass walks *every* registered tile in registration order, not
+        just the ones that need the cycle: order is observable (a tile ticked
+        early can wake one ticked later, and that one then runs in the same
+        cycle), so the list may not be filtered down. What it can skip is the
+        *call*: a tile with no deadline and nothing awake does exactly one
+        thing inside ``clock_tick`` — credit a dormant cycle — so that is done
+        inline here instead, which is the difference between a method call and
+        three attribute accesses per sleeping tile per cycle. ``_stride_safe``
+        already guarantees the two side effects that would make the inline form
+        wrong (``always_items``, a per-tile ``on_tick``) are absent.
         """
         tile_clocks = self._tile_clocks
         fast_reject = self._heavy_tile_clocks
@@ -435,13 +517,25 @@ class MultiTileClock(Clock):
         on_tick_wake = self.on_tick_wake
         cycle = self.clock_tick_num
         end = cycle + num_iterations
+        # Earliest cycle >= end at which something needs attention, when the
+        # window ended on a stride that reached it (so nothing has ticked
+        # since and the answer still holds). None = not known.
+        horizon = None
         while cycle < end:
             self.current_cycle = cycle
             for tile_clock in tile_clocks:
-                tile_clock.clock_tick(cycle)
+                if tile_clock.awake:
+                    tile_clock.clock_tick(cycle)
+                else:
+                    wake_at = tile_clock.wake_at
+                    if wake_at is not None and wake_at <= cycle:
+                        tile_clock.clock_tick(cycle)
+                    else:
+                        tile_clock.dormant_cycles += 1
             if on_tick is not None:
                 on_tick(cycle)
             nxt = cycle + 1
+            horizon = None
             if nxt < end:
                 may_stride = True
                 for tile_clock in fast_reject:
@@ -449,21 +543,29 @@ class MultiTileClock(Clock):
                         may_stride = False
                         break
                 if may_stride:
-                    # Earliest cycle any tile needs attention again, clamped
-                    # to the window. next_event_cycle never returns <= cycle,
-                    # so this always makes progress.
-                    nxt = end
+                    # Earliest cycle any tile needs attention again.
+                    # next_event_cycle never returns <= cycle, so this always
+                    # makes progress; ``inf`` means "nobody, ever, unless
+                    # somebody acts on the device".
+                    when_any = math.inf
                     for tile_clock in tile_clocks:
                         when = tile_clock.next_event_cycle(cycle)
-                        if when is not None and when < nxt:
-                            nxt = when
+                        if when is not None and when < when_any:
+                            when_any = when
                     if on_tick_wake is not None:
                         # An on_tick consumer that must be sampled on a cycle
                         # of its own choosing, even when every tile is dormant
                         # and there would otherwise be nothing to stop at.
                         when = on_tick_wake(cycle)
-                        if when is not None and when < nxt:
-                            nxt = when
+                        if when is not None and when < when_any:
+                            when_any = when
+                    if when_any >= end:
+                        # The stride runs out the window: what it computed is
+                        # still true at ``end``, so it is worth remembering.
+                        nxt = end
+                        horizon = when_any
+                    else:
+                        nxt = when_any
                     skipped = nxt - cycle - 1
                     if skipped > 0:
                         self.stride_skipped_cycles += skipped
@@ -475,8 +577,10 @@ class MultiTileClock(Clock):
         self.current_cycle = end
         for tile_clock in tile_clocks:
             tile_clock.clock_tick_num = end
+        self.quiescent_until = horizon
 
     def _run_threaded(self, num_iterations):
+        self.quiescent_until = None
         if not self._workers_started:
             self._start_workers()
         n_workers = len(self._heavy_tile_clocks)

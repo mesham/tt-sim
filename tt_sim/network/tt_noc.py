@@ -1570,13 +1570,13 @@ class NUI(MemMapable, Clockable):
                         self.next_arrival = arrival
                 owner = self.clock_owner
                 if owner is not None:
-                    owner.awake = True
+                    owner.wake()
                 return
         with self._inbox_lock:
             self.noc_new_requests_to_handle.append(data_request)
         owner = self.clock_owner
         if owner is not None:
-            owner.awake = True
+            owner.wake()
 
     def _current_cycle(self):
         """The cycle being simulated, or ``None`` for an unclocked NIU.

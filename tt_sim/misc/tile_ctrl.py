@@ -84,7 +84,7 @@ class TensixTileControl(MemMapable, Clockable):
         if addr == 0x1B0:
             self.RISCV_DEBUG_REG_SOFT_RESET_0 = value
             if self.clock_owner is not None:
-                self.clock_owner.awake = True
+                self.clock_owner.wake()
         elif addr == 0x1F0:
             # RISCV_DEBUG_REG_WALL_CLOCK_L
             self.counter_high_at = self.cycle_num >> 32

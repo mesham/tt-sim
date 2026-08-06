@@ -650,7 +650,7 @@ A few server-level env vars also apply (defined in
 | --- | --- |
 | `TT_SIM_RECORD=<path>` | Record every wire message to a file for later replay. |
 | `TT_SIM_LOG_PROTOCOL=1` | Print every wire message to stderr. |
-| `TT_SIM_CYCLES_PER_POLL=N` | Cycles to run after each wire message (default 100). Tighten for more deterministic state dumps; loosen for faster runs. |
+| `TT_SIM_CYCLES_PER_POLL=N` | Cycles to run after each wire message (default 100). Tighten for more deterministic state dumps. Lowering it no longer buys wall clock at any grid width — see the last round of this document. |
 
 These compose with the trace env vars too.
 
@@ -2491,4 +2491,194 @@ cp -a /tmp/ab/base /tmp/ab/base2    # any signal here is harness bias
 
 # hit rate (deterministic, load-independent): wrap MemoryMap.locate and
 # classify each call as cached / full-lookup / miss.
+```
+
+# What landed: the `TT_SIM_CYCLES_PER_POLL` term — a pump that costs nothing when nothing can happen
+
+**Measured 2026-08-06** against `fd4e806`, machine as elsewhere in this
+document (12th Gen Core i7-12700H, 16 threads, CPython 3.12, `TT_SIM_THREADED`
+unset). This is the ROADMAP's "smarter `TT_SIM_CYCLES_PER_POLL` default" item.
+**The default did not change, and the reason is the first result below.**
+
+## Measure first: the premise was stale
+
+The item's evidence was `programming_examples/vecadd_multi_core` on Wormhole at
+the full 8x10 grid — "17 minutes on the kernel and still in the DRAM readback
+60 minutes later" at the default poll of 100 — and the standing advice
+everywhere was to set `TT_SIM_CYCLES_PER_POLL=10` by hand. That observation
+predates firmware-loop parking. Re-run, same program, same 80 workers, same
+machine, no grid override:
+
+| | wall | result |
+|---|---|---|
+| default poll (100) | **105.6 s** | PASS, "all results match expected values within tolerance" |
+| `TT_SIM_CYCLES_PER_POLL=10` | 82.7 s | PASS |
+
+which looks like a 22 % gap until the two are *instrumented*, at which point
+the gap disappears (81.0 s at 100, 79.7 s at 10 — and instrumentation only
+ever makes a run slower). The instrumentation says why:
+
+| | poll=100 | poll=10 |
+|---|---|---|
+| pump calls | 2,961 | 3,349 |
+| ...of which fully dormant | 2,545 (**0.48 s total**) | 2,509 (0.44 s) |
+| ...of which live | 416 (70.9 s) | 840 (68.5 s) |
+| tile ticks | 3,179,034 | 1,112,208 |
+| **live tile ticks** | **483,351** | **482,320** |
+
+The simulator does the *same real work* either way, to within 0.2 %. The whole
+of the poll knob's effect is how many *dormant* tile visits it buys, and those
+are 0.5 s of an 81 s run. 105.6 vs 82.7 was machine drift, which is the third
+time this document has recorded that lesson. **The hour-long readback was
+killed by firmware-loop parking** (`tt_sim/pe/rv/spin.py`), exactly as the
+2026-08-03 prediction in `docs/upstream-examples-status.md` said it would be:
+a worker spinning on a go-message poll now parks, so the post-kernel grid is
+genuinely dormant and the readback pumps into a device that strides.
+
+What is left at 8x10 is 483 k live tile ticks at ~147 µs each. That is the
+cost of a live Tensix tile, not of the pump, and it is now ROADMAP item 4.
+
+## What changed anyway: the per-*call* cost
+
+Phase 4 striding removed the pump's per-*cycle* cost on a sleeping grid; it
+left the per-*call* one, which is what the wire bridge pays. `run()` ticks the
+window's opening cycle over every registered tile clock and then probes every
+tile for a deadline, so a host DMA readback — thousands of messages into a
+parked grid — cost O(tiles) per message whatever the poll budget. Two changes
+in `tt_sim/device/clock.py`, both cycle-neutral by construction:
+
+- **`MultiTileClock.quiescent_until`** — the stride already computes "earliest
+  cycle anything needs attention"; it is now kept rather than discarded, and a
+  later `run` that ends before it skips the window whole: no ticks, no probes,
+  same simulated time, same `dormant_cycles` credit. Nothing ticked means
+  nothing changed, so the horizon survives its own use.
+- **The dormant tick is inlined.** The tick pass still walks every tile in
+  registration order — order is observable, since a tile ticked early can wake
+  one ticked later, which then runs in the same cycle — but a tile with
+  nothing awake and no due deadline does exactly one thing inside
+  `clock_tick`, credit a dormant cycle, so the pump does that itself instead
+  of paying for the call.
+
+`TileClock.wake()` invalidates the horizon, so the six sites that assigned
+`clock.awake = True` directly now call it, and `clock_test.py` scans the tree
+for any other assignment — turning the plan doc's "wake-hook completeness"
+risk from a claim into a test.
+
+## Cycle-neutrality, checked rather than argued
+
+Every guard on both architectures, run under a shim that records the pump's
+final `clock_tick_num`, the number of *live* tile ticks, `stride_skipped_cycles`
+and summed `dormant_cycles` — with the watchdog at its default **and** with
+`TT_SIM_DEADLOCK=0`, since the watchdog's sampling cadence is what bounds a
+stride:
+
+```
+diff base.txt head.txt  ->  no differences, 4 runs of 44 guards
+```
+
+**No guard's simulated cycle total moved, and neither did its tick
+accounting.** That is stronger than "the values still match": the two trees
+tick the same components on the same cycles. It also proves something about
+the first change — `stride_skipped_cycles` is identical, so
+`quiescent_until`'s fast path fires **zero times on any in-tree guard**. It
+cannot: every wire message addresses a tile and therefore wakes it, and a woken
+tile genuinely needs the cycle. It is kept because it makes "the pump does
+nothing when nothing can advance" true by construction rather than by
+measurement, and because it is what makes *raising* the knob free; it is not
+where the guard-visible saving comes from.
+
+## The A/B
+
+Two frozen trees: `git archive fd4e806` as base, this worktree as head,
+alternating order every round, paired within round.
+
+Pump microbenchmarks — per `run(100)` call on Blackhole, `TT_SIM_DEADLOCK=0`,
+7 rounds, medians (µs):
+
+| tiles | shape | base | head | factor | base spread / head spread |
+|---|---|---|---|---|---|
+| 1 | quiescent | 4.7 | 1.9 | 2.5× | [2.4–7.6] / [1.1–2.2] |
+| 20 | quiescent | 13.0 | 2.5 | 5.2× | [11.6–26.9] / [2.2–4.4] |
+| 80 | quiescent | 58.7 | **6.1** | **9.6×** | [33.2–66.8] / [5.8–11.6] |
+| 1 | readback | 8.8 | 6.4 | 1.4× | [5.2–13.3] / [4.1–6.9] |
+| 20 | readback | 20.4 | 12.9 | 1.6× | [15.6–30.4] / [10.5–26.6] |
+| 80 | readback | 40.8 | **30.5** | 1.3× | [38.1–78.1] / [28.1–56.1] |
+| 1 | kernel | 1774 | 1249 | 1.4× | [1298–2097] / [981–2296] |
+| 20 | kernel | 2185 | 1802 | 1.2× | [1832–3048] / [1438–2502] |
+| 80 | kernel | 4382 | **2398** | **1.8×** | [3417–4657] / [2203–3314] |
+
+*quiescent* = nothing poked; *readback* = one DRAM tile woken then pumped (a
+host DMA page read); *kernel* = one permanently-live Tensix tile among N
+(the host polling a go message). The shape is the point: the quiescent cost is
+now nearly flat in grid width where it was linear, and the marginal cost of a
+materialised-but-sleeping tile per pumped cycle falls ~3×.
+
+End to end, 7 rounds, medians (s):
+
+| workload | base | head | delta | base spread / head spread |
+|---|---|---|---|---|
+| **control** (`pytest tt_sim/util tt_sim/memory`, no pump at all) | 1.14 | 1.19 | +4.4 % | [0.99–1.29] / [1.06–1.40] |
+| `blackhole/pad_multi_core` (2048 interleaved DRAM page reads) | 18.59 | 18.22 | −2.0 % | [16.94–20.67] / [15.08–19.03] |
+| `blackhole/six` (matmul) | 7.01 | 6.94 | −1.0 % | [6.35–9.37] / [6.15–9.97] |
+| `wormhole/examples` | 14.29 | 14.53 | +1.7 % | [13.53–23.38] / [14.15–20.04] |
+| `blackhole/vecadd_sharding` (4 workers) | 3.71 | 3.58 | −3.4 % | [3.14–5.05] / [3.32–4.39] |
+
+**Honest reading: nothing here is signal.** The verified-zero control moved
++4.4 %, which is larger than three of the four real deltas, so the noise floor
+on this machine swallows the whole effect. That is expected and is the point
+of the first section: at 4–8 materialised tiles the per-message-per-tile term
+is single-digit microseconds against seconds of real work. The change pays at
+grid width, which the microbenchmarks isolate and which only a live wide-grid
+run exercises:
+
+| live workload | rounds | base median (s) | head median (s) | delta | head wins |
+|---|---|---|---|---|---|
+| `vecadd_multi_core`, Wormhole **8x10 = 80 workers**, default poll | 6 | 81.75 | 80.28 | −1.8 % | 3/6 |
+| control, same rounds | 6 | 1.19 | 1.24 | +4.5 % | 2/6 |
+
+**Also a null, and that is the honest headline.** Each arm threw exactly one
+105 s outlier out of six — which is the same drift that produced the 105.6 vs
+82.7 "22 % gap" at the top of this round, now caught symmetrically by
+interleaving. At 80 workers the pump is ~1 s of an 80 s run whichever tree you
+use; the other 71 s is 483 k ticks of live Tensix tiles.
+
+So: the change is a **structural** fix, not a wall-clock one. It removes the
+last term that scaled with grid width × poll budget — provably, in the
+microbenchmarks, and with every guard's cycle accounting byte-identical — and
+what it exposes underneath is that the pump was no longer the problem.
+
+## Gates
+
+`pytest tt_sim/ driver/` **1074 passed** (1071 + 3 new) with the model off and
+again with `TT_SIM_COST_MODEL=1`; **30/30** Blackhole replay guards standalone;
+`driver/tests/cost_model_gate.py --jobs 4` **PASS** over 44 discovered guards
+with **no poll-budget multiplier change** (`dramtop` 1×, `two` 2×, `offline`
+4×, identical to base); `ruff check` / `ruff format` clean.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+git archive fd4e806 | tar -x -C /tmp/ab/base     # frozen base
+
+# the premise check — the exact configuration the roadmap item cited
+cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
+WH80=$(python3 -c "print(','.join(f'{x}-{y}' for y in [1,2,3,4,5,7,8,9,10,11] \
+                             for x in [1,2,3,4,6,7,8,9]))")
+TT_METAL_SIMULATOR=~/tt-sim/driver/wormhole TT_METAL_SLOW_DISPATCH_MODE=1 \
+TT_SIM_TENSIX_COORDS=$WH80 ./metal_example_vecadd_multi_core   # no grid override
+
+# where its time goes: a sitecustomize.py on PYTHONPATH that wraps
+# MultiTileClock.run (timing each call, bucketing by whether the window strided
+# to its end) and TileClock.clock_tick (counting live vs dormant visits).
+
+# cycle neutrality: same shim, dump clock_tick_num / live ticks /
+# stride_skipped_cycles / summed dormant_cycles per guard, diff base vs head.
+# Run it twice, with the watchdog on and with TT_SIM_DEADLOCK=0.
+
+# pump microbenchmark: build a Blackhole with N Tensix tiles, run(300) to
+# settle, then time run(100) in three shapes — untouched, with one DRAM tile
+# read first, and with one tile's wake_probe pinned to cycle+1. Alternate
+# trees every round. Poke tiles with clock.wake(), never clock.awake = True,
+# or the benchmark measures the fast path instead of the workload.
 ```
