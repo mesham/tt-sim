@@ -328,6 +328,13 @@ def write_profile_report(profile: dict, hotspots) -> None:
                 "role": entry.role,
                 "path": str(entry.path),
                 "how": entry.how,
+                # The PCs in ``hotspots.json`` are the addresses the core
+                # actually executed. ``bias`` is what tt-metal added to this
+                # ELF's link addresses to get there, so ``pc - bias`` indexes
+                # back into the ELF. It is recorded as a number, not only
+                # inside the ``how`` prose, because a consumer converting
+                # addresses must not have to parse English.
+                "bias": int(entry.bias),
             }
             if entry.how == REJECTED:
                 # Positively identified as the wrong ELF; loading it would put
@@ -347,6 +354,13 @@ def write_profile_report(profile: dict, hotspots) -> None:
         table = hotspots.resolve(index) if hotspots is not None else None
         payload = report_mod.hotspots_to_dict(table) if table is not None else {}
         if payload:
+            # Provenance travels with the table, not only in profile.json. A
+            # hotspot table is identical in shape whether every name on it was
+            # byte-verified against the device or guessed by mtime from some
+            # other kernel's build, and a consumer reading this file alone
+            # would have no way to tell. ``how`` per unit is that way.
+            payload["elfs"] = elf_meta
+            payload["cost_model"] = cost_model_enabled()
             (directory / "hotspots.json").write_text(json.dumps(payload, indent=2))
 
         notes = [found.note] if found.note else []
@@ -358,6 +372,11 @@ def write_profile_report(profile: dict, hotspots) -> None:
             "elfs": elf_meta,
             "notes": notes,
             "elf_roots": found.roots,
+            # Where the counter dataset actually landed. Usually
+            # ``<dir>/counters``, but ``TT_SIM_TRACE_COUNTERS`` overrides it,
+            # and without this the documented ``python3 -m tt_sim.trace.report
+            # <dir>`` re-render silently produces a report with no counters.
+            "counters": str(profile.get("counters") or ""),
         }
         (directory / "profile.json").write_text(json.dumps(meta, indent=2))
 

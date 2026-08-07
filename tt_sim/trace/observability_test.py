@@ -602,3 +602,193 @@ def test_the_bus_stays_free_when_the_stall_category_is_off():
     bus.publish(StallEvent(cycle=1, unit_id=CORE, reason="mutex_wait"))
     assert seen == []
     assert not bus.is_enabled(EventCategory.STALL)
+
+
+# ---------------------------------------------------------------------------
+# The published schema contract (docs/trace-schema.md)
+# ---------------------------------------------------------------------------
+#
+# These pin what ``docs/trace-schema.md`` promises external consumers. The
+# compiler team builds tooling against those names, so from v4 onwards a
+# rename or a removal is a breaking change and must come with a
+# ``SCHEMA_VERSION`` bump. A test that fails when a documented field is
+# renamed is worth more than a paragraph asking people to be careful.
+
+#: Field names per event class, exactly as documented. Adding a field with a
+#: default is additive and safe -- list it here in the same commit. Renaming or
+#: removing one is breaking: bump ``Event.SCHEMA_VERSION`` and say so in
+#: ``docs/trace-schema.md``.
+DOCUMENTED_FIELDS = {
+    "InstrEvent": {
+        "cycle",
+        "unit_id",
+        "pc",
+        "instruction",
+        "stalled",
+        "reg_write_idx",
+        "reg_write_value",
+        "stall_cycles",
+        "stall_reason",
+    },
+    "DispatchEvent": {"cycle", "unit_id", "opcode", "target_unit", "thread_id"},
+    "NoCEvent": {
+        "cycle",
+        "unit_id",
+        "phase",
+        "txn_type",
+        "src",
+        "dst",
+        "size_bytes",
+        "txn_id",
+        "issue_cycle",
+    },
+    "LifecycleEvent": {"cycle", "unit_id", "kind", "detail"},
+    "MemEvent": {"cycle", "unit_id", "op", "address", "size", "region", "pc"},
+    "ComputeEvent": {
+        "cycle",
+        "unit_id",
+        "op",
+        "target_unit",
+        "thread_id",
+        "detail",
+        "duration",
+    },
+    "SyncEvent": {"cycle", "unit_id", "kind", "detail"},
+    "CounterSnapshot": {"cycle", "unit_id", "counter_name", "value", "kernel_id"},
+    "StallEvent": {
+        "cycle",
+        "unit_id",
+        "reason",
+        "blocked_on",
+        "cycles",
+        "opcode",
+        "thread_id",
+        "semaphore",
+    },
+}
+
+
+def test_every_documented_event_field_is_still_there():
+    """Field *names* are the frozen half of the contract -- cycle *values* are
+    not, and move with each cost-model instalment by design. A rename here
+    breaks every consumer silently, because a missing key reads as a null."""
+    import dataclasses
+
+    from tt_sim.trace import events as events_mod
+
+    for name, expected in DOCUMENTED_FIELDS.items():
+        cls = getattr(events_mod, name)
+        actual = {f.name for f in dataclasses.fields(cls)}
+        assert actual == expected, (
+            f"{name}: documented {sorted(expected)}, found {sorted(actual)}. "
+            "Adding a field is additive — list it above. Renaming or removing "
+            "one is breaking: bump SCHEMA_VERSION and update "
+            "docs/trace-schema.md."
+        )
+
+
+def test_every_event_class_is_documented():
+    """A new event kind that nobody wrote down is the failure this catches."""
+    from tt_sim.trace import events as events_mod
+
+    published = {
+        cls.__name__
+        for cls in vars(events_mod).values()
+        if isinstance(cls, type) and issubclass(cls, Event) and cls is not Event
+    }
+    assert published == set(DOCUMENTED_FIELDS)
+
+
+def test_the_parquet_counter_columns_are_frozen(tmp_path):
+    """The counter dataset's column names are what every canned query and every
+    downstream notebook is written against."""
+    import glob
+
+    from tt_sim.trace.writers.parquet import ParquetCounterWriter
+
+    bus = EventBus()
+    bus.enabled = True
+    writer = ParquetCounterWriter(tmp_path, bus=bus)
+    bus.publish(
+        CounterSnapshot(cycle=100, unit_id=CORE, counter_name="instr_retired", value=7)
+    )
+    writer.close()
+    files = glob.glob(str(tmp_path / "**" / "*.parquet"), recursive=True)
+    row = pq.ParquetDataset(files).read().to_pylist()[0]
+    assert set(row) == {
+        "cycle",
+        "chip",
+        "kernel_id",
+        "core_y",
+        "core_x",
+        "unit",
+        "counter_name",
+        "value",
+    }
+
+
+def test_the_three_unit_vocabularies_stay_in_sync():
+    """``unit_id[3]``, ``ComputeEvent.target_unit`` and
+    ``DispatchEvent.target_unit`` name the same backend three different ways,
+    and a consumer joining on the wrong one gets an empty result rather than an
+    error. The alias table is the documented translation, so it has to track
+    the code that produces the other two spellings."""
+    import ast
+    import inspect
+    from pathlib import Path
+
+    import yaml
+
+    from tt_sim.pe.tensix.backends import (
+        config,
+        matrix,
+        misc,
+        mover,
+        packer,
+        sync,
+        thcon,
+        unpacker,
+        vector,
+    )
+    from tt_sim.trace.events import BACKEND_UNIT_ALIASES, Unit
+
+    # Left column: every key is a real ``Unit`` enum value.
+    for unit in BACKEND_UNIT_ALIASES:
+        assert unit in {u.value for u in Unit}, unit
+
+    # Middle column: the backend classes' own ``unit_name`` strings, read out
+    # of their ``super().__init__(..., "<name>")`` calls.
+    names = set()
+    for module in (config, matrix, misc, mover, packer, sync, thcon, unpacker, vector):
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "attr", None) == "__init__"
+                and node.args
+                and isinstance(node.args[-1], ast.Constant)
+                and isinstance(node.args[-1].value, str)
+            ):
+                names.add(node.args[-1].value)
+    documented = {alias for alias, _ in BACKEND_UNIT_ALIASES.values()}
+    assert names == documented, (
+        f"backend unit_name strings {sorted(names)} != documented "
+        f"{sorted(documented)} — update BACKEND_UNIT_ALIASES and "
+        "docs/trace-schema.md"
+    )
+
+    # Right column: every alias is a real ``ex_resource`` in the ISA tables.
+    spec = yaml.safe_load(
+        (
+            Path(inspect.getfile(matrix)).parent.parent / "tensix_instructions.yaml"
+        ).read_text()
+    )
+    entries = spec.values() if isinstance(spec, dict) else spec
+    resources = {
+        entry["ex_resource"]
+        for entry in entries
+        if isinstance(entry, dict) and "ex_resource" in entry
+    }
+    for unit, (_, ex_resource) in BACKEND_UNIT_ALIASES.items():
+        assert ex_resource in resources, (
+            f"{unit} -> ex_resource {ex_resource!r} is not in tensix_instructions.yaml"
+        )

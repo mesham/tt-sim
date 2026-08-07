@@ -127,6 +127,12 @@ the same.
 
 ---
 
+> **Building a tool against these outputs rather than reading them
+> yourself?** This document tells you how to *produce* each output;
+> [`docs/trace-schema.md`](../../../docs/trace-schema.md) is the stable,
+> versioned contract for *consuming* them — every field's meaning, unit
+> and stability, and the traps that produce confidently wrong numbers.
+
 ## 0. The one-shot answer — `TT_SIM_PROFILE`
 
 **Start here.** If the question is "where did my kernel's cycles go",
@@ -3007,4 +3013,258 @@ TT_SIM_TENSIX_COORDS=$WH80 ./metal_example_vecadd_multi_core
 # tick count is identical between arms by construction, so it is a
 # like-for-like cost per unit of simulator work with the host, the build and
 # the trace parse taken out.
+```
+
+# What landed: the one place Numba is the right tool — the exact FPU kernel
+
+**Measured 2026-08-07** against `cc0a72e`, machine as elsewhere in this
+document (12th Gen Core i7-12700H, 16 threads, CPython 3.12.13,
+`TT_SIM_THREADED` unset unless stated). This is ROADMAP Tier 3 item 7, "Numba
+and the threading revival".
+
+## The item ranked three candidates. Measuring them re-ranks them completely
+
+The item's ranked target is the pump's event heap; a later profile argued for
+the RV interpreter instead. Both were measured first, undistorted, with a
+`perf_counter` shim rather than cProfile (wrapping only a handful of functions,
+so the ~0.2 us it adds lands on functions costing tens to hundreds of us):
+
+| | `blackhole/six` (matmul) | `blackhole/vecadd_sharding` |
+| --- | --- | --- |
+| process wall | 7.87 s | 3.80 s |
+| **pump overhead** (`MultiTileClock.run` − Σ tile ticks) | **0.070 s (0.9 %)** | **0.059 s (1.6 %)** |
+| RV interpretation (`BabyRISCV.clock_tick` ×5) | 1.44 s (18 %) | 1.64 s (43 %) |
+| `perform_mvmul` | **4.41 s (56 %)** | — |
+| — of which the two `_fpu_*_batch` calls | **2.71 s (34 %)** | — |
+| `handle_elwadd` | — | 0.21 s (5.5 %) |
+| `handle_pacr` | 0.23 s (3 %) | 0.24 s (6.3 %) |
+
+**The item's ranked target is the smallest thing on the list by a factor of
+forty.** The heap is 0.9–1.6 % of a run; the 6 % the item quotes is the whole
+of `TileClock.clock_tick`'s own dispatch over 27 clockables, which is a
+different thing and is declined in `docs/plans/event-driven-pump.md` anyway.
+No JIT can be worth a dependency for 1 %.
+
+**The largest single item in the tree is one nobody had ranked**: the exact FPU
+datapath, and specifically the two already-*numpy* methods
+`_fpu_group_sums_batch` / `_fpu_accumulate_batch`. They are a third of a matmul
+guard. They are slow *because* they are numpy: one MVMUL is a 16-lane reduction
+over at most 16 SrcB rows by 16 Dst columns — 2048 elements — and roughly fifty
+numpy operations each allocate and traverse a fresh 16 KB temporary to do
+2048 elements of integer arithmetic. Microbenchmarked at the shapes `six`
+actually issues (srcA `(16,1,16)`, srcB `(16,8,1)`, Dst `(8,16)`):
+
+```
+group_sums_batch   232 us      accumulate_batch   302 us      -> 534 us per MVMUL
+```
+
+That is 260 ns per output element for ~50 integer ops. The arithmetic is not
+the cost; the temporaries are. This is the one shape in the tree that Numba is
+actually *for*.
+
+## Is `RV32I.clock_tick` a JIT target? No — but not for the reason given
+
+The item says "a polymorphic `clock_tick` over 240 objects is not a JIT
+target"; the later profile countered that `RV32I.clock_tick` plus the `i_isa`
+handlers now are one. **Both are wrong in their reasoning and the conclusion
+still holds.** It is not polymorphism, and it is not call overhead — an
+`@njit` boundary crossing measures **~450 ns**, against ~11 us for one
+`BabyRISCV.clock_tick`, so a per-instruction JIT would lose only ~4 % to the
+boundary.
+
+The blocker is that the interpreter's hot path is *inseparable from Python
+object graphs*. Loads and stores go through `MemorySpace`/`MemoryMap` dispatch;
+registers are `Register` objects over `bytes`; `.ttinsn` pushes onto the Tensix
+queue; the cost model and the event bus hang off the same path. `nopython` mode
+can see none of it. Making it compilable means re-expressing the memory map,
+the register file and the tile's state as flat arrays — which is not an
+optimisation but a different simulator, and one whose whole selling point
+("poke at simulator state from a driver script") is gone. The item already
+lists `MemoryMap` dispatch as Numba-hostile; the RV interpreter is Numba-hostile
+*through* it. That is the durable reason, and it does not expire when the
+interpreter gets faster.
+
+## What changed
+
+Two new files and a seam, all optional:
+
+- **`tt_sim/pe/tensix/backends/fpu_jit_kernel.py`** — `mvmul_fused`, one
+  `@njit(cache=True, nogil=True)` loop nest that is a line-by-line
+  transliteration of the two batched methods with the numpy operations replaced
+  by scalar arithmetic over the same indices. Fusing them also removes the
+  `(2, rows, columns)` group-sum arrays entirely; every intermediate stays in a
+  register and Dst is written once. **534 us -> 46 us, 13.3x.**
+- **`tt_sim/pe/tensix/backends/fpu_jit.py`** — the guard. Importing the kernel
+  *is* the numba dependency, which is why it is a separate module: `fpu_jit`
+  imports it lazily inside a `try`, and returns `None` for ever on any failure.
+  `perform_mvmul_exact` then runs the numpy pair exactly as before.
+- **`matrix.py`** keeps both paths side by side; int64 is forced at the
+  boundary, because the kernel compiles for whatever width it is handed and
+  every bound in the two docstrings assumes 64.
+
+**Numba is not a dependency and the default tree does not use it.** Compiling
+costs ~3.7 s cold and ~0.5 s per process from numba's on-disk cache, which is
+pure loss on a workload with a handful of MVMULs — so the compile is deferred
+until 512 have run, and a run that issues none never imports numba at all.
+`TT_SIM_NUMBA=1`/`=0` forces or forbids it.
+
+## Bit-exactness, which is the whole contract
+
+The kernel is an accelerator, never a second source of truth.
+`fpu_accumulate_test.py` already pinned the numpy pair against the scalar port
+of ttsim's C; it now fuzzes the compiled kernel against the numpy pair over
+**300 random cases** covering both fidelity-phase bits, both Dst widths, both
+settings of the Wormhole -1 renormalisation quirk, broadcast and per-row SrcB,
+every row count 1..16, and exponent distributions with and without zeros. All
+exact. The chain therefore reaches ttsim.
+
+Differentially, `optests/diff.sh reduce` (GAPOOL, i.e. the same
+`perform_mvmul_exact` and the same fused kernel) **matches ttsim** with the jit
+forced on. The matmul optests could not be run: `matmulblock` and `matmulidx`
+fail to compile against the current tt-metal with `'SrcOrder' has not been
+declared` / `'matmul_block_init' was not declared in this scope` — **verified
+pre-existing**, identical on a frozen `cc0a72e` tree, and worth fixing
+separately since it removes MVMUL from the differential net.
+
+## Cycle-neutrality, checked rather than argued
+
+All **44 discovered guards** on both architectures, under a shim recording the
+pump's final `clock_tick_num`, its `stride_skipped_cycles`, every tile clock's
+tick number, the summed `dormant_cycles`, the live tile-tick count, and a
+blake2b checksum over the per-dispatch `(cycle, instruction, thread, backend)`
+stream — so a reordering that leaves the totals alone still shows. Run for
+`cc0a72e` and for this tree with the jit off, at the default threshold, and
+forced on, each with the cost model off and on:
+
+```
+base vs head(jit off)         ->  no differences      (and again, model on)
+base vs head(default)         ->  no differences      (and again, model on)
+base vs head(jit forced on)   ->  no differences      (and again, model on)
+```
+
+The shim's own determinism was checked first, against a byte-identical second
+copy of `cc0a72e` — which caught a real bug in it (the checksum had included
+`id(self)`, a memory address) before any conclusion rested on it. Under the
+model, `blackhole/offline` and `blackhole/two` fail in *both* trees, which is
+the documented budget-dependent pair.
+
+## The A/B
+
+Four arms: `base` and `ctrl` are byte-identical frozen `cc0a72e` trees (`ctrl`
+is the verified-zero control), `head_off` is this tree with the jit disabled,
+`head_on` with it forced on. Order alternated every round, paired within round,
+in-process pump CPU time (`time.process_time` around `MultiTileClock.run`), on
+a box polled to load1 < 0.5.
+
+`blackhole/six` (matmul), 16 rounds, medians:
+
+| arm | median | spread | vs base |
+| --- | --- | --- | --- |
+| base | 5.270 s | 31.9 % | — |
+| **ctrl** | 5.195 s | 18.8 % | **−1.43 %** |
+| head_off | 5.271 s | 30.3 % | +0.02 % |
+| **head_on** | **4.012 s** | 31.8 % | **−23.88 %** |
+
+`blackhole/vecadd_sharding` (no MVMUL), 14 rounds — the null that proves the
+lazy import never fires:
+
+| arm | median | vs base |
+| --- | --- | --- |
+| base | 2.182 s | — |
+| ctrl | 2.124 s | −2.66 % |
+| head_off | 2.196 s | +0.60 % |
+| head_on | 2.176 s | **−0.29 %** |
+
+An earlier 10-round run of the same matmul A/B put the control at **+10.0 %**
+and was discarded unreported, which is what a control is for. End-to-end wall
+on `six` for scale: 5.98–6.60 s with the jit off, 4.79–5.00 s warm, and
+**8.41 s on the very first run on a machine**, where the cold compile is paid.
+
+## The item's own test: threading, and why it is now further from passing
+
+> re-run the 4-Tensix `four/`-derived benchmark with `TT_SIM_THREADED=1`;
+> target wall clock **under** sequential.
+
+`blackhole/vecadd_sharding` is the in-tree 4-Tensix guard. 10 interleaved
+rounds, end-to-end wall, medians:
+
+| | sequential | threaded | |
+| --- | --- | --- | --- |
+| jit off | 3.013 s | 16.765 s | **5.56x slower** |
+| jit on | 3.086 s | 16.655 s | **5.40x slower** |
+
+**Fails, and by more than the 1.56–2.4x the roadmap records.** The reason is
+structural and is new since that number was taken — threading defeats the
+event-driven pump. Same guard, same fingerprint shim:
+
+```
+sequential: clock_tick_num=14300  stride_skipped=5887   live_tile_ticks=29921
+threaded:   clock_tick_num=14300  stride_skipped=0      live_tile_ticks=29921
+```
+
+The threaded pump cannot stride *at all*: it executes every one of the 14,300
+cycles behind a 12-thread barrier where the sequential pump skips 5,887 of them
+(41 %) outright. Identical `live_tile_ticks` and `summed_dormant` confirm the
+same work is done either way. **Every improvement to the sequential pump makes
+threading look worse**, which is why this regression has grown rather than
+shrunk, and any revival has to answer "how does a threaded pump stride" before
+anything else.
+
+`nogil` itself works, and it is still not enough. Running the fused kernel from
+N threads (it holds no Python objects, so it drops the GIL for its whole run):
+
+| threads | 1 | 2 | 4 | 8 |
+| --- | --- | --- | --- | --- |
+| `njit(nogil=True)` fused kernel | 1.00x | **1.68x** | 0.80x | 0.74x |
+| numpy pair (default path) | 1.00x | 0.55x | 0.23x | 0.21x |
+
+So nogil buys ~1.7x on this one kernel at two threads and then collapses, the
+boundary crossing being the serialisation point; the numpy pair actively
+anti-scales. Against a 5.4x pump regression, on a workload where ~70 % of
+matmul time is one unit on one tile, there is no arithmetic that turns this
+into a win. **No free-threaded interpreter is needed to reach that conclusion**
+— the ceiling is the pump and the workload, not the GIL.
+
+## Gates
+
+`pytest tt_sim/ driver/` **1113 passed** with the model off and again with
+`TT_SIM_COST_MODEL=1`; **1112 passed, 1 skipped** for both of those with numba
+made *unimportable* by a `meta_path` blocker (the skip is the jit fuzz);
+**30/30** Blackhole replay guards standalone, with and without numba;
+`driver/tests/cost_model_gate.py --jobs 4` **RESULT: PASS**, exit 0, over 44
+guards, both with and without numba, with no poll-budget multiplier change
+(`dramtop` 1x, `two` 2x, `offline` 4x); `ruff check` / `ruff format --check`
+clean.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+git archive cc0a72e | tar -x -C /tmp/ab/base
+git archive cc0a72e | tar -x -C /tmp/ab/ctrl      # the verified-zero control
+
+# candidate ceilings: a sitecustomize.py wrapping MultiTileClock.run,
+# TileClock.clock_tick, BabyRISCV.clock_tick, perform_mvmul, the two
+# _fpu_*_batch methods, handle_elwadd and handle_pacr with perf_counter, and
+# dumping totals at exit. Prefer this to cProfile here -- cProfile's ~1.4x on
+# this workload lands unevenly on numpy-heavy vs call-heavy code and would
+# have mis-ranked the FPU kernel against the interpreter.
+
+# the njit boundary cost that settles the RV-interpreter question: time an
+# @njit(lambda a,b: a+b) call against a pure-Python one-ALU-op body.
+
+# cycle neutrality: per guard, dump clock_tick_num / stride_skipped_cycles /
+# summed dormant_cycles / per-tile tick numbers / live tile ticks / a blake2b
+# over (cycle, instruction, thread, backend-ordinal) per issueInstruction.
+# Assign the backend ordinal by first-seen order -- id() is an address and
+# makes the checksum non-deterministic. Verify the shim against two copies of
+# the SAME commit before trusting any diff it produces.
+
+# the A/B: four arms (base, ctrl, head jit-off, head jit-on), alternate order
+# every round, pair within round, in-process pump CPU time. Discard the round
+# set outright if ctrl moves more than a few percent -- it did once here.
+
+# threading: TT_SIM_THREADED=1 vs unset on driver/blackhole/server/
+# vecadd_sharding_replay_test (the 4-Tensix guard), end-to-end wall, and read
+# stride_skipped_cycles in both to see where the time goes.
 ```

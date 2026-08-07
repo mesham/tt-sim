@@ -48,6 +48,33 @@ class Unit(Enum):
     UNKNOWN = "UNKNOWN"
 
 
+#: The same Tensix backend unit is named three different ways in the trace,
+#: and the three vocabularies are **not** interchangeable -- ``SFPU`` is
+#: ``Vector`` is ``SFPU``, but ``MATRIX`` is ``Matrix`` is ``MATH``. Joining
+#: two datasets on the wrong one silently returns nothing.
+#:
+#: ``{Unit enum value: (ComputeEvent.target_unit, DispatchEvent.target_unit)}``
+#: where the second element is also :attr:`StallEvent.blocked_on`. The keys
+#: are what appears in ``unit_id[3]`` and in the Parquet ``unit`` column, and
+#: are the canonical join key; the aliases exist because the middle column is
+#: the backend class's own ``unit_name`` and the right-hand one is the ISA's
+#: ``ex_resource``, which the instruction tables are keyed by.
+#:
+#: ``ex_resource`` has one value with no unit behind it, ``NONE`` -- an
+#: instruction the wait gate accounts for but dispatches to no backend.
+BACKEND_UNIT_ALIASES = {
+    "MATRIX": ("Matrix", "MATH"),
+    "SFPU": ("Vector", "SFPU"),
+    "PACKER": ("Packer", "PACK"),
+    "UNPACKER": ("Unpacker", "UNPACK"),
+    "THCON": ("Scalar", "THCON"),
+    "CFG": ("Config", "CFG"),
+    "SYNC": ("Sync", "SYNC"),
+    "TDMA": ("Misc", "TDMA"),
+    "MOVER": ("Mover", "XMOV"),
+}
+
+
 #: Every reason a :class:`StallEvent` may carry, frozen so a consumer can
 #: switch on the set exhaustively and a typo cannot silently mint a new one.
 #:
@@ -94,9 +121,16 @@ STALL_REASONS = frozenset(
         #: observed its expected value.
         "atomic_pending",
         # -- backend issue refusal -------------------------------------------
-        #: The target unit (or its IPC group) is still occupied by a multi-cycle
-        #: instruction. Cost-model state: never fires with TT_SIM_COST_MODEL
-        #: unset, because nothing arms an occupancy then.
+        #: The target unit (or its IPC group) is still occupied and cannot take
+        #: another instruction. Almost always cost-model state -- an occupancy
+        #: is what ``busy_until`` arms, and nothing arms one with
+        #: TT_SIM_COST_MODEL unset. The one exception is real and measured: the
+        #: config unit's own single-issue throughput rule (a SETC16/WRCFG in
+        #: the previous cycle blocks this cycle's other-opcode issue,
+        #: ``backends/config.py``) is structural, not an occupancy, and refuses
+        #: under this reason in **both** regimes. So a small
+        #: ``tensix_stall_unit_busy`` on an un-modelled run is correct, and it
+        #: is always blamed on ``CFG``.
         "unit_busy",
         #: The target unit's issue slot was already taken this cycle, by another
         #: thread or by this one's own earlier instruction.
@@ -247,9 +281,11 @@ class StallEvent(Event):
     published bound at its low end (``docs/plans/cost-model.md``); it is
     corroborated against silicon but never calibrated to it. Read the
     *attribution* -- which reason dominates, and which unit -- rather than the
-    absolute figure. With ``TT_SIM_COST_MODEL`` unset the ``unit_busy`` reason
-    cannot occur at all, because nothing arms an occupancy; the other reasons
-    are structural and occur in both regimes.
+    absolute figure. Every reason is structural and occurs in both timing
+    regimes; ``unit_busy`` is the one that mostly does not, because an
+    occupancy is what the cost model arms -- but see its note in
+    :data:`STALL_REASONS` for the config unit's structural exception, which
+    does fire with ``TT_SIM_COST_MODEL`` unset.
     """
 
     CATEGORY: ClassVar[EventCategory] = EventCategory.STALL

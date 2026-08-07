@@ -8,6 +8,12 @@ Event Format for visual timelines on `ui.perfetto.dev`. Later phases
 add Spike commitlog, Parquet counters, Cachegrind, and LCOV writers
 as additional consumers of the same bus. tt-sim does not build viewers.
 
+> **Consuming a trace rather than extending the simulator?** Read
+> [`docs/trace-schema.md`](../../docs/trace-schema.md) instead. That is
+> the stable, versioned contract — every field's meaning, unit and
+> stability, plus the traps — written so you never have to open this
+> directory. This file is the implementer's guide.
+
 All seven phases of [ROADMAP §H](../../ROADMAP.md) are complete (event
 bus, Perfetto, Spike-compatible commitlog, Parquet/DuckDB counters, NoC
 Parquet + Cachegrind memory trace, LCOV source-level attribution,
@@ -608,9 +614,17 @@ op. `0` is "the tables have no opinion" — the model is off, the unit is
 unwired (unpacker, config, mover, misc), or the opcode is uncosted. A
 consumer must not read `0` as one cycle.
 
-Both `unit_id` and `target_unit` carry the same architectural unit
-information — `unit_id` is the canonical join key, `target_unit` is the
-human-readable form. Consumers can use either.
+`unit_id` and `target_unit` name the same architectural unit **in two
+different vocabularies, and they are not interchangeable.** `unit_id[3]`
+is the `Unit` enum (`MATRIX`, `SFPU`, `PACKER`, …); `target_unit` here is
+the backend class's own `unit_name` (`Matrix`, `Vector`, `Packer`, …) —
+and `DispatchEvent.target_unit` / `StallEvent.blocked_on` are a *third*,
+the ISA's `ex_resource` (`MATH`, `SFPU`, `PACK`, …). `SFPU` is `Vector`
+is `SFPU`; `MATRIX` is `Matrix` is `MATH`. Join on `unit_id`, which is
+the canonical key, and translate with
+`tt_sim.trace.BACKEND_UNIT_ALIASES` — a join on the wrong one returns
+nothing rather than failing. Full table in
+[`docs/trace-schema.md`](../../docs/trace-schema.md).
 
 ### `SyncEvent` (category `sync`)
 
@@ -667,15 +681,22 @@ name is a mechanism the model actually knows:
 | `backend_enforced_stall` | A backend unit asserted the gate's stall directly. |
 | `src_reserved_by_unpacker` | Matrix-unit op waiting for a Src bank the unpackers still own. |
 | `src_reserved_by_matrix` | Unpacker / ThCon waiting for a Src bank the matrix unit still owns. |
-| `unit_busy` | Target unit (or its IPC group) still occupied. **Cost-model only.** |
+| `unit_busy` | Target unit (or its IPC group) still occupied. **Mostly cost-model state** — see below. |
 | `issue_slot_taken` | Target unit's issue slot already taken this cycle. |
 | `issue_yield_fairness` | Slot yielded to a less-recently-granted thread. |
 | `flush_pending` | Scalar unit mid-`FLUSHDMA`, waiting for the DMA units to drain. |
 | `atomic_pending` | Scalar unit retrying an `ATCAS`. |
 
-**Regime.** `unit_busy` cannot occur with `TT_SIM_COST_MODEL` unset —
-nothing arms an occupancy then, so its absence is truthful rather than
-missing. Every other reason is structural and occurs in both regimes.
+**Regime.** Every reason is structural and occurs in both regimes.
+`unit_busy` is *nearly* the exception — an occupancy is what the cost
+model arms, so with `TT_SIM_COST_MODEL` unset almost nothing can report
+it. Not quite nothing: the config unit's own single-issue throughput
+rule (a `SETC16`/`WRCFG` in the previous cycle blocks this cycle's
+other-opcode issue, `backends/config.py`) is a structural refusal that
+also carries this reason. Measured on the Blackhole `sfpumath` guard,
+an un-modelled run reports `tensix_stall_unit_busy` = 6 cycles, all
+blamed on `CFG`; the modelled run reports 84 across `CFG` and the rest.
+Do not assert that this counter is absent without the cost model.
 
 **These are modelled floors, not calibrated cycle counts.** The
 simulator charges every published bound at its low end

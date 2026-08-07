@@ -3,6 +3,7 @@ from tt_sim.trace.bus import EventBus, get_bus
 from tt_sim.trace.counters import CounterAggregator
 from tt_sim.trace.dwarf import DwarfIndex, SourceLoc
 from tt_sim.trace.events import (
+    BACKEND_UNIT_ALIASES,
     STALL_REASONS,
     ComputeEvent,
     CounterSnapshot,
@@ -39,6 +40,7 @@ from tt_sim.trace.writers.parquet import ParquetCounterWriter
 from tt_sim.trace.writers.perfetto import PerfettoWriter
 
 __all__ = [
+    "BACKEND_UNIT_ALIASES",
     "DEFAULT_INVARIANTS",
     "STALL_REASONS",
     "ComputeEvent",

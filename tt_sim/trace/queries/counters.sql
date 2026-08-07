@@ -68,19 +68,24 @@ ORDER  BY bytes DESC;
 -- 5) Where the RISC-V time went: stall cycles per core, split by reason.
 --    Rows only exist with TT_SIM_COST_MODEL set -- with the model off no
 --    instruction can stall, so an empty result is the correct answer and
---    not a missing measurement.
+--    not a missing measurement. Note SUM(...) FILTER returns NULL when the
+--    counter is absent; do NOT coalesce it to 0, which would turn "no
+--    claim" into "measured zero stalls".
+--
+--    Matched by PATTERN, not by a list of reasons. Stall reasons are an
+--    open set -- a new one appears in this dataset with no code change --
+--    so a query naming them one by one silently drops the newest.
+--    `stall_cycles` is excluded because it is the sum of the per-reason
+--    rows; summing both double-counts every stall.
 -- -----------------------------------------------------------------------
 SELECT  unit,
-        SUM(value) FILTER (WHERE counter_name = 'stall_cycles')       AS stalled,
-        SUM(value) FILTER (WHERE counter_name = 'stall_load_use')     AS load_use,
-        SUM(value) FILTER (WHERE counter_name = 'stall_store_rate')   AS store_rate,
-        SUM(value) FILTER (WHERE counter_name = 'stall_integer_unit') AS integer_unit,
-        SUM(value) FILTER (WHERE counter_name = 'instr_retired')      AS retired
+        REPLACE(counter_name, 'stall_', '') AS reason,
+        SUM(value)                          AS cycles
 FROM    read_parquet('counters/**/*.parquet', hive_partitioning=true)
-WHERE   counter_name IN ('stall_cycles', 'stall_load_use', 'stall_store_rate',
-                         'stall_integer_unit', 'instr_retired')
-GROUP   BY unit
-ORDER   BY stalled DESC NULLS LAST;
+WHERE   counter_name LIKE 'stall\_%' ESCAPE '\'
+  AND   counter_name <> 'stall_cycles'
+GROUP   BY unit, counter_name
+ORDER   BY cycles DESC;
 
 -- -----------------------------------------------------------------------
 -- 6) Tensix backend unit utilisation: modelled occupancy against the
@@ -113,3 +118,37 @@ FROM    read_parquet('counters/**/*.parquet', hive_partitioning=true)
 GROUP   BY unit
 HAVING  txns IS NOT NULL
 ORDER   BY flight DESC;
+
+-- -----------------------------------------------------------------------
+-- 8) Where a Tensix thread's LOST time went, by mechanism -- the
+--    complement of query 6's "where its spent time went".
+--
+--    `tensix_` is a separate namespace from the `stall_` above on purpose:
+--    a Tensix thread publishes under the SAME `unit` as the baby RISC-V
+--    core that feeds it, so the two must never be added together.
+--    `tensix_stall_cycles` (the total) and `tensix_stall_on_<unit>` (the
+--    same cycles re-cut by which unit was to blame) are both excluded --
+--    each restates cycles the per-reason rows already carry.
+-- -----------------------------------------------------------------------
+SELECT  unit,
+        REPLACE(counter_name, 'tensix_stall_', '') AS reason,
+        SUM(value)                                 AS cycles
+FROM    read_parquet('counters/**/*.parquet', hive_partitioning=true)
+WHERE   counter_name LIKE 'tensix\_stall\_%' ESCAPE '\'
+  AND   counter_name NOT IN ('tensix_stall_cycles', 'tensix_stall_episodes')
+  AND   counter_name NOT LIKE 'tensix\_stall\_on\_%' ESCAPE '\'
+GROUP   BY unit, counter_name
+ORDER   BY cycles DESC;
+
+-- -----------------------------------------------------------------------
+-- 9) ...and which UNIT was to blame for it. A partial view: a semaphore
+--    or mutex wait blames no unit, so these cycles sum to LESS than
+--    `tensix_stall_cycles` rather than equalling it.
+-- -----------------------------------------------------------------------
+SELECT  unit                                          AS thread,
+        REPLACE(counter_name, 'tensix_stall_on_', '') AS blocked_on,
+        SUM(value)                                    AS cycles
+FROM    read_parquet('counters/**/*.parquet', hive_partitioning=true)
+WHERE   counter_name LIKE 'tensix\_stall\_on\_%' ESCAPE '\'
+GROUP   BY unit, counter_name
+ORDER   BY cycles DESC;

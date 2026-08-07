@@ -1,5 +1,11 @@
 # Canned queries for tt-sim traces
 
+Column meanings, units and stability guarantees for everything queried
+here are in [`docs/trace-schema.md`](../../../docs/trace-schema.md).
+Read §4.3 ("is it safe to aggregate across units?") and §4.4 ("do not
+sum a total with its parts") before writing a query of your own — they
+are the two ways to get a confidently wrong number out of this dataset.
+
 Two query sets:
 
 - **Perfetto** (below) — SQL run in the **Query (SQL)** tab of

@@ -302,6 +302,66 @@ def test_stall_cycles_is_not_double_counted():
     assert [c.counter for c in contributions] == ["stall_load_use"]
 
 
+def test_tensix_stall_reasons_are_cycles_not_volumes():
+    """Measured on the Blackhole ``sfpumath`` guard: ``tensix_stall_*`` rows
+    carry cycles. They were being filed under a table headed "Volume counters
+    (not cycles)", which is wrong in the most expensive direction — a reader
+    ranking bottlenecks would never see the largest one."""
+    contributions, volumes = report.classify(
+        {
+            ("2,1 TRISC2", "tensix_stall_semaphore_empty"): 6072,
+            ("2,1 TRISC0", "tensix_stall_src_reserved_by_matrix"): 3913,
+        }
+    )
+    assert volumes == {}
+    ranked = {c.counter: c for c in contributions}
+    assert ranked["tensix_stall_semaphore_empty"].cycles == 6072
+    assert ranked["tensix_stall_semaphore_empty"].kind == "stall"
+    # Described structurally, from the shape of the name, so a reason invented
+    # tomorrow is explained rather than left blank. The vocabulary is open.
+    assert "semaphore_empty" in ranked["tensix_stall_semaphore_empty"].described
+
+
+def test_the_two_redundant_recuts_of_a_tensix_stall_are_not_ranked():
+    """One partition of a thread's lost cycles, three ways of writing it down.
+    ``tensix_stall_<reason>`` is the partition; ``tensix_stall_cycles`` is its
+    total and ``tensix_stall_on_<unit>`` the same cycles re-cut by blame.
+    Ranking all three triples the stall."""
+    contributions, volumes = report.classify(
+        {
+            ("2,1 TRISC0", "tensix_stall_cycles"): 3913,
+            ("2,1 TRISC0", "tensix_stall_src_reserved_by_matrix"): 3913,
+            ("2,1 TRISC0", "tensix_stall_on_MATH"): 3913,
+            ("2,1 TRISC0", "tensix_stall_episodes"): 4,
+        }
+    )
+    assert [c.counter for c in contributions] == ["tensix_stall_src_reserved_by_matrix"]
+    assert sum(c.cycles for c in contributions) == 3913
+    # An episode count is a count, not a duration, however it is spelled.
+    assert volumes == {"tensix_stall_episodes": 4}
+
+
+def test_the_redundancy_rule_is_exported_for_consumers():
+    """The single easiest way to get a wrong total out of the counter dataset
+    is to sum a total alongside the parts it restates, so the rule is a
+    predicate a consumer can call rather than prose they must re-derive."""
+    assert report.is_redundant("stall_cycles")
+    assert report.is_redundant("tensix_stall_cycles")
+    assert report.is_redundant("tensix_stall_on_MATH")
+    assert not report.is_redundant("stall_load_use")
+    assert not report.is_redundant("tensix_stall_semaphore_empty")
+    assert not report.is_redundant("busy_cycles")
+
+    # Cycle-bearing is matched by pattern, never by an enumeration: a stall
+    # reason added anywhere in the tree must rank with no change here.
+    assert report.is_cycle_bearing("stall_a_reason_invented_tomorrow")
+    assert report.is_cycle_bearing("tensix_stall_a_reason_invented_tomorrow")
+    assert report.is_cycle_bearing("some_new_occupancy_cycles")
+    assert report.is_cycle_bearing("instr_retired")
+    assert not report.is_cycle_bearing("noc_bytes_total")
+    assert not report.is_cycle_bearing("tensix_stall_episodes")
+
+
 def test_the_report_states_its_own_framing_and_shows_the_remainder():
     rendered = report.render(
         report.Report(

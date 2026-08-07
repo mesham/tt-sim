@@ -9,14 +9,21 @@ Regenerate at any time without re-running the simulator::
 
     python3 -m tt_sim.trace.report <profile-dir>
 
-**Counters are classified by pattern, not by a list.** Anything named
-``stall_<reason>`` is an RV stall with that reason; anything else ending
-in ``_cycles`` is a cycle-bearing counter and is ranked alongside the
-rest, marked *(discovered)* so a reader can see the report adopted a
-counter it has no prose for. That is deliberate: counters are being
-added to this tree faster than any hardcoded table would survive, and a
-report that silently omitted a new stall reason would be wrong in the
-most expensive direction — it would look complete.
+**Counters are classified by pattern, not by a list.** ``stall_<reason>``
+is an RV stall, ``tensix_stall_<reason>`` a Tensix thread stall, and
+anything else ending in ``_cycles`` a cycle-bearing counter; all are
+ranked, marked *(discovered)* where the report has no prose for them. That
+is deliberate: counters are being added to this tree faster than any
+hardcoded table would survive, and a report that silently omitted a new
+stall reason would be wrong in the most expensive direction — it would
+look complete. :func:`is_cycle_bearing` and :func:`is_redundant` are the
+two rules, exported because every consumer of the dataset needs them.
+
+The redundancy rule is the subtle half. One partition of a thread's lost
+cycles is written down three ways — the per-reason rows, their
+``*_stall_cycles`` total, and (for Tensix) a ``tensix_stall_on_<unit>``
+re-cut by which unit was to blame — and ranking more than one of them
+multiplies the stall.
 
 **Shares are against the run's cycle span and units run concurrently**,
 so per-source shares can and do sum past 100 %. The report says so in
@@ -35,9 +42,52 @@ from pathlib import Path
 
 #: Counters that are cycle-bearing but not named ``*_cycles``.
 _EXTRA_CYCLE_COUNTERS = {"instr_retired"}
-#: ``stall_cycles`` is the sum of the per-reason rows, so counting it too
-#: would double every RV stall.
-_REDUNDANT = {"stall_cycles"}
+#: Totals that restate cycles a per-reason partition already carries.
+#: ``stall_cycles`` is the sum of the ``stall_<reason>`` rows and
+#: ``tensix_stall_cycles`` the sum of the ``tensix_stall_<reason>`` rows, so
+#: ranking either alongside its parts doubles every stall it names.
+_REDUNDANT = {"stall_cycles", "tensix_stall_cycles"}
+#: Counts, not cycles, despite sitting under a stall prefix.
+_STALL_VOLUMES = {"tensix_stall_episodes"}
+
+STALL_PREFIX = "stall_"
+TENSIX_STALL_PREFIX = "tensix_stall_"
+#: ``tensix_stall_on_<unit>`` re-cuts the same cycles as
+#: ``tensix_stall_<reason>``, by the unit blamed rather than the mechanism.
+#: It is a second view of one partition, not extra time, and it is *partial* —
+#: a semaphore or mutex wait blames no unit — so it is neither ranked nor
+#: summed. Query it directly when the question is "which unit held this
+#: thread up".
+_BLAME_PREFIX = "tensix_stall_on_"
+
+
+def is_redundant(counter: str) -> bool:
+    """True for a counter that restates cycles another row already carries.
+
+    Summing a redundant counter alongside the partition it restates is the
+    single easiest way to produce a wrong total from this dataset, so the
+    rule lives here rather than in each consumer.
+    """
+    return counter in _REDUNDANT or counter.startswith(_BLAME_PREFIX)
+
+
+def is_cycle_bearing(counter: str) -> bool:
+    """True when a counter's ``value`` is a count of cycles.
+
+    Pattern-matched, never enumerated: a stall reason added anywhere in the
+    tree is ranked with no change here. The complement is a *volume* counter
+    — bytes, or a number of events — which must never be added to a cycle
+    total.
+    """
+    if counter in _STALL_VOLUMES:
+        return False
+    return (
+        counter.endswith("_cycles")
+        or counter in _EXTRA_CYCLE_COUNTERS
+        or counter.startswith(STALL_PREFIX)
+        or counter.startswith(TENSIX_STALL_PREFIX)
+    )
+
 
 #: Prose for the counters that exist today. A counter missing from here is
 #: still reported — it is just labelled as discovered rather than described.
@@ -50,8 +100,6 @@ _DESCRIPTIONS = {
     "stall_store_rate": "RV sustained-store rate limit",
     "stall_integer_unit": "RV integer-unit latency",
 }
-
-STALL_PREFIX = "stall_"
 
 FRAMING = """\
 > **What these numbers are.** Every cycle below is *modelled*: charged from a
@@ -81,7 +129,9 @@ class Contribution:
 
     @property
     def kind(self) -> str:
-        if self.counter.startswith(STALL_PREFIX):
+        if self.counter.startswith(STALL_PREFIX) or self.counter.startswith(
+            TENSIX_STALL_PREFIX
+        ):
             return "stall"
         return "occupancy"
 
@@ -157,24 +207,25 @@ def classify(
     contributions: list[Contribution] = []
     volumes: dict[str, int] = defaultdict(int)
     for (unit, counter), value in totals.items():
-        if counter in _REDUNDANT or value <= 0:
+        if is_redundant(counter) or value <= 0:
             continue
-        cycle_bearing = (
-            counter.endswith("_cycles")
-            or counter in _EXTRA_CYCLE_COUNTERS
-            or counter.startswith(STALL_PREFIX)
-        )
-        if not cycle_bearing:
+        if not is_cycle_bearing(counter):
             volumes[counter] += value
             continue
         described = _DESCRIPTIONS.get(counter, "")
+        discovered = not described
+        if not described and counter.startswith(TENSIX_STALL_PREFIX):
+            # Structural, not enumerated: the shape of the name is enough to
+            # say what the row is, so a stall reason invented tomorrow is
+            # described rather than left blank.
+            described = f"Tensix thread stall: {counter[len(TENSIX_STALL_PREFIX) :]}"
         contributions.append(
             Contribution(
                 unit=unit,
                 counter=counter,
                 cycles=value,
                 described=described,
-                discovered=not described,
+                discovered=discovered,
             )
         )
     contributions.sort(key=lambda c: (-c.cycles, c.unit, c.counter))
@@ -558,8 +609,14 @@ def main(argv=None) -> int:
     hotspots_path = directory / "hotspots.json"
     hotspots = json.loads(hotspots_path.read_text()) if hotspots_path.exists() else {}
 
+    # The run records where its counters landed, because
+    # ``TT_SIM_TRACE_COUNTERS`` can put them outside the profile directory.
+    # Falling back to the default keeps older profile directories readable.
+    counters = Path(meta.get("counters") or (directory / "counters"))
+    if not counters.is_dir():
+        counters = directory / "counters"
     report = build(
-        directory / "counters",
+        counters,
         hotspots=hotspots,
         elfs=meta.get("elfs"),
         cost_model=meta.get("cost_model"),
