@@ -2682,3 +2682,239 @@ TT_SIM_TENSIX_COORDS=$WH80 ./metal_example_vecadd_multi_core   # no grid overrid
 # trees every round. Poke tiles with clock.wake(), never clock.awake = True,
 # or the benchmark measures the fast path instead of the workload.
 ```
+
+---
+
+# What landed: a cheaper live Tensix tile — the RV front end's dispatch overhead
+
+**Measured 2026-08-07** against `0933ebc`, machine as elsewhere in this
+document (12th Gen Core i7-12700H, 16 threads, CPython 3.12, `TT_SIM_THREADED`
+unset). This is ROADMAP Tier 2 item 2, "a cheaper live Tensix tile".
+
+## The premise held, which is worth recording because the last four did not
+
+The item's numbers — **~150 µs per ticked Tensix tile, and 71 s of an 81 s
+8x10 `vecadd_multi_core` run** — were re-measured first, on the same program
+and the same 80 workers, with a shim wrapping `MultiTileClock.run` and
+`TileClock.clock_tick` (timing the tick only for clocks the pump flagged
+heavy):
+
+| | base `0933ebc` |
+| --- | --- |
+| process wall | 83.2 s |
+| pump (`MultiTileClock.run`) | 73.0 s |
+| **inside live Tensix tile ticks** | **69.8 s (84 %)** |
+| live Tensix tile ticks | 477,571 |
+| **µs per live Tensix tile tick** | **146.2** |
+
+So: unchanged. Everything below is about the 84 %.
+
+## Where a live tile tick actually goes
+
+cProfile inside the server process itself (a `sitecustomize.py` on `PYTHONPATH`
+with an `atexit` dump — py-spy cannot attach here, `ptrace_scope` forbids it),
+same 80-worker run. Shares are of `TileClock.clock_tick`'s 230.4 s cumulative;
+the multiplier onto real time is ~0.34, since cProfile roughly triples this
+workload:
+
+| | cProfile s | share of a tile tick |
+| --- | --- | --- |
+| **baby RISC-V cores** (`BabyRISCV.clock_tick` ×5) | 122.7 | **53 %** |
+| — normal execution (`RV32I.clock_tick`) | 82.4 | 36 % |
+| — a *parked* core re-running its poll loop | 20.7 | 9 % |
+| — SEEK/RECORD/VERIFY attempts | 5.8 | 2.5 % |
+| — soft-reset poll (`_read_soft_reset` ×5) | 6.3 | 2.7 % |
+| **Tensix coprocessor** (19 clockables) | 92.2 | **40 %** |
+| — `handle_elwadd` → 128 scalar FPU ops each | 29.5 | 13 % |
+| — `handle_pacr` → 512 two-byte L1 writes each | 21.8 | 9 % |
+| — unpacker `handle_unpacr` | 3.9 | 1.7 % |
+| — per-tick dispatch and everything else | ~37 | 16 % |
+| `TileClock.clock_tick` itself (27 clockables per tick) | 13.8 | 6 % |
+| NoC routers, dormancy probe | 1.8 | 0.8 % |
+
+**There is no single hotspot.** The largest identifiable item is 13 % and the
+cost is genuinely spread over an interpreter and a datapath. Within the RV
+half, though, a large fraction is *dispatch overhead* rather than simulated
+work, and that is what this round takes out. Per `RV32I.clock_tick`
+(1.76 M of them):
+
+| | cProfile s | note |
+| --- | --- | --- |
+| instruction fetch through `MemorySpace.read` | 20.6 | trace-event check, interval lookup, snoop check, offset conversion, then 4 bytes |
+| `RV_ISA.get_int` field extraction | 6.0 | 5.29 M classmethod calls for a shift and a mask |
+| `extract_immediate` | 4.6 | dispatch on a *format string*, then `sign_extend` |
+| `MemorySpace._publish_mem_event` (all callers) | 6.4 | `get_bus()` + `is_enabled()` per read *and* per write, 3.05 M times, with nothing subscribed |
+
+## What changed
+
+Four changes, no new behaviour, in `tt_sim/memory/memory.py`,
+`tt_sim/pe/rv/rv32.py` and `tt_sim/pe/rv/isa/i_isa.py`:
+
+- **An instruction-fetch fast path.** `RV32I` caches
+  `(low, last, leaf, base)` for the plain-RAM span the PC sits in — the same
+  trick `BabyRISCV._read_soft_reset` already uses for the one *other* access
+  every core makes on every cycle — and reads the word straight out of the
+  leaf. `resolve_plain_ram_span` (new, in `memory.py`, the span-returning
+  sibling of `spin.py`'s `_resolve_plain_ram`) does the resolving; it refuses
+  MMIO, unmapped addresses, spans that cross a mapping boundary and any level
+  with snoop addresses. The hot path re-checks the event bus and the snoop list
+  on **every** fetch, so enabling tracing mid-run puts every core back on the
+  full dispatch within one instruction and a `MemEvent` is never dropped.
+- **`MemorySpace` holds the event bus** instead of calling `get_bus()` inside
+  every read and write, and checks `bus.enabled` inline before entering
+  `_publish_mem_event`. `write` also stopped computing its `hasattr`/`len`
+  event size when nothing is listening. Two `len(...) > 0` snoop tests became
+  truthiness tests on the list.
+- **The `RV_ISA.get_int` calls in `i_isa.py` are inlined** to
+  `(instr >> n) & mask` — 30 sites, mechanically, mask computed from the same
+  bit range.
+- **The immediate decoders are plain module functions** (`_imm_i` … `_imm_j`)
+  instead of a string-dispatched classmethod calling another classmethod.
+  `extract_immediate` remains as the named API and delegates through a dict, so
+  its tests are untouched. Also, `isa.run` is bound once per core at
+  construction rather than rebuilt per ISA per instruction.
+
+Together these remove **1.6 M Python calls from a 9.6 M-call guard** (−17 % on
+`vecadd_sharding`).
+
+## Cycle-neutrality, checked rather than argued
+
+Every one of the 44 discovered guards on both architectures, run under a shim
+recording the pump's final `clock_tick_num`, its `stride_skipped_cycles`, the
+summed `dormant_cycles`, every tile clock's tick number, and the number of
+*live* tile ticks — with the cost model **off** and again with
+`TT_SIM_COST_MODEL=1`:
+
+```
+diff base.txt head.txt        ->  no differences, model off
+diff base_cm.txt head_cm.txt  ->  no differences, model on
+```
+
+(Under the model, `blackhole/offline` and `blackhole/two` produce no accounting
+in *either* tree — they are the budget-dependent guards the cost-model gate
+documents, and they fail identically on both sides.) The live 80-worker
+Wormhole run reports `live_tensix 477571` on both trees, in all four
+instrumented runs, so the wire path agrees with the offline guards.
+
+## The A/B
+
+Two frozen trees plus a **verified-zero control** — `git archive 0933ebc`
+extracted twice, `base` and `ctrl` — with `head` this worktree; order
+alternated every round, paired within round. The machine was *not* quiet for
+part of this (a browser renderer at >100 % and a day-old `metalium_host`), and
+the control says so, which is the point of having one.
+
+End-to-end guard wall time, 12 rounds, medians:
+
+| workload | base | ctrl | head |
+| --- | --- | --- | --- |
+| **control** (`pytest tt_sim/util tt_sim/memory`, no pump) | 1.263 s | +2.1 % | +2.0 % |
+| `blackhole/four` | 2.058 s | +0.1 % | **−12.4 %** |
+| `blackhole/nine` | 2.400 s | +0.1 % | **−10.4 %** |
+| `blackhole/vecadd_sharding` | 4.249 s | +0.2 % | **−11.2 %** |
+| `blackhole/six` (matmul) | 8.071 s | −2.4 % | **−10.5 %** |
+
+In-process **pump CPU time** (`time.process_time` around `MultiTileClock.run`,
+so process start-up, imports and trace parsing are excluded and the tick count
+is provably identical between arms), 20 rounds, medians, on a much busier
+machine:
+
+| workload | live tile ticks | base | ctrl | head |
+| --- | --- | --- | --- | --- |
+| `blackhole/four` | 8,911 | 1.105 s | −6.5 % | **−20.2 %** |
+| `blackhole/nine` | 15,902 | 1.482 s | +3.3 % | **−14.0 %** |
+| `blackhole/vecadd_sharding` | 29,921 | 3.060 s | −4.6 % | **−14.1 %** |
+| `blackhole/six` | 15,577 | 6.613 s | +0.4 % | −3.8 % |
+| `wormhole/offline` | 5,786 | 0.532 s | −3.4 % | **−17.6 %** |
+
+**`six` is the honest outlier and it is the one that explains the change.** It
+is the matmul: 497 µs per live tile tick against ~105 µs for the others,
+because `handle_elwadd` / `MVMUL` / `handle_pacr` dominate it and the RV front
+end does not. A change to the interpreter cannot help a workload that is not in
+the interpreter, and it does not.
+
+The measurement that settles it is the item's own, because its denominator is
+fixed by cycle-identity — 477,571 live Tensix tile ticks, both trees, every
+run. Two interleaved pairs of the full 8x10 `vecadd_multi_core`:
+
+| pair | base µs/live-tick | head µs/live-tick | delta |
+| --- | --- | --- | --- |
+| 1 (base first) | 155.3 | 135.2 | −12.9 % |
+| 2 (head first) | 145.8 | 130.6 | −10.4 % |
+
+i.e. **146 µs → 131 µs**, and the time spent inside live Tensix tile ticks goes
+from 69.7–74.2 s to 62.4–64.6 s. End-to-end wall on that run is a null at four
+rounds (base 84.2–95.7 s, head 71.7–97.0 s, head wins 2/4) — the same
+tt-metal-side drift this document has now recorded four times, which is why the
+in-process, denominator-fixed measurement is the one quoted.
+
+## What is left, and why the rest is not this item's work
+
+After this round the live tile tick is roughly **45 % RV interpretation, 45 %
+Tensix datapath, 6 % tile-clock dispatch**. Three things were measured and
+deliberately *not* done:
+
+- **Eliding a parked core's tick.** A core the firmware-loop recogniser has
+  parked still executes its poll loop on every cycle the tile is awake for some
+  other reason — 9 % of the tick at 80 workers, 19 % on `vecadd_sharding`.
+  `spin.py` already has the machinery to fast-forward a parked span by
+  restoring the recorded per-phase register snapshot, and the correctness
+  argument (a verified fixed point over memory that provably did not change)
+  extends to a single cycle. But eliding needs the watch re-read on every tick,
+  because `TensixTile.next_wake_cycle`'s fast reject skips the parked cores'
+  `wake_check` whenever any *other* core is running — and the watch is up to
+  `MAX_WATCH_RANGES` spans including the loop's own code, so re-reading it
+  costs a large fraction of what the tick costs. Estimated payoff ~2× on a path
+  where the cost model's scoreboard would have to be time-translated every
+  cycle. Not worth the fidelity surface for ~4 % of the run.
+- **`handle_elwadd`'s 128 scalar FPU ops and `handle_pacr`'s 512 two-byte L1
+  writes** — 13 % and 9 % of the tick, and by far the largest single items
+  left. Both are per-element Python loops over a face that numpy could do in
+  one call. That is a rewrite of the FPU and packer datapaths (bf16 rounding,
+  fidelity phases, Dst formats, edge masks), i.e. a fidelity change, and it
+  belongs with the JIT/vectorisation item rather than here.
+- **Per-component gating inside a live tile** (pump Phase 3) is declined in
+  `docs/plans/event-driven-pump.md` and stays declined; 27 clockables are
+  ticked per tile cycle and the whole dispatch is 6 %.
+
+## Gates
+
+`pytest tt_sim/ driver/` **1074 passed** with the model off and again with
+`TT_SIM_COST_MODEL=1`; **30/30** Blackhole replay guards standalone;
+`driver/tests/cost_model_gate.py --jobs 4` **RESULT: PASS** over 44 discovered
+guards with **no poll-budget multiplier change** (`dramtop` 1×, `two` 2×,
+`offline` 4×); `ruff check` / `ruff format --check` clean.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+git archive 0933ebc | tar -x -C /tmp/ab/base
+git archive 0933ebc | tar -x -C /tmp/ab/ctrl      # the verified-zero control
+
+# the premise check, and the item's own metric. A sitecustomize.py on
+# PYTHONPATH wraps MultiTileClock.run and TileClock.clock_tick, times the tick
+# only for clocks registered heavy=True, and dumps at exit.
+cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
+WH80=$(python3 -c "print(','.join(f'{x}-{y}' for y in [1,2,3,4,5,7,8,9,10,11] \
+                             for x in [1,2,3,4,6,7,8,9]))")
+TT_METAL_SIMULATOR=<tree>/driver/wormhole TT_METAL_SLOW_DISPATCH_MODE=1 \
+TT_SIM_TENSIX_COORDS=$WH80 ./metal_example_vecadd_multi_core
+
+# where the tick goes: cProfile from *inside* the server (py-spy cannot attach,
+# ptrace_scope forbids it) — a sitecustomize.py that enables a Profile at
+# import and dumps to "$OUT.$(pid)" from atexit. Suffix by pid, or the shell's
+# own later `python3 -c` overwrites the dump.
+
+# cycle neutrality: per guard, dump clock_tick_num / stride_skipped_cycles /
+# summed dormant_cycles / per-tile tick numbers / live tile ticks, for every
+# driver/*/server/*_replay_test.py, and diff base against head. Twice, with
+# TT_SIM_COST_MODEL unset and set.
+
+# the A/B: alternate base/ctrl/head every round, pair within round, and report
+# the control's own deviation beside the change's. Prefer in-process pump CPU
+# time (time.process_time around MultiTileClock.run) to end-to-end wall — the
+# tick count is identical between arms by construction, so it is a
+# like-for-like cost per unit of simulator work with the host, the build and
+# the trace parse taken out.
+```

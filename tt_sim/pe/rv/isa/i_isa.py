@@ -5,6 +5,56 @@ from tt_sim.pe.rv.isa.rv_isa import RV_ISA
 from tt_sim.util.conversion import conv_to_bytes, conv_to_int32, conv_to_uint32
 
 
+# Immediate decoders, lifted out of ``RV_I_ISA.extract_immediate``'s
+# format-string dispatch. One of these runs for most simulated instructions, and
+# the string compare plus the ``sign_extend`` classmethod call cost more than
+# the arithmetic they guard. ``extract_immediate`` still exists and delegates
+# here, so the documented API and its tests are unchanged. Sign extension is the
+# ``value - 2**width`` form of ``value | (~0 << width)`` — identical for a value
+# already masked to ``width`` bits, which each of these is by construction.
+def _imm_i(instr):
+    imm = (instr >> 20) & 0xFFF
+    return imm - 0x1000 if imm & 0x800 else imm
+
+
+def _imm_s(instr):
+    imm = (((instr >> 25) & 0x7F) << 5) | ((instr >> 7) & 0x1F)
+    return imm - 0x1000 if imm & 0x800 else imm
+
+
+def _imm_b(instr):
+    imm = (
+        (((instr >> 31) & 0x1) << 12)
+        | (((instr >> 7) & 0x1) << 11)
+        | (((instr >> 25) & 0x3F) << 5)
+        | (((instr >> 8) & 0xF) << 1)
+    )
+    return imm - 0x2000 if imm & 0x1000 else imm
+
+
+def _imm_u(instr):
+    return instr & 0xFFFFF000
+
+
+def _imm_j(instr):
+    imm = (
+        (((instr >> 31) & 0x1) << 20)
+        | (((instr >> 12) & 0xFF) << 12)
+        | (((instr >> 20) & 0x1) << 11)
+        | (((instr >> 21) & 0x3FF) << 1)
+    )
+    return imm - 0x200000 if imm & 0x100000 else imm
+
+
+_IMMEDIATE_DECODERS = {
+    "I": _imm_i,
+    "S": _imm_s,
+    "B": _imm_b,
+    "U": _imm_u,
+    "J": _imm_j,
+}
+
+
 class RV_I_ISA(RV_ISA):
     @classmethod
     def run(cls, register_file, memory_space, snoop, instr=None):
@@ -53,8 +103,8 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_u_lui(cls, instr, register_file, memory_space, snoop):
-        rd = RV_ISA.get_int(instr, 7, 11)
-        immediate = RV_I_ISA.extract_immediate(instr, "U")
+        rd = (instr >> 7) & 0x1F
+        immediate = _imm_u(instr)
         register_file[rd].write(conv_to_bytes(immediate))
         if snoop:
             RV_ISA.print_snoop(
@@ -66,8 +116,8 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_u_auipc(cls, instr, register_file, memory_space, snoop):
-        rd = RV_ISA.get_int(instr, 7, 11)
-        immediate = RV_I_ISA.extract_immediate(instr, "U")
+        rd = (instr >> 7) & 0x1F
+        immediate = _imm_u(instr)
         pc = register_file["pc"]
         pc_val = pc.read_uint()
         register_file[rd].write(conv_to_bytes(immediate + pc_val))
@@ -81,7 +131,7 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_j_jal(cls, instr, register_file, memory_space, snoop):
-        rd = RV_ISA.get_int(instr, 7, 11)
+        rd = (instr >> 7) & 0x1F
         pc = register_file["pc"]
         pc_val = pc.read_uint()
         if rd > 0:
@@ -90,7 +140,7 @@ class RV_I_ISA(RV_ISA):
                 conv_to_bytes(pc_val + 4)
             )  # Address of the next instruction
 
-        offset = RV_I_ISA.extract_immediate(instr, "J")
+        offset = _imm_j(instr)
         new_pc_val = pc_val + offset
 
         nextpc = register_file["nextpc"]
@@ -105,7 +155,7 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_i_jalr(cls, instr, register_file, memory_space, snoop):
-        rd = RV_ISA.get_int(instr, 7, 11)
+        rd = (instr >> 7) & 0x1F
         pc = register_file["pc"]
         pc_val = pc.read_uint()
         if rd > 0:
@@ -114,9 +164,9 @@ class RV_I_ISA(RV_ISA):
                 conv_to_bytes(pc_val + 4)
             )  # Address of the next instruction
 
-        rs1 = RV_ISA.get_int(instr, 15, 19)
+        rs1 = (instr >> 15) & 0x1F
         rs1_val = register_file[rs1].read_uint()
-        offset = RV_I_ISA.extract_immediate(instr, "I")
+        offset = _imm_i(instr)
 
         new_pc_val = (rs1_val + offset) & ~1
 
@@ -132,14 +182,14 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_b_branch(cls, instr, register_file, memory_space, snoop):
-        type_val = RV_ISA.get_int(instr, 12, 14)
+        type_val = (instr >> 12) & 0x7
 
-        rs1 = RV_ISA.get_int(instr, 15, 19)
+        rs1 = (instr >> 15) & 0x1F
         rs1_val = register_file[rs1].read_uint()
-        rs2 = RV_ISA.get_int(instr, 20, 24)
+        rs2 = (instr >> 20) & 0x1F
         rs2_val = register_file[rs2].read_uint()
 
-        offset = RV_I_ISA.extract_immediate(instr, "B")
+        offset = _imm_b(instr)
 
         pc = register_file["pc"]
         pc_val = pc.read_uint()
@@ -230,12 +280,12 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_i_load(cls, instr, register_file, memory_space, snoop):
-        type_val = RV_ISA.get_int(instr, 12, 14)
+        type_val = (instr >> 12) & 0x7
 
-        rs1 = RV_ISA.get_int(instr, 15, 19)
+        rs1 = (instr >> 15) & 0x1F
         rs1_val = register_file[rs1].read_uint()
-        rd = RV_ISA.get_int(instr, 7, 11)
-        offset = RV_I_ISA.extract_immediate(instr, "I")
+        rd = (instr >> 7) & 0x1F
+        offset = _imm_i(instr)
 
         tgt_mem_address = rs1_val + offset
 
@@ -318,13 +368,13 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_s_store(cls, instr, register_file, memory_space, snoop):
-        type_val = RV_ISA.get_int(instr, 12, 14)
+        type_val = (instr >> 12) & 0x7
 
-        rs1 = RV_ISA.get_int(instr, 15, 19)
+        rs1 = (instr >> 15) & 0x1F
         rs1_val = register_file[rs1].read_uint()
-        rs2 = RV_ISA.get_int(instr, 20, 24)
+        rs2 = (instr >> 20) & 0x1F
 
-        offset = RV_I_ISA.extract_immediate(instr, "S")
+        offset = _imm_s(instr)
         tgt_mem_address = rs1_val + offset
 
         rs2_val = register_file[rs2].read()
@@ -373,11 +423,11 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_i_arith(cls, instr, register_file, memory_space, snoop):
-        type_val = RV_ISA.get_int(instr, 12, 14)
+        type_val = (instr >> 12) & 0x7
 
-        rs1 = RV_ISA.get_int(instr, 15, 19)
+        rs1 = (instr >> 15) & 0x1F
         rs1_val = register_file[rs1].read_uint()
-        rd1 = RV_ISA.get_int(instr, 7, 11)
+        rd1 = (instr >> 7) & 0x1F
 
         signed_op = False
         write_result = True
@@ -391,7 +441,7 @@ class RV_I_ISA(RV_ISA):
             or type_val == 0x6
             or type_val == 0x7
         ):
-            immediate = RV_I_ISA.extract_immediate(instr, "I")
+            immediate = _imm_i(instr)
             immediate_unsigned = immediate & 0xFFFFFFFF
 
             if type_val == 0x0:
@@ -451,12 +501,12 @@ class RV_I_ISA(RV_ISA):
             # a Zbb single-bit-manip op (clz/ctz/cpop/sext.*/rori/rev8/orc.b),
             # which must fall through to that extension rather than being run as
             # a shift.
-            high = RV_ISA.get_int(instr, 25, 31)
+            high = (instr >> 25) & 0x7F
             if type_val == 0x1 and high != 0x00:
                 return False
             if type_val == 0x5 and high not in (0x00, 0x20):
                 return False
-            bit_pos = RV_ISA.get_int(instr, 20, 24)
+            bit_pos = (instr >> 20) & 0x1F
             if type_val == 0x1:
                 # slli
                 result = (rs1_val << bit_pos) % (1 << 32)  # Overflow is ignored
@@ -465,7 +515,7 @@ class RV_I_ISA(RV_ISA):
                     info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} << {hex(bit_pos)}"
             elif type_val == 0x5:
                 # srli or srai
-                arithmetic_variant = RV_ISA.get_int(instr, 30, 30) == 1
+                arithmetic_variant = ((instr >> 30) & 0x1) == 1
                 result = rs1_val >> bit_pos
                 if arithmetic_variant:
                     result = RV_I_ISA.sign_extend_shift(rs1_val, result, bit_pos)
@@ -493,13 +543,13 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_r_arith(cls, instr, register_file, memory_space, snoop):
-        type_val = RV_ISA.get_int(instr, 12, 14)
+        type_val = (instr >> 12) & 0x7
 
-        rs1 = RV_ISA.get_int(instr, 15, 19)
+        rs1 = (instr >> 15) & 0x1F
         rs1_val = register_file[rs1].read_uint()
-        rs2 = RV_ISA.get_int(instr, 20, 24)
+        rs2 = (instr >> 20) & 0x1F
         rs2_val = register_file[rs2].read_uint()
-        rd = RV_ISA.get_int(instr, 7, 11)
+        rd = (instr >> 7) & 0x1F
 
         # Base RV32I R-type uses funct7 == 0x00 for every funct3, plus 0x20 for
         # the two "alternate" ops sub (funct3 0) and sra (funct3 5). Any other
@@ -507,7 +557,7 @@ class RV_I_ISA(RV_ISA):
         # 0x04/0x05/0x30, ...) and must be left for the next ISA to decode —
         # otherwise, e.g., zext.h (funct7 0x04, funct3 4) is silently executed
         # as xor and andn (funct7 0x20, funct3 7) as and.
-        funct7 = RV_ISA.get_int(instr, 25, 31)
+        funct7 = (instr >> 25) & 0x7F
         if funct7 == 0x20:
             if type_val not in (0x0, 0x5):
                 return False
@@ -520,7 +570,7 @@ class RV_I_ISA(RV_ISA):
         info_msg = None
         if type_val == 0x0:
             # add and sub
-            is_sub = RV_ISA.get_int(instr, 30, 30) == 1
+            is_sub = ((instr >> 30) & 0x1) == 1
             if is_sub:
                 snoop_str = "sub"
                 result = (rs1_val - rs2_val) % (1 << 32)  # Overflow is ignored
@@ -561,7 +611,7 @@ class RV_I_ISA(RV_ISA):
                 info_msg = f"{cls.get_reg_name(rd)} = {cls.get_reg_name(rs1)} ^ {cls.get_reg_name(rs2)}"
         elif type_val == 0x5:
             # srl or sra
-            arithmetic_variant = RV_ISA.get_int(instr, 30, 30) == 1
+            arithmetic_variant = ((instr >> 30) & 0x1) == 1
             shift_bits = rs2_val & 0x1F  # Least significant 5 bits for RV32I
             result = rs1_val >> shift_bits
             if arithmetic_variant:
@@ -602,7 +652,7 @@ class RV_I_ISA(RV_ISA):
     @classmethod
     def handle_i_fence(cls, instr, register_file, memory_space, snoop):
         if snoop:
-            i_variant = RV_ISA.get_int(instr, 12, 12) == 1
+            i_variant = ((instr >> 12) & 0x1) == 1
             if i_variant:
                 RV_ISA.print_snoop(snoop, "fence.i", "ignored")
             else:
@@ -611,8 +661,8 @@ class RV_I_ISA(RV_ISA):
 
     @classmethod
     def handle_i_misc(cls, instr, register_file, memory_space, snoop):
-        type_val = RV_ISA.get_int(instr, 12, 14)
-        is_ebreak = type_val == 0x0 and RV_ISA.get_int(instr, 20, 20) == 1
+        type_val = (instr >> 12) & 0x7
+        is_ebreak = type_val == 0x0 and ((instr >> 20) & 0x1) == 1
         if is_ebreak and breakpoint_trap.trapping_enabled():
             # A kernel asserting on itself: see tt_sim/pe/rv/breakpoint.py.
             if snoop:
@@ -666,41 +716,11 @@ class RV_I_ISA(RV_ISA):
 
         Returns:
         - 32-bit sign-extended immediate value as an integer
+
+        The bodies live in the module-level ``_imm_*`` functions, which is what
+        the interpreter calls; this stays as the named API.
         """
-
-        if inst_type == "I":
-            # I-type: imm[11:0] = inst[31:20]
-            imm = (instruction >> 20) & 0xFFF  # Extract bits 31:20 (12 bits)
-            return RV_I_ISA.sign_extend(imm, 12)
-
-        elif inst_type == "S":
-            # S-type: imm[11:5] = inst[31:25], imm[4:0] = inst[11:7]
-            imm = ((instruction >> 25) & 0x7F) << 5  # Bits 31:25 -> imm[11:5]
-            imm |= (instruction >> 7) & 0x1F  # Bits 11:7 -> imm[4:0]
-            return RV_I_ISA.sign_extend(imm, 12)
-
-        elif inst_type == "B":
-            # B-type: imm[12|10:5|4:1|11] = inst[31|30:25|11:8|7]
-            imm = ((instruction >> 31) & 0x1) << 12  # Bit 31 -> imm[12]
-            imm |= ((instruction >> 7) & 0x1) << 11  # Bit 7 -> imm[11]
-            imm |= ((instruction >> 25) & 0x3F) << 5  # Bits 30:25 -> imm[10:5]
-            imm |= ((instruction >> 8) & 0xF) << 1  # Bits 11:8 -> imm[4:1]
-            imm &= ~1  # Bit 0 is always 0 for B-type
-            return RV_I_ISA.sign_extend(imm, 13)
-
-        elif inst_type == "U":
-            # U-type: imm[31:12] = inst[31:12]
-            imm = instruction & 0xFFFFF000  # Bits 31:12, shifted already
-            return imm  # No sign extension needed, upper 20 bits
-
-        elif inst_type == "J":
-            # J-type: imm[20|10:1|11|19:12] = inst[31|30:21|20|19:12]
-            imm = ((instruction >> 31) & 0x1) << 20  # Bit 31 -> imm[20]
-            imm |= ((instruction >> 12) & 0xFF) << 12  # Bits 19:12 -> imm[19:12]
-            imm |= ((instruction >> 20) & 0x1) << 11  # Bit 20 -> imm[11]
-            imm |= ((instruction >> 21) & 0x3FF) << 1  # Bits 30:21 -> imm[10:1]
-            imm &= ~1  # Bit 0 is always 0 for J-type
-            return RV_I_ISA.sign_extend(imm, 21)
-
-        else:
+        decoder = _IMMEDIATE_DECODERS.get(inst_type)
+        if decoder is None:
             raise ValueError(f"Unsupported instruction type: {inst_type}")
+        return decoder(instruction)

@@ -1,4 +1,4 @@
-from tt_sim.memory.memory import VisibleMemory
+from tt_sim.memory.memory import VisibleMemory, resolve_plain_ram_span
 from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.register.register import Register, RegisterAccessMode
 from tt_sim.pe.register.register_file import RegisterFile
@@ -104,6 +104,11 @@ class RV32I(ProcessingElement):
         if extensions is None:
             extensions = []
         self.isas = [RV_I_ISA] + extensions
+        # ``isa.run`` on a class builds a fresh bound-classmethod object every
+        # time it is looked up, once per ISA per simulated instruction. The list
+        # is fixed at construction (nothing in the tree mutates ``isas``), so
+        # bind once.
+        self._isa_runs = [isa.run for isa in self.isas]
         assert isinstance(memory_spaces, list)
         self.start_address = start_address
         self.active = False
@@ -162,6 +167,36 @@ class RV32I(ProcessingElement):
         # ``tt_sim/pe/rv/spin.py``) swaps in a recording proxy for the few
         # ticks of a detection attempt. One attribute read on the hot path.
         self._exec_memory = self.visible_memory
+        # Instruction-fetch fast path: ``(low, last, leaf, base)`` for the
+        # plain-RAM span the PC currently sits in, or None. Same trick as
+        # ``BabyRISCV._read_soft_reset`` — the fetch is the one memory access
+        # every core makes on every cycle, and resolving it through the full
+        # MemorySpace dispatch (event check, interval lookup, snoop check,
+        # offset conversion) costs more than reading the four bytes. Populated
+        # only while nothing is subscribed to the event bus, so a MemEvent for
+        # the fetch is never dropped; see ``_cache_fetch_src``.
+        self._fetch_src = None
+
+    def _cache_fetch_src(self, addr):
+        """Try to resolve ``addr`` into :attr:`_fetch_src`; clear it otherwise.
+
+        Refused while the event bus is enabled, because a fetch through
+        ``MemorySpace.read`` publishes a ``MemEvent`` and a direct leaf read
+        does not. The bus is re-checked on every fetch, so turning tracing on
+        mid-run puts every core back on the slow path within one instruction.
+        """
+        if self.bus.enabled:
+            self._fetch_src = None
+            return
+        span = resolve_plain_ram_span(self.visible_memory, addr)
+        if span is None:
+            self._fetch_src = None
+            return
+        low, high, leaf, base = span
+        # Stored as the last PC a whole 4-byte word fits at, so the hot check
+        # is one comparison rather than two. A span under 4 bytes wide makes
+        # ``high < low`` and can therefore never be taken.
+        self._fetch_src = (low, high - 3, leaf, base)
 
     def print_snoop(self, pc, nextpc, actioned):
         addr = pc.read_uint()
@@ -181,12 +216,26 @@ class RV32I(ProcessingElement):
         nextpc = self.nextpc_register
         pc_val = pc.read_uint()
         nextpc.write(conv_to_bytes(pc_val + 4))
-        self.visible_memory.caller_context = (self.unit_id, self.core_label, pc_val)
+        memory = self.visible_memory
+        memory.caller_context = (self.unit_id, self.core_label, pc_val)
 
         # Fetch once per cycle and hand the word to every ISA in the list —
         # each one used to re-read it from memory, which cost a full memory-map
-        # traversal per ISA tried.
-        instr = int.from_bytes(self.visible_memory.read(pc_val, 4), "little")
+        # traversal per ISA tried. The cached plain-RAM span skips the traversal
+        # too; anything the cache cannot answer for — a PC outside it, a bus
+        # that has since been enabled, a snoop registered since — falls back to
+        # the full dispatch and re-resolves.
+        src = self._fetch_src
+        if (
+            src is not None
+            and src[0] <= pc_val <= src[1]
+            and not self.bus.enabled
+            and not memory.snoop_addresses
+        ):
+            instr = int.from_bytes(src[2].read(pc_val - src[3], 4), "little")
+        else:
+            instr = int.from_bytes(memory.read(pc_val, 4), "little")
+            self._cache_fetch_src(pc_val)
 
         # Memory-stall back-pressure (ROADMAP section I). Consulted before any
         # tracing or snoop output is produced, because a stalled cycle must
@@ -216,8 +265,8 @@ class RV32I(ProcessingElement):
         actioned = False
         pe_stall = False
         exec_memory = self._exec_memory
-        for isa in self.isas:
-            actioned = isa.run(register_file, exec_memory, self.snoop, instr)
+        for isa_run in self._isa_runs:
+            actioned = isa_run(register_file, exec_memory, self.snoop, instr)
             pe_stall = actioned == ProcessingElement.PEStall
             if actioned or pe_stall:
                 break

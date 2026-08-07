@@ -198,6 +198,41 @@ addresses that; it is the same target as item 9's JIT work and item 5's
 issue-loop model, approached from the wall-clock side. Rank it against
 those rather than treating it as pump work.
 
+**First instalment landed 2026-08-07: 146 µs → 131 µs.** The premise
+was re-measured and held exactly (69.8 s of an 83.2 s run inside live
+Tensix tile ticks, 477,571 of them at 146.2 µs). Profiling the real
+80-worker server from the inside splits a tile tick **53 % baby RISC-V
+/ 40 % Tensix coprocessor / 6 % tile-clock dispatch**, with no single
+item above 13 %. What was taken out is the RV front end's *dispatch
+overhead* rather than any simulated work: an instruction-fetch fast
+path onto the plain-RAM leaf, the event bus held on `MemorySpace`
+instead of `get_bus()` per access, `get_int` inlined and the immediate
+decoders lifted out of their format-string dispatch — 1.6 M Python
+calls removed from a 9.6 M-call guard, every one of the 44 guards
+byte-identical in cycle accounting with the model on and off.
+`driver/wormhole/docs/profiling.md` has the numbers.
+
+**What is left is no longer one item, and the two halves rank
+differently.**
+
+- The RV interpreter is still ~45 % of a tile tick and is now close to
+  what a pure-Python interpreter costs; the next real step there is
+  item 7's JIT, not more micro-optimisation.
+- The other ~45 % is the **Tensix datapath's per-element Python
+  loops** — `handle_elwadd` walks 128 scalar FPU ops (13 % of a tick)
+  and `handle_pacr` does 512 two-byte L1 writes (9 %). These are the
+  largest single items in the tree and numpy could do each in one
+  call, but they are a rewrite of the FPU and packer datapaths (bf16
+  rounding, fidelity phases, Dst formats, edge masks) — a *fidelity*
+  change, and the reason `six` (matmul, 497 µs/tick) gained least from
+  this round. **Rank that with item 7, not here.**
+- Measured and declined: eliding a parked core's tick (9 % at 80
+  workers) needs the loop's whole watch re-read every cycle, because
+  `TensixTile.next_wake_cycle`'s fast reject skips `wake_check` while
+  any other core runs; ~2× on that path, against the cost model's
+  scoreboard having to be time-translated per cycle. Reasoning in the
+  profiling instalment.
+
 ## 3. Issue-loop model
 
 The residual on every rung-2 prediction is one constant unmodelled

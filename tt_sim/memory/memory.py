@@ -23,6 +23,13 @@ class MemorySpace(MemMapable, ABC):
         # access so error messages and trace events can attribute the
         # access. Layout: (unit_id_tuple_or_None, core_label, pc).
         self.caller_context: tuple | None = None
+        # The event bus is a process-wide singleton that is never replaced
+        # (``RV32I`` holds it the same way), so keep it rather than calling
+        # ``get_bus()`` inside every read and write. ``read``/``write`` are the
+        # busiest calls in the simulator after the RV interpreter itself, and
+        # with nothing subscribed the MemEvent branch has to cost one attribute
+        # read rather than a call into ``_publish_mem_event``.
+        self.bus = get_bus()
 
     def add_snoop(self, snoop_addr_low, snoop_addr_high):
         self.snoop_addresses.append((snoop_addr_low, snoop_addr_high))
@@ -47,7 +54,7 @@ class MemorySpace(MemMapable, ABC):
         return "L1"
 
     def _publish_mem_event(self, op: str, addr: int, size: int):
-        bus = get_bus()
+        bus = self.bus
         if not bus.is_enabled(EventCategory.MEM):
             return
         # Extract PC from caller_context if available — tuple shape is
@@ -101,30 +108,32 @@ class MemorySpace(MemMapable, ABC):
         return False
 
     def read(self, addr, size):
-        self._publish_mem_event("read", addr, size)
+        if self.bus.enabled:
+            self._publish_mem_event("read", addr, size)
         addr_range, memory_space = self._locate_memory_space(addr)
         if addr_range is not None and memory_space is not None:
             target_addr = self.convert_addr_to_target_range(addr_range, addr)
-            if len(self.snoop_addresses) > 0 and self.check_is_snoop(addr):
+            if self.snoop_addresses and self.check_is_snoop(addr):
                 print(
                     f"->>>>>> Read value {hex(conv_to_uint32(memory_space.read(target_addr, size)))} at address {hex(addr)}"
                 )
             return memory_space.read(target_addr, size)
         else:
-            if len(self.snoop_addresses) > 0 and self.check_is_snoop(addr):
+            if self.snoop_addresses and self.check_is_snoop(addr):
                 print(
                     f"->>>>>> Attempt to read at address {hex(addr)} but no memory registered"
                 )
             return conv_to_bytes(0)
 
     def write(self, addr, value, size=None):
-        write_size = (
-            size
-            if size is not None
-            else (len(value) if hasattr(value, "__len__") else 0)
-        )
-        self._publish_mem_event("write", addr, write_size)
-        if len(self.snoop_addresses) > 0 and self.check_is_snoop(addr):
+        if self.bus.enabled:
+            write_size = (
+                size
+                if size is not None
+                else (len(value) if hasattr(value, "__len__") else 0)
+            )
+            self._publish_mem_event("write", addr, write_size)
+        if self.snoop_addresses and self.check_is_snoop(addr):
             print(
                 f"->>>>>> Write value {hex(conv_to_uint32(value))} at address {hex(addr)}"
             )
@@ -159,6 +168,61 @@ class MemorySpace(MemMapable, ABC):
 
         new_mm = MemoryMap.merge(*memory_maps)
         return cls(new_mm, safe, snoops)
+
+
+def resolve_plain_ram_span(memory, addr):
+    """Resolve ``addr`` to the plain-RAM leaf backing it, plus the span of
+    *outer* addresses over which that answer stays valid.
+
+    Returns ``(low, high, leaf, base)`` such that for every ``a`` in
+    ``[low, high]`` and every ``n`` with ``a + n - 1 <= high``,
+    ``memory.read(a, n)`` is exactly ``leaf.read(a - base, n)`` — same bytes,
+    same bounds checks, no side effects. ``None`` when the address is unmapped,
+    is served by an MMIO component, or any level on the way down has snoop
+    addresses configured (those print, so they must keep the slow path).
+
+    The caller still owes the trace-event check: a :class:`MemorySpace` read
+    publishes a ``MemEvent``, and the direct leaf read does not. See
+    ``RV32I._cache_fetch_src``, the one in-tree user, which only caches while
+    the event bus is disabled.
+
+    Nesting is followed the same few levels ``_resolve_plain_ram`` in
+    ``tt_sim/pe/rv/spin.py`` follows; merged maps normally hold leaves directly.
+    """
+    shift = 0
+    low = None
+    high = None
+    cur = addr
+    for _ in range(4):
+        memory_map = getattr(memory, "memory_map", None)
+        if memory_map is None:
+            return None
+        if getattr(memory, "snoop_addresses", None):
+            return None
+        addr_range, target = memory_map.locate(cur)
+        if addr_range is None or target is None:
+            return None
+        range_low = shift + addr_range.low
+        range_high = shift + addr_range.high
+        if low is None or range_low > low:
+            low = range_low
+        if high is None or range_high < high:
+            high = range_high
+        if isinstance(target, (AddressableMemory, SparseAddressableMemory)):
+            base = shift + addr_range.low
+            leaf_high = base + target.getSize() - 1
+            if leaf_high < high:
+                high = leaf_high
+            if high < low:
+                return None
+            return low, high, target, base
+        if isinstance(target, MemorySpace):
+            shift += addr_range.low
+            cur -= addr_range.low
+            memory = target
+            continue
+        return None
+    return None
 
 
 class VisibleMemory(MemorySpace):
