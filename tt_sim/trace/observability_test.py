@@ -17,11 +17,14 @@ import pytest
 from tt_sim.trace.bus import EventBus
 from tt_sim.trace.counters import CounterAggregator
 from tt_sim.trace.events import (
+    STALL_REASONS,
     ComputeEvent,
     CounterSnapshot,
+    Event,
     EventCategory,
     InstrEvent,
     NoCEvent,
+    StallEvent,
 )
 from tt_sim.trace.writers.noc_parquet import NoCParquetWriter
 from tt_sim.trace.writers.perfetto import PerfettoWriter
@@ -417,3 +420,185 @@ def test_counter_snapshots_are_still_the_documented_shape():
     counters = _counters([InstrEvent(cycle=1, unit_id=CORE, pc=0, instruction=0x13)])
     assert all(isinstance(value, int) for value in counters.values())
     assert CounterSnapshot.CATEGORY is EventCategory.COUNTER
+
+
+# ---------------------------------------------------------------------------
+# Tensix stall reasons
+# ---------------------------------------------------------------------------
+
+
+def test_the_schema_version_covers_the_stall_event():
+    """A new event kind is a schema change. ``StallEvent`` was added at 4, so a
+    consumer that pinned 3 and sees 4 knows to re-read the taxonomy — even
+    though the change is additive and its own categories are untouched."""
+    assert Event.SCHEMA_VERSION == 4
+    assert StallEvent.CATEGORY is EventCategory.STALL
+    assert EventCategory.STALL.value == "stall"
+
+
+def test_every_stall_reason_is_in_the_frozen_vocabulary():
+    """The reasons the simulator can actually emit, pinned against the exported
+    set. A reason that is not in ``STALL_REASONS`` is a typo, and a code
+    generator switching on the set would silently drop it."""
+    import ast
+    import inspect
+
+    from tt_sim.pe.tensix import frontend as frontend_mod
+    from tt_sim.pe.tensix.backends import backend_base, config, misc, sync, thcon
+    from tt_sim.pe.tensix.backends import unpacker as unpacker_mod
+
+    emitted = set()
+    for module in (
+        backend_base,
+        config,
+        misc,
+        sync,
+        thcon,
+        unpacker_mod,
+        frontend_mod,
+    ):
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None)
+            if name not in ("_refuse", "_note_stall"):
+                continue
+            # ``_refuse(reason, ...)`` / ``_note_stall(cycle, reason, ...)``.
+            idx = 0 if name == "_refuse" else 1
+            if len(node.args) > idx and isinstance(node.args[idx], ast.Constant):
+                emitted.add(node.args[idx].value)
+    assert emitted, "found no stall emission sites — did the helpers get renamed?"
+    assert emitted <= STALL_REASONS, sorted(emitted - STALL_REASONS)
+
+
+def test_a_stall_episode_is_one_wide_slice_on_its_own_track(tmp_path, monkeypatch):
+    """A stall spans many cycles while the instruction slices under it span one.
+    They must not share a track: two partially overlapping ``X`` slices are not
+    legally nestable and Perfetto drops them."""
+    trace = _write(
+        tmp_path,
+        [
+            StallEvent(
+                cycle=100,
+                unit_id=CORE,
+                reason="src_reserved_by_unpacker",
+                blocked_on="UNPACK",
+                cycles=37,
+                opcode="MVMUL",
+                thread_id=1,
+            ),
+            InstrEvent(cycle=100, unit_id=CORE, pc=0x100, instruction=0x13),
+        ],
+        cost_model=True,
+        monkeypatch=monkeypatch,
+    )
+    stall = [s for s in _slices(trace) if s["name"].startswith("stall:")]
+    assert len(stall) == 1
+    assert stall[0]["dur"] == 37
+    assert stall[0]["ts"] == 100
+    # Names the cause in the slice title, so the UI is readable without
+    # opening the args.
+    assert stall[0]["name"] == "stall:src_reserved_by_unpacker->UNPACK"
+    assert stall[0]["args"]["blocked_on"] == "UNPACK"
+    assert stall[0]["args"]["blocked_opcode"] == "MVMUL"
+    instr = [s for s in _slices(trace) if s["name"] == "pc=0x100"]
+    assert len(instr) == 1
+    assert instr[0]["tid"] != stall[0]["tid"], "stall shares the instruction track"
+
+
+def test_a_stall_slice_never_reads_as_a_calibrated_absolute(tmp_path, monkeypatch):
+    """Modelled cycles are floors built from published bounds. The slice a
+    reader is most tempted to quote out of context has to say so on itself."""
+    for cost_model in (True, False):
+        trace = _write(
+            tmp_path,
+            [
+                StallEvent(
+                    cycle=5,
+                    unit_id=CORE,
+                    reason="semaphore_empty",
+                    cycles=9,
+                    semaphore=3,
+                )
+            ],
+            cost_model=cost_model,
+            monkeypatch=monkeypatch,
+        )
+        (stall,) = [s for s in _slices(trace) if s["name"].startswith("stall:")]
+        assert "not calibrated to silicon" in stall["args"]["timing_model"]
+        # No unit is named for a semaphore wait: it is about a sync object.
+        assert stall["name"] == "stall:semaphore_empty"
+        assert "blocked_on" not in stall["args"]
+        assert stall["args"]["semaphore"] == 3
+
+
+def test_stall_cycles_are_counted_by_reason_and_by_blamed_unit():
+    counters = _counters(
+        [
+            StallEvent(
+                cycle=10,
+                unit_id=CORE,
+                reason="src_reserved_by_unpacker",
+                blocked_on="UNPACK",
+                cycles=700,
+            ),
+            StallEvent(
+                cycle=20,
+                unit_id=CORE,
+                reason="unit_busy",
+                blocked_on="UNPACK",
+                cycles=74,
+            ),
+        ]
+    )
+    assert counters[(CORE, "tensix_stall_cycles")] == 774
+    assert counters[(CORE, "tensix_stall_episodes")] == 2
+    assert counters[(CORE, "tensix_stall_src_reserved_by_unpacker")] == 700
+    assert counters[(CORE, "tensix_stall_unit_busy")] == 74
+    # Both reasons blame the same unit, so the per-unit roll-up is their sum —
+    # which is the number "how much is the unpacker costing me?" wants.
+    assert counters[(CORE, "tensix_stall_on_UNPACK")] == 774
+
+
+def test_tensix_stall_counters_do_not_collide_with_the_rv_ones():
+    """A Tensix thread publishes StallEvents under the *same* unit_id its baby
+    RISC-V core publishes InstrEvents under. An unprefixed ``stall_cycles``
+    would sum two unrelated mechanisms into one unreadable number."""
+    counters = _counters(
+        [
+            InstrEvent(
+                cycle=10,
+                unit_id=CORE,
+                pc=0,
+                instruction=0x13,
+                stall_cycles=5,
+                stall_reason="load_use",
+            ),
+            StallEvent(cycle=11, unit_id=CORE, reason="mutex_wait", cycles=40),
+        ]
+    )
+    assert counters[(CORE, "stall_cycles")] == 5
+    assert counters[(CORE, "stall_load_use")] == 5
+    assert counters[(CORE, "tensix_stall_cycles")] == 40
+    assert counters[(CORE, "tensix_stall_mutex_wait")] == 40
+
+
+def test_a_run_with_no_stalls_has_no_stall_rows_rather_than_zeroed_ones():
+    """Same contract as the RV stall counters: absent, not zero. A dataset must
+    not assert a stall-free machine just because nothing was measured."""
+    counters = _counters([InstrEvent(cycle=1, unit_id=CORE, pc=0, instruction=0x13)])
+    assert not [name for (_, name) in counters if name.startswith("tensix_stall")]
+
+
+def test_the_bus_stays_free_when_the_stall_category_is_off():
+    """The emission guard is ``is_enabled``, so a disabled category must cost a
+    subscriber nothing — the untraced path is the one that has to stay free."""
+    bus = EventBus()
+    bus.enabled = True
+    bus.set_category_enabled(EventCategory.STALL, False)
+    seen = []
+    bus.subscribe(EventCategory.STALL, seen.append)
+    bus.publish(StallEvent(cycle=1, unit_id=CORE, reason="mutex_wait"))
+    assert seen == []
+    assert not bus.is_enabled(EventCategory.STALL)

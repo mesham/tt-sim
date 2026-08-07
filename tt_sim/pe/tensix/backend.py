@@ -77,6 +77,15 @@ class TensixBackend:
         self.adc = [ADCThread() for i in range(3)]
         self.addressable_memory = None
         self.diags_settings = diags_settings
+        # Why the most recent ``issueInstruction`` refusal happened, written by
+        # ``TensixBackendUnit._refuse`` and read back by the wait gate, which is
+        # the caller that holds the cycle number and the decoded opcode needed
+        # to publish a StallEvent. Only meaningful immediately after a call that
+        # returned False; the gate reads it in that same statement.
+        # ``last_refusal_blocked_on`` is empty unless the refusing unit wants to
+        # point at a *different* unit as the cause -- see ``_refuse``.
+        self.last_refusal_reason = ""
+        self.last_refusal_blocked_on = ""
 
     def getDiagnosticSettings(self):
         return self.diags_settings

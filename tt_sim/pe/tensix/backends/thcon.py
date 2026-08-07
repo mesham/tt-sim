@@ -79,7 +79,13 @@ class ScalarUnit(TensixBackendUnit):
 
     def issueInstruction(self, instruction, from_thread):
         if self.stalled:
-            return False
+            # Which of the three is genuinely different work, so each is named
+            # rather than all three collapsing into "the scalar unit is busy".
+            if self.stalled_type == ScalarUnit.THConStallType.SRC_UNPACKER:
+                return self._refuse("src_reserved_by_matrix", blocked_on="MATH")
+            if self.stalled_type == ScalarUnit.THConStallType.FLUSHDMA:
+                return self._refuse("flush_pending")
+            return self._refuse("atomic_pending")
 
         return super().issueInstruction(instruction, from_thread)
 

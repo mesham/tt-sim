@@ -127,6 +127,96 @@ the same.
 
 ---
 
+## 0. The one-shot answer — `TT_SIM_PROFILE`
+
+**Start here.** If the question is "where did my kernel's cycles go",
+you do not need to pick from the nine writers below. One variable
+turns on the right ones and leaves a ranked report behind:
+
+```bash
+export TT_SIM_COST_MODEL=1                 # without this nothing can stall
+export TT_SIM_PROFILE=/tmp/myrun           # <- the whole interface
+./build/six                                # ...or any tt-metal binary
+```
+
+That is the complete invocation. When the process exits you get:
+
+```
+/tmp/myrun/report.md        ranked, human-readable — read this
+/tmp/myrun/report.json      the same numbers, machine-readable
+/tmp/myrun/hotspots.json    per-PC and per-function cycle attribution
+/tmp/myrun/profile.json     which ELFs were used and how they were chosen
+/tmp/myrun/counters/        the raw Parquet dataset (§4 below)
+```
+
+`report.md` opens with what the numbers are and are not — modelled
+floors from published bounds, corroborated but **not calibrated**
+against silicon — then ranks, first, every cycle-bearing counter by
+its share of the run, and second, the source functions those cycles
+were spent in. It ends with an explicit **attribution coverage**
+table: how much of the run the model could name and how much it could
+not. Nothing is quietly dropped.
+
+Re-render at any time without re-running the simulator:
+
+```bash
+python3 -m tt_sim.trace.report /tmp/myrun --top 40
+python3 -m tt_sim.trace.report /tmp/myrun --stdout | less
+```
+
+### Source attribution, and when it works
+
+Function and line names come from DWARF in the ELFs tt-metal builds.
+They **are** present in a default tt-metal build — no special flags —
+under `~/.cache/tt-metal-cache/<build-hash>/`. tt-sim finds them
+itself: it takes the newest firmware and kernel ELF per baby core and
+then *proves* the choice by comparing the ELF's own bytes against what
+is resident in simulated L1. Kernels are relocated at load, so the
+comparison also recovers the load bias; the report's `chosen how`
+column says `verified`, `relocated +0x…`, `recent` (a mtime guess,
+unconfirmed) or `no match`.
+
+Two consequences worth knowing before you read a report:
+
+- A unit whose resident code matches **no** candidate is left
+  unattributed on purpose. Naming it from the newest ELF in the cache
+  would be a confidently wrong answer, which is worse than a bare PC.
+- **Replaying a captured wire trace attributes firmware but often not
+  the kernels**, because the kernel ELF that produced the recorded
+  bytes may no longer be in the cache (or was built for the other
+  architecture) while the firmware, which changes rarely, still is.
+  Expect a partial report there and a full one from a live run — on
+  the Blackhole `six` trace it is 39 % of sampled PC cycles against
+  100 % live.
+
+Override discovery entirely when you know better:
+
+```bash
+export TT_SIM_PROFILE_ELFS="BRISC:/path/brisc.elf,TRISC2:/path/trisc2.elf@0x8b00"
+```
+
+`<UNIT>:<path>` per entry, comma-separated; the optional `@<bias>` is
+a load bias to add to every address in that ELF.
+
+Other knobs: `TT_SIM_PROFILE_LABEL` names the run in the report's
+title, and `TT_SIM_PROFILE_INTERVAL` sets the counter flush cadence in
+cycles (default 100).
+
+### What the report will not tell you
+
+It ranks by *modelled* cycles. Anything the cost model does not charge
+contributes nothing rather than a guess, which is why the per-unit
+table carries an `unattributed` column — that column is the size of
+the gap, not the size of the idle. And a cycle charged is not a cycle
+delivered: a core can be charged tens of thousands of stall cycles
+that never reach the run's length, because the length is set by when
+cores meet each other. Use the report for *relative* attribution.
+
+The rest of this document is the individual writers, for when you want
+one specific output rather than the whole answer.
+
+---
+
 ## 1. JSONL event log — `TT_SIM_TRACE`
 
 **What:** Every architectural event the simulator emits, one

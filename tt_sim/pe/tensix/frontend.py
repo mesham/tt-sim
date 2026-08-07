@@ -5,7 +5,7 @@ from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.memory.memory import MemoryStall
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
-from tt_sim.trace import DispatchEvent, EventCategory, get_bus
+from tt_sim.trace import DispatchEvent, EventCategory, StallEvent, get_bus
 from tt_sim.util.bits import extract_bits, get_nth_bit
 from tt_sim.util.conversion import conv_to_uint32
 
@@ -259,6 +259,44 @@ class WaitGate(TensixFrontendUnit):
                     sem_check.append(i)
             return sem_check
 
+    #: Which backend unit each STALLWAIT condition bit is *about*, so a stall on
+    #: it can name the unit responsible rather than a bare condition number.
+    #: Indices follow :meth:`check_for_semwait_condition_match` (Wormhole) and
+    #: :meth:`_check_blackhole_condition` (Blackhole) exactly -- the two layouts
+    #: genuinely differ, which is why there are two maps. A condition absent
+    #: from a map is one that names no single unit (Wormhole's C0/C13, the two
+    #: "memory request outstanding" bits), and stalls on it carry no
+    #: ``blocked_on``.
+    STALLWAIT_COND_UNIT_WH = {
+        1: "UNPACK",
+        2: "UNPACK",
+        3: "PACK",
+        4: "PACK",
+        5: "PACK",
+        6: "PACK",
+        7: "MATH",
+        8: "UNPACK",
+        9: "UNPACK",
+        10: "MATH",
+        11: "MATH",
+        12: "XMOV",
+        14: "SFPU",
+    }
+    STALLWAIT_COND_UNIT_BH = {
+        0: "THCON",
+        1: "UNPACK",
+        2: "UNPACK",
+        3: "PACK",
+        4: "MATH",
+        5: "UNPACK",
+        6: "UNPACK",
+        7: "MATH",
+        8: "MATH",
+        9: "XMOV",
+        11: "SFPU",
+        12: "CFG",
+    }
+
     def __init__(self, frontend, backend, blackhole_conditions=False):
         super().__init__(frontend)
         self.mutex_stall = False
@@ -266,10 +304,117 @@ class WaitGate(TensixFrontendUnit):
         self.latchedWaitInstruction = None
         self.latch_wait = False
         self.backend = backend
+        # Open stall episode, or None. See ``_note_stall``: a stall is published
+        # once per contiguous span rather than once per cycle, so this holds the
+        # span's first cycle, its (reason, blocked_on, opcode, semaphore) key
+        # and the last cycle seen on it. All three stay None/-1 for ever unless
+        # the STALL trace category is enabled, which is what keeps an untraced
+        # run's cost to the single ``is not None`` test on the accept path.
+        self._stall_since = None
+        self._stall_key = None
+        self._stall_last = -1
         # The STALLWAIT/SEMWAIT condition-mask bit assignments differ between
         # Wormhole and Blackhole (compare the two arch's STALLWAIT.md). When set,
         # ``check_for_semwait_condition_match`` uses the Blackhole layout.
         self.blackhole_conditions = blackhole_conditions
+
+    def _note_stall(self, cycle_num, reason, blocked_on="", opcode="", semaphore=-1):
+        """Record one stalled cycle into the open episode, opening one if needed.
+
+        Called from every branch of :meth:`clock_tick` that declines to release
+        the head instruction. The bus check comes first and is the only cost an
+        untraced run pays here -- one global read and one dict lookup, on a
+        branch that was already doing strictly more work than that (a semaphore
+        comparison, a Src-bank ownership test, a refused issue). Nothing is
+        allocated and no episode state is written when the category is off, so
+        :attr:`_stall_since` stays ``None`` and the accept path's ``is not
+        None`` test stays false for the whole run.
+
+        A change of *any* key component closes the previous episode and opens a
+        new one, so a thread that moves from waiting on the unpackers to waiting
+        on a semaphore is two episodes, not one blurred span.
+        """
+        unit_id = self.frontend.unit_id
+        if unit_id is None:
+            return
+        bus = get_bus()
+        if not bus.is_enabled(EventCategory.STALL):
+            return
+        key = (reason, blocked_on, opcode, semaphore)
+        if self._stall_key != key:
+            if self._stall_since is not None:
+                self._flush_stall(bus)
+            self._stall_since = cycle_num
+            self._stall_key = key
+        self._stall_last = cycle_num
+
+    def _flush_stall(self, bus=None):
+        """Publish the open episode, if any, and close it.
+
+        Called when the gate makes progress (an instruction issued, or a latched
+        wait's condition was met) and, via :meth:`_note_stall`, when the reason
+        changes under it. A mutex or backend-enforced stall needs no explicit
+        flush: the tick after it clears either accepts -- which flushes -- or
+        stalls for a different reason, which is a key change. A run that ends
+        mid-stall leaves its final episode unpublished; that is one span at the
+        very end of a trace, and coalescing is worth more than chasing it.
+        """
+        since = self._stall_since
+        if since is None:
+            return
+        reason, blocked_on, opcode, semaphore = self._stall_key
+        self._stall_since = None
+        self._stall_key = None
+        if bus is None:
+            bus = get_bus()
+        bus.publish(
+            StallEvent(
+                cycle=since,
+                unit_id=self.frontend.unit_id,
+                reason=reason,
+                blocked_on=blocked_on,
+                cycles=self._stall_last - since + 1,
+                opcode=opcode,
+                thread_id=self.frontend.thread_id,
+                semaphore=semaphore,
+            )
+        )
+
+    def _note_latched_wait(self, cycle_num):
+        """Attribute a cycle spent under a latched SEMWAIT / STALLWAIT.
+
+        The reason is read out of the latched instruction's own masks, which is
+        the whole reason this is expressible: the hardware's wait conditions
+        *are* a named vocabulary (STALLWAIT.md tabulates one unit per condition
+        bit), so the model does not have to guess what the thread is waiting
+        for -- it is written in the instruction.
+        """
+        latched = self.latchedWaitInstruction
+        if latched is None:
+            return
+        if latched.isSemaphoreMode():
+            for sem in latched.getSemaphoresToCheck():
+                semaphore = self.backend.getSyncUnit().getSemaphore(sem)
+                if latched.getConditionCheck(0) and semaphore.value == 0:
+                    self._note_stall(cycle_num, "semaphore_empty", semaphore=sem)
+                    return
+                if latched.getConditionCheck(1) and semaphore.value >= semaphore.max:
+                    self._note_stall(cycle_num, "semaphore_full", semaphore=sem)
+                    return
+            return
+        cond_units = (
+            WaitGate.STALLWAIT_COND_UNIT_BH
+            if self.blackhole_conditions
+            else WaitGate.STALLWAIT_COND_UNIT_WH
+        )
+        for idx in range(15):
+            if latched.getConditionCheck(idx) and not (
+                self.check_for_semwait_condition_match(idx)
+            ):
+                self._note_stall(
+                    cycle_num, "resource_wait", blocked_on=cond_units.get(idx, "")
+                )
+                return
 
     def setBackendEnforcedStall(self):
         self.backend_enforced_stall = True
@@ -445,7 +590,11 @@ class WaitGate(TensixFrontendUnit):
         return not self.latch_wait and not self.frontend.wait_gate_instruction_fifo
 
     def clock_tick(self, cycle_num):
-        if not self.mutex_stall and not self.backend_enforced_stall:
+        if self.mutex_stall:
+            self._note_stall(cycle_num, "mutex_wait", blocked_on="SYNC")
+        elif self.backend_enforced_stall:
+            self._note_stall(cycle_num, "backend_enforced_stall")
+        else:
             instruction = self.frontend.inspect_wait_gate_instruction()
             if not self.latch_wait and self.latchedWaitInstruction is not None:
                 if instruction is not None:
@@ -462,7 +611,9 @@ class WaitGate(TensixFrontendUnit):
                 if condition_met:
                     self.latch_wait = False
                     self.latchedWaitInstruction = None
+                    self._flush_stall()
                     return  # One cycle latency here
+                self._note_latched_wait(cycle_num)
 
             if not self.latch_wait:
                 if instruction is not None:
@@ -475,10 +626,37 @@ class WaitGate(TensixFrontendUnit):
                         if self.checkIfFPUInstructionShouldStall(
                             instruction_info["name"]
                         ):
+                            self._note_stall(
+                                cycle_num,
+                                "src_reserved_by_unpacker",
+                                blocked_on="UNPACK",
+                                opcode=instruction_info["name"],
+                            )
                             return
                     instruction_accepted = self.frontend.backend.issueInstruction(
                         instruction, self.frontend.thread_id
                     )
+                    if not instruction_accepted:
+                        # The unit left its reason behind in ``_refuse``; this is
+                        # the only caller, and it reads it in the same statement
+                        # that saw the refusal. The unit it named wins over the
+                        # one we offered to, because a unit blocked on *another*
+                        # unit knows which, and the gate does not.
+                        backend = self.frontend.backend
+                        self._note_stall(
+                            cycle_num,
+                            backend.last_refusal_reason,
+                            blocked_on=(
+                                backend.last_refusal_blocked_on
+                                or instruction_info["ex_resource"]
+                            ),
+                            opcode=instruction_info["name"],
+                        )
+                    elif self._stall_since is not None:
+                        # Progress: whatever the thread was blocked on has
+                        # cleared. One attribute test on the accept path, and it
+                        # is only ever true when the STALL category is enabled.
+                        self._flush_stall()
                     if instruction_accepted:
                         # An accepted ATGETM stalls the gate until the sync unit
                         # grants the mutex (informMutexAcquired clears mutex_stall).

@@ -56,10 +56,13 @@ class LCOVWriter:
     def _on_event(self, event: InstrEvent):
         if event.stalled:
             return
-        loc = self._dwarf.lookup(event.pc)
+        # ``nearest`` rather than ``lookup``: a DWARF line program records a
+        # row only where the source position changes, so an exact-PC lookup
+        # drops most of the run. See tt_sim/trace/dwarf.py.
+        loc = self._dwarf.nearest(event.pc, unit=event.unit_id[-1])
         if loc is None:
             return
-        self._hits[loc] += 1
+        self._hits[(loc.file, loc.line)] += 1
 
     def close(self):
         # Group by source file for LCOV record emission.

@@ -184,7 +184,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         if self.busy_until is not None and self.is_occupied(
             self.instruction_group(instruction_name)
         ):
-            return False
+            return self._refuse("unit_busy")
         if instruction_name == "SETC16":
             if self.next_instruction.count("SETC16") < 3:
                 # Max one per thread per cycle allowed
@@ -196,7 +196,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
                 )
                 return True
             else:
-                return False
+                return self._refuse("issue_slot_taken")
         elif instruction_name == "WRCFG":
             if self.next_instruction.count("WRCFG") == 0:
                 # Max one in total per cycle allowed
@@ -208,7 +208,7 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
                 )
                 return True
             else:
-                return False
+                return self._refuse("issue_slot_taken")
         else:
             if (
                 not self.prev_cycle_setc16_or_wrcfg
@@ -222,7 +222,9 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
                 )
                 return True
             else:
-                return False
+                # The config unit's own throughput rule: a SETC16/WRCFG in the
+                # previous cycle blocks this cycle's other-opcode issue.
+                return self._refuse("unit_busy")
 
     def setConfig(self, stateID, cfgIndex, value, from_thread=None):
         if self.getDiagnosticSettings().reportConfigurationSet():

@@ -1,8 +1,9 @@
 from tt_sim.trace.auto import enable_from_env
 from tt_sim.trace.bus import EventBus, get_bus
 from tt_sim.trace.counters import CounterAggregator
-from tt_sim.trace.dwarf import DwarfIndex
+from tt_sim.trace.dwarf import DwarfIndex, SourceLoc
 from tt_sim.trace.events import (
+    STALL_REASONS,
     ComputeEvent,
     CounterSnapshot,
     DispatchEvent,
@@ -12,9 +13,11 @@ from tt_sim.trace.events import (
     LifecycleEvent,
     MemEvent,
     NoCEvent,
+    StallEvent,
     SyncEvent,
     Unit,
 )
+from tt_sim.trace.hotspots import Hotspot, HotspotAggregator, HotspotTable
 from tt_sim.trace.ids import IDRegistry, UnitID, get_registry
 from tt_sim.trace.invariants import (
     DEFAULT_INVARIANTS,
@@ -37,6 +40,7 @@ from tt_sim.trace.writers.perfetto import PerfettoWriter
 
 __all__ = [
     "DEFAULT_INVARIANTS",
+    "STALL_REASONS",
     "ComputeEvent",
     "CounterAggregator",
     "CounterSnapshot",
@@ -45,6 +49,9 @@ __all__ = [
     "Event",
     "EventBus",
     "EventCategory",
+    "Hotspot",
+    "HotspotAggregator",
+    "HotspotTable",
     "IDRegistry",
     "InstrEvent",
     "Invariant",
@@ -62,7 +69,9 @@ __all__ = [
     "PCAlignmentInvariant",
     "ParquetCounterWriter",
     "PerfettoWriter",
+    "SourceLoc",
     "SpikeCommitlogWriter",
+    "StallEvent",
     "StateDumpWriter",
     "SyncEvent",
     "Unit",

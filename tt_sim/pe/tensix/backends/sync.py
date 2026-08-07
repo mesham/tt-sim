@@ -65,7 +65,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         if self.busy_until is not None and self.is_occupied(
             self.issue_group(instruction)
         ):
-            return False
+            return self._refuse("unit_busy")
         instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
         instruction_name = instruction_info["name"]
         if instruction_name == "ATGETM" or instruction_name == "ATRELM":
@@ -104,7 +104,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                         continue
                     if instruction_n_info["instr_args"]["mutex_index"] == index:
                         # Same mutex referenced, do not issue this cycle
-                        return False
+                        return self._refuse("issue_slot_taken")
                 self.next_instruction.append(
                     (
                         instruction,
@@ -114,7 +114,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                 return True
             else:
                 # Three or more already issued, do not issue this cycle
-                return False
+                return self._refuse("issue_slot_taken")
         else:
             # Only one of any other instruction allowed
             if not self.checkIfNextInstructionsContainAnyOtherOpcodes(
@@ -128,7 +128,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                 )
                 return True
             else:
-                return False
+                return self._refuse("issue_slot_taken")
 
     def is_clock_idle(self):
         # A queued mutex waiter is retried every cycle by the override below.

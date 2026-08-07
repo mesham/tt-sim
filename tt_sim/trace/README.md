@@ -283,6 +283,43 @@ tree shows hottest PCs, with addresses underneath. Accesses without a
 PC (NoC-driven or internal-engine traffic; ~10% of the typical trace)
 group under a synthetic `<region>_no_pc` function.
 
+<!-- BEGIN: ranked bottleneck report (tt_sim/trace/report.py) -->
+### Ranked bottleneck report (`TT_SIM_PROFILE`)
+
+The one-shot entry point. `TT_SIM_PROFILE=<dir>` enables the counter
+aggregator and a per-PC hotspot aggregator, auto-discovers the ELFs
+tt-metal built, and writes a ranked `report.md` (plus `report.json`,
+`hotspots.json`, `profile.json` and the raw `counters/` dataset) at
+exit. Set `TT_SIM_COST_MODEL=1` alongside it or nothing can stall.
+
+```bash
+TT_SIM_COST_MODEL=1 TT_SIM_PROFILE=/tmp/myrun ./build/six
+python3 -m tt_sim.trace.report /tmp/myrun --stdout     # re-render
+```
+
+Three design points that matter to anyone extending this:
+
+- **DWARF resolution is post-processing.** `HotspotAggregator` keys on
+  the raw PC (one dict increment per retirement) and resolves through
+  `DwarfIndex` once, at close, over the few thousand distinct PCs a run
+  touches. A DWARF lookup per `InstrEvent` would be a real cost on a
+  tree whose tracing overhead is already over budget.
+- **The report generalises over counter names.** `stall_<reason>` is an
+  RV stall with that reason; anything else ending in `_cycles` is a
+  cycle-bearing counter and is ranked too, marked *(discovered)*. A new
+  stall reason or a new occupancy counter appears in the output with no
+  change to `report.py`.
+- **Attribution refuses to guess.** `DwarfIndex.nearest` answers only
+  inside the address ranges the line program actually covers, and
+  discovery leaves a core unattributed when its resident code matches no
+  candidate ELF. An index built from the wrong ELF would otherwise
+  answer every query and report ~100 % coverage of a kernel that never
+  ran.
+
+The user-facing walkthrough is
+[`driver/wormhole/docs/profiling.md` §0](../../driver/wormhole/docs/profiling.md).
+<!-- END: ranked bottleneck report -->
+
 ### Source-level attribution (LCOV)
 
 `TT_SIM_TRACE_LCOV=<file>` plus `TT_SIM_TRACE_LCOV_ELFS=<elf1,elf2>`
@@ -320,12 +357,20 @@ Caveats:
 - Stripped ELFs (no `-g`) load cleanly but contribute zero
   attribution. Build the kernel/firmware you care about with debug
   info.
-- ELFs are loaded once at sim init; lookup is a single dict access
-  per `InstrEvent` — negligible runtime cost.
+- ELFs are loaded once at sim init; lookup is a bisect against the
+  loaded line table per `InstrEvent`. It is a *floor* lookup, because a
+  line program records a row only where the source position changes —
+  exact-PC matching drops most of a run.
 - PC ranges from multiple ELFs may overlap (firmware + kernel share
-  L1 space). The index uses last-load-wins; list kernel ELFs after
+  L1 space). Load each ELF against the unit that runs it
+  (`DwarfIndex.load(path, unit="TRISC2")`) to keep them apart; the
+  unscoped index still uses last-load-wins, so list kernel ELFs after
   firmware ELFs in `TT_SIM_TRACE_LCOV_ELFS` if you want kernel
   attribution to take priority on collisions.
+- `TT_SIM_TRACE_LCOV_ELFS` takes bare paths and does no auto-discovery
+  or relocation. For a tt-metal kernel, which tt-metal places at a
+  runtime base different from its link address, use `TT_SIM_PROFILE`
+  above instead — it finds the ELFs and recovers the load bias.
 
 ### Architectural invariants
 
@@ -435,6 +480,11 @@ Common fields on every event:
 | `unit_id`        | `tuple` | `(chip_id, core_y, core_x, unit)` of the source. |
 | `schema_version` | `int`   | Bumps on any breaking change to the event shape. |
 | `category`       | `str`   | Routing key — `instr`, `dispatch`, `noc`, etc.   |
+
+`SCHEMA_VERSION` is **4**. Version 4 added the `stall` category and
+`StallEvent`; it is additive, so a consumer of versions 1–3 sees the
+categories it already knew, unchanged, and simply does not subscribe to
+the new one.
 
 Per-type fields published today:
 
@@ -578,6 +628,77 @@ Emitted from cross-thread / cross-core synchronisation points.
 `cycle` is 0 — sync points happen inside memory writes / register
 reads which don't carry the device cycle directly. Pair with adjacent
 `MemEvent` / `InstrEvent` for timing.
+
+<!-- BEGIN stall-reasons (ROADMAP Tier 1 item 1) -->
+### `StallEvent` (category `stall`)
+
+The complement of `DispatchEvent`: that event says an instruction
+issued, this one says why the next one could not. Emitted from the
+Tensix wait gate (`pe/tensix/frontend.py`), one event per **episode** —
+the contiguous run of cycles a thread was held for one reason — not one
+per cycle. On `sfpumath` that is 32 events covering 10,793 stalled
+cycles.
+
+`unit_id` is the **thread that suffered** the stall (`TRISC0/1/2`);
+`blocked_on` names the unit **responsible**. Those are deliberately
+different: an unpacker that cannot start because the matrix unit still
+owns the Src bank is reported as blocked on `MATH`, not on `UNPACK`.
+
+| Field        | Type  |                                                    |
+|--------------|-------|----------------------------------------------------|
+| `reason`     | `str` | One of `STALL_REASONS` (below).                    |
+| `blocked_on` | `str` | `ex_resource` name of the unit at fault, or `""`.  |
+| `cycles`     | `int` | Length of the episode, ≥ 1.                        |
+| `opcode`     | `str` | Instruction held at the gate, or `""`.             |
+| `thread_id`  | `int` | Issuing Tensix thread, 0–2.                        |
+| `semaphore`  | `int` | Semaphore index for a semaphore wait, else `-1`.   |
+
+`reason` is drawn from a frozen vocabulary exported as
+`tt_sim.trace.STALL_REASONS`, so a consumer can switch on it
+exhaustively. There is deliberately no generic `"stalled"` — every
+name is a mechanism the model actually knows:
+
+| Reason | Meaning |
+|---|---|
+| `semaphore_empty` | SEMWAIT: selected semaphore still zero — the producer has not posted. |
+| `semaphore_full` | SEMWAIT: semaphore at max — consumer back-pressure. |
+| `resource_wait` | STALLWAIT condition unmet; `blocked_on` names the unit it is about. |
+| `mutex_wait` | `ATGETM` accepted, mutex not yet granted. |
+| `backend_enforced_stall` | A backend unit asserted the gate's stall directly. |
+| `src_reserved_by_unpacker` | Matrix-unit op waiting for a Src bank the unpackers still own. |
+| `src_reserved_by_matrix` | Unpacker / ThCon waiting for a Src bank the matrix unit still owns. |
+| `unit_busy` | Target unit (or its IPC group) still occupied. **Cost-model only.** |
+| `issue_slot_taken` | Target unit's issue slot already taken this cycle. |
+| `issue_yield_fairness` | Slot yielded to a less-recently-granted thread. |
+| `flush_pending` | Scalar unit mid-`FLUSHDMA`, waiting for the DMA units to drain. |
+| `atomic_pending` | Scalar unit retrying an `ATCAS`. |
+
+**Regime.** `unit_busy` cannot occur with `TT_SIM_COST_MODEL` unset —
+nothing arms an occupancy then, so its absence is truthful rather than
+missing. Every other reason is structural and occurs in both regimes.
+
+**These are modelled floors, not calibrated cycle counts.** The
+simulator charges every published bound at its low end
+(`docs/plans/cost-model.md`); the result is corroborated against
+silicon but never calibrated to it. Read the *attribution* — which
+reason dominates and which unit is named — rather than the absolute
+figure. The Perfetto writer repeats this on every stall slice's
+`timing_model` argument, because a stall width is the number most
+likely to be quoted out of context.
+
+Counters derived by `CounterAggregator`: `tensix_stall_cycles`,
+`tensix_stall_episodes`, `tensix_stall_<reason>` and
+`tensix_stall_on_<unit>`. The `tensix_` prefix is load-bearing — a
+Tensix thread publishes under the *same* `unit_id` its baby RISC-V core
+uses for `InstrEvent`, so an unprefixed `stall_cycles` would sum two
+unrelated mechanisms.
+
+Not surfaced, with reasons: **unpacker idle cycles** are derivable from
+the existing `busy_cycles` counter against the run's cycle span, and
+counting them directly would need the pump to visit units on cycles it
+deliberately skips. **L1 bank conflicts** (L1 is flat memory) and NoC
+`vc` occupancy (no VCs modelled) remain genuinely un-modelled.
+<!-- END stall-reasons -->
 
 ## ID scheme
 

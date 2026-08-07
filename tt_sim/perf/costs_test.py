@@ -1015,6 +1015,11 @@ EXPECTED_CONSUMERS = {
     # would fabricate performance data, which is worse than emitting none.
     "tt_sim/trace/writers/perfetto.py",
     "tt_sim/trace/writers/noc_parquet.py",
+    # Same question, asked at exit rather than at open: the ranked bottleneck
+    # report stamps the regime into its own header, and says in its body that
+    # an un-modelled run has no stall rows rather than zeroed ones. It reads
+    # no cost and runs after the last cycle.
+    "tt_sim/trace/auto.py",
     # Prose only — ``ComputeEvent.duration`` documents which table its cycles
     # came from. No import; the event is a plain dataclass field populated by
     # ``TensixBackendUnit.clock_tick``, which is already on this list.

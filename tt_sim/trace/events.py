@@ -20,6 +20,7 @@ class EventCategory(Enum):
     DISPATCH = "dispatch"
     LIFECYCLE = "lifecycle"
     COUNTER = "counter"
+    STALL = "stall"
 
 
 class Unit(Enum):
@@ -47,9 +48,69 @@ class Unit(Enum):
     UNKNOWN = "UNKNOWN"
 
 
+#: Every reason a :class:`StallEvent` may carry, frozen so a consumer can
+#: switch on the set exhaustively and a typo cannot silently mint a new one.
+#:
+#: Each name is a cause the model **actually knows** at the moment it declines
+#: to make progress -- there is deliberately no generic ``"stalled"``. A code
+#: generator acts on the reason, so a reason that does not name a mechanism is
+#: worse than no reason at all.
+#:
+#: The three ``issue_*`` reasons are back-pressure from the target backend unit
+#: (:meth:`tt_sim.pe.tensix.backends.backend_base.TensixBackendUnit.issueInstruction`);
+#: the rest are the Tensix wait gate declining to release its head instruction.
+STALL_REASONS = frozenset(
+    {
+        # -- wait gate, latched SEMWAIT --------------------------------------
+        #: A selected semaphore is still zero: the producer has not posted yet.
+        "semaphore_empty",
+        #: A selected semaphore is at its maximum: consumer back-pressure, the
+        #: producer cannot post again until something drains.
+        "semaphore_full",
+        # -- wait gate, latched STALLWAIT ------------------------------------
+        #: A STALLWAIT condition is unmet. ``blocked_on`` names the unit the
+        #: condition is about, which is the actionable half.
+        "resource_wait",
+        # -- wait gate, other ------------------------------------------------
+        #: An ATGETM has been accepted but the sync unit has not granted the
+        #: mutex yet.
+        "mutex_wait",
+        #: A backend unit asserted the gate's stall directly.
+        "backend_enforced_stall",
+        #: A Matrix-unit instruction cannot start because the SrcA/SrcB bank it
+        #: reads is still owned by the unpackers. ``blocked_on`` is ``UNPACK``.
+        "src_reserved_by_unpacker",
+        #: The mirror image: an unpacker (or a ThCon GPR-to-Src write) cannot
+        #: start because the Src bank it *writes* is still owned by the matrix
+        #: unit. ``blocked_on`` is ``MATH``. Together with the reason above,
+        #: these two are the Src ping-pong a code generator is trying to
+        #: overlap, and which way round it is stuck is the actionable part.
+        "src_reserved_by_matrix",
+        # -- backend unit servicing something else ----------------------------
+        #: The scalar unit is mid-``FLUSHDMA``, waiting for the DMA units its
+        #: condition mask names to drain.
+        "flush_pending",
+        #: The scalar unit is retrying an atomic (``ATCAS``) that has not yet
+        #: observed its expected value.
+        "atomic_pending",
+        # -- backend issue refusal -------------------------------------------
+        #: The target unit (or its IPC group) is still occupied by a multi-cycle
+        #: instruction. Cost-model state: never fires with TT_SIM_COST_MODEL
+        #: unset, because nothing arms an occupancy then.
+        "unit_busy",
+        #: The target unit's issue slot was already taken this cycle, by another
+        #: thread or by this one's own earlier instruction.
+        "issue_slot_taken",
+        #: The slot was free but yielded to a thread granted less recently, so
+        #: the grant rotates rather than following wait-gate tick order.
+        "issue_yield_fairness",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Event:
-    SCHEMA_VERSION: ClassVar[int] = 3
+    SCHEMA_VERSION: ClassVar[int] = 4
     CATEGORY: ClassVar[EventCategory | None] = None
     cycle: int
     unit_id: tuple
@@ -160,3 +221,53 @@ class CounterSnapshot(Event):
     counter_name: str
     value: int
     kernel_id: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class StallEvent(Event):
+    """One contiguous span during which a Tensix thread made no progress.
+
+    The complement of :class:`DispatchEvent`: that event says an instruction
+    issued, this one says why the next one could not. ``unit_id`` is the
+    **thread that suffered** the stall (TRISC0/1/2), ``blocked_on`` names the
+    unit **responsible** for it, and ``reason`` says which mechanism held it.
+    That split is the whole point -- a code generator needs "the math thread
+    spent 61 k cycles waiting on the unpackers", not "something stalled".
+
+    **Coalesced into episodes, not emitted per cycle.** The wait gate re-offers
+    its head instruction every cycle while blocked, so a per-cycle event would
+    put 64 k rows on one guard for one wait. Instead an episode accumulates
+    while ``(reason, blocked_on, opcode)`` is unchanged and is published once,
+    when it ends: ``cycle`` is the first cycle of the span and :attr:`cycles`
+    its length. A thread is in at most one episode at a time (the gate's stall
+    branches are mutually exclusive), so episodes on one thread never overlap.
+
+    **These are modelled floors, not calibrated cycle counts.** The span is as
+    long as the simulator held the thread, and the simulator charges every
+    published bound at its low end (``docs/plans/cost-model.md``); it is
+    corroborated against silicon but never calibrated to it. Read the
+    *attribution* -- which reason dominates, and which unit -- rather than the
+    absolute figure. With ``TT_SIM_COST_MODEL`` unset the ``unit_busy`` reason
+    cannot occur at all, because nothing arms an occupancy; the other reasons
+    are structural and occur in both regimes.
+    """
+
+    CATEGORY: ClassVar[EventCategory] = EventCategory.STALL
+    #: One of :data:`STALL_REASONS`.
+    reason: str
+    #: The backend unit responsible, as an ``ex_resource`` name (``MATH``,
+    #: ``SFPU``, ``PACK``, ``UNPACK``, ``XMOV``, ``THCON``, ``CFG``, ``SYNC``).
+    #: Empty when the mechanism names no single unit -- a semaphore or mutex
+    #: wait is about a synchronisation object, not about a unit.
+    blocked_on: str = ""
+    #: Cycles in this episode. Always >= 1.
+    cycles: int = 1
+    #: The instruction held at the head of the wait gate, when the stall is
+    #: attributable to one. Empty for a latched wait, which blocks a *class* of
+    #: instructions rather than the one at the head.
+    opcode: str = ""
+    #: Issuing Tensix thread (0-2), mirroring :class:`DispatchEvent`.
+    thread_id: int = -1
+    #: For a semaphore wait, the semaphore index the thread is blocked on;
+    #: ``-1`` for every other reason.
+    semaphore: int = -1

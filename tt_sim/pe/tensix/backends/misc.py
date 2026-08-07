@@ -34,11 +34,11 @@ class MiscellaneousUnit(TensixBackendUnit):
         if self.busy_until is not None and self.is_occupied(
             self.issue_group(instruction)
         ):
-            return False
+            return self._refuse("unit_busy")
         # Accepts one per thread
         for _, thread_id in self.next_instruction:
             if thread_id == from_thread:
-                return False
+                return self._refuse("issue_slot_taken")
         self.next_instruction.append(
             (
                 instruction,

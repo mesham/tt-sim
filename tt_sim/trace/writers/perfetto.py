@@ -1,10 +1,10 @@
 """Perfetto / Chrome Trace Event Format writer.
 
 Subscribes to ``instr``, ``dispatch``, ``compute``, ``sync``, ``noc``,
-and ``lifecycle`` events from the bus and streams them as JSON in the
-shape ``ui.perfetto.dev`` ingests directly. ``mem`` events are skipped
-by default — their volume swamps the UI and they don't have natural
-slice semantics.
+``stall`` and ``lifecycle`` events from the bus and streams them as JSON
+in the shape ``ui.perfetto.dev`` ingests directly. ``mem`` events are
+skipped by default — their volume swamps the UI and they don't have
+natural slice semantics.
 
 Cycles map to microseconds in the trace (``ts = cycle``).
 
@@ -29,6 +29,12 @@ is only ever a number the simulator actually holds:
   (``InstrEvent.stall_cycles``).
 * ``dispatch`` slices are one cycle wide in both regimes: issuing to a
   backend unit is a single-cycle act.
+* ``stall`` slices span a whole episode — the contiguous cycles a Tensix
+  thread was held for one named reason (``StallEvent.cycles``) — and are
+  drawn on a ``<thread> stall`` track of their own, beside the track
+  carrying what that thread did run. The slice name is
+  ``stall:<reason>-><unit>``, so the *cause* is legible without opening
+  the args.
 
 **With ``TT_SIM_COST_MODEL`` unset all of that collapses to one cycle**
 (a NoC flight to the one or two cycles the two-list swap in
@@ -97,6 +103,7 @@ class PerfettoWriter:
             EventCategory.SYNC,
             EventCategory.NOC,
             EventCategory.LIFECYCLE,
+            EventCategory.STALL,
         ):
             self._bus.subscribe(cat, self._on_event)
 
@@ -244,6 +251,51 @@ class PerfettoWriter:
                     "tid": tid,
                     "ts": ts,
                     "dur": event.duration if modelled else 1,
+                    "args": args,
+                }
+            )
+        elif cat is EventCategory.STALL:
+            # Its own track, not the thread's instruction track. A stall spans
+            # many cycles and the instruction slices beneath it are one cycle
+            # each; two partially overlapping ``X`` slices on one track are not
+            # legally nestable and Perfetto drops them. On a track of its own
+            # the episodes cannot overlap each other either — the wait gate's
+            # stall branches are mutually exclusive, so a thread is in at most
+            # one episode at a time — and the result reads as a "why is this
+            # thread not progressing" lane beside "what it ran".
+            chip, y, x, unit = event.unit_id
+            _, stall_tid = self._pid_tid((chip, y, x, f"{unit} stall"))
+            name = (
+                f"stall:{event.reason}->{event.blocked_on}"
+                if event.blocked_on
+                else f"stall:{event.reason}"
+            )
+            args = {
+                "stall_reason": event.reason,
+                "stall_cycles": event.cycles,
+                "thread_id": event.thread_id,
+                # Modelled floors, never calibrated absolutes. Repeated on the
+                # slice because a stall width is the number a reader is most
+                # tempted to quote out of context.
+                "timing_model": (
+                    "modelled floor from published bounds, "
+                    f"not calibrated to silicon (TT_SIM_COST_MODEL {self._regime})"
+                ),
+            }
+            if event.blocked_on:
+                args["blocked_on"] = event.blocked_on
+            if event.opcode:
+                args["blocked_opcode"] = event.opcode
+            if event.semaphore >= 0:
+                args["semaphore"] = event.semaphore
+            self._emit_raw(
+                {
+                    "ph": "X",
+                    "name": name,
+                    "pid": pid,
+                    "tid": stall_tid,
+                    "ts": ts,
+                    "dur": event.cycles,
                     "args": args,
                 }
             )

@@ -21,6 +21,10 @@ cost model supplies the state, cycle-attributing ones:
   which against the run length is the unit's utilisation.
 - ``noc_flight_cycles`` and ``noc_txns_timed`` per NIU, from
   ``NoCEvent.issue_cycle`` against the event's own cycle.
+- ``tensix_stall_cycles`` per Tensix thread, split by
+  ``tensix_stall_<reason>`` and ``tensix_stall_on_<unit>``, from
+  ``StallEvent`` — where a thread's *lost* time went, against
+  ``dispatch_total`` for where its spent time went.
 
 Every one of those is **absent, not zero, with ``TT_SIM_COST_MODEL``
 unset**: a counter is only emitted when something incremented it, so a
@@ -44,6 +48,7 @@ from tt_sim.trace.events import (
     LifecycleEvent,
     MemEvent,
     NoCEvent,
+    StallEvent,
     SyncEvent,
 )
 
@@ -64,6 +69,7 @@ class CounterAggregator:
         bus.subscribe(EventCategory.NOC, self._on_noc)
         bus.subscribe(EventCategory.MEM, self._on_mem)
         bus.subscribe(EventCategory.SYNC, self._on_sync)
+        bus.subscribe(EventCategory.STALL, self._on_stall)
         bus.subscribe(EventCategory.LIFECYCLE, self._on_lifecycle)
 
     def _on_instr(self, e: InstrEvent):
@@ -108,6 +114,18 @@ class CounterAggregator:
 
     def _on_sync(self, e: SyncEvent):
         self._counters[(e.unit_id, f"sync_{e.kind}")] += 1
+
+    def _on_stall(self, e: StallEvent):
+        # Namespaced ``tensix_`` because a Tensix thread's unit_id is the *same*
+        # unit_id its baby RISC-V core publishes InstrEvents under -- an
+        # unprefixed ``stall_cycles`` here would silently sum into the RV cost
+        # model's counter of the same name and make both unreadable.
+        self._counters[(e.unit_id, "tensix_stall_cycles")] += e.cycles
+        self._counters[(e.unit_id, "tensix_stall_episodes")] += 1
+        self._counters[(e.unit_id, f"tensix_stall_{e.reason}")] += e.cycles
+        if e.blocked_on:
+            self._counters[(e.unit_id, f"tensix_stall_on_{e.blocked_on}")] += e.cycles
+        self._maybe_flush(e.cycle)
 
     def _on_lifecycle(self, e: LifecycleEvent):
         # Always flush at lifecycle boundaries; bump kernel_id at each

@@ -60,7 +60,13 @@ class UnPackerUnit(TensixBackendUnit):
 
     def issueInstruction(self, instruction, from_thread):
         if self.blocked:
-            return False
+            # Not ``unit_busy``: the unpacker is idle, and is waiting for the
+            # *matrix unit* to release the Src bank its latched instruction
+            # wants to write. The exact mirror of the wait gate's
+            # ``src_reserved_by_unpacker``, and the other half of the Src
+            # ping-pong a code generator is trying to overlap -- so it is
+            # attributed to MATH, not to the unpacker the gate offered to.
+            return self._refuse("src_reserved_by_matrix", blocked_on="MATH")
         else:
             return super().issueInstruction(instruction, from_thread)
 

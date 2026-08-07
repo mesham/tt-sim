@@ -114,6 +114,39 @@ class TensixBackendUnit(Clockable, ABC):
         self._starved_threads = None
         self._grant_lru = [0, 1, 2]
 
+    def _refuse(self, reason, blocked_on=""):
+        """Record *why* this unit is refusing, then refuse.
+
+        The wait gate publishes the :class:`~tt_sim.trace.events.StallEvent`,
+        because it is the caller that holds ``cycle_num`` and the decoded
+        opcode -- including the ``ex_resource`` name that becomes
+        ``blocked_on``, so the unit's own identity does not need recording
+        here. Written to the shared backend rather than to ``self`` so the gate
+        can read it back without first working out which of the ten units
+        ``backend.issueInstruction`` dispatched to.
+
+        ``blocked_on`` overrides the gate's default of "the unit I offered to".
+        Usually those are the same thing, but not always: an unpacker refusing
+        because the Src bank it writes is still owned by the *matrix unit* is
+        blocked on ``MATH``, and reporting ``UNPACK`` there would point a reader
+        at the symptom instead of the cause.
+
+        Costs one test and two attribute stores, on a branch that was already
+        returning False, and nothing at all on the accept path. It is
+        deliberately not conditional on the bus being enabled: a branch on a
+        global would cost more here than the stores it guards.
+
+        A unit built without a backend -- which the clock and cost-model unit
+        tests do, exercising a single unit in isolation -- records nothing and
+        still refuses, because the recording only exists to be read back by a
+        wait gate that such a unit does not have.
+        """
+        backend = self.backend
+        if backend is not None:
+            backend.last_refusal_reason = reason
+            backend.last_refusal_blocked_on = blocked_on
+        return False
+
     def issueInstruction(self, instruction, from_thread):
         # The default issuing of instructions here, which applies to most
         # units, is one instruction per cycle. Can override for specific
@@ -129,18 +162,18 @@ class TensixBackendUnit(Clockable, ABC):
             if starved is None:
                 starved = self._starved_threads = set()
             starved.add(from_thread)
-            return False
+            return self._refuse("unit_busy")
         if self.next_instruction:
             if starved is None:
                 starved = self._starved_threads = set()
             starved.add(from_thread)
-            return False
+            return self._refuse("issue_slot_taken")
         # The slot is free. Yield it when a thread granted less recently than
         # this one is also waiting: that thread's gate re-offers every cycle,
         # so the grant rotates rather than following wait-gate tick order.
         if starved and self._must_yield(from_thread, starved):
             starved.add(from_thread)
-            return False
+            return self._refuse("issue_yield_fairness")
         self.next_instruction.append(
             (
                 instruction,

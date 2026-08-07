@@ -42,14 +42,35 @@ Supported env vars (all optional, all default-off):
 
 All writers can be enabled simultaneously; they subscribe to disjoint
 event handling and write independent outputs.
+
+**The one-shot entry point.** ``TT_SIM_PROFILE=<dir>`` is the documented
+"here is my kernel, tell me where its cycles went" invocation: it turns
+on the counter aggregator and the per-PC hotspot aggregator, discovers
+the kernel ELFs tt-metal just built, and writes a ranked
+``<dir>/report.md`` (plus ``report.json``, ``hotspots.json`` and the raw
+``counters/`` dataset) when the process exits. Everything it enables is
+also reachable individually via the vars above; the point of the single
+var is that a reader who has never opened this file gets a usable answer
+without choosing between them. Companion knobs:
+
+- ``TT_SIM_PROFILE_ELFS`` — ``BRISC:/path.elf,TRISC2:/path.elf`` (or a
+  bare comma-separated list, unit inferred from the filename) to skip
+  auto-discovery entirely.
+- ``TT_SIM_PROFILE_INTERVAL`` — counter flush cadence in cycles.
+- ``TT_SIM_PROFILE_LABEL`` — a name for the run, printed in the report.
 """
 
 import atexit
+import json
 import os
+import sys
+from pathlib import Path
 
 from tt_sim.trace.bus import get_bus
 from tt_sim.trace.counters import DEFAULT_FLUSH_INTERVAL_CYCLES, CounterAggregator
 from tt_sim.trace.dwarf import DwarfIndex
+from tt_sim.trace.elfdisc import REJECTED, discover, session_start
+from tt_sim.trace.hotspots import HotspotAggregator
 from tt_sim.trace.ids import get_registry
 from tt_sim.trace.invariants import InvariantRunner
 from tt_sim.trace.state_dump import StateDumpWriter
@@ -71,6 +92,8 @@ _MEMORY_WRITER: MemoryTraceWriter | None = None
 _LCOV_WRITER: LCOVWriter | None = None
 _INVARIANTS: InvariantRunner | None = None
 _STATE_WRITER: StateDumpWriter | None = None
+_HOTSPOTS: HotspotAggregator | None = None
+_PROFILE: dict | None = None
 
 
 def enable_from_env(device=None) -> None:
@@ -84,6 +107,7 @@ def enable_from_env(device=None) -> None:
     """
     global _JSONL, _PERFETTO, _COMMITLOG, _COUNTERS_AGG, _COUNTERS_WRITER
     global _NOC_WRITER, _MEMORY_WRITER, _LCOV_WRITER, _INVARIANTS, _STATE_WRITER
+    global _HOTSPOTS, _PROFILE
     jsonl_path = os.environ.get("TT_SIM_TRACE")
     perfetto_path = os.environ.get("TT_SIM_TRACE_PERFETTO")
     commitlog_path = os.environ.get("TT_SIM_TRACE_COMMITLOG")
@@ -93,6 +117,13 @@ def enable_from_env(device=None) -> None:
     lcov_path = os.environ.get("TT_SIM_TRACE_LCOV")
     invariants_path = os.environ.get("TT_SIM_TRACE_INVARIANTS")
     state_dump_path = os.environ.get("TT_SIM_TRACE_STATE_DUMP")
+    profile_dir = os.environ.get("TT_SIM_PROFILE")
+
+    # ``TT_SIM_PROFILE`` is a preset over the vars above: it owns the counter
+    # dataset unless the user asked for one somewhere else, in which case that
+    # wins and the profile just reads it.
+    if profile_dir and not counters_path:
+        counters_path = str(Path(profile_dir) / "counters")
 
     if not any(
         (
@@ -105,12 +136,28 @@ def enable_from_env(device=None) -> None:
             lcov_path,
             invariants_path,
             state_dump_path,
+            profile_dir,
         )
     ):
         return
 
     bus = get_bus()
     bus.enabled = True
+
+    if profile_dir and _PROFILE is None:
+        _PROFILE = {
+            "dir": Path(profile_dir),
+            "counters": counters_path,
+            "since": session_start(),
+            "label": os.environ.get("TT_SIM_PROFILE_LABEL", ""),
+            "device": device,
+        }
+        if _HOTSPOTS is None:
+            _HOTSPOTS = HotspotAggregator()
+    elif _PROFILE is not None and _PROFILE.get("device") is None:
+        # ``TT_Device`` calls this once before it has a device reference and
+        # once after; keep the later, usable one for byte verification.
+        _PROFILE["device"] = device
 
     if jsonl_path and _JSONL is None:
         _JSONL = JSONLLogger(jsonl_path)
@@ -122,7 +169,9 @@ def enable_from_env(device=None) -> None:
         _COMMITLOG = SpikeCommitlogWriter(commitlog_path)
 
     if counters_path and _COUNTERS_WRITER is None:
-        interval_env = os.environ.get("TT_SIM_TRACE_COUNTERS_INTERVAL")
+        interval_env = os.environ.get(
+            "TT_SIM_TRACE_COUNTERS_INTERVAL"
+        ) or os.environ.get("TT_SIM_PROFILE_INTERVAL")
         interval = (
             int(interval_env)
             if interval_env is not None
@@ -189,6 +238,138 @@ def enable_from_env(device=None) -> None:
                     )
             if _STATE_WRITER is not None:
                 _STATE_WRITER.close()
+            if _PROFILE is not None:
+                write_profile_report(_PROFILE, _HOTSPOTS)
 
         atexit.register(_on_exit)
         enable_from_env._atexit_registered = True  # type: ignore[attr-defined]
+
+
+#: How much of a tile's L1 to snapshot when looking for a relocated kernel.
+#: Kernel text is placed in the low megabyte; snapshotting more costs time
+#: at exit for no extra hits.
+_L1_SEARCH_BYTES = 1 << 20
+
+
+def _device_probes(device):
+    """``(verifier, searcher)`` over the first live Tensix tile.
+
+    ``verifier(unit, vaddr, size)`` proves a candidate ELF is resident where
+    it was linked. It returns ``None`` — abstain, not "mismatch" — when the
+    address is not readable through this tile, which is the common case for a
+    core's private local-memory window.
+
+    ``searcher(blob)`` finds a byte string anywhere in the tile's L1 and is
+    what recovers the load bias of a kernel tt-metal placed somewhere other
+    than its link address. The snapshot is taken once, lazily, and only if a
+    verifier miss actually asks for it.
+    """
+    tiles = getattr(device, "tensix_tiles", None) or getattr(
+        getattr(device, "tt_device", None), "tensix_tiles", None
+    )
+    if not tiles:
+        return None, None
+    tile = tiles[0]
+    snapshot: list[bytes | None] = []
+
+    def read(unit, vaddr, size):
+        # Read through the *core's own* memory view, not the tile's. The five
+        # baby cores each map a private local memory at 0xFFB00000 (and NCRISC
+        # an IRAM at 0xFFC00000); a tile-level read of those addresses answers
+        # for whichever core the tile map happens to resolve to, so it can
+        # confidently contradict an ELF that is in fact resident.
+        core = getattr(tile, str(unit).lower(), None)
+        source = getattr(core, "visible_memory", None) or tile
+        try:
+            return bytes(source.read(vaddr, size))
+        except Exception:
+            return None
+
+    def search(blob):
+        if not snapshot:
+            try:
+                snapshot.append(bytes(tile.read(0, _L1_SEARCH_BYTES)))
+            except Exception:
+                snapshot.append(None)
+        l1 = snapshot[0]
+        if l1 is None:
+            return None
+        at = l1.find(blob)
+        if at < 0:
+            return None
+        # Ambiguity is a wrong answer waiting to happen: two copies of the
+        # same text mean the bias cannot be pinned down.
+        if l1.find(blob, at + 1) >= 0:
+            return None
+        return at
+
+    return read, search
+
+
+def write_profile_report(profile: dict, hotspots) -> None:
+    """Resolve the hotspot table against auto-discovered ELFs and render
+    the ranked report. Never raises: a profiling run that has already
+    produced its answer must not fail at exit because a cache moved."""
+    from tt_sim.perf.model import cost_model_enabled
+    from tt_sim.trace import report as report_mod
+
+    directory = Path(profile["dir"])
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        verifier, searcher = _device_probes(profile.get("device"))
+        found = discover(
+            since=profile.get("since"), verifier=verifier, searcher=searcher
+        )
+        index = DwarfIndex()
+        elf_meta = []
+        for entry in found.elfs:
+            row = {
+                "unit": entry.unit,
+                "role": entry.role,
+                "path": str(entry.path),
+                "how": entry.how,
+            }
+            if entry.how == REJECTED:
+                # Positively identified as the wrong ELF; loading it would put
+                # some other kernel's function names on this run's hotspots.
+                elf_meta.append(row)
+                continue
+            try:
+                added = index.load(entry.path, unit=entry.unit, bias=entry.bias)
+            except Exception as exc:  # a bad ELF costs its unit, not the run
+                row["how"] = f"{entry.how} (unreadable: {exc})"
+                elf_meta.append(row)
+                continue
+            if not added:
+                row["how"] = f"{entry.how}, no DWARF"
+            elf_meta.append(row)
+
+        table = hotspots.resolve(index) if hotspots is not None else None
+        payload = report_mod.hotspots_to_dict(table) if table is not None else {}
+        if payload:
+            (directory / "hotspots.json").write_text(json.dumps(payload, indent=2))
+
+        notes = [found.note] if found.note else []
+        meta = {
+            "label": profile.get("label") or directory.name,
+            # Ask the model itself rather than re-parsing the variable, so
+            # `TT_SIM_COST_MODEL=0` is reported as off, not as truthy.
+            "cost_model": cost_model_enabled(),
+            "elfs": elf_meta,
+            "notes": notes,
+            "elf_roots": found.roots,
+        }
+        (directory / "profile.json").write_text(json.dumps(meta, indent=2))
+
+        built = report_mod.build(
+            profile.get("counters"),
+            hotspots=payload,
+            elfs=elf_meta,
+            cost_model=meta["cost_model"],
+            label=meta["label"],
+            notes=notes,
+        )
+        path = report_mod.write(built, directory)
+        print(f"[tt-sim profile] ranked report written to {path}", file=sys.stderr)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[tt-sim profile] report generation failed: {exc}", file=sys.stderr)
