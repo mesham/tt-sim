@@ -21,14 +21,15 @@ observability tooling, differential testing, and education. The
 priority list below is shaped by the first lane: the Tensix front-end
 bound, the poll-until-DONE guard conversion, the silicon-backed RV cost
 fixes, the last two Tensix unit costs and firmware-loop parking (with
-and without the cost model) have all landed, so what remains is getting
-that attribution out to the people who will act on it, and closing the
-few uncosted terms that are left.
+and without the cost model) have all landed, and as of 2026-08-07 so
+has the attribution pipe that carries it to the people who will act on
+it (item 1, closed). What remains is closing the few uncosted terms
+that are left, and the simulator's own wall clock.
 The first named external consumer is the **compiler team**: they will
 drive kernels through tt-sim to trace where cycles go — instruction
-mix, data movement, stalls — and generate more efficient code from it,
-which is why cost-model fidelity and easily-consumed trace output
-(item 1) carry the weight they do here.
+mix, data movement, stalls — and generate more efficient code from it.
+Their contract is [`docs/trace-schema.md`](docs/trace-schema.md),
+frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ---
 
@@ -36,20 +37,24 @@ which is why cost-model fidelity and easily-consumed trace output
 
 ### Tier 1 — load-bearing, start here
 
-1. **Bottleneck-attribution workflow for the compiler team** — a
-   documented, stable path from "run this kernel" to "ranked
-   bottleneck report" over the Perfetto/Parquet outputs. Promoted:
-   the fidelity work it depended on has landed (stall reasons are
-   real, data movement is costed, grid-scale runs are affordable), so
-   what remains is packaging the attribution for the people who will
-   act on it.
+1. **Bottleneck-attribution workflow for the compiler team —
+   CLOSED 2026-08-07.** All five bullets landed:
+   [`docs/trace-schema.md`](docs/trace-schema.md) is the frozen
+   contract at `SCHEMA_VERSION` 4, stall *reasons* publish as
+   `StallEvent`, `TT_SIM_PROFILE=<dir>` is the one-invocation entry
+   point, hotspots name a kernel function and line, and the report
+   states its own framing. Kept in place rather than removed so the
+   "item N" cross-references below stay valid. What is left is
+   item 9's Jupyter / NoC-heatmap worked demonstration.
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **A cheaper live Tensix tile** — successor to "smarter
-   `TT_SIM_CYCLES_PER_POLL` default", which closed 2026-08-06: the pump is
-   free when nothing can advance, and what a wide grid costs is its live
-   workers.
+2. **A cheaper live Tensix tile** — first instalment landed
+   2026-08-07 (146 → 131 µs per live tile tick); the premise was
+   re-measured and held. **The remainder is no longer one item**: the
+   RV interpreter half is now item 7's JIT, and the Tensix
+   per-element datapath half is a fidelity rewrite ranked with it.
+   See §2.
 3. **Issue-loop model** — worth more rung-2 dataset coverage than any
    remaining congestion work.
 4. **DRAM residue** — endpoint occupancy first (pure model shape, no
@@ -139,38 +144,71 @@ instruction mix, data movement, stalls — and use that to emit more
 efficient code. The pieces mostly exist; what's missing is the
 consumable end of the pipe:
 
-- **A documented, stable trace schema.** Perfetto (visual timelines)
-  and the Parquet counter/NoC datasets (machine-readable) already
-  carry the model's attribution — NoC flight and bandwidth, unit
-  occupancy, RV stalls. Write the schema down (field meanings, units,
-  stability expectations) so the team can build tooling against it
-  without reading tt-sim internals; treat schema changes as breaking
-  from then on.
-- **Stall *reasons*, not just stall counts.** The front-end bound has
-  made refused issues real, so the FPU/SFPU stalled-cycles and
-  wait-reason fields are now expressible, and the unpacker wiring has
-  made packer back-pressure and unpacker idle cycles real too. These
-  are the fields a code generator acts on — surfacing them in the
-  trace output is what is left.
-- **Source-level attribution.** `DwarfIndex` function-name attribution
-  (currently in item 9's long tail — promote it here) so a hotspot
-  names a kernel function and line, not a bare PC; kernel-ELF
-  auto-discovery so the workflow needs no hand-holding.
-- **An entry-point workflow.** One documented invocation (env vars or
-  a small driver) from "here is my kernel" to a ranked report of
-  where modelled cycles went, with the Jupyter/NoC-heatmap examples
-  as the worked demonstration.
-- **Honest framing baked into the output.** Modelled numbers are
-  floors built from published bounds, corroborated but not calibrated
-  against end-to-end silicon (item 8) — the report should say so, so
-  the team optimises against relative attribution, not absolute
-  cycle promises.
+**All five bullets closed 2026-08-07.**
 
-A first version is assemblable today — `six` already attributes ~75 %
-of its modelled cycles to a published number — and its fidelity
-improves automatically as items 3–6 land. The tracing
-overhead budget (item 9) matters doubly here, since the team will
-run this at kernel scale.
+- **A documented, stable trace schema — done.**
+  [`docs/trace-schema.md`](docs/trace-schema.md) is the frozen
+  contract at `SCHEMA_VERSION` 4: field meanings, units and stability
+  for the Parquet counter and NoC datasets, Perfetto, the event
+  stream and the attribution artefacts, written for a consumer who
+  will never read tt-sim internals. Schema changes are breaking from
+  here; `observability_test.py` and `attribution_test.py` fail on a
+  rename. Writing it flushed out three defects it then fixed:
+  `tensix_stall_<reason>` cycles were filed under a table headed
+  "volume counters (not cycles)", so the largest bottleneck on
+  `sfpumath` (`semaphore_empty`, 28.5 % of span) was invisible in the
+  ranked report; `hotspots.json` carried no ELF provenance or load
+  bias; and the canned SQL enumerated stall reasons in an `IN` list
+  that would silently have dropped `stall_load_rate`.
+- **Stall *reasons*, not just stall counts — done.** `StallEvent`
+  (category `stall`) publishes one event per stall *episode* — not
+  per cycle — with a reason from a frozen vocabulary, the unit to
+  blame, and the held opcode; `unit_id` is the thread that suffered,
+  `blocked_on` the unit responsible. **The old premise was wrong:**
+  the "74 refused issues on `sfpumath`" is the **unpacker's**
+  occupancy hold, not FPU/SFPU — the SFPU refuses zero there and the
+  FPU four. Real FPU stalls arrive instead via
+  `src_reserved_by_unpacker` (703–61,132 cycles). The richest source
+  turned out to be the `STALLWAIT`/`SEMWAIT` condition bits, a
+  *published named vocabulary* — semaphore waits are 609–64,726
+  cycles — so the model never has to guess what a thread waits on.
+  Packer back-pressure and SFPU stalls are expressible but measure
+  zero on all five guards checked, so they are emitted only if they
+  fire. Unpacker *idle* is declined: derivable from `busy_cycles`,
+  and counting it directly needs per-cycle visits the pump skips.
+- **Source-level attribution — done.** `DwarfIndex` resolves
+  (function, file, line); `tt_sim/trace/elfdisc.py` finds firmware
+  *and* kernel ELFs in tt-metal's build cache and **proves** each
+  against resident memory, recovering the load bias (tt-metal places
+  kernels away from their link address — BRISC links at `0x49a0`,
+  runs at `0x8970`). Live Wormhole `six`: 100 % of sampled PC cycles
+  resolved, all ten ELFs byte-verified. Three premises were wrong
+  here too: pyelftools *raised* on every real tt-metal kernel ELF
+  (vestigial `.rela.debug_*`, RISC-V reloc type 1), so
+  `TT_SIM_TRACE_LCOV` had never run against one; `lookup` was
+  exact-PC, which drops most of a run; and an unbounded floor lookup
+  attributes every PC to whatever ELF is loaded, once reporting
+  95.7 % coverage of a kernel that never ran.
+- **An entry-point workflow — done.**
+  `TT_SIM_COST_MODEL=1 TT_SIM_PROFILE=<dir> ./your-binary` is the
+  whole interface; `python3 -m tt_sim.trace.report <dir>` re-renders.
+  Walkthrough in `driver/wormhole/docs/profiling.md` §0. **Still
+  open:** the Jupyter / NoC-heatmap worked demonstration, which stays
+  in item 9.
+- **Honest framing baked into the output — done.** The report opens
+  with it and repeats "charged is not delivered" beside every table
+  that could be misread as a partition.
+
+**The ~75 % figure was re-measured 2026-08-07 and holds**: Blackhole
+`six` is 76.9 % of an 87,499-cycle span (NoC 61,128 + Tensix 6,167);
+live Wormhole `six` is 84.3 % of 73,399. One correction — the old
+table's fourth term, RV stalls *reaching* the total, is not derivable
+from trace output (only the charged figure is, and it is 212 % of the
+span), so the report excludes stalls from that roll-up and says why.
+Fidelity still improves automatically as items 3–6 land.
+`TT_SIM_PROFILE` costs ~+17 % over `TT_SIM_TRACE_COUNTERS` alone on
+`blackhole/four`, about half of it a ~3 s fixed exit cost (ELF
+discovery + DWARF) that amortises at kernel scale.
 
 ## 2. A cheaper live Tensix tile
 
@@ -194,7 +232,7 @@ What that leaves is the other half of the same 2026-08-03 prediction,
 and it is now the whole of the wide-grid cost: **a live Tensix tile is
 expensive** (~150 µs per ticked tile, ~12 of them live at a time on the
 8x10 `vecadd_multi_core` run, 71 s of its 81 s). Nothing in the pump
-addresses that; it is the same target as item 9's JIT work and item 5's
+addresses that; it is the same target as item 7's JIT work and item 3's
 issue-loop model, approached from the wall-clock side. Rank it against
 those rather than treating it as pump work.
 
@@ -306,25 +344,51 @@ cross-unpacker half of the address-phase interlock ("nor can any
 other thread start an `UNPACR`") — each needs a sourced arbitration
 rule that the docs do not currently give.
 
-## 7. Numba and the threading revival
+## 7. Numba and the threading revival — CLOSED 2026-08-07
 
-Nothing has yet *needed* Numba; the ranked target is the event-driven
-pump **after Phase 4's** heap-of-(cycle, unit, event) shape — a
-polymorphic `clock_tick` over 240 objects is not a JIT target. Tensix
-numeric inner loops must be re-evaluated against the post-optimisation
-baseline (the cheap numpy wins already banked 1.6–1.8×). The
-`@njit(nogil=True)` angle is what could make multi-Tensix threading
-(structurally landed, strictly opt-in via `TT_SIM_THREADED=1`, a
-1.56–2.4× measured regression under the GIL) a win without waiting for
-free-threaded 3.13t — tempered by the fact that ~70 % of matmul time
-is one unit on one tile. Numba-hostile, do not attempt: `MemoryMap`
-dispatch, `EventBus.publish`, the current clock tick, `frontend.py`
-YAML decode. Rejected alternatives, recorded so they aren't
-re-litigated: Cython (build step breaks hackability), PyPy (numpy
-interop), C extension (last resort).
+Measured; see `driver/wormhole/docs/profiling.md`, "the one place
+Numba is the right tool". **The item's own ranking was wrong on all
+three counts.**
 
-- *Test:* re-run the 4-Tensix `four/`-derived benchmark with
-  `TT_SIM_THREADED=1`; target wall clock **under** sequential.
+- **The pump's event heap is 0.9–1.6 % of a run**, not 6 % — that
+  figure was `TileClock.clock_tick`'s whole dispatch, a different
+  thing, declined separately in `event-driven-pump.md`. No dependency
+  is worth 1 %.
+- **The RV interpreter is not a JIT target**, but not for
+  polymorphism or call overhead — an `@njit` boundary is ~450 ns
+  against ~11 µs per `BabyRISCV.clock_tick`, so a per-instruction JIT
+  would lose only ~4 % there. It is Numba-hostile *through*
+  `MemoryMap` / `Register` / the Tensix queue: compiling it means
+  replacing the state model, which is what this project exists not to
+  do. That reason does not expire as the interpreter gets faster.
+- **What landed instead** is a fourth target nobody had ranked: the
+  exact FPU kernel (`_fpu_group_sums_batch` / `_fpu_accumulate_batch`),
+  34 % of a matmul guard. It was *already* numpy and slow **because**
+  of it — one MVMUL is 2048 elements and ~50 numpy ops each allocate a
+  fresh 16 KB temporary, 534 µs per MVMUL. One fused
+  `@njit(cache=True, nogil=True)` loop nest: **13.3×** on the kernel,
+  **−23.9 %** pump CPU on `blackhole/six` (16 interleaved rounds,
+  control −1.4 %), bit-exact and cycle-identical on all 44 guards.
+  Numba stays **optional** — lazy import behind a 512-MVMUL threshold,
+  `None` on any failure — and the ladder is green with it made
+  genuinely unimportable.
+
+**Threading is closed too, and structurally.** The item's own test
+fails at **5.56× slower** than sequential, worse than the recorded
+1.56–2.4×, because `TT_SIM_THREADED=1` drives `stride_skipped_cycles`
+from 5887 to **0**: the threaded pump cannot stride at all. Every
+improvement to the sequential pump widens the gap. `nogil` genuinely
+works but scales 1.68× at two threads then collapses, so **a
+free-threaded interpreter would not change this** — the ceiling is
+striding, plus ~70 % of matmul being one unit on one tile. Revisit
+only if a threaded pump learns to stride.
+
+Rejected alternatives, still not to be re-litigated: Cython (build
+step breaks hackability), PyPy (numpy interop), C extension (last
+resort).
+
+*Next for wall clock*: `handle_elwadd` / `handle_pacr`, which need
+**numpy, not Numba** — no new dependency.
 
 ## 8. Rung-4 calibration
 
@@ -341,11 +405,14 @@ not "cycle-accurate".
   met on RV-bound workloads (counters/Perfetto ~2×, JSONL ~4×) —
   re-target the budget or make `EventBus.publish` cheaper at the call
   site.
-- Fields now expressible but not yet surfaced: packer back-pressure
-  and unpacker idle cycles (the unpacker is wired), FPU/SFPU
-  stalled-cycles (the front-end bound makes refused issues real —
-  74 on `sfpumath` alone). Still genuinely gated: L1 bank conflicts
-  (L1 is flat memory) and NoC `vc` + VC occupancy (no VCs modelled).
+- Surfaced 2026-08-07 in schema v4 as `StallEvent` (see item 1; the
+  "74 on `sfpumath`" was the unpacker, not FPU/SFPU). Packer and SFPU
+  stall mechanisms exist but are unexercised by today's guards;
+  unpacker *idle* cycles are declined with a reason. Still genuinely
+  gated: L1 bank conflicts (L1 is flat memory) and NoC `vc` + VC
+  occupancy (no VCs modelled).
+- **The Jupyter / NoC-heatmap worked demonstration**, inherited from
+  item 1's entry-point bullet — the one piece of that item still open.
 - **Parked spans in the event stream** (handed over by the
   firmware-loop parking work). A core
   the firmware-loop recogniser has parked is not traced, and the tile
@@ -360,12 +427,14 @@ not "cycle-accurate".
   event kind, so it is a schema decision, not a patch.
 - `chip_id` hard-coded to 0 (per-tile `core_y`/`core_x` already fan
   out) — multi-chip identity.
-- Long tail: inline-print migration, `DwarfIndex` function-name
-  attribution, kernel-ELF auto-discovery, invariant mining (tt-metal
+- Long tail: inline-print migration, invariant mining (tt-metal
   #28562), `hypothesis` property tests (needs a kernel generator),
   host-polling determinism (co-design with pump time-skipping),
   L1/DRAM snapshots in state dumps, `SpikeCommitlogWriter` mem-access
-  decoration, Jupyter template, NoC heatmap example, Pyright cleanup.
+  decoration, Pyright cleanup. (`DwarfIndex` function-name
+  attribution and kernel-ELF auto-discovery closed 2026-08-07 under
+  item 1; the Jupyter template and NoC heatmap example are promoted
+  to their own bullet above.)
 
 ## 10. Functional backlog
 
