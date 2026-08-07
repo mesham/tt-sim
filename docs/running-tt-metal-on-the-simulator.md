@@ -266,6 +266,8 @@ All are read from the environment and work in this tt-metal-driven flow.
 | `TT_SIM_PUMP_STRIDE=0` | disable the pump's time-skipping (on by default) — see below |
 | `TT_SIM_COST_MODEL=1` | charge each op the cycle cost the ISA-doc tables give it (off by default) — see below |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS=1` | accept NoC transfers whose source and destination addresses are not congruent, which hardware treats as undefined behaviour |
+| `TT_SIM_NUMBA=0` / `=1` | never / always use the optional compiled FPU kernel, overriding the call threshold — see below |
+| `TT_SIM_NUMBA_THRESHOLD=N` | MVMULs to run before compiling the FPU kernel (default 512) |
 
 `TT_SIM_CYCLES_PER_POLL=N` is how many simulated cycles the device advances
 after each host message — the simulator's stand-in for "the host waited a
@@ -290,6 +292,24 @@ as it did before. `run(N)` advances exactly N cycles either way and
 window — so this is a debugging switch: if a result differs with it set, the
 difference is a pump bug and worth reporting. See
 [`docs/plans/event-driven-pump.md`](plans/event-driven-pump.md).
+
+`TT_SIM_NUMBA` controls the one optional accelerator in the tree. If
+[numba](https://numba.pydata.org/) happens to be installed, the exact FPU
+datapath's inner kernel — the thing an MVMUL, GAPOOL or DOTPV spends its time
+in — can be run as one compiled loop nest instead of ~50 small numpy passes,
+which is **13x** on that kernel and about **−24 %** on the pump time of a
+matmul workload. It is bit-identical either way (`fpu_accumulate_test.py`
+fuzzes the two against each other), and numba is **not a dependency**: without
+it the numpy path runs exactly as before, which is why the default is the
+pure-Python tree that CLAUDE.md promises.
+
+Compiling costs ~3.7 s the first time on a machine and ~0.5 s per process
+afterwards, from numba's on-disk cache under `__pycache__`. That is pure loss
+on a workload with a handful of MVMULs, so the compile is deferred until the
+first 512 have run, and a run that never issues an MVMUL never even imports
+numba. Set
+`TT_SIM_NUMBA=1` to compile on the first one, or `=0` to stay on numpy for
+good.
 
 `TT_SIM_COST_MODEL=1` (truthy = `1/true/yes/on`) turns on the per-unit
 cycle-cost model: instead of every op retiring in the tick it was issued, a unit

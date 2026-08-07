@@ -3,6 +3,7 @@ import os
 import numpy as np
 
 from tt_sim.pe.tensix.backends.backend_base import DataFormat, TensixBackendUnit
+from tt_sim.pe.tensix.backends.fpu_jit import get_fused_mvmul
 from tt_sim.pe.tensix.backends.vector import VectorUnit
 from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.util import DataFormatConversions
@@ -1502,9 +1503,9 @@ class MatrixUnit(TensixBackendUnit):
         # DataFormatConversions). SrcB is transposed because its rows index the
         # 16 lanes, and the copy is deliberate -- every later op wants it
         # contiguous.
-        srcAColumns = toFP32(srcA.readRows(srcARow, 16))[:, np.newaxis, :]
+        srcAMat = toFP32(srcA.readRows(srcARow, 16))
         srcBLanes = srcB.readRows(srcBRow, 1 if broadcastSrcBRow else numRows)
-        srcBRows = toFP32(np.ascontiguousarray(srcBLanes.T))[:, :, np.newaxis]
+        srcBMat = toFP32(np.ascontiguousarray(srcBLanes.T))
 
         # Every Dst element is read before any is written, where the scalar loop
         # interleaved the two. That is safe because each (row, column) touches
@@ -1520,14 +1521,37 @@ class MatrixUnit(TensixBackendUnit):
                 DataFormatConversions.BF16InDstToBF16(dst.getDst16bRows(dstRows)) << 16
             )
 
-        results = self._fpu_accumulate_batch(
-            self._fpu_group_sums_batch(
-                srcAColumns, srcBRows, fidelityPhase, expProdAdj
-            ),
-            dstVals,
-            useDst32b,
-            negOneRenormBug,
-        )
+        # The optional Numba path (tt_sim/pe/tensix/backends/fpu_jit.py) fuses
+        # the two passes into one scalar loop nest over the same indices. It is
+        # bit-exact with the pair below -- fpu_accumulate_test.py fuzzes them
+        # against each other -- and returns None whenever numba is absent,
+        # disabled, or the workload is too short to repay compiling it, which
+        # is the common case and costs two global reads. int64 is forced at the
+        # boundary: the kernel compiles for whatever width it is handed, and
+        # every bound in the two docstrings above assumes 64.
+        fused = get_fused_mvmul()
+        if fused is not None:
+            results = fused(
+                srcAMat.astype(np.int64, copy=False),
+                srcBMat.astype(np.int64, copy=False),
+                dstVals.astype(np.int64, copy=False),
+                int(fidelityPhase),
+                int(expProdAdj),
+                bool(useDst32b),
+                bool(negOneRenormBug),
+            )
+        else:
+            results = self._fpu_accumulate_batch(
+                self._fpu_group_sums_batch(
+                    srcAMat[:, np.newaxis, :],
+                    srcBMat[:, :, np.newaxis],
+                    fidelityPhase,
+                    expProdAdj,
+                ),
+                dstVals,
+                useDst32b,
+                negOneRenormBug,
+            )
 
         if useDst32b:
             dst.setDst32bRows(

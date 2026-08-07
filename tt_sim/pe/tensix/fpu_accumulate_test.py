@@ -255,3 +255,108 @@ def test_batch_accumulate_matches_scalar(useDst32b, negOneRenormBug):
         MatrixUnit._fpu_accumulate(gs, dst, useDst32b, negOneRenormBug)
         for gs, dst in zip(groupSums, dstVals)
     ]
+
+
+# --- the optional Numba path ------------------------------------------------
+#
+# ``fpu_jit`` fuses the two batched methods into one compiled scalar loop nest.
+# It is an accelerator, never a second source of truth, so the contract it has
+# to keep is exactly "bit-identical to the numpy pair, at every shape and flag
+# combination perform_mvmul_exact can produce". These fuzz that; the test above
+# pins the numpy pair to the scalar reference, so the chain reaches ttsim.
+
+
+def _fused_or_skip():
+    try:
+        from tt_sim.pe.tensix.backends.fpu_jit_kernel import mvmul_fused
+    except ImportError:
+        pytest.skip("numba not installed; the numpy path is the whole simulator")
+    return mvmul_fused
+
+
+def _numpy_pair(srcAMat, srcBMat, dstVals, fidelityPhase, expProdAdj, useDst32b, bug):
+    """Exactly what perform_mvmul_exact runs when the jit is unavailable."""
+    return MatrixUnit._fpu_accumulate_batch(
+        MatrixUnit._fpu_group_sums_batch(
+            srcAMat[:, np.newaxis, :],
+            srcBMat[:, :, np.newaxis],
+            fidelityPhase,
+            expProdAdj,
+        ),
+        dstVals,
+        useDst32b,
+        bug,
+    )
+
+
+def test_fused_jit_matches_numpy_pair():
+    """Fuzz the compiled kernel against the numpy pair over every shape.
+
+    Covers both fidelity-phase bits (which reslice the mantissas), both Dst
+    widths (16-bit rounds every term before the add), both settings of the
+    Wormhole -1 renormalisation quirk, a broadcast and a per-row SrcB, every
+    row count 1..16, and a mix of dense exponents and ones with zeros in them
+    (a zero exponent takes the nonZero branch out, which is the path that
+    decides whether a whole group is live).
+    """
+    mvmul_fused = _fused_or_skip()
+    rng = np.random.default_rng(20260807)
+
+    def pat(shape, dense):
+        sign = rng.integers(0, 2, shape, dtype=np.int64) << 31
+        exp = rng.integers(100, 150, shape, dtype=np.int64) << 23
+        if not dense:
+            exp = exp * rng.integers(0, 2, shape, dtype=np.int64)
+        return sign | exp | (rng.integers(0, 128, shape, dtype=np.int64) << 16)
+
+    for trial in range(300):
+        rows = int(rng.integers(1, 17))
+        dense = bool(rng.integers(0, 2))
+        srcAMat = pat((16, 16), dense)
+        srcBMat = pat((16, 1 if rng.integers(0, 2) else rows), dense)
+        fidelityPhase = int(rng.integers(0, 4))
+        expProdAdj = _exp_prod_adj(fidelityPhase)
+        useDst32b = bool(rng.integers(0, 2))
+        bug = bool(rng.integers(0, 2))
+        dstVals = pat((rows, 16), dense)
+        if not useDst32b:
+            dstVals = (dstVals >> 16) << 16
+
+        expected = np.broadcast_to(
+            _numpy_pair(
+                srcAMat, srcBMat, dstVals, fidelityPhase, expProdAdj, useDst32b, bug
+            ),
+            (rows, 16),
+        )
+        got = mvmul_fused(
+            srcAMat, srcBMat, dstVals, fidelityPhase, expProdAdj, useDst32b, bug
+        )
+        assert np.array_equal(expected, got), f"trial {trial}: rows={rows}"
+
+
+def test_jit_is_optional_and_off_by_default_for_short_runs(monkeypatch):
+    """The numpy path must be reachable, and must be what a short run takes.
+
+    ``get_fused_mvmul`` returning None is not a degraded mode -- it is the
+    documented default. Compiling costs seconds; a guard with a handful of
+    MVMULs would never earn that back, so the switch waits for the threshold
+    and ``TT_SIM_NUMBA=0`` pins it off for good.
+    """
+    from tt_sim.pe.tensix.backends import fpu_jit
+
+    monkeypatch.setenv("TT_SIM_NUMBA", "0")
+    fpu_jit.reset_for_test()
+    assert fpu_jit.get_fused_mvmul() is None
+    assert fpu_jit.get_fused_mvmul() is None  # decision is frozen, not re-read
+
+    monkeypatch.delenv("TT_SIM_NUMBA")
+    monkeypatch.setenv("TT_SIM_NUMBA_THRESHOLD", "3")
+    fpu_jit.reset_for_test()
+    for _ in range(3):
+        assert fpu_jit.get_fused_mvmul() is None
+    # The fourth call crosses the threshold and tries to import; whether it
+    # succeeds depends on numba being installed, and either answer is correct.
+    fpu_jit.get_fused_mvmul()
+    assert fpu_jit._resolved
+
+    fpu_jit.reset_for_test()
