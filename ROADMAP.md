@@ -23,8 +23,8 @@ bound, the poll-until-DONE guard conversion, the silicon-backed RV cost
 fixes, the last two Tensix unit costs and firmware-loop parking (with
 and without the cost model) have all landed, and as of 2026-08-07 so
 has the attribution pipe that carries it to the people who will act on
-it (item 1, closed). What remains is closing the few uncosted terms
-that are left, and the simulator's own wall clock.
+it. What remains is closing the few uncosted terms that are left, and
+the simulator's own wall clock.
 The first named external consumer is the **compiler team**: they will
 drive kernels through tt-sim to trace where cycles go — instruction
 mix, data movement, stalls — and generate more efficient code from it.
@@ -37,56 +37,108 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ### Tier 1 — load-bearing, start here
 
-1. **Bottleneck-attribution workflow for the compiler team —
-   CLOSED 2026-08-07.** All five bullets landed:
-   [`docs/trace-schema.md`](docs/trace-schema.md) is the frozen
-   contract at `SCHEMA_VERSION` 4, stall *reasons* publish as
-   `StallEvent`, `TT_SIM_PROFILE=<dir>` is the one-invocation entry
-   point, hotspots name a kernel function and line, and the report
-   states its own framing. Kept in place rather than removed so the
-   "item N" cross-references below stay valid. What is left is
-   item 9's Jupyter / NoC-heatmap worked demonstration.
+1. **The MVMUL gather/scatter** — *half done, 2026-08-08.* The format
+   conversions and `_fpu_accumulate_batch` are now table-driven:
+   **−7.1 % on `six`, −3.4 % on `matmulblock`** end-to-end (−10.5 % /
+   −6.6 % with `TT_SIM_NUMBA=0`; −16 % of pump), bit-exact, all nine
+   matmul-class optests still matching ttsim. Zero effect on the 23 of
+   30 guards that issue no MVMUL, and **+0.9 % on `reduce`**, which
+   cannot repay a 17 ms table build with 36 calls.
+   What is left is **not numpy-addressable**: `_fpu_group_sums_batch`
+   is 46 numpy calls at ~3.5 µs each *regardless of array size*, and
+   three rewrites (operand-shaped hoisting, int32, table gather) all
+   measured neutral or worse — the dead ends are recorded in the code.
+   Its remaining 9× is the Numba kernel's or nobody's.
+   Two follow-ups the profile exposed: the **672 ms numba on-disk
+   cache load** (2.95 s cold) is now the largest single one-off in a
+   matmul guard and makes the JIT only break-even below `six`; and the
+   unpacker's `_unpack_block` converts *into* the same layouts and
+   would take the same tables.
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **A cheaper live Tensix tile** — first instalment landed
-   2026-08-07 (146 → 131 µs per live tile tick); the premise was
-   re-measured and held. **The remainder is no longer one item**: the
-   RV interpreter half is now item 7's JIT, and the Tensix
-   per-element datapath half is a fidelity rewrite ranked with it.
-   See §2.
-3. **Issue-loop model** — worth more rung-2 dataset coverage than any
+2. **Issue-loop model** — worth more rung-2 dataset coverage than any
    remaining congestion work.
-4. **DRAM residue** — endpoint occupancy first (pure model shape, no
+3. **DRAM residue** — endpoint occupancy first (pure model shape, no
    new data needed); the rest is measurement-blocked.
-5. **Next silicon session on the Blackhole box** — a bundle of cheap
+4. **Next silicon session on the Blackhole box** — a bundle of cheap
    probes once a card is in hand, including the first-ever Wormhole
    measurements.
-6. **Tensix issue latency & wait-gates**, then mover / PC-buffer
-    timing point fixes.
-7. **Numba on the pump's event heap, and the `nogil` threading
-    revival** — the ranked JIT target now that pump Phase 4 exists.
-8. **Rung-4 calibration against silicon traces** — the eventual bar
+5. **Tensix issue latency & wait-gates**, then mover / PC-buffer
+   timing point fixes.
+
+### Tier 3 — larger or later
+
+6. **Rung-4 calibration against silicon traces** — the eventual bar
     for claiming anything stronger than "estimator".
 
 ### Tier 4 — opportunistic / housekeeping
 
-9. **Tracing & observability follow-ups** — the perf-budget decision,
-    `chip_id`, and the long tail.
-10. **Functional backlog** (pick up when a kernel demands it) — Tensix
+7. **Tracing & observability follow-ups** — the perf-budget decision,
+    `chip_id`, the Jupyter / NoC-heatmap demonstration, and the long
+    tail.
+8. **Functional backlog** (pick up when a kernel demands it) — Tensix
     backend gaps, NoC registers/atomics, device/tile infrastructure,
     Blackhole ISA extensions.
-11. **Architectural clarity & quick wins** — module boundaries,
+9. **Architectural clarity & quick wins** — module boundaries,
     docstring audit, diagrams, ISA index; shellcheck,
     `MEM_BOOT_CODE_BASE`.
-12. **Parked decisions & re-measurements** — Wormhole reset fan-out,
+10. **Parked decisions & re-measurements** — Wormhole reset fan-out,
     the Blackhole watchdog A/B, re-timing the example sweep.
+
+Closed 2026-08-07 and removed from this list: **bottleneck attribution
+for the compiler team** (all five bullets — the frozen schema at
+[`docs/trace-schema.md`](docs/trace-schema.md), `StallEvent`,
+`TT_SIM_PROFILE`, source-level hotspots, honest framing) and **Numba /
+the threading revival** (see "Not to be started" for what it settled).
+History is in git; `driver/wormhole/docs/profiling.md` has the numbers.
 
 ### Not to be started
 
 - **Pump Phase 3** (per-component gating) — the plan doc forbids it as
   the next phase; revisit only if a multi-tile workload shows
   per-component cost dominating after Phase 4.
+- **Numba on the pump's event heap or the RV interpreter** — measured
+  and declined 2026-08-07. The event heap is **0.9–1.6 % of a run**
+  (the "6 %" once quoted was `TileClock.clock_tick`'s whole dispatch,
+  a different thing); no dependency is worth 1 %. The RV interpreter
+  is not a JIT target either, but *not* for polymorphism or call
+  overhead — an `@njit` boundary is ~450 ns against ~11 µs per
+  `BabyRISCV.clock_tick`. It is Numba-hostile **through** `MemoryMap`
+  / `Register` / the Tensix queue: compiling it means replacing the
+  state model, which is what this project exists not to do. That
+  reason does not expire as the interpreter gets faster. Numba *is*
+  used, optionally, for the one shape it suits — the exact FPU kernel
+  (13.3×, −23.9 % on `blackhole/six`), lazily imported so the
+  pure-Python tree is unchanged.
+- **The threaded pump** (`TT_SIM_THREADED=1`) — measured at **5.56×
+  slower** than sequential, worse than the 1.56–2.4× once recorded,
+  and now understood: threading drives `stride_skipped_cycles` from
+  5887 to **0**, so the threaded pump cannot stride at all. Every
+  improvement to the sequential pump widens the gap. `nogil` scales
+  1.68× at two threads then collapses, so **a free-threaded
+  interpreter would not change this**; the ceiling is striding, plus
+  ~70 % of matmul being one unit on one tile. Revisit only if a
+  threaded pump learns to stride.
+- **Cython, PyPy, C extension** — recorded so they aren't
+  re-litigated: build step breaks hackability; numpy interop; last
+  resort, respectively.
+- **Vectorising the Tensix per-element datapath**
+  (`handle_elwadd` / `handle_pacr`) — **declined 2026-08-08 on
+  measurement.** The "~22 % of a tile tick" premise did not survive:
+  across 27 replay workloads the two are a **median 5.8 %** of pump
+  time and **14.8 % at most** (`four_fp`, `vecadd_sharding`), **0 % on
+  six workloads**, and `handle_elwadd` is never called at all in 18 of
+  27. A `perf_counter` shim and cProfile agree to 0.3 pp, so the
+  earlier 13 %/9 % and 3 % figures differ by *workload*, not method.
+  Only ~half of `handle_pacr` is per-element work — the rest is
+  per-instruction config plumbing numpy cannot touch — leaving ~10 %
+  addressable best case, ~2.5 % median, against a run-to-run noise
+  floor of 4 % CV. Set against rewriting bf16 rounding, fidelity
+  phases and Dst formats on a path with **no differential oracle
+  coverage** (no optest issues a plain `add_tiles`), the risk/reward
+  is negative. Revisit only if a workload puts `handle_elwadd` above
+  ~15 % of pump.
 - **Congestion beyond the wired link step** — declared unmodellable
   with current evidence (needs a per-link flow census, not a
   coefficient); VC arbitration measured at ~1/50th of the link effect.
@@ -136,81 +188,35 @@ possible:
 
 ---
 
-## 1. Bottleneck attribution for the compiler team
+## 1. The MVMUL gather/scatter
 
-The cost model's first named external consumer: the compiler team will
-run generated kernels through tt-sim to find where cycles go —
-instruction mix, data movement, stalls — and use that to emit more
-efficient code. The pieces mostly exist; what's missing is the
-consumable end of the pipe:
+*(formerly "a cheaper live Tensix tile". Its RV half closed 2026-08-07;
+its per-element datapath half was declined 2026-08-08 on measurement —
+see "Not to be started". What the measurement surfaced instead is
+below.)*
 
-**All five bullets closed 2026-08-07.**
+**`perform_mvmul` is 47–51 % of pump time on `six` even with the Numba
+FPU kernel engaged** — 745 µs per call, of which the fused `@njit`
+kernel is only ~46 µs. The rest is the Dst/SrcA/SrcB rectangle gather
+and the `FP32ToDstFormatBF16` / `BF16InDstToBF16` conversion helpers
+around it: pure numpy work needing no new dependency, and — unlike the
+declined ELWADD path — covered by a working differential oracle, since
+`matmulblock` and `matmulidx` both pass against ttsim.
 
-- **A documented, stable trace schema — done.**
-  [`docs/trace-schema.md`](docs/trace-schema.md) is the frozen
-  contract at `SCHEMA_VERSION` 4: field meanings, units and stability
-  for the Parquet counter and NoC datasets, Perfetto, the event
-  stream and the attribution artefacts, written for a consumer who
-  will never read tt-sim internals. Schema changes are breaking from
-  here; `observability_test.py` and `attribution_test.py` fail on a
-  rename. Writing it flushed out three defects it then fixed:
-  `tensix_stall_<reason>` cycles were filed under a table headed
-  "volume counters (not cycles)", so the largest bottleneck on
-  `sfpumath` (`semaphore_empty`, 28.5 % of span) was invisible in the
-  ranked report; `hotspots.json` carried no ELF provenance or load
-  bias; and the canned SQL enumerated stall reasons in an `IN` list
-  that would silently have dropped `stall_load_rate`.
-- **Stall *reasons*, not just stall counts — done.** `StallEvent`
-  (category `stall`) publishes one event per stall *episode* — not
-  per cycle — with a reason from a frozen vocabulary, the unit to
-  blame, and the held opcode; `unit_id` is the thread that suffered,
-  `blocked_on` the unit responsible. **The old premise was wrong:**
-  the "74 refused issues on `sfpumath`" is the **unpacker's**
-  occupancy hold, not FPU/SFPU — the SFPU refuses zero there and the
-  FPU four. Real FPU stalls arrive instead via
-  `src_reserved_by_unpacker` (703–61,132 cycles). The richest source
-  turned out to be the `STALLWAIT`/`SEMWAIT` condition bits, a
-  *published named vocabulary* — semaphore waits are 609–64,726
-  cycles — so the model never has to guess what a thread waits on.
-  Packer back-pressure and SFPU stalls are expressible but measure
-  zero on all five guards checked, so they are emitted only if they
-  fire. Unpacker *idle* is declined: derivable from `busy_cycles`,
-  and counting it directly needs per-cycle visits the pump skips.
-- **Source-level attribution — done.** `DwarfIndex` resolves
-  (function, file, line); `tt_sim/trace/elfdisc.py` finds firmware
-  *and* kernel ELFs in tt-metal's build cache and **proves** each
-  against resident memory, recovering the load bias (tt-metal places
-  kernels away from their link address — BRISC links at `0x49a0`,
-  runs at `0x8970`). Live Wormhole `six`: 100 % of sampled PC cycles
-  resolved, all ten ELFs byte-verified. Three premises were wrong
-  here too: pyelftools *raised* on every real tt-metal kernel ELF
-  (vestigial `.rela.debug_*`, RISC-V reloc type 1), so
-  `TT_SIM_TRACE_LCOV` had never run against one; `lookup` was
-  exact-PC, which drops most of a run; and an unbounded floor lookup
-  attributes every PC to whatever ELF is loaded, once reporting
-  95.7 % coverage of a kernel that never ran.
-- **An entry-point workflow — done.**
-  `TT_SIM_COST_MODEL=1 TT_SIM_PROFILE=<dir> ./your-binary` is the
-  whole interface; `python3 -m tt_sim.trace.report <dir>` re-renders.
-  Walkthrough in `driver/wormhole/docs/profiling.md` §0. **Still
-  open:** the Jupyter / NoC-heatmap worked demonstration, which stays
-  in item 9.
-- **Honest framing baked into the output — done.** The report opens
-  with it and repeats "charged is not delivered" beside every table
-  that could be misread as a partition.
+Two smaller findings from the same measurement, worth doing whenever
+this area is next opened:
 
-**The ~75 % figure was re-measured 2026-08-07 and holds**: Blackhole
-`six` is 76.9 % of an 87,499-cycle span (NoC 61,128 + Tensix 6,167);
-live Wormhole `six` is 84.3 % of 73,399. One correction — the old
-table's fourth term, RV stalls *reaching* the total, is not derivable
-from trace output (only the charged figure is, and it is 212 % of the
-span), so the report excludes stalls from that roll-up and says why.
-Fidelity still improves automatically as items 3–6 land.
-`TT_SIM_PROFILE` costs ~+17 % over `TT_SIM_TRACE_COUNTERS` alone on
-`blackhole/four`, about half of it a ~3 s fixed exit cost (ELF
-discovery + DWARF) that amortises at kernel scale.
-
-## 2. A cheaper live Tensix tile
+- `edge_masks_for_pacr` re-reads **20 config registers on every
+  PACR** (371 µs/call, ~13 % of `handle_pacr`) for a result that
+  depends only on `(stateID, packer)`. A fidelity-free memoisation,
+  if invalidation on config write can be made safe.
+- `optests/diff.sh` silently JITs kernels against whatever
+  `TT_METAL_HOME` points at, which is what produced a phantom
+  "`SrcOrder` has not been declared" break — the local
+  `riscv/tt-metal` tree is v0.70.1 and does not declare it, while the
+  venv's runtime root is v0.74.0 and does. Worth a one-line guard in
+  `diff.sh` that fails loudly rather than JITting against the wrong
+  tree.
 
 **"Smarter `TT_SIM_CYCLES_PER_POLL` default" closed 2026-08-06, and the
 default did not change.** Its evidence — "at 80 workers a readback ran
@@ -232,9 +238,9 @@ What that leaves is the other half of the same 2026-08-03 prediction,
 and it is now the whole of the wide-grid cost: **a live Tensix tile is
 expensive** (~150 µs per ticked tile, ~12 of them live at a time on the
 8x10 `vecadd_multi_core` run, 71 s of its 81 s). Nothing in the pump
-addresses that; it is the same target as item 7's JIT work and item 3's
-issue-loop model, approached from the wall-clock side. Rank it against
-those rather than treating it as pump work.
+addresses that; it is the same target as item 2's issue-loop model,
+approached from the wall-clock side. Rank it against that rather than
+treating it as pump work.
 
 **First instalment landed 2026-08-07: 146 µs → 131 µs.** The premise
 was re-measured and held exactly (69.8 s of an 83.2 s run inside live
@@ -254,8 +260,10 @@ byte-identical in cycle accounting with the model on and off.
 differently.**
 
 - The RV interpreter is still ~45 % of a tile tick and is now close to
-  what a pure-Python interpreter costs; the next real step there is
-  item 7's JIT, not more micro-optimisation.
+  what a pure-Python interpreter costs. **No further step is
+  ranked**: a JIT was measured and declined (see "Not to be started"),
+  and it is Numba-hostile through `MemoryMap` regardless of how fast
+  the interpreter gets.
 - The other ~45 % is the **Tensix datapath's per-element Python
   loops** — `handle_elwadd` walks 128 scalar FPU ops (13 % of a tick)
   and `handle_pacr` does 512 two-byte L1 writes (9 %). These are the
@@ -263,7 +271,8 @@ differently.**
   call, but they are a rewrite of the FPU and packer datapaths (bf16
   rounding, fidelity phases, Dst formats, edge masks) — a *fidelity*
   change, and the reason `six` (matmul, 497 µs/tick) gained least from
-  this round. **Rank that with item 7, not here.**
+  this round. **This is now the whole of the item** — and it needs
+  numpy, not Numba, so no new dependency.
 - Measured and declined: eliding a parked core's tick (9 % at 80
   workers) needs the loop's whole watch re-read every cycle, because
   `TensixTile.next_wake_cycle`'s fast reject skips `wake_check` while
@@ -271,7 +280,7 @@ differently.**
   scoreboard having to be time-translated per cycle. Reasoning in the
   profiling instalment.
 
-## 3. Issue-loop model
+## 2. Issue-loop model
 
 The residual on every rung-2 prediction is one constant unmodelled
 issuing-core path (intercepts 77–94 cycles across four independent
@@ -279,7 +288,7 @@ series). An issue-loop term is worth more of the 8,140-point tt-metal
 NoC dataset than congestion was — 24 sole-cause entries vs 2 — so it
 is the ranked next step for widening rung-2 coverage.
 
-## 4. DRAM residue
+## 3. DRAM residue
 
 - **Endpoint occupancy** — a second request is not queued behind the
   first: latency without contention. Pure model shape; no new data
@@ -296,7 +305,7 @@ is the ranked next step for widening rung-2 coverage.
 - Bank conflicts / refresh windows — no DRAM bank model, nothing
   published; long-term.
 
-## 5. Next silicon session (Blackhole box)
+## 4. Next silicon session (Blackhole box)
 
 Cheap probes to bundle into one card session — plan and analyse here,
 run there:
@@ -331,7 +340,7 @@ run there:
   depth is a lower bound still growing at the longest burst; needed
   before the front-end bound's constant can ever be called calibrated.
 
-## 6. Tensix issue latency, wait-gates & PC-buffer timing
+## 5. Tensix issue latency, wait-gates & PC-buffer timing
 
 Wait-gate stalls on srcA/srcB availability and the documented per-op
 issue cadence, now expressible through the landed front-end bound.
@@ -344,53 +353,7 @@ cross-unpacker half of the address-phase interlock ("nor can any
 other thread start an `UNPACR`") — each needs a sourced arbitration
 rule that the docs do not currently give.
 
-## 7. Numba and the threading revival — CLOSED 2026-08-07
-
-Measured; see `driver/wormhole/docs/profiling.md`, "the one place
-Numba is the right tool". **The item's own ranking was wrong on all
-three counts.**
-
-- **The pump's event heap is 0.9–1.6 % of a run**, not 6 % — that
-  figure was `TileClock.clock_tick`'s whole dispatch, a different
-  thing, declined separately in `event-driven-pump.md`. No dependency
-  is worth 1 %.
-- **The RV interpreter is not a JIT target**, but not for
-  polymorphism or call overhead — an `@njit` boundary is ~450 ns
-  against ~11 µs per `BabyRISCV.clock_tick`, so a per-instruction JIT
-  would lose only ~4 % there. It is Numba-hostile *through*
-  `MemoryMap` / `Register` / the Tensix queue: compiling it means
-  replacing the state model, which is what this project exists not to
-  do. That reason does not expire as the interpreter gets faster.
-- **What landed instead** is a fourth target nobody had ranked: the
-  exact FPU kernel (`_fpu_group_sums_batch` / `_fpu_accumulate_batch`),
-  34 % of a matmul guard. It was *already* numpy and slow **because**
-  of it — one MVMUL is 2048 elements and ~50 numpy ops each allocate a
-  fresh 16 KB temporary, 534 µs per MVMUL. One fused
-  `@njit(cache=True, nogil=True)` loop nest: **13.3×** on the kernel,
-  **−23.9 %** pump CPU on `blackhole/six` (16 interleaved rounds,
-  control −1.4 %), bit-exact and cycle-identical on all 44 guards.
-  Numba stays **optional** — lazy import behind a 512-MVMUL threshold,
-  `None` on any failure — and the ladder is green with it made
-  genuinely unimportable.
-
-**Threading is closed too, and structurally.** The item's own test
-fails at **5.56× slower** than sequential, worse than the recorded
-1.56–2.4×, because `TT_SIM_THREADED=1` drives `stride_skipped_cycles`
-from 5887 to **0**: the threaded pump cannot stride at all. Every
-improvement to the sequential pump widens the gap. `nogil` genuinely
-works but scales 1.68× at two threads then collapses, so **a
-free-threaded interpreter would not change this** — the ceiling is
-striding, plus ~70 % of matmul being one unit on one tile. Revisit
-only if a threaded pump learns to stride.
-
-Rejected alternatives, still not to be re-litigated: Cython (build
-step breaks hackability), PyPy (numpy interop), C extension (last
-resort).
-
-*Next for wall clock*: `handle_elwadd` / `handle_pacr`, which need
-**numpy, not Numba** — no new dependency.
-
-## 8. Rung-4 calibration
+## 6. Rung-4 calibration
 
 The bar for claiming anything stronger than "first-order estimator":
 match a captured silicon cycle trace within X %. Needs golden traces —
@@ -399,20 +362,21 @@ under `driver/wormhole/server/traces/`. Until then, no in-tree cycle
 count has ever been compared to silicon; say "performance estimator",
 not "cycle-accurate".
 
-## 9. Tracing & observability follow-ups
+## 7. Tracing & observability follow-ups
 
 - **Perf-budget decision**: the ~30 % tracing overhead target is not
   met on RV-bound workloads (counters/Perfetto ~2×, JSONL ~4×) —
   re-target the budget or make `EventBus.publish` cheaper at the call
   site.
-- Surfaced 2026-08-07 in schema v4 as `StallEvent` (see item 1; the
-  "74 on `sfpumath`" was the unpacker, not FPU/SFPU). Packer and SFPU
+- Surfaced 2026-08-07 in schema v4 as `StallEvent` (the "74 on
+  `sfpumath`" turned out to be the unpacker, not FPU/SFPU). Packer and SFPU
   stall mechanisms exist but are unexercised by today's guards;
   unpacker *idle* cycles are declined with a reason. Still genuinely
   gated: L1 bank conflicts (L1 is flat memory) and NoC `vc` + VC
   occupancy (no VCs modelled).
-- **The Jupyter / NoC-heatmap worked demonstration**, inherited from
-  item 1's entry-point bullet — the one piece of that item still open.
+- **The Jupyter / NoC-heatmap worked demonstration** — inherited from
+  the closed attribution item's entry-point bullet, and the one piece
+  of it still open.
 - **Parked spans in the event stream** (handed over by the
   firmware-loop parking work). A core
   the firmware-loop recogniser has parked is not traced, and the tile
@@ -432,11 +396,11 @@ not "cycle-accurate".
   host-polling determinism (co-design with pump time-skipping),
   L1/DRAM snapshots in state dumps, `SpikeCommitlogWriter` mem-access
   decoration, Pyright cleanup. (`DwarfIndex` function-name
-  attribution and kernel-ELF auto-discovery closed 2026-08-07 under
-  item 1; the Jupyter template and NoC heatmap example are promoted
-  to their own bullet above.)
+  attribution and kernel-ELF auto-discovery closed 2026-08-07 with the
+  attribution item; the Jupyter template and NoC heatmap example are
+  promoted to their own bullet above.)
 
-## 10. Functional backlog
+## 8. Functional backlog
 
 Pick up when a kernel or example actually demands it; everything here
 fails loudly today. Grep for `NotImplementedError` in the named files.
@@ -502,7 +466,7 @@ in-tree kernel): `mret`, F single-precision execution, the V vector
 unit (TRISC2), Zfh's BF16 CSR mode, the L1 cache tag search
 accelerator. Wormhole's RV32IM-only set is complete and correct.
 
-## 11. Architectural clarity & quick wins
+## 9. Architectural clarity & quick wins
 
 - Module boundaries per hardware block — `frontend.py` mixes decode
   and dispatch; `tt_noc.py` bundles NIU + both NoCs + directory.
@@ -523,7 +487,7 @@ accelerator. Wormhole's RV32IM-only set is complete and correct.
   a captured trace whether tt-metal writes the `jal`; if not, the
   bridge should synthesise it.
 
-## 12. Parked decisions & re-measurements
+## 10. Parked decisions & re-measurements
 
 - **Wormhole NCRISC/TRISC reset fan-out**: the launch-message
   `enables` path is wired on Blackhole only; decide whether Wormhole
