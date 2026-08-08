@@ -5449,6 +5449,238 @@ inside `RiscvCostState`, which is `None` when the model is off.
   invariant, and the two published fours asserted equal.
 - `ROADMAP.md` — item 2 rewritten to what is actually left.
 
+## The issue loop: the residual on every rung-2 prediction, and it was the harness
+
+Landed 2026-08-08. `ROADMAP.md` item 1 asked for an "issue-loop model" on the
+grounds that "the residual on every rung-2 prediction is one constant
+unmodelled issuing-core path (intercepts 77-94 cycles across four independent
+series)". The premise is half right and the half that is wrong is the
+important half. **The path was never unmodelled. The harness never ran it.**
+
+Nothing was charged. There is no new table entry, no new provenance rank, no
+edit to `unit_costs.yaml`, and not one simulated cycle moves on any in-tree
+workload. What changed is that the rung-2 predictor now executes the same
+program the measurement times, which closes 24-28 cycles of the intercept on
+every series on both architectures and takes rung 2 from 6 retained entries to
+14.
+
+### The premise, reproduced
+
+Both halves check out exactly as written, on the tree at `97635b2`:
+
+| Wormhole series | intercept | slope |
+| --- | --- | --- |
+| L1 read diff-axis | **77** | +3.94 cycles/KiB |
+| L1 read same-axis | **80** | +4.30 |
+| L1 write diff-axis | **94** | +2.65 |
+| L1 write same-axis | **89** | +2.83 |
+| DRAM read | 79 | −0.65 |
+| DRAM write | 129 | −3.21 |
+
+The "four independent series" at 77-94 are the four L1 rows. Sole-cause
+exclusion counts: **24** for `num_transactions per barrier != 1`, **2** for the
+pattern (congestion) rule, 4 for `stateful`, 0 for the rest. Both numbers
+reproduce on the nose.
+
+### The axis nobody had looked down
+
+The 24 sole-cause entries are the same six shapes at N = 4, 16, 64 and 256
+transactions per barrier. Differencing along N is the one thing this dataset
+does that is cleanly identifiable — unlike congestion, where three unknowns
+move together, N moves alone with geometry, size, memory and direction all
+held fixed. The marginal cost of one more transaction, at sizes below the
+point where serialisation binds:
+
+| | Wormhole | Blackhole |
+| --- | --- | --- |
+| L1 **write** | **22.0** | **23.0** |
+| L1 read | 19 → 27 | 35.0 |
+| DRAM read / write | 21 / 25 | 22 / 26 |
+
+The write rows are the striking ones. 22.0 on Wormhole is flat to two decimal
+places across N = 4 → 256 (a 64× range), across 64 B → 512 B, and across both
+geometries — same-axis and different-axis agree to 0.01 cycles. A quantity
+that ignores distance and size is not a network quantity. It is the issuing
+core running instructions.
+
+### The arithmetic that says which mechanism, done before anything was run
+
+A constant intercept is consistent with several mechanisms — a fixed issue
+latency, a per-request loop, a pipeline drain — and the roadmap item was right
+that they need distinguishing. The N axis distinguishes them: a fixed latency
+or a drain is paid **once per barrier** and cannot produce a slope in N; a
+per-transaction loop is paid N times and can produce nothing else. The measured
+number is a slope, so the mechanism is the loop.
+
+Which loop is not a guess either. `ncrisc_noc_fast_write_any_len` in each
+architecture's `noc_nonblocking_api.h` expands, at `DM_DEDICATED_NOC`, to a
+`while (!noc_cmd_buf_ready(noc, cmd_buf));` poll, a fixed list of
+command-buffer stores, and two counter increments. Count the instructions a
+straightforward compilation gives:
+
+| | stores | instructions | + interlock | dataset |
+| --- | --- | --- | --- | --- |
+| Wormhole write | 6 | 16 | 16 + 6 = **22** | **22.0** |
+| Blackhole write | 7 | 17 | 17 + 6 = **23** | **23.0** |
+| Wormhole read | 5 | 12 | 12 + 6 = **18** | 19 at low N |
+| Blackhole read | 6 | 13 | 13 + 6 = **19** | 35 |
+
+The six is the ">= 7" row of the RISC-V load-latency table — the row naming
+"NoC 0 configuration and command", charged since [the NIU register
+block](#the-niu-register-block-the-number-was-in-the-table-under-the-wrong-key)
+landed on 2026-08-06 for entirely unrelated reasons. The instruction counts
+come from gcc. **Neither number came from this dataset**, and their sum lands
+on the measurement to 0.0 cycles on both architectures.
+
+Better than the agreement is the *differential*. Blackhole costs exactly one
+cycle more than Wormhole per write, and the reason is one line of Blackhole's
+own header: it splits the destination across `NOC_RET_ADDR_MID` and
+`NOC_RET_ADDR_COORDINATE` where Wormhole writes only the latter. One extra
+store, one extra cycle, and the dataset says 23.0 against 22.0. A fitted
+constant does not predict a cross-architecture difference of one cycle from a
+header diff.
+
+Checked rather than asserted: the reference build is
+`riscv-tt-elf-gcc -O3 -march=rv32im` from tt-metal's own toolchain, on the C
+above, run on a real simulated Wormhole and Blackhole tile. It produces
+22 / 23 / 18 / 19, all four.
+
+### What the data cannot distinguish, stated plainly
+
+Within the per-transaction slope, the instruction stream and any **NIU
+command-buffer occupancy** are not separable: both are per-transaction, both
+serialise against the same poll, and the dataset holds one number. The
+agreement above bounds the command buffer's contribution at *approximately
+zero* on the write path — the instruction count alone already explains the
+measurement — but "approximately zero" is an inference from a coincidence of
+two independently sourced numbers, not a measurement of the command buffer.
+
+The ISA docs are the reason it stays that way. `NoC/Counters.md` states the
+protocol and no timing: *"After writing 1 to `NOC_CMD_CTRL` ... software must
+not write to `NOC_CMD_CTRL` of any request initiator (at the same NIU) until
+`NOC_CMD_CTRL` of the relevant request initiator reverts back to 0."* How long
+that takes is not published anywhere in either tree. So the term is
+`provenance: unknown` and may carry no number, which is also why the read gap
+below is named and not charged.
+
+### The one thing that is genuinely unmodelled, newly measured
+
+Reads do not fit, and the misfit is the finding. tt-sim's read issue loop costs
+18 (Wormhole) and 19 (Blackhole); the dataset measures 27 and 35 per
+transaction at N ≥ 64. That excess — **9 cycles on Wormhole, 16 on Blackhole**
+— is the initiator's outstanding-read-request credit limit. tt-sim's NIU
+imposes no limit at all: `add_outstanding_noc_request` appends to a queue.
+
+It is a different term from the one the roadmap named, it is now sized on both
+architectures, and it is **not chargeable**: the number above is a measurement
+on two parts, and no published statement or arithmetic on vendor numbers yields
+it. `vendor_source_derived` is not available because there is no arithmetic
+that separates the credit limit from the L1 read ports. It goes on the record
+as a named, sized `unknown`, and the read rows at N > 1 stay excluded with that
+reason written next to them.
+
+### What was built
+
+`tt_sim/perf/noc_issue_loop.py`: the per-transaction store list transcribed
+from both architectures' `noc_nonblocking_api.h`, plus enough RV32I encoders to
+assemble the loop and its barrier. `predict_timed_region` in the sweep loads it
+onto the initiator tile's BRISC, releases the core and times the core's own
+`START → DONE` markers — the same span `DeviceZoneScopedN` wraps.
+
+`predict_cycles` is **kept**, unchanged, and the report runs both predictors
+over the same points so the difference is printed rather than asserted. The
+closed-form test that pins the network composition still points at it.
+
+**This is a reconstruction of a compiled program, not a hardware constant**,
+and that is why it is a harness and not a cost entry. The measured
+per-transaction cost is the cost of *some* compilation of a vendor inline
+function; a different compiler or a different tt-metal release would move it.
+The chip has no opinion. What tt-sim does — execute whatever instructions the
+kernel actually contains — is already the right answer, and adding a table
+entry for the issue loop would double-charge every real workload.
+
+### Before and after, on the same points
+
+| Wormhole | n | min | median | max | mean |
+| --- | --- | --- | --- | --- | --- |
+| all retained, network only | 148 | 73 | 406 | 536,486 | 19,494 |
+| all retained, + issue loop | 148 | **46** | **87** | **14,223** | **616** |
+| N = 1 (the old retained set), network only | 60 | 73 | 90 | 349 | 118 |
+| N = 1, + issue loop | 60 | **46** | **64** | **322** | **92** |
+| N = 1, ≤ 512 B, network only | 24 | 73 | 79 | 201 | 87 |
+| N = 1, ≤ 512 B, + issue loop | 24 | **46** | **54** | **178** | **62** |
+
+| Blackhole | n | min | median | max | mean |
+| --- | --- | --- | --- | --- | --- |
+| all retained, network only | 148 | −28 | 356 | 268,799 | 10,041 |
+| all retained, + issue loop | 148 | −52 | **68** | **7,654** | **340** |
+| N = 1, network only | 60 | −28 | 92 | 152 | 82 |
+| N = 1, + issue loop | 60 | −52 | **66** | **125** | **56** |
+
+Per-series intercepts close by **24-28 cycles** on every N = 1 row on both
+architectures, and by up to **2,685** on the N = 256 rows. Wormhole's four L1
+series go 77 / 80 / 94 / 89 → **53 / 54 / 66 / 65**; Blackhole's go
+93 / 99 / 80 / 83 → **67 / 72 / 55 / 58**.
+
+**The spread question, answered honestly.** On *all* retained points the
+absolute maximum residual is larger than the old sweep's 349 — but that is a
+comparison between 60 points and 148, and the 88 new ones are burst rows that
+multiply this file's already-recorded ~10 % L1 bandwidth optimism by up to 256.
+Like for like, on the 60 points the sweep retained before, **every statistic
+improves and none widens**: min 73 → 46, median 90 → 64, max 349 → 322, mean
+118 → 92. The report prints all three scopes for exactly this reason.
+
+**And one thing gets worse, on purpose.** Blackhole's DRAM-write row was
+already the file's single `KNOWN_OVER_CHARGED` entry at −24; adding a real
+issue cost on top of an already-too-large prediction takes it to −50. That is
+arithmetic, not a new defect, and it does not change the row's status: the
+over-charge is in `dram.access_latency` being derived from read figures, which
+[the rung-2 instalment](#blackhole-and-the-first-place-the-model-over-charges-anything)
+recorded and which splitting the entry by request action would fix.
+
+### What is left in the residual, and why it may never be charged
+
+46-58 cycles at ≤ 512 B, flat along all five axes including the new one. Two
+things are in it and neither is hardware:
+
+* **the profiler's own instrumentation** — `DeviceZoneScopedN`'s timestamp
+  reads and their L1 stores sit inside the region it reports;
+* **the barrier's discovery granularity** — the last acknowledgement lands at
+  some cycle, and the core finds out on its next poll iteration, up to one poll
+  period later. The predictor stops at the acknowledgement.
+
+Charging either would mean putting tt-metal's measurement apparatus into a
+model of a chip. The residual is the right size for them and it is flat, which
+is the most that can be said without a second instrument.
+
+### The gate
+
+**PASS, exit 0**, and byte-identical: `dramtop` 1×, `two` 2×, `offline` 4× poll
+budgets all unmoved, all 44 guards' values unchanged, all 30 Blackhole replay
+guards pass, 1145 tests green with the model off and on. Every one of those is
+a formality here and saying so is the point — **nothing outside
+`tt_sim/perf/` was touched**, so no guard's cycle count could have moved, and
+none did. This is the first rung-2 instalment for which "the gate cannot
+fail" is a claim about the change's shape rather than a hope.
+
+### What changed in the repository
+
+- `tt_sim/perf/noc_issue_loop.py` — **new**. The store lists, the encoders, the
+  program, and the arithmetic that predicts its cost.
+- `tt_sim/perf/noc_issue_loop_test.py` — **new**. Encoders checked against
+  words from the reference build; the store lists checked against the headers;
+  the 22 / 23 / 18 / 19 claim run on both arches; flatness in N and in size;
+  and a model-off control proving the six cycles are the model's.
+- `tt_sim/perf/noc_dataset_sweep.py` — `predict_timed_region` alongside the
+  unchanged `predict_cycles`; the N > 1 exclusion narrowed to everything
+  outside the reconstructed L1 write path, with each of its three remaining
+  reasons written out; `RESIDUAL_EXPECTATION` rewritten, including a retraction
+  of its own "unmodelled issuing-core path" wording; a burst axis and a
+  both-predictors readout in the report.
+- `tt_sim/perf/noc_dataset_sweep_test.py` — one renamed rule.
+- **No change to `unit_costs.yaml`, `costs.py`, `model.py` or anything under
+  `tt_sim/network/`, `tt_sim/device/` or `tt_sim/pe/`.**
+
 ## Using it, when the time comes
 
 ```python

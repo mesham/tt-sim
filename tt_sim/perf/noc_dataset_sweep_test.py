@@ -351,7 +351,7 @@ def test_sole_cause_counts_are_a_subset_of_the_ladder_counts():
     by_count, sole = sweep.exclusion_multiplicity(entries, 2)
     assert by_count == {0: 1, 1: 1, 2: 1}
     assert sole["pattern not in {ONE_FROM_ONE, ONE_TO_ONE}"] == 1
-    assert sole["num_transactions per barrier != 1"] == 0
+    assert sole["num_transactions per barrier != 1, outside the L1 write path"] == 0
     _kept, ladder = sweep.retained(entries, 2)
     removed = dict((name, count) for name, count, _left in ladder)
     for name, count in sole.items():

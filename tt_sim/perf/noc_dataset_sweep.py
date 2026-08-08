@@ -26,8 +26,11 @@ a ``DeviceZoneScopedN`` region in the data-movement suite's estimator kernels
 (``noc_estimator_tests/kernels/{reader,writer,dram_reader,dram_writer}.cpp``)
 that wraps *the whole issue loop plus the closing barrier*: N ``noc_async_*``
 calls followed by one ``noc_async_*_barrier``. So it includes the issuing
-RISC-V core's register writes and its barrier polling, which tt-sim does not
-model -- see :data:`RESIDUAL_EXPECTATION`.
+RISC-V core's register writes and its barrier polling. Since 2026-08-08 the
+prediction includes them too -- :func:`predict_timed_region` runs that program
+on a simulated BRISC rather than poking the registers from Python, which is
+what :func:`predict_cycles` did and still does. See
+:data:`RESIDUAL_EXPECTATION` and :mod:`tt_sim.perf.noc_issue_loop`.
 
 Three things about the keying are worth stating because they are easy to get
 wrong and none of them is documented:
@@ -51,8 +54,8 @@ wrong and none of them is documented:
 What it says about congestion, which is the largest ``unknown`` left
 --------------------------------------------------------------------
 
-Six entries per architecture are retained and ~340 are dropped, most of them
-because they contain multi-party traffic that ``noc.congestion``
+Fourteen entries per architecture are retained and ~330 are dropped, most of
+them because they contain multi-party traffic that ``noc.congestion``
 (``provenance: unknown``) does not model. The obvious question is whether the
 dropped rows could *supply* that model. They cannot, and :data:`CONGESTION_VERDICT`
 sets out why with the arithmetic: the file never separates the number of
@@ -186,22 +189,34 @@ def load_dataset(path):
 # much of the dataset the model is declining to be tested against.
 
 RESIDUAL_EXPECTATION = """\
-The model predicts the NoC round trip and the endpoint's service time and
-nothing else. The measurement additionally contains the issuing RISC-V core's
-own path -- the DeviceZone entry, the ~6 NIU register stores per
-``noc_async_read``, and the barrier's polling loop on
-``NIU_MST_REQS_OUTSTANDING``. Since 2026-08-06 tt-sim does charge part of
-that: the barrier's *load* of the NIU counter is the ">= 7" row of the
-load-latency table (the row names NoC 0 and NoC 1 alongside the overlay), so
-each poll iteration pays a six-cycle load-use interlock. The stores do not --
-"other memory regions can achieve a throughput of one store every cycle" is
-what the simulator already does -- and neither does the DeviceZone entry.
+The measurement is a DeviceZoneScopedN region wrapping N ``noc_async_*`` calls
+and the closing barrier, so it contains the issuing RISC-V core's own
+instruction stream as well as the network round trip and the endpoint's
+service time.
 
-So the residual is NOT expected to be zero. It is expected to be a CONSTANT:
-one issuing-core path, the same in every row, independent of transaction size,
-of geometry, of memory type and of direction. Its value is not predicted; its
-constancy is exactly what the assembled model claims. Any structure in the
-residual along one of those four axes is model error, and names which term."""
+Until 2026-08-08 the prediction did not: it drove the initiator's NoC
+registers from Python, and the sweep recorded the difference as a constant
+77-94 cycle residual described as "one unmodelled issuing-core path". THAT
+DESCRIPTION WAS WRONG. The path was never unmodelled -- tt-sim runs baby
+RISC-V cores against a published pipeline and a published load-latency table,
+and a kernel issuing a NoC transaction pays for its own stores and polls like
+any other code. What was missing is that the HARNESS never ran them. It does
+now (`predict_timed_region`, `tt_sim.perf.noc_issue_loop`), and this adds no
+cost-table entry and moves no simulated cycle outside this harness.
+
+So the residual is still NOT expected to be zero, but what is left is
+narrower and of a different kind: the profiler's own instrumentation (the
+DeviceZone timestamp reads and their L1 stores) and the barrier's discovery
+granularity -- one poll iteration between the last acknowledgement landing and
+the core noticing. Neither is a property of the hardware and neither may
+become a cost-table entry.
+
+It is still expected to be a CONSTANT: the same in every row, independent of
+transaction size, of geometry, of memory type, of direction AND NOW of the
+number of transactions per barrier. That last axis is the new one, and it is
+the sharpest of the five: it is the only axis along which the issuing core's
+cost accumulates linearly, so structure in it points at the issue path
+specifically rather than at any endpoint term."""
 
 
 CONGESTION_VERDICT = """\
@@ -315,13 +330,34 @@ def _exclusions(arch_id):
             lambda k: k["pattern"] in (PATTERN_READ, PATTERN_WRITE),
         ),
         (
-            "num_transactions per barrier != 1",
-            "N > 1 measures a pipelined burst, whose length is set by the "
-            "initiator's outstanding-transaction credit limit and by the "
-            "kernel loop's per-transaction issue cost. tt-sim models neither. "
-            "N = 1 is the only shape where the measured zone is one round "
-            "trip.",
-            lambda k: k["num_transactions"] == 1,
+            "num_transactions per barrier != 1, outside the L1 write path",
+            "N > 1 is a pipelined burst, and what governs it is the issuing "
+            "core's per-transaction cost. That is now modelled and validated "
+            "for ONE ISSUE PATH -- the single-target unicast L1 write, which "
+            "`tt_sim.perf.noc_issue_loop` reconstructs from the vendor headers "
+            "and which the model reproduces to 0.0 cycles per transaction on "
+            "both architectures. The other three are still declined, each for "
+            "its own reason. (a) A READ burst is additionally limited by the "
+            "initiator's outstanding-request credit: the measured marginal is "
+            "27 cycles/transaction on Wormhole and 35 on Blackhole against an "
+            "issue loop costing 18 and 19, and tt-sim's NIU imposes no such "
+            "limit. The ISA docs state the protocol -- software must not write "
+            "NOC_CMD_CTRL again until it reverts to 0 -- but publish no timing "
+            "for it, so the term would be `provenance: unknown` and may carry "
+            "no number. (b) The DRAM rows issue through `TensorAccessor`, a "
+            "different instruction sequence (~3 cycles/transaction longer) "
+            "that is not reconstructed. (c) Multi-party rows run the nested "
+            "`WRITER_MODE_UNICAST_MULTI` loop, which reloads a destination "
+            "coordinate per subordinate; also not reconstructed, and those "
+            "rows are congestion rows anyway.",
+            lambda k: (
+                k["num_transactions"] == 1
+                or (
+                    k["pattern"] == PATTERN_WRITE
+                    and k["memory"] == MEMORY_L1
+                    and k["mechanism"] == 0
+                )
+            ),
         ),
         (
             "stateful",
@@ -373,9 +409,13 @@ MISSING_TERM = {
         "a congestion term (`noc.congestion`, provenance: unknown) AND the "
         "per-core geometry of the grid, which the dataset does not record"
     ),
-    "num_transactions per barrier != 1": (
-        "the initiator's outstanding-transaction credit limit, and a cost for "
-        "the issuing core's per-transaction NIU register writes"
+    "num_transactions per barrier != 1, outside the L1 write path": (
+        "for reads, the initiator's outstanding-read-request credit limit -- "
+        "worth 9 cycles per transaction on Wormhole and 16 on Blackhole, "
+        "measured, and unpublished, so it cannot be charged at any provenance "
+        "rank this cost model has; for the rest, reconstructions of the "
+        "`TensorAccessor` and multi-subordinate issue paths alongside the "
+        "plain one in `tt_sim.perf.noc_issue_loop`"
     ),
     "stateful": "a per-transaction NoC command-register configuration cost",
     "loopback": "the multicast fan-out above, of which this is a flag",
@@ -622,6 +662,115 @@ def predict_cycles(arch, memory, is_read, same_axis, size, budget=500_000):
     raise RuntimeError(f"no completion within {budget} cycles for {arch} {size} B")
 
 
+#: Memo for :func:`predict_timed_region`. A 256 x 64 KiB burst is half a
+#: million simulated cycles, and the report and its tests ask for the same
+#: point repeatedly; the answer is a pure function of the key.
+_TIMED_REGION_CACHE = {}
+
+
+def predict_timed_region(
+    arch, memory, is_read, same_axis, size, num_transactions=1, budget=4_000_000
+):
+    """Cycles the model takes for the region the measurement actually times.
+
+    :func:`predict_cycles` drives the initiator's registers from Python, so it
+    predicts the network and the endpoint and *nothing the issuing core does*.
+    The dataset's number is a ``DeviceZoneScopedN`` region wrapping N
+    ``noc_async_*`` calls and the closing barrier, so it contains a RISC-V
+    instruction stream as well.
+
+    This runs that instruction stream: it loads
+    :func:`~tt_sim.perf.noc_issue_loop.issue_loop_program` onto the initiator
+    tile's BRISC, releases it, and times the core's own ``START -> DONE``
+    markers -- the loop, the barrier's drain, and nothing else. Every cycle it
+    costs is charged by cost-table entries that already existed; this adds no
+    term and moves nothing outside the harness. See
+    :mod:`tt_sim.perf.noc_issue_loop` for what the program is and why it is a
+    reconstruction rather than a constant.
+    """
+    from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
+    from tt_sim.perf import noc_issue_loop as loop
+    from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
+
+    # The cost model is a process-wide switch, so it is part of the key.
+    memo = (
+        arch,
+        memory,
+        is_read,
+        same_axis,
+        size,
+        num_transactions,
+        os.environ.get("TT_SIM_COST_MODEL"),
+    )
+    if memo in _TIMED_REGION_CACHE:
+        return _TIMED_REGION_CACHE[memo]
+
+    geometry = GEOMETRY[arch]
+    master = geometry["master"]
+    sub = geometry["same_axis" if same_axis else "diff_axis"]
+
+    if memory == MEMORY_L1:
+        device = _build_device(arch, [master, sub])
+        local, remote = device.tensix_tiles[0], device.tensix_tiles[1]
+        remote_addr = _L1_ADDR
+    else:
+        device = _build_device(arch, [master])
+        local, remote = device.tensix_tiles[0], device.dram_tiles[0]
+        remote_addr = _DRAM_ADDR
+
+    coord = _coord_word(arch, remote)
+    payload = bytes((i * 7) & 0xFF for i in range(size))
+    source = remote if is_read else local
+    coord_pair = local.get_coord_pair()
+    device.write(source.get_coord_pair(), remote_addr if is_read else _L1_ADDR, payload)
+
+    for index, word in enumerate(loop.issue_loop_program(arch, is_read)):
+        device.write(coord_pair, loop.PROGRAM_ADDR + 4 * index, conv_to_bytes(word))
+    # mode 0 = read; mode 2 = write, bit 4 = NOC_CMD_RESP_MARKED (non-posted,
+    # so an ACK returns and OUTSTANDING tracks it -- what a barrier waits on).
+    params = (
+        coord,
+        remote_addr if is_read else _L1_ADDR,  # NOC_TARG_ADDR_LO
+        _L1_ADDR if is_read else remote_addr,  # NOC_RET_ADDR_LO
+        size,
+        num_transactions,
+        0 if is_read else (2 | (1 << 4)),
+    )
+    for index, value in enumerate(params):
+        device.write(coord_pair, loop.PARAMS_ADDR + 4 * index, conv_to_bytes(value))
+    for marker in (loop.START_ADDR, loop.DONE_ADDR):
+        device.write(coord_pair, marker, conv_to_bytes(0))
+
+    device.reset_tile(coord_pair)
+    device.deassert_soft_reset(coord_pair, BabyRISCVCoreType.BRISC)
+
+    started = None
+    for cycle in range(1, budget + 1):
+        device.run(1)
+        if started is None:
+            if conv_to_uint32(bytes(device.read(coord_pair, loop.START_ADDR, 4))):
+                started = cycle
+            continue
+        if conv_to_uint32(bytes(device.read(coord_pair, loop.DONE_ADDR, 4))):
+            device.shutdown()
+            _TIMED_REGION_CACHE[memo] = cycle - started
+            return cycle - started
+    device.shutdown()
+    raise RuntimeError(
+        f"no completion within {budget} cycles for {arch} {size} B x {num_transactions}"
+    )
+
+
+def _coord_word(arch, remote):
+    """The value the kernel stores into ``NOC_*_ADDR_COORDINATE``."""
+    from tt_sim.network.noc_coords import WormholeNocCoords
+
+    x, y = remote.noc0_router.id_pair
+    if isinstance(remote.noc0_router.noc_coord_strategy, WormholeNocCoords):
+        return (x << 4) | (y << 10)
+    return (y << 6) | x
+
+
 # ---------------------------------------------------------------------------
 # The sweep.
 # ---------------------------------------------------------------------------
@@ -651,11 +800,20 @@ class Residual:
         memory = {MEMORY_L1: "L1", MEMORY_DRAM_SHARDED: "DRAM"}[self.key["memory"]]
         direction = "read" if self.key["pattern"] == PATTERN_READ else "write"
         axis = "same-axis" if self.key["same_axis"] else "diff-axis"
-        return f"{memory} {direction} {axis}"
+        n = self.key["num_transactions"]
+        burst = "" if n == 1 else f" x{n}"
+        return f"{memory} {direction} {axis}{burst}"
 
 
-def sweep(entries, sizes, arch, drop_unmeasured=True):
-    """Predict every retained point. Returns ``[Residual, ...]``."""
+def sweep(entries, sizes, arch, drop_unmeasured=True, issue_loop=True):
+    """Predict every retained point. Returns ``[Residual, ...]``.
+
+    ``issue_loop`` selects which predictor answers: the default runs the
+    issuing core's real instruction stream (:func:`predict_timed_region`), and
+    ``False`` falls back to the network-and-endpoint-only
+    :func:`predict_cycles` this sweep used before 2026-08-08. The report prints
+    both so the difference is visible rather than asserted.
+    """
     cache = {}
     rows = []
     for key, latencies in entries:
@@ -668,9 +826,14 @@ def sweep(entries, sizes, arch, drop_unmeasured=True):
                 key["same_axis"],
                 size,
             )
-            if signature not in cache:
-                cache[signature] = predict_cycles(arch, *signature)
-            rows.append(Residual(key, size, measured, cache[signature]))
+            burst = key["num_transactions"]
+            if (signature, burst) not in cache:
+                cache[(signature, burst)] = (
+                    predict_timed_region(arch, *signature, num_transactions=burst)
+                    if issue_loop
+                    else predict_cycles(arch, *signature)
+                )
+            rows.append(Residual(key, size, measured, cache[(signature, burst)]))
     return rows
 
 
@@ -825,6 +988,10 @@ def report(entries, sizes, arch, out=sys.stdout):
             "direction",
             lambda r: "read" if r.key["pattern"] == PATTERN_READ else "write",
         ),
+        (
+            "transactions per barrier (tests the issue loop)",
+            lambda r: f"N={r.key['num_transactions']}",
+        ),
     ):
         emit()
         emit(f"  {axis_name}")
@@ -853,8 +1020,10 @@ def report(entries, sizes, arch, out=sys.stdout):
 
     emit()
     emit("  implied sustained bandwidth, from the large-transfer slope")
+    emit("  (N = 1 rows only: a burst row's slope is N transfers, not one)")
     sourced = _sourced_bandwidths(arch)
-    for name, group in sorted(_grouped(rows, lambda r: r.label).items()):
+    single = [r for r in rows if r.key["num_transactions"] == 1]
+    for name, group in sorted(_grouped(single, lambda r: r.label).items()):
         big = sorted([r for r in group if r.size >= 4096], key=lambda r: r.size)
         if len(big) < 2:
             continue
@@ -871,9 +1040,78 @@ def report(entries, sizes, arch, out=sys.stdout):
     for label, value in sourced.items():
         emit(f"      {label:<40} {value}")
 
+    _issue_loop_readout(kept, sizes, arch, rows, emit)
     _bandwidth_ceiling_check(entries, sizes, arch_id, emit)
     _dropped_readout(entries, sizes, arch_id, emit)
     return rows
+
+
+def _issue_loop_readout(kept, sizes, arch, rows, emit):
+    """What running the issuing core's own program is worth, measured.
+
+    The previous predictor is still here, so the two can be run side by side on
+    the same points rather than compared against a number written down last
+    week. The difference is the whole of this section's claim.
+    """
+    before = sweep(kept, sizes, arch, issue_loop=False)
+    emit()
+    emit("-" * 78)
+    emit("The issuing core's own program, on and off")
+    emit("-" * 78)
+    emit(
+        "  `predict_cycles` drives the NoC registers from Python and predicts the\n"
+        "  network alone; `predict_timed_region` runs the loop the kernel runs. Same\n"
+        "  points, same cost tables, no new term -- the only difference is whether the\n"
+        "  issuing core's instructions are executed."
+    )
+    emit()
+    emit(
+        f"    {'series':<26}{'residual, network only':>24}{'+ issue loop':>16}"
+        f"{'closed':>9}"
+    )
+    by_label_before = _grouped(before, lambda r: r.label)
+    for label, group in sorted(_grouped(rows, lambda r: r.label).items()):
+        old = by_label_before.get(label)
+        if not old:
+            continue
+        gi, _ = _linear_fit([r.size for r in old], [float(r.residual) for r in old])
+        ni, _ = _linear_fit([r.size for r in group], [float(r.residual) for r in group])
+        emit(f"    {label:<26}{gi:>24.0f}{ni:>16.0f}{gi - ni:>9.0f}")
+
+    def _single(rowset):
+        return [r for r in rowset if r.key["num_transactions"] == 1]
+
+    for scope, old, new in (
+        ("all retained points", before, rows),
+        (
+            "N = 1 only, i.e. exactly the points this sweep retained before",
+            _single(before),
+            _single(rows),
+        ),
+        (
+            "N = 1, <= 512 B, where no bandwidth term is in play",
+            [r for r in _single(before) if r.size <= 512],
+            [r for r in _single(rows) if r.size <= 512],
+        ),
+    ):
+        emit()
+        emit(f"    {scope}")
+        for name, group in (("network only", old), ("+ issue loop", new)):
+            stats = _summary([r.residual for r in group])
+            emit(
+                f"      {name:<14} n={stats['n']:<4} min {stats['min']:>6.0f}  "
+                f"median {stats['median']:>6.0f}  max {stats['max']:>6.0f}  "
+                f"mean {stats['mean']:>6.0f}"
+            )
+    emit(
+        "\n  Read the three scopes together. The first widens in absolute spread and\n"
+        "  that is honest: the new rows are burst rows, so they multiply the L1\n"
+        "  bandwidth shortfall this file already records by up to 256. The second\n"
+        "  and third are like-for-like, and there the residual only tightens.\n"
+        "\n  What is left is the profiler's own instrumentation and the barrier's\n"
+        "  discovery granularity. Neither is a hardware property, so neither is a\n"
+        "  candidate for the cost tables."
+    )
 
 
 def _dropped_readout(entries, sizes, arch_id, emit):
