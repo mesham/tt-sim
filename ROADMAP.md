@@ -37,61 +37,59 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ### Tier 1 — load-bearing, start here
 
-1. **The MVMUL gather/scatter** — *half done, 2026-08-08.* The format
-   conversions and `_fpu_accumulate_batch` are now table-driven:
-   **−7.1 % on `six`, −3.4 % on `matmulblock`** end-to-end (−10.5 % /
-   −6.6 % with `TT_SIM_NUMBA=0`; −16 % of pump), bit-exact, all nine
-   matmul-class optests still matching ttsim. Zero effect on the 23 of
-   30 guards that issue no MVMUL, and **+0.9 % on `reduce`**, which
-   cannot repay a 17 ms table build with 36 calls.
-   What is left is **not numpy-addressable**: `_fpu_group_sums_batch`
-   is 46 numpy calls at ~3.5 µs each *regardless of array size*, and
-   three rewrites (operand-shaped hoisting, int32, table gather) all
-   measured neutral or worse — the dead ends are recorded in the code.
-   Its remaining 9× is the Numba kernel's or nobody's.
-   Two follow-ups the profile exposed: the **672 ms numba on-disk
-   cache load** (2.95 s cold) is now the largest single one-off in a
-   matmul guard and makes the JIT only break-even below `six`; and the
-   unpacker's `_unpack_block` converts *into* the same layouts and
-   would take the same tables.
+1. **The outstanding-read-request credit limit** — successor to the
+   issue-loop model, which closed 2026-08-08. Half that item's
+   premise was wrong: the issuing-core path was never *unmodelled* —
+   tt-sim reproduces it to 0.0 cycles/transaction on both arches —
+   the rung-2 **harness** simply never ran it. Fixing that widened
+   rung 2 from 6 retained entries to 14 and closed every intercept by
+   24–28 cycles, charging nothing. What the check *found* is a real
+   gap on the read path: tt-sim's NIU imposes no outstanding-request
+   limit, worth **9 cycles/transaction on Wormhole, 16 on Blackhole**.
+   Measured but **unpublished** (`NoC/Counters.md` states the protocol
+   and gives no timing), so it cannot be charged at any provenance
+   rank this model has. **It needs a card, not a dataset** — fold it
+   into item 3.
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **Issue-loop model** — worth more rung-2 dataset coverage than any
-   remaining congestion work.
-3. **DRAM residue** — endpoint occupancy first (pure model shape, no
+2. **DRAM residue** — endpoint occupancy first (pure model shape, no
    new data needed); the rest is measurement-blocked.
-4. **Next silicon session on the Blackhole box** — a bundle of cheap
+3. **Next silicon session on the Blackhole box** — a bundle of cheap
    probes once a card is in hand, including the first-ever Wormhole
    measurements.
-5. **Tensix issue latency & wait-gates**, then mover / PC-buffer
+4. **Tensix issue latency & wait-gates**, then mover / PC-buffer
    timing point fixes.
 
 ### Tier 3 — larger or later
 
-6. **Rung-4 calibration against silicon traces** — the eventual bar
+5. **Rung-4 calibration against silicon traces** — the eventual bar
     for claiming anything stronger than "estimator".
 
 ### Tier 4 — opportunistic / housekeeping
 
-7. **Tracing & observability follow-ups** — the perf-budget decision,
+6. **Tracing & observability follow-ups** — the perf-budget decision,
     `chip_id`, the Jupyter / NoC-heatmap demonstration, and the long
     tail.
-8. **Functional backlog** (pick up when a kernel demands it) — Tensix
+7. **Functional backlog** (pick up when a kernel demands it) — Tensix
     backend gaps, NoC registers/atomics, device/tile infrastructure,
     Blackhole ISA extensions.
-9. **Architectural clarity & quick wins** — module boundaries,
+8. **Architectural clarity & quick wins** — module boundaries,
     docstring audit, diagrams, ISA index; shellcheck,
     `MEM_BOOT_CODE_BASE`.
-10. **Parked decisions & re-measurements** — Wormhole reset fan-out,
+9. **Parked decisions & re-measurements** — Wormhole reset fan-out,
     the Blackhole watchdog A/B, re-timing the example sweep.
 
-Closed 2026-08-07 and removed from this list: **bottleneck attribution
-for the compiler team** (all five bullets — the frozen schema at
+Closed and removed from this list: **bottleneck attribution for the
+compiler team** (2026-08-07 — the frozen schema at
 [`docs/trace-schema.md`](docs/trace-schema.md), `StallEvent`,
-`TT_SIM_PROFILE`, source-level hotspots, honest framing) and **Numba /
-the threading revival** (see "Not to be started" for what it settled).
-History is in git; `driver/wormhole/docs/profiling.md` has the numbers.
+`TT_SIM_PROFILE`, source-level hotspots, honest framing), **Numba /
+the threading revival** (2026-08-07), **a cheaper live Tensix tile**
+and **the MVMUL gather/scatter** (2026-08-08), and **the issue-loop
+model** (2026-08-08, which became item 1's successor). See "Not to be
+started" for what each settled. History is in git;
+`driver/wormhole/docs/profiling.md` and `docs/plans/cost-model.md`
+have the numbers.
 
 ### Not to be started
 
@@ -123,6 +121,19 @@ History is in git; `driver/wormhole/docs/profiling.md` has the numbers.
 - **Cython, PyPy, C extension** — recorded so they aren't
   re-litigated: build step breaks hackability; numpy interop; last
   resort, respectively.
+- **Making the Numba warm-up cheaper** — **declined 2026-08-08 on
+  measurement.** It is ~800 ms per process of which only **~30 ms is
+  the on-disk cache**: ~450 ms is `import numba` and ~350 ms is
+  numba's lazy target-context init, which a *one-line* kernel pays in
+  full. Not reducible without an AOT build or a second dependency,
+  both refused. Backgrounding it on a thread measures **+42 %**, not a
+  win — the compile thread and the simulator's numpy calls convoy on
+  the GIL. `TT_SIM_NUMBA_THRESHOLD` stays **512**: 128 costs
+  `matmulidx` 789 ms, 1024 costs `matmulblock` 260 ms. Note the
+  accelerator earns its keep only from `six` (4096 MVMULs, −16 %)
+  upward and is a small net loss on `matmulblock`; the "~20 % on
+  `matmulblock`" once claimed was conditional on removing a cost that
+  cannot be removed.
 - **Vectorising the Tensix per-element datapath**
   (`handle_elwadd` / `handle_pacr`) — **declined 2026-08-08 on
   measurement.** The "~22 % of a tile tick" premise did not survive:
@@ -188,107 +199,43 @@ possible:
 
 ---
 
-## 1. The MVMUL gather/scatter
+## 1. The outstanding-read-request credit limit
 
-*(formerly "a cheaper live Tensix tile". Its RV half closed 2026-08-07;
-its per-element datapath half was declined 2026-08-08 on measurement —
-see "Not to be started". What the measurement surfaced instead is
-below.)*
+*(Successor to the issue-loop model, closed 2026-08-08. Instalment:
+`docs/plans/cost-model.md`, "The issue loop: the residual on every
+rung-2 prediction, and it was the harness".)*
 
-**`perform_mvmul` is 47–51 % of pump time on `six` even with the Numba
-FPU kernel engaged** — 745 µs per call, of which the fused `@njit`
-kernel is only ~46 µs. The rest is the Dst/SrcA/SrcB rectangle gather
-and the `FP32ToDstFormatBF16` / `BF16InDstToBF16` conversion helpers
-around it: pure numpy work needing no new dependency, and — unlike the
-declined ELWADD path — covered by a working differential oracle, since
-`matmulblock` and `matmulidx` both pass against ttsim.
+**What closed.** The residual was real — intercepts 77/80/94/89 on
+Wormhole's four L1 series, reproduced exactly — but "unmodelled" was
+wrong. tt-sim executes the issuing core's loop in every real workload;
+the rung-2 harness drove the NoC registers from Python and never ran
+it. Running it reproduces the measured per-transaction cost to **0.0
+cycles** on both arches: 22 on Wormhole, 23 on Blackhole, predicted
+*before* measuring from an instruction count (16 WH / 17 BH, from the
+vendor header's store list) plus the published 6-cycle load-use
+interlock on the `NOC_CMD_CTRL` poll. **Nothing was charged** — a term
+would have double-charged every real workload. Rung 2 widened 6 → 14
+retained entries, 60 → 148 points, and every N=1 intercept closed by
+24–28 cycles.
 
-Two smaller findings from the same measurement, worth doing whenever
-this area is next opened:
+**What is left.** The check found one genuinely unmodelled term: the
+NIU imposes no **outstanding-read-request credit limit**. tt-sim's
+read loop costs 18/19 cycles per transaction against a measured 27/35
+— an excess of **9 cycles/txn on Wormhole, 16 on Blackhole**. It is
+measured but **unpublished**: `NoC/Counters.md` states the protocol
+("must not write `NOC_CMD_CTRL` until it reverts to 0") and gives no
+timing, and no arithmetic on vendor numbers isolates it from the L1
+read ports. So it stays a named, sized `unknown` — it **cannot be
+charged at any provenance rank this model has**, and needs a card
+rather than a dataset. Fold it into item 3's silicon session.
 
-- `edge_masks_for_pacr` re-reads **20 config registers on every
-  PACR** (371 µs/call, ~13 % of `handle_pacr`) for a result that
-  depends only on `(stateID, packer)`. A fidelity-free memoisation,
-  if invalidation on config write can be made safe.
-- `optests/diff.sh` silently JITs kernels against whatever
-  `TT_METAL_HOME` points at, which is what produced a phantom
-  "`SrcOrder` has not been declared" break — the local
-  `riscv/tt-metal` tree is v0.70.1 and does not declare it, while the
-  venv's runtime root is v0.74.0 and does. Worth a one-line guard in
-  `diff.sh` that fails loudly rather than JITting against the wrong
-  tree.
+Also inseparable, and recorded as such: within the per-transaction
+slope, instruction stream and NIU command-buffer occupancy cannot be
+told apart. The instruction count alone explains the measurement,
+which bounds the command buffer near zero — but that is an inference
+from a coincidence, not a measurement.
 
-**"Smarter `TT_SIM_CYCLES_PER_POLL` default" closed 2026-08-06, and the
-default did not change.** Its evidence — "at 80 workers a readback ran
-for an hour that finishes in seconds at `=10`" — predated firmware-loop
-parking and no longer reproduces: `vecadd_multi_core` at the full
-Wormhole 8x10 grid now PASSes in ~80 s at the default, and an
-interleaved A/B against `=10` puts the two inside each other's spread
-(the simulator does the same real work either way — 483 k vs 482 k live
-tile ticks). The residual per-message-per-tile term the item named is
-gone too: the pump now skips a window it has already proved nothing can
-happen in, and inlines the dormant tick, which at 80 tiles takes a
-quiescent `run(100)` from 58.7 µs to 6.1 µs and one-live-tile-among-80
-from 4382 µs to 2398 µs — with every guard's simulated cycle total
-byte-identical. Details in `docs/plans/event-driven-pump.md`
-(Phase 4b) and `driver/wormhole/docs/profiling.md`. The advice to set
-the knob by hand is retracted in both runbooks.
-
-What that leaves is the other half of the same 2026-08-03 prediction,
-and it is now the whole of the wide-grid cost: **a live Tensix tile is
-expensive** (~150 µs per ticked tile, ~12 of them live at a time on the
-8x10 `vecadd_multi_core` run, 71 s of its 81 s). Nothing in the pump
-addresses that; it is the same target as item 2's issue-loop model,
-approached from the wall-clock side. Rank it against that rather than
-treating it as pump work.
-
-**First instalment landed 2026-08-07: 146 µs → 131 µs.** The premise
-was re-measured and held exactly (69.8 s of an 83.2 s run inside live
-Tensix tile ticks, 477,571 of them at 146.2 µs). Profiling the real
-80-worker server from the inside splits a tile tick **53 % baby RISC-V
-/ 40 % Tensix coprocessor / 6 % tile-clock dispatch**, with no single
-item above 13 %. What was taken out is the RV front end's *dispatch
-overhead* rather than any simulated work: an instruction-fetch fast
-path onto the plain-RAM leaf, the event bus held on `MemorySpace`
-instead of `get_bus()` per access, `get_int` inlined and the immediate
-decoders lifted out of their format-string dispatch — 1.6 M Python
-calls removed from a 9.6 M-call guard, every one of the 44 guards
-byte-identical in cycle accounting with the model on and off.
-`driver/wormhole/docs/profiling.md` has the numbers.
-
-**What is left is no longer one item, and the two halves rank
-differently.**
-
-- The RV interpreter is still ~45 % of a tile tick and is now close to
-  what a pure-Python interpreter costs. **No further step is
-  ranked**: a JIT was measured and declined (see "Not to be started"),
-  and it is Numba-hostile through `MemoryMap` regardless of how fast
-  the interpreter gets.
-- The other ~45 % is the **Tensix datapath's per-element Python
-  loops** — `handle_elwadd` walks 128 scalar FPU ops (13 % of a tick)
-  and `handle_pacr` does 512 two-byte L1 writes (9 %). These are the
-  largest single items in the tree and numpy could do each in one
-  call, but they are a rewrite of the FPU and packer datapaths (bf16
-  rounding, fidelity phases, Dst formats, edge masks) — a *fidelity*
-  change, and the reason `six` (matmul, 497 µs/tick) gained least from
-  this round. **This is now the whole of the item** — and it needs
-  numpy, not Numba, so no new dependency.
-- Measured and declined: eliding a parked core's tick (9 % at 80
-  workers) needs the loop's whole watch re-read every cycle, because
-  `TensixTile.next_wake_cycle`'s fast reject skips `wake_check` while
-  any other core runs; ~2× on that path, against the cost model's
-  scoreboard having to be time-translated per cycle. Reasoning in the
-  profiling instalment.
-
-## 2. Issue-loop model
-
-The residual on every rung-2 prediction is one constant unmodelled
-issuing-core path (intercepts 77–94 cycles across four independent
-series). An issue-loop term is worth more of the 8,140-point tt-metal
-NoC dataset than congestion was — 24 sole-cause entries vs 2 — so it
-is the ranked next step for widening rung-2 coverage.
-
-## 3. DRAM residue
+## 2. DRAM residue
 
 - **Endpoint occupancy** — a second request is not queued behind the
   first: latency without contention. Pure model shape; no new data
@@ -305,7 +252,7 @@ is the ranked next step for widening rung-2 coverage.
 - Bank conflicts / refresh windows — no DRAM bank model, nothing
   published; long-term.
 
-## 4. Next silicon session (Blackhole box)
+## 3. Next silicon session (Blackhole box)
 
 Cheap probes to bundle into one card session — plan and analyse here,
 run there:
@@ -340,7 +287,7 @@ run there:
   depth is a lower bound still growing at the longest burst; needed
   before the front-end bound's constant can ever be called calibrated.
 
-## 5. Tensix issue latency, wait-gates & PC-buffer timing
+## 4. Tensix issue latency, wait-gates & PC-buffer timing
 
 Wait-gate stalls on srcA/srcB availability and the documented per-op
 issue cadence, now expressible through the landed front-end bound.
@@ -353,7 +300,7 @@ cross-unpacker half of the address-phase interlock ("nor can any
 other thread start an `UNPACR`") — each needs a sourced arbitration
 rule that the docs do not currently give.
 
-## 6. Rung-4 calibration
+## 5. Rung-4 calibration
 
 The bar for claiming anything stronger than "first-order estimator":
 match a captured silicon cycle trace within X %. Needs golden traces —
@@ -362,7 +309,7 @@ under `driver/wormhole/server/traces/`. Until then, no in-tree cycle
 count has ever been compared to silicon; say "performance estimator",
 not "cycle-accurate".
 
-## 7. Tracing & observability follow-ups
+## 6. Tracing & observability follow-ups
 
 - **Perf-budget decision**: the ~30 % tracing overhead target is not
   met on RV-bound workloads (counters/Perfetto ~2×, JSONL ~4×) —
@@ -400,7 +347,7 @@ not "cycle-accurate".
   attribution item; the Jupyter template and NoC heatmap example are
   promoted to their own bullet above.)
 
-## 8. Functional backlog
+## 7. Functional backlog
 
 Pick up when a kernel or example actually demands it; everything here
 fails loudly today. Grep for `NotImplementedError` in the named files.
@@ -466,7 +413,7 @@ in-tree kernel): `mret`, F single-precision execution, the V vector
 unit (TRISC2), Zfh's BF16 CSR mode, the L1 cache tag search
 accelerator. Wormhole's RV32IM-only set is complete and correct.
 
-## 9. Architectural clarity & quick wins
+## 8. Architectural clarity & quick wins
 
 - Module boundaries per hardware block — `frontend.py` mixes decode
   and dispatch; `tt_noc.py` bundles NIU + both NoCs + directory.
@@ -487,7 +434,7 @@ accelerator. Wormhole's RV32IM-only set is complete and correct.
   a captured trace whether tt-metal writes the `jal`; if not, the
   bridge should synthesise it.
 
-## 10. Parked decisions & re-measurements
+## 9. Parked decisions & re-measurements
 
 - **Wormhole NCRISC/TRISC reset fan-out**: the launch-message
   `enables` path is wired on Blackhole only; decide whether Wormhole
