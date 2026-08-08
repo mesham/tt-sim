@@ -6,10 +6,21 @@ fixed-point datapath, where each product is truncated to ~12 bits, aligned
 within its group of eight lanes, and rounded into Dst on *every* instruction.
 What ``perform_mvmul_exact`` actually calls is the batched numpy pair
 ``_fpu_group_sums_batch`` / ``_fpu_accumulate_batch``; the scalar pair stays the
-readable reference. The last two tests here fuzz the batched pair against the
-scalar one so the two cannot drift, which is also the standing proof that
-numpy's fixed-width int64 never wraps where the scalar code's Python ints would
-have widened.
+readable reference, and the fuzz tests here hold the two together at three
+levels, so nothing downstream of the scalar port can drift away from it:
+
+- the batched pair against the scalar pair, on random operands -- which is also
+  the standing proof that numpy's fixed-width int64 never wraps where the scalar
+  code's Python ints would have widened;
+- the batched pair's *boundaries* against the scalar pair, swept rather than
+  sampled, because the alignment and renormalisation edges are where a shift
+  clamp or a folded table can be wrong for a range a random draw never visits;
+- and the whole per-instruction chain, from Src/Dst storage words in, so the
+  ``block*`` conversions that widen them are pinned wired together with the
+  datapath rather than only in isolation.
+
+The optional Numba kernel then gets the same treatment against the batched pair
+at the end of the file.
 
 ttsim's model is architecture-independent bar one thing -- a
 ``#if TT_ARCH_VERSION == 0`` (Wormhole) fixup for renormalising a result whose
@@ -25,7 +36,9 @@ both ``TT_ARCH_VERSION`` values; the same harness fuzz-matched this port on
 import numpy as np
 import pytest
 
+from tt_sim.pe.tensix.backends.backend_base import DataFormat
 from tt_sim.pe.tensix.backends.matrix import MatrixUnit
+from tt_sim.pe.tensix.util import DataFormatConversions as DFC
 
 # (dstVal, useDst32b, groupSums, expected Wormhole, expected Blackhole).
 # The first four straddle the -1 renormalisation quirk: the two arches disagree
@@ -255,6 +268,176 @@ def test_batch_accumulate_matches_scalar(useDst32b, negOneRenormBug):
         MatrixUnit._fpu_accumulate(gs, dst, useDst32b, negOneRenormBug)
         for gs, dst in zip(groupSums, dstVals)
     ]
+
+
+# --- the whole per-instruction datapath, from storage words in ---------------
+#
+# The tests above start from FP32 words, which is *downstream* of where an MVMUL
+# starts: ``perform_mvmul_exact`` is handed 19-bit Src datums and 16- or 32-bit
+# Dst ones, widens them with the ``block*`` conversions, runs the datapath and
+# narrows the result back into Dst's layout. The conversions have their own
+# exhaustive sweep (``conversion_batch_test``) and the datapath has the fuzz
+# above, but neither would notice the right conversion wired to the wrong
+# operand, a SrcB block transposed the wrong way, or a Dst read that widened
+# with the write's table. This runs the whole chain and compares it, datum by
+# datum, against the scalar conversions feeding the scalar datapath.
+
+
+def _scalar_mvmul_datapath(
+    srcAStore, srcBStore, dstStore, srcAStyle, useDst32b, fidelityPhase, bug
+):
+    """The reference: scalar conversions into the scalar datapath, per datum."""
+    toFP32 = (
+        DFC.TF32InSrcToFP32 if srcAStyle == DataFormat.TF32 else DFC.BF16InSrcToFP32
+    )
+    rows = dstStore.shape[0]
+    out = np.zeros_like(dstStore)
+    for i in range(rows):
+        bRow = 0 if srcBStore.shape[0] == 1 else i
+        bVals = [toFP32(int(v)) for v in srcBStore[bRow]]
+        for j in range(16):
+            aVals = [toFP32(int(srcAStore[k, j])) for k in range(16)]
+            groupSums = MatrixUnit._fpu_group_sums(
+                aVals, bVals, fidelityPhase, _exp_prod_adj(fidelityPhase)
+            )
+            if useDst32b:
+                dstVal = DFC.FP32InDstToFP32(int(dstStore[i, j]))
+            else:
+                dstVal = DFC.BF16InDstToBF16(int(dstStore[i, j])) << 16
+            got = MatrixUnit._fpu_accumulate(groupSums, dstVal, useDst32b, bug)
+            out[i, j] = (
+                DFC.FP32ToDstFormatFP32(got)
+                if useDst32b
+                else DFC.FP32ToDstFormatBF16(got)
+            )
+    return out
+
+
+def _block_mvmul_datapath(
+    srcAStore, srcBStore, dstStore, srcAStyle, useDst32b, fidelityPhase, bug
+):
+    """Exactly the chain ``perform_mvmul_exact`` runs, minus the register gather."""
+    toFP32 = (
+        DFC.blockTF32InSrcToFP32
+        if srcAStyle == DataFormat.TF32
+        else DFC.blockBF16InSrcToFP32
+    )
+    srcAMat = toFP32(srcAStore)
+    srcBMat = toFP32(np.ascontiguousarray(srcBStore.T))
+    if useDst32b:
+        dstVals = DFC.blockFP32InDstToFP32(dstStore)
+    else:
+        dstVals = DFC.blockBF16InDstToFP32(dstStore)
+    results = MatrixUnit._fpu_accumulate_batch(
+        MatrixUnit._fpu_group_sums_batch(
+            srcAMat[:, np.newaxis, :],
+            srcBMat[:, :, np.newaxis],
+            fidelityPhase,
+            _exp_prod_adj(fidelityPhase),
+        ),
+        dstVals,
+        useDst32b,
+        bug,
+    )
+    results = np.broadcast_to(results, dstStore.shape)
+    return (
+        DFC.blockFP32ToDstFormatFP32(results)
+        if useDst32b
+        else DFC.blockFP32ToDstFormatBF16(results)
+    )
+
+
+@pytest.mark.parametrize("srcAStyle", [DataFormat.BF16, DataFormat.TF32])
+@pytest.mark.parametrize("useDst32b", [False, True])
+@pytest.mark.parametrize("negOneRenormBug", [False, True])
+def test_mvmul_datapath_from_storage_matches_scalar(
+    srcAStyle, useDst32b, negOneRenormBug
+):
+    """Both Src operand styles, both Dst widths, both arches, every phase.
+
+    The Src exponent lives in the *low* eight bits of a Src datum, so a uniform
+    draw over the 19-bit space already lands on exponent 0 (the lane the datapath
+    drops) and 255 (the Inf/NaN pattern, which Dst has no encoding for and which
+    the datapath must saturate rather than propagate) about once in 256 lanes.
+    A quarter of the trials force those two ends much harder, together with a
+    denormal Dst and a Dst that is exactly zero, so that whole-group underflow
+    and exact cancellation are both hit.
+    """
+    rng = np.random.default_rng(20260808 + int(useDst32b) + 2 * int(negOneRenormBug))
+    dstSpace = 1 << 32 if useDst32b else 1 << 16
+
+    for trial in range(24):
+        rows = int(rng.choice([1, 2, 3, 16]))
+        broadcast = bool(rng.integers(0, 2))
+        fidelityPhase = trial % 4
+
+        srcAStore = rng.integers(0, 1 << 19, (16, 16), dtype=np.int64)
+        srcBStore = rng.integers(0, 1 << 19, (1 if broadcast else rows, 16), np.int64)
+        dstStore = rng.integers(0, dstSpace, (rows, 16), dtype=np.int64)
+        if trial % 4 == 0:
+            # Force the exponent extremes: the low byte of a Src datum is its
+            # exponent, so this is "every lane is a zero, an Inf or a NaN".
+            extreme = rng.choice([0x00, 0xFF], srcAStore.shape)
+            srcAStore = (srcAStore & ~0xFF) | extreme
+            srcBStore = (srcBStore & ~0xFF) | rng.choice([0x00, 0xFF], srcBStore.shape)
+            dstStore = np.where(rng.random(dstStore.shape) < 0.5, 0, dstStore)
+
+        expected = _scalar_mvmul_datapath(
+            srcAStore,
+            srcBStore,
+            dstStore,
+            srcAStyle,
+            useDst32b,
+            fidelityPhase,
+            negOneRenormBug,
+        )
+        got = _block_mvmul_datapath(
+            srcAStore,
+            srcBStore,
+            dstStore,
+            srcAStyle,
+            useDst32b,
+            fidelityPhase,
+            negOneRenormBug,
+        )
+        assert np.array_equal(expected, got), (
+            f"trial {trial}: rows={rows} broadcast={broadcast} phase={fidelityPhase}"
+        )
+
+
+def test_accumulate_boundaries_match_scalar():
+    """The alignment and renormalisation boundaries, swept rather than sampled.
+
+    ``_fpu_accumulate_batch`` folds three alignment cases into one table-driven
+    expression -- no shift, a rounding shift, and a shift large enough that the
+    term vanishes -- and clamps the shift at 31 on the grounds that a group sum
+    under 2**28 plus 2**30 cannot survive it. A random draw hits those edges only
+    by luck, so this walks them: every shift from 0 to 34 against the extreme
+    mantissas, both signs, both Dst widths and both arches.
+    """
+    mans = [0, 1, 2, (1 << 13) - 1, 1 << 13, (1 << 27) + 1, (1 << 28) - 1]
+    dstWords = [0x00000000, 0x00000001, 0x3F800000, 0x807FFFFF, 0x7F7FFFFF, 0xFF800000]
+
+    cases, dstVals = [], []
+    for dstVal in dstWords:
+        expDst = (dstVal >> 23) & 0xFF
+        for delta in range(0, 35):
+            for sign in (0, 1):
+                for man in mans:
+                    # Straddle Dst's exponent in both directions, so the long
+                    # shift falls on a group term and on Dst in turn.
+                    for gExp in (expDst - delta, expDst + delta):
+                        cases.append([(sign, gExp, man), (0, expDst, mans[-1])])
+                        dstVals.append(dstVal)
+
+    for useDst32b in (False, True):
+        for bug in (False, True):
+            expected = [
+                MatrixUnit._fpu_accumulate(gs, dst, useDst32b, bug)
+                for gs, dst in zip(cases, dstVals)
+            ]
+            got = _batch_accumulate(cases, dstVals, useDst32b, bug)
+            assert got == expected, f"useDst32b={useDst32b} bug={bug}"
 
 
 # --- the optional Numba path ------------------------------------------------

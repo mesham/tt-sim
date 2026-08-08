@@ -106,8 +106,16 @@ class DstRegister:
 
     def getDst16bRows(self, rows):
         rows = self.adj16(np.asarray(rows))
-        valid = self.dstRowValid[rows][:, np.newaxis]
-        return np.where(valid, self.dstBits[rows], 0).astype(np.int64)
+        block = self.dstBits[rows].astype(np.int64)
+        valid = self.dstRowValid[rows]
+        if valid.all():
+            # The overwhelmingly common case -- the flags are asserted on reset
+            # and re-asserted by every write, so only a rectangle straddling a
+            # ZEROACC still has one clear. Skipping the select then skips a
+            # broadcast and a dtype promotion over the whole block, which is the
+            # bulk of this accessor's cost on an MVMUL-heavy workload.
+            return block
+        return np.where(valid[:, np.newaxis], block, 0)
 
     def setDst16bRows(self, rows, values):
         rows = self.adj16(np.asarray(rows))
@@ -118,8 +126,11 @@ class DstRegister:
         br = self.adj32(np.asarray(rows))
         hi = self.dstBits[br].astype(np.int64)
         lo = self.dstBits[br + 8].astype(np.int64)
-        valid = self.dstRowValid[br][:, np.newaxis]
-        return np.where(valid, (hi << 16) | (lo & 0xFFFF), 0)
+        block = (hi << 16) | (lo & 0xFFFF)
+        valid = self.dstRowValid[br]
+        if valid.all():
+            return block
+        return np.where(valid[:, np.newaxis], block, 0)
 
     def setDst32bRows(self, rows, values):
         br = self.adj32(np.asarray(rows))

@@ -1317,6 +1317,26 @@ class MatrixUnit(TensixBackendUnit):
     # that keeps it there, because numpy wraps silently where the scalar code's
     # Python ints would simply widen.
 
+    # Rounding-shift tables for :meth:`_fpu_accumulate_batch`, indexed by the
+    # shift itself. They exist to collapse the three alignment cases -- shift by
+    # zero (which must pass its operand through *unrounded*), a rounding shift,
+    # and a shift so large the term rounds away entirely -- into a single
+    # expression, where writing them out costs a ``maximum``, a ``minimum`` and
+    # two nested ``where``s per term.
+    #
+    # ``_HALF[s]`` is the half-ULP a round-to-nearest right shift by ``s`` adds,
+    # and zero at ``s == 0``. ``_ROUND_ADJ[2 * s + sign]`` is the same thing less
+    # one for a negative sign-magnitude term, which is how the scalar datapath
+    # rounds ``-x`` -- by rounding ``x`` and negating. A gather is only worth it
+    # where it removes calls: at the 2048-element shapes inside
+    # :meth:`_fpu_group_sums_batch` a table lookup is 2.5x *slower* than the
+    # ``1 << shift`` it would replace, which is why that method has none.
+    _HALF = np.array([0] + [1 << (s - 1) for s in range(1, 32)], dtype=np.int64)
+    _ROUND_ADJ = np.array(
+        [(1 << (s - 1)) - sign if s else 0 for s in range(32) for sign in (0, 1)],
+        dtype=np.int64,
+    )
+
     @staticmethod
     def _fpu_group_sums_batch(srcAVals, srcBVals, fidelityPhase, expProdAdj):
         """Batched :meth:`_fpu_group_sums`, one call per MVMUL.
@@ -1336,6 +1356,20 @@ class MatrixUnit(TensixBackendUnit):
         ``(man << 1) + (1 << shift)`` stays under 2**31 and the shifted-down
         term is never larger than the product it came from; eight of those sum
         to under 2**15, and 2**15 << 13 is under 2**28.
+
+        This one resisted every attempt to shorten it, which is worth recording
+        because the reasons are not obvious. A numpy call on this path costs
+        ~3.5 us whether it touches 256 elements or 4096, so what matters is the
+        *number* of calls, not which array shape they land on: hoisting the
+        mantissa slicing and the zero-operand handling off the broadcast product
+        onto the operands (they are 16x smaller) changed nothing, and neither did
+        narrowing the intermediates to int32. Replacing ``1 << shift`` with a
+        gather from a 32-entry table -- which is a clear win in the format
+        conversions, where it collapses eight calls into one -- is a *loss* here
+        at 2048 elements (12.3 us against 4.9 us). The expression below is 46
+        numpy calls and a faithful one seems not to fit in fewer; the 9x still
+        on the table belongs to the optional Numba kernel, which pays no
+        per-call overhead at all.
         """
         nonZero = ((srcAVals & 0x7F800000) != 0) & ((srcBVals & 0x7F800000) != 0)
 
@@ -1398,20 +1432,20 @@ class MatrixUnit(TensixBackendUnit):
         exp = np.maximum(np.maximum(gExp[0], gExp[1]), expDst)
 
         # Align the two group sums and Dst to the largest of the three
-        # exponents. A shift of 31 or more rounds the term away entirely; a
-        # 16-bit Dst additionally rounds every term to its precision here,
-        # before the add, which is what makes a long accumulation drift.
-        shift = exp - gExp
-        safeShift = np.minimum(np.maximum(shift, 1), 30)
-        rounded = (gMan + (np.int64(1) << (safeShift - 1)) - gSign) >> safeShift
-        man = np.where(shift == 0, gMan, np.where(shift < 31, rounded, 0))
+        # exponents. ``exp`` *is* that maximum, so neither shift can be
+        # negative, and the table clamp at 31 is what rounds a hopelessly small
+        # term away entirely: a group sum is under 2**28 and a Dst mantissa at
+        # most 2**24, so adding 2**30 and shifting by 31 gives zero, which is
+        # the answer an unclamped shift of 31-or-more would also give. A 16-bit
+        # Dst additionally rounds every term to its precision here, before the
+        # add, which is what makes a long accumulation drift.
+        shift = np.minimum(exp - gExp, 31)
+        man = (gMan + MatrixUnit._ROUND_ADJ[(shift << 1) + gSign]) >> shift
         if not useDst32b:
             man = (man + (1 << 12) - gSign) & ~0x1FFF
 
-        shiftDst = exp - expDst
-        safeShiftDst = np.minimum(np.maximum(shiftDst, 1), 30)
-        roundedDst = (manDst + (np.int64(1) << (safeShiftDst - 1))) >> safeShiftDst
-        manDst = np.where(shiftDst == 0, manDst, np.where(shiftDst < 31, roundedDst, 0))
+        shiftDst = np.minimum(exp - expDst, 31)
+        manDst = (manDst + MatrixUnit._HALF[shiftDst]) >> shiftDst
         if not useDst32b:
             manDst = (manDst + (1 << 12)) & ~0x1FFF
 
@@ -1422,24 +1456,28 @@ class MatrixUnit(TensixBackendUnit):
 
         # Renormalise to 24 bits. np.frexp's exponent is exactly bit_length for
         # a non-negative integer this small; man == 0 gives 0, as Python does.
-        shift = (32 - np.frexp(man.astype(np.float64))[1].astype(np.int64)) - 8
+        shift = 24 - np.frexp(man.astype(np.float64))[1].astype(np.int64)
         if negOneRenormBug:
             shift = np.where((sign != 0) & (man == 1), shift - 27, shift)
         expOut = exp - shift
         if not useDst32b:
             shift = shift - 16
-        rshift = np.minimum(np.maximum(-shift, 1), 30)
-        down = (man + (np.int64(1) << (rshift - 1))) >> rshift
-        man = np.where(shift < 0, down, man << np.maximum(shift, 0))
+        # One expression for both directions: a shift up leaves the rounding
+        # index at zero, where _HALF adds nothing and the right shift is the
+        # identity, and a shift down leaves the left shift the identity.
+        rshift = np.minimum(np.maximum(-shift, 0), 30)
+        man = ((man << np.maximum(shift, 0)) + MatrixUnit._HALF[rshift]) >> rshift
         if not useDst32b:
             man = man << 16
-        expOut = np.where((man & 0x1000000) != 0, expOut + 1, expOut)
+        expOut = expOut + ((man >> 24) & 1)
         man = man & 0x7FFFFF
 
-        result = (sign << 31) | (np.minimum(np.maximum(expOut, 0), 254) << 23) | man
-        # Dst holds no infinities, so an overflow saturates; an underflow before
-        # or after normalising, and an exact cancellation, all give zero.
-        result = np.where(expOut >= 255, (sign << 31) | (255 << 23), result)
+        # Dst holds no infinities, so an overflow saturates -- exponent 255 with
+        # no mantissa. An underflow before or after normalising, and an exact
+        # cancellation, all give zero, and that final select is also what makes
+        # a nonsensical clamped exponent below unreachable.
+        man = np.where(expOut >= 255, 0, man)
+        result = (sign << 31) | (np.minimum(expOut, 255) << 23) | man
         return np.where((exp <= 0) | (acc == 0) | (expOut <= 0), 0, result)
 
     def perform_mvmul_exact(
@@ -1477,9 +1515,9 @@ class MatrixUnit(TensixBackendUnit):
             expProdAdj -= 7
 
         toFP32 = (
-            DataFormatConversions.TF32InSrcToFP32
+            DataFormatConversions.blockTF32InSrcToFP32
             if srcAStyle == DataFormat.TF32
-            else DataFormatConversions.BF16InSrcToFP32
+            else DataFormatConversions.blockBF16InSrcToFP32
         )
         srcA = self.backend.getSrcA(self.srcABank)
         srcB = self.backend.getSrcB(self.srcBBank)
@@ -1497,12 +1535,12 @@ class MatrixUnit(TensixBackendUnit):
         # gathered and numpy broadcasts the rest.
         #
         # The operands are gathered a rectangle at a time and converted out of
-        # the Src storage layout a rectangle at a time too: the ``*InSrcTo*``
-        # conversions are pure bit arithmetic, so the same functions the scalar
-        # paths call convert a whole block when handed one (see
-        # DataFormatConversions). SrcB is transposed because its rows index the
-        # 16 lanes, and the copy is deliberate -- every later op wants it
-        # contiguous.
+        # the Src storage layout a rectangle at a time too, through the
+        # ``block*`` conversions -- one table gather each, where the arithmetic
+        # form the scalar paths call costs eight numpy calls on a 2 KB temporary
+        # (see DataFormatConversions' block section). SrcB is transposed because
+        # its rows index the 16 lanes, and the copy is deliberate -- every later
+        # op wants it contiguous.
         srcAMat = toFP32(srcA.readRows(srcARow, 16))
         srcBLanes = srcB.readRows(srcBRow, 1 if broadcastSrcBRow else numRows)
         srcBMat = toFP32(np.ascontiguousarray(srcBLanes.T))
@@ -1515,10 +1553,12 @@ class MatrixUnit(TensixBackendUnit):
         # column and re-asserts it before the instruction ends.
         dstRows = np.arange(dstRow, dstRow + numRows)
         if useDst32b:
-            dstVals = DataFormatConversions.FP32InDstToFP32(dst.getDst32bRows(dstRows))
+            dstVals = DataFormatConversions.blockFP32InDstToFP32(
+                dst.getDst32bRows(dstRows)
+            )
         else:
-            dstVals = (
-                DataFormatConversions.BF16InDstToBF16(dst.getDst16bRows(dstRows)) << 16
+            dstVals = DataFormatConversions.blockBF16InDstToFP32(
+                dst.getDst16bRows(dstRows)
             )
 
         # The optional Numba path (tt_sim/pe/tensix/backends/fpu_jit.py) fuses
@@ -1555,11 +1595,11 @@ class MatrixUnit(TensixBackendUnit):
 
         if useDst32b:
             dst.setDst32bRows(
-                dstRows, DataFormatConversions.FP32ToDstFormatFP32(results)
+                dstRows, DataFormatConversions.blockFP32ToDstFormatFP32(results)
             )
         else:
             dst.setDst16bRows(
-                dstRows, DataFormatConversions.FP32ToDstFormatBF16(results)
+                dstRows, DataFormatConversions.blockFP32ToDstFormatBF16(results)
             )
 
     def get_dataformat_and_useDst(self, issue_thread, stateID):

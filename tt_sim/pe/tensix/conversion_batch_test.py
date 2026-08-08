@@ -123,6 +123,87 @@ def test_denormal_flush_is_the_only_case_the_branch_removal_touched():
     assert DFC.FP32ToBF16(0xBFC00000) == 0xBFC0
 
 
+# -- The table-driven block forms -------------------------------------------
+#
+# ``perform_mvmul_exact`` does not call the arithmetic forms above; it calls the
+# ``block*`` family, which gathers the answer out of a table of that same
+# arithmetic form over its whole input space. Building a table from the function
+# it replaces means it cannot encode a *different* function -- but it can be
+# built over the wrong domain, indexed with the wrong bits, or fold in a
+# widening shift the caller does not want, none of which the fpu tests would
+# catch (they start from FP32 words, downstream of the conversion). So each one
+# is swept against what it claims to compute, over the same exhaustive input
+# space as the arithmetic forms above.
+
+# (block classmethod, the expression it must equal).
+BLOCK_SRC_EQUIVALENTS = [
+    ("blockBF16InSrcToFP32", lambda x: DFC.BF16InSrcToFP32(x)),
+    ("blockTF32InSrcToFP32", lambda x: DFC.TF32InSrcToFP32(x)),
+]
+BLOCK_DST16_EQUIVALENTS = [
+    # The MVMUL Dst16b read wants an FP32 bit pattern, so the widening shift is
+    # folded into the table.
+    ("blockBF16InDstToFP32", lambda x: DFC.BF16InDstToBF16(x) << 16),
+]
+BLOCK_FP32_EQUIVALENTS = [
+    ("blockFP32InDstToFP32", lambda x: DFC.FP32InDstToFP32(x)),
+    ("blockFP32ToDstFormatBF16", lambda x: DFC.FP32ToDstFormatBF16(x)),
+    ("blockFP32ToDstFormatFP32", lambda x: DFC.FP32ToDstFormatFP32(x)),
+]
+
+
+def _assert_block_matches(name, reference, xs):
+    got = getattr(DFC, name)(xs)
+    assert isinstance(got, np.ndarray), f"{name} did not stay vectorised"
+    assert got.dtype == np.int64, f"{name} must stay int64 for the FPU datapath"
+    assert np.array_equal(got, reference(xs)), name
+
+
+@pytest.mark.parametrize("name,reference", BLOCK_SRC_EQUIVALENTS)
+def test_block_src_conversions_over_the_whole_19_bit_space(name, reference):
+    _assert_block_matches(name, reference, np.arange(SRC_SPACE, dtype=np.int64))
+
+
+@pytest.mark.parametrize("name,reference", BLOCK_DST16_EQUIVALENTS)
+def test_block_dst16_conversions_over_the_whole_16_bit_space(name, reference):
+    _assert_block_matches(name, reference, np.arange(DST16_SPACE, dtype=np.int64))
+
+
+@pytest.mark.parametrize("name,reference", BLOCK_FP32_EQUIVALENTS)
+def test_block_fp32_conversions_over_every_equivalence_class(name, reference):
+    _assert_block_matches(name, reference, _fp32_cases())
+
+
+def test_block_src_conversions_ignore_bits_above_the_src_width():
+    """Masking the index is not a behaviour change, and this is why.
+
+    Every ``*InSrcTo*`` conversion reads only bits 0..18 (``TF32InSrcToTF32``'s
+    masks are 0x40000 / 0x3FF00 / 0xFF), so a datum with rubbish above bit 18
+    already converted as though those bits were absent. The table's ``& 0x7FFFF``
+    keeps that true rather than raising an out-of-bounds index.
+    """
+    dirty = np.arange(SRC_SPACE, dtype=np.int64) | (1 << 30)
+    clean = np.arange(SRC_SPACE, dtype=np.int64)
+    assert np.array_equal(DFC.BF16InSrcToFP32(dirty), DFC.BF16InSrcToFP32(clean))
+    assert np.array_equal(
+        DFC.blockBF16InSrcToFP32(dirty), DFC.blockBF16InSrcToFP32(clean)
+    )
+
+
+def test_block_tables_are_shared_and_frozen():
+    """One table per conversion, built once and not writable.
+
+    A caller that mutated a returned block would otherwise corrupt every later
+    conversion, since a gather's result is a fresh array but the table is not.
+    """
+    from tt_sim.pe.tensix.util import _BLOCK_LUTS, _block_lut
+
+    first = _block_lut("BF16InDstToBF16", 16, DFC.BF16InDstToBF16)
+    assert _block_lut("BF16InDstToBF16", 16, DFC.BF16InDstToBF16) is first
+    assert not first.flags.writeable
+    assert _BLOCK_LUTS["BF16InDstToBF16"] is first
+
+
 # -- The unpacker's own conversion, end to end ------------------------------
 #
 # ``UnPackerUnit.formatConversion`` is what ``_unpack_block`` hands a whole

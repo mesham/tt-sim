@@ -3268,3 +3268,534 @@ git archive cc0a72e | tar -x -C /tmp/ab/ctrl      # the verified-zero control
 # vecadd_sharding_replay_test (the 4-Tensix guard), end-to-end wall, and read
 # stride_skipped_cycles in both to see where the time goes.
 ```
+
+---
+
+# Declined on measurement: the Tensix per-element datapath
+
+**Measured 2026-08-08** against `97635b2`, machine as elsewhere in this document
+(12th Gen Core i7-12700H, 16 threads, CPython 3.12.13, numpy 2.4.4, numba 0.66.0
+installed, `TT_SIM_THREADED` unset). This was ROADMAP Tier 1 item 1, scheduled on
+the claim that `handle_elwadd` and `handle_pacr` are "**~22 % of a tile tick**
+between them" and want a numpy rewrite of the FPU and packer datapaths.
+
+**The premise does not hold, and the item is closed.** Across 27 workloads the
+two functions are a **median 5.8 %** of pump time (mean 5.3 %, max 14.8 %), they
+are **0 % on six workloads**, and `handle_elwadd` is **never called at all in 18
+of the 27**. Nothing was changed; this section is the evidence, recorded so the
+item is not re-derived from the 22 % figure in three months.
+
+Two prior profiles disagreed about these same functions — 13 %/9 % from the
+RISC-V front-end instalment, 3 % combined from the Numba/FPU instalment above.
+**Both are locally correct on the workloads each ran. The disagreement is
+workload selection, not methodology**, and §"Why the two prior figures differ"
+below records that in particular *cProfile did not mis-rank these two*.
+
+## Method
+
+A `perf_counter_ns` wrapper is monkeypatched onto `MatrixUnit.handle_elwadd`,
+`PackerUnit.handle_pacr` and `Device.run` before the guard module is imported,
+accumulating inclusive nanoseconds and a call count per function. The Tensix
+backend dispatches through `getattr(self, self.opcode_to_method_map[name])`
+(`backends/backend_base.py`), so patching the class attribute is sufficient. The
+shim adds ~0.2 us per call to functions that cost 600–2300 us, i.e. under
+0.05 % — negligible, and it is charged to both arms of every comparison anyway.
+
+**The denominator is time inside `Device.run` — the pump — and that is the right
+one**, because it is the *ceiling on any wall-clock win*. Removing a function
+entirely cannot save more than its inclusive share of the pump. Pump is 86–99 %
+of each guard's process wall clock, the remainder being trace parse and host
+message replay, so the choice barely moves the figures but it is the honest
+bound. Per-*live-tile-tick* denominators (as used by the RISC-V front-end
+instalment) are a different quantity: they divide out idle tiles, so they read
+higher than the wall-clock share a change could actually deliver.
+
+**Cross-checked against cProfile on `vecadd_sharding`, and the two methods agree
+to 0.3 percentage points:**
+
+| | `handle_elwadd` | `handle_pacr` | combined |
+| --- | --- | --- | --- |
+| `perf_counter` shim | 6.74 % | 7.90 % | **14.64 %** |
+| cProfile (`cumtime` / pump `cumtime`) | 0.770 s / 10.33 s = 7.46 % | 0.708 s / 10.33 s = 6.86 % | **14.32 %** |
+
+## The 27-workload table
+
+Every Blackhole replay guard that runs a compute kernel, one run each, inclusive
+time as a percentage of pump. `—` means the function was never called. Run-to-run
+spread is ~4 % of each figure (see the noise floor below), so treat the last
+digit as noise.
+
+| workload | `handle_elwadd` | `handle_pacr` | combined |
+| --- | --- | --- | --- |
+| `four_fp` | 6.22 | 8.60 | **14.82** |
+| `vecadd_sharding` | 6.74 | 7.90 | **14.64** |
+| `transpose` | 5.32 | 4.92 | 10.24 |
+| `tilize` | — | 8.73 | 8.73 |
+| `reduceneg` | 1.02 | 7.49 | 8.51 |
+| `reduce` | 1.05 | 7.18 | 8.23 |
+| `matmulidx` | — | 7.86 | 7.86 |
+| `four` | 2.86 | 4.77 | 7.63 |
+| `optest` | — | 7.22 | 7.22 |
+| `nine` | 2.31 | 4.46 | 6.77 |
+| `untilize` | — | 6.51 | 6.51 |
+| `five` | — | 6.36 | 6.36 |
+| `twolaunch` | — | 6.26 | 6.26 |
+| `matmulblock` | — | 5.80 | 5.80 |
+| `five_fp` | — | 5.53 | 5.53 |
+| `pipestall` | 1.62 | 3.89 | 5.51 |
+| `sfpumath` | 1.74 | 2.00 | 3.74 |
+| `sfpuchain` | — | 3.63 | 3.63 |
+| `where` | — | 2.90 | 2.90 |
+| `six` | — | 2.87 | 2.87 |
+| `softplus` | — | 0.60 | 0.60 |
+| `three` | — | — | **0** |
+| `eight` | — | — | **0** |
+| `two` | — | — | **0** |
+| `pad_multi_core` | — | — | **0** |
+| `shard_data_rm` | — | — | **0** |
+| `noc_tile_transfer` | — | — | **0** |
+
+**Median 5.80 %, mean 5.35 %, max 14.82 %.** `handle_elwadd` runs in 9 of 27 and
+never exceeds 6.74 %; `handle_pacr` runs in 21 of 27. (`dramtop`, `loopback` and
+`offline` are the three guards not in the table.)
+
+The per-workload spread *is* the finding. A single blended number is what caused
+the original disagreement, and any future claim about these functions should be
+stated per workload or not at all.
+
+## Why the two prior figures differ
+
+Both prior profiles are reproducible; they ran different workloads.
+
+- The Numba/FPU instalment reported **3 % combined on `blackhole/six`**. Correct
+  — I measure 2.87 %, and the reason is structural: **`six` issues no ELWADD at
+  all.** Its 0.21 s / 5.5 % `handle_elwadd` figure was on `vecadd_sharding`,
+  where I measure 6.74 %.
+- The RISC-V front-end instalment reported **13 % / 9 %**. That is above
+  everything reproducible here; the closest workload is `four_fp` at 6.22 / 8.60.
+  A per-live-tile-tick denominator explains part of the gap (it divides out the
+  idle tiles that a wall-clock share must include), and workload choice the rest.
+
+**cProfile did not mis-rank these two functions.** The instalment above cautions
+against cProfile here, and that caution is sound *for its own comparison* —
+ranking the numpy-heavy FPU batch kernel against the call-heavy RV interpreter,
+where a ~1.4x interpreter-weighted overhead genuinely distorts. It does not
+generalise to `handle_elwadd` and `handle_pacr`, which are both call-heavy scalar
+loops and therefore distorted the same way: cProfile and the shim agree to
+0.3 pp, as tabulated above. Do not discard cProfile for these paths on the
+strength of the earlier note.
+
+## Only about half of `handle_pacr` is addressable by numpy at all
+
+The roadmap described `handle_pacr` as "512 two-byte L1 writes", implying the
+whole function is a per-datum loop. It is not. cProfile callee breakdown on
+`vecadd_sharding` (256 PACRs, 16384 datums), as a share of the function:
+
+| callee | calls | share of `handle_pacr` | per-datum? |
+| --- | --- | --- | --- |
+| `generate_output_address` | 256 | **16 %** | no — per instruction |
+| `edge_masks_for_pacr` | 256 | **13 %** | no — per instruction |
+| `generate_input_address` | 256 | **11 %** | no — per instruction |
+| `MemoryMap.write` (the L1 stores) | 16384 | 30 % | yes |
+| `formatConversion` | 16384 | 6.5 % | yes |
+| `getDst` | 16384 | 0.7 % | yes |
+| own `tottime` (the loop itself) | — | 16 % | mixed |
+
+**About 40 % of the function is per-instruction config-register plumbing that
+vectorising the datum loop cannot touch.** `handle_elwadd`, by contrast, really
+is per-element dominated — `elementwise_fp_other` is 84 % of it, split between
+`get_elementwise_fp_src_type` (39 %) and `store_elementwise_fp_result` (37 %) —
+so it is the vectorisable one, and also the one carrying the bf16-rounding,
+fidelity-phase and Dst-format semantics that make a rewrite risky.
+
+Netting that out: the addressable share is roughly **10 % of pump on the best
+workload and ~2.5 % on the median one**, before accounting for the numpy call
+overhead that a 128-element array cannot amortise.
+
+## The noise floor: what this box can honestly demonstrate
+
+Ten rounds of unmodified `vecadd_sharding` — the most favourable workload in the
+table — each a fresh subprocess, end-to-end wall clock:
+
+```
+3.378 3.475 3.278 3.214 3.360 3.396 3.178 3.256 3.103 3.074  (seconds)
+```
+
+**mean 3.271 s, sd 0.132 s, CV 4.0 %, min-to-max spread 12.3 %.**
+
+So a 2–7 % effect — which is what a *perfect* vectorisation of both functions
+would deliver — sits at or below what this machine can separate from noise
+without a very large number of interleaved rounds. That is the practical half of
+the argument for declining: even a successful rewrite could not be honestly
+demonstrated on most of the table. It is the fourth time this document has had to
+make the point, and it is why the A/B recipes here insist on frozen worktrees, a
+verified-zero control arm and round counts in the report.
+
+## Oracle coverage: the full-tile ELWADD path has none
+
+This outlives the decision, and is the part to read if you ever *do* touch these
+paths.
+
+`optests/` differentially tests tt-sim against ttsim, which owns bit-exact
+functional correctness. Coverage of the two paths is very asymmetric:
+
+- **`PACR` is covered by 16 of the 17 optests** (all but `dramtop`, which runs no
+  compute kernel) — essentially anything that calls `pack_tile` emits it.
+- **`ELWADD` has no direct coverage.** No optest issues a plain `add_tiles`,
+  `eltwise_binary` or `mul_tiles`. ELWADD reaches the simulator only obliquely:
+  `transpose` via `binary_dest_reuse_tiles<ELWADD, DEST_TO_SRCA>`,
+  `transpose`/`sfpumath` via `copy_tile` (which lowers to ELWADD only when
+  `fp32_dest_acc_en` is set), and `reduce`/`reduceneg` through the REDUCE_ROW
+  transpose path.
+
+**The full-tile eltwise-binary datapath — what `vecadd_sharding` and `four`
+exercise, and precisely what a numpy FPU rewrite would most change — has no
+differential oracle.** Rewriting bf16 rounding, fidelity phases and Dst formats
+on an unoracled path, for a median 2.5 % addressable share, is the substantive
+half of the argument for declining. If the item is ever reopened, **write an
+`add_tiles` optest first**; it is the cheap prerequisite and it has value on its
+own.
+
+Verified 2026-08-08, all PASS against ttsim: `matmulblock`, `matmulidx`,
+`transpose`, `reduce`, `reduceneg`, `sfpumath`, `packspill`, `untilize`,
+`tilize`.
+
+## The `SrcOrder` "compile break" is an invocation error, not a code break
+
+Recorded because it was believed to have removed MVMUL from the differential net,
+and it had not. `matmulblock` and `matmulidx` were reported as no longer
+compiling, with `error: 'SrcOrder' has not been declared`.
+
+**Root cause: `optests/diff.sh` JITs the device kernels against whatever
+`TT_METAL_HOME` points at.** The script does
+
+```sh
+export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
+```
+
+so `TT_METAL_HOME` silently drives the *kernel* build as well as the host build.
+The failing runs pointed at `/home/nick/projects/riscv/tt-metal`, which is pinned
+at **v0.70.1**, while the venv's `TT_METAL_RUNTIME_ROOT` is the **v0.74.0** tree.
+`SrcOrder` is the *newer* API — v0.74 declares it in
+`tt_metal/hw/inc/api/compute/compute_kernel_hw_startup.h`; v0.70.1 has no such
+declaration. The failure is at JIT time, not CMake time: the build log is clean
+and the error surfaces from `trisck.cc`.
+
+Pointed at the 0.74 tree, both build and pass:
+
+```
+PASS  matmulblock: tt-sim matches ttsim (6144 elements)
+PASS  matmulidx:   tt-sim matches ttsim (2560 elements)
+```
+
+**MVMUL differential coverage was never lost.** Cost to "fix": set the variable
+correctly. If you ever need these optests to build against v0.70.1 as well, it is
+a mechanical six-line backport across the two compute kernels — `matmul_init` →
+`mm_init_short`, `matmul_block_init` → `mm_block_init_short`, and
+`compute_kernel_hw_startup<SrcOrder::Reverse>(in0, in1, out)` →
+`compute_kernel_hw_startup(in1, in0, out)`, which is what v0.74's `Reverse`
+branch expands to. Not `mm_init` / `mm_block_init`: those take an extra output-CB
+argument and fold in the hardware configure step.
+
+A one-line guard in `diff.sh` that fails loudly when the resolved
+`TT_METAL_RUNTIME_ROOT` lacks `SrcOrder` would stop this being re-diagnosed.
+
+## Left on the table: `edge_masks_for_pacr`
+
+Not done, because nothing was changed here and it wants its own A/B, but it is
+the best fidelity-free win in this area and it is cheap to state:
+`edge_masks_for_pacr` costs **371 us per PACR — 13 % of `handle_pacr`** — to
+perform 20 `getConfigValue` lookups (16 `TILE_ROW_SET_MAPPING_*`, four
+`PCK_EDGE_OFFSET_SEC*_mask`) whose result depends only on `(stateID, packer)`.
+Memoising it touches no arithmetic and no datum. The work is entirely in making
+invalidation correct — the entry has to be dropped whenever any of those config
+registers is written, which means hooking the config write path rather than the
+packer. Worth ~1 % of pump on packer-heavy workloads, so it needs the full
+interleaved treatment to demonstrate, and it should not be attempted as a
+by-the-way change.
+
+## Gates (nothing changed, so these are a pin, not a check)
+
+`ruff check` / `ruff format --check` clean; `pytest tt_sim/ driver/` **1120
+passed** with the cost model off and again with `TT_SIM_COST_MODEL=1`; **1119
+passed, 1 skipped** with numba made unimportable by a `meta_path` blocker (the
+skip is the jit fuzz); **30/30** Blackhole replay guards standalone;
+`driver/tests/cost_model_gate.py --jobs 4` **RESULT: PASS**, exit 0, over 44
+guards, with the poll-budget multipliers unchanged (`dramtop` 1x, `two` 2x,
+`offline` 4x); nine optests PASS against ttsim. Cycle identity is trivial — the
+tracked diff is empty.
+
+This is a measurement record, not a cost-model instalment: no timing changed, so
+there is no `docs/plans/cost-model.md` entry and no provenance to record.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+
+# the per-workload table. A shim module that wraps MatrixUnit.handle_elwadd,
+# PackerUnit.handle_pacr and Device.run with perf_counter_ns *before* importing
+# the guard, then calls its main() and prints ns and call counts. Report the
+# share of Device.run, not of process wall — it is the ceiling on any win, and
+# it is not the same quantity as a per-live-tile-tick share.
+python3 -m driver.blackhole.server.<name>_replay_test   # under that shim
+
+# the cProfile cross-check, which agrees to 0.3 pp on these two functions:
+# cProfile.Profile() around the same main(), then compare each function's
+# cumtime against device.py:run's cumtime. pstats.print_callees("handle_pacr")
+# is what shows that ~40 % of it is per-instruction address/edge-mask setup
+# rather than the per-datum loop.
+
+# the noise floor: 10 fresh subprocesses of one guard, end-to-end wall, report
+# mean / sd / CV / min-to-max. On this box: CV 4.0 %, spread 12.3 %. Anything
+# smaller than that needs frozen worktrees, a null control and many rounds.
+
+# oracle coverage: grep the optest compute kernels for add_tiles /
+# eltwise_binary / mul_tiles before assuming ELWADD is covered — it is not.
+TT_METAL_HOME=<the 0.74 tree> TTSIM_ORACLE=<ttsim>/oracle-bh ./optests/diff.sh matmulblock
+# TT_METAL_HOME drives the *kernel* JIT via TT_METAL_RUNTIME_ROOT. Pointing it
+# at a 0.70.1 tree is what produces the phantom "'SrcOrder' has not been
+# declared" break; check the resolved tree before diagnosing a code fault.
+```
+
+# The MVMUL gather/scatter (ROADMAP item 1), 2026-08-08 — accepted, half of it
+
+The roadmap's largest wall-clock item. Its premise was that `perform_mvmul` costs
+**745 us per call of which the fused Numba kernel is only ~46 us**, leaving ~94 %
+in "the Dst/SrcA/SrcB rectangle gather and the surrounding format conversions".
+The first half of that is an artefact and the second half is right for the wrong
+reason, so the interior profile is worth having in full.
+
+## What the 745 us actually was
+
+A `perf_counter_ns` shim on each segment of `perform_mvmul_exact`, on
+`matmulblock` (1536 MVMULs), Blackhole, cost model off, quiet box:
+
+| segment | us/call, numpy only | us/call, Numba engaged |
+|---|---|---|
+| prologue (config reads, RWC, base rows, fidelity phase) | 46.2 | 43.8 |
+| SrcA gather + convert | 47.4 | 45.1 |
+| SrcB gather + convert | 31.3 | 31.2 |
+| Dst gather + convert | 59.6 | 56.7 |
+| **`_fpu_group_sums_batch`** | **282.7** | — |
+| **`_fpu_accumulate_batch`** | **262.9** | — |
+| **fused Numba kernel, steady state** | — | **56.4** |
+| store convert + write | 58.3 | 57.9 |
+| epilogue (bank flip, addrmod) | 60.0 | 59.9 |
+| **total** | **859.8** | **353** |
+
+**Neither prior figure was right, and the 745 us was an artefact.** Numba's
+kernel is `cache=True`, and the *first* call after the 512-MVMUL threshold pays a
+**672 ms** on-disk cache load (2.95 s if the cache is cold, which a fresh
+worktree always is). Averaged over the calls that is 437 us/call on its own and
+**26 % of `matmulblock`'s whole pump** — which is where "745 us of which 46 is
+the kernel" came from. Divide it out and the honest numbers are the table above:
+860 us per call with numpy alone, 353 us steady-state with Numba, and the 46 us
+kernel figure reproduces at 56 us.
+
+Two corollaries worth recording. First, **Numba is roughly break-even on
+`matmulblock`** — 2557 ms of pump with it against 2533 ms without, because 1024
+calls x 468 us saved barely covers the 672 ms cache load. It only clearly wins
+from `six` (4096 calls) upward. Second, the roadmap's "94 % is gather and
+conversions" is not true of either configuration: gather + conversions +
+prologue + epilogue is **297 us, 35 % of the numpy-only call** — though it is 84 %
+of the Numba-engaged one, which is presumably how the claim arose.
+
+## The measurement that decided the shape of the fix
+
+A numpy call on this path costs **~3.5 us whether it touches 256 elements or
+4096**. Op *count* is the entire cost; array shape is not. That was measured
+directly (`a & 0xFF` is 3.80 us on a 16x16 int64 block and 3.55 us on a
+16x16x16 one) and it invalidates three obvious ideas, all of which were tried
+and reverted:
+
+- hoisting per-operand work off the broadcast product array in
+  `_fpu_group_sums_batch` — same op count, no change;
+- narrowing the intermediates to int32 — no change (`a & 0xFF` on int32 measured
+  *slower*, 6.01 us);
+- replacing `1 << shift` with a gather from a 32-entry table — **2.5x slower**
+  at 2048 elements (12.3 us against 4.9 us).
+
+`_fpu_group_sums_batch` is 46 numpy calls and a faithful version does not seem to
+fit in fewer, so **it was left exactly as it was**; a comment in the method now
+records why, so the next person does not spend the afternoon again. The remaining
+9x on it belongs to the Numba kernel, which pays no per-call overhead at all, and
+to nothing numpy can do.
+
+Where the same lens *does* pay is anywhere one call can replace eight.
+
+## What was changed
+
+**1. Table-driven format conversions** (`DataFormatConversions.block*`). Every
+storage-layout conversion is a bit permutation of a narrow datum — a Src datum is
+19 bits, a Dst16b one 16, and the FP32 ones read nothing below bit 16 that
+survives — so the whole mapping fits in a table and a block converts in one
+gather instead of six to nine calls. On a 16x16 block: `BF16InSrcToFP32`
+27.7 -> 1.0 us, `FP32ToDstFormatBF16` 31.0 -> 2.7 us, `FP32InDstToFP32`
+34.9 -> ~7 us.
+
+The tables are built by the arithmetic form itself over its whole input space, so
+they cannot encode a different function, and `conversion_batch_test` walks each
+one against the scalar form regardless. Two subtleties:
+
+- **The build has to be cheap, not merely amortised.** Evaluating the arithmetic
+  form over `arange(2**19)` walks a 4 MB intermediate once per operation in the
+  expression, and at one page fault per 4 KB that is **58 ms** — which a guard
+  with 36 MVMULs in it would never earn back. Building instead as an outer OR of
+  two half-width tables touches the full-size array once: **8.8 ms**. That is
+  valid exactly because these functions are bit permutations, so they distribute
+  over an OR of disjoint fields; `FP32ToDstFormatBF16` is the one that is not
+  (the denormal flush reads the exponent to decide what to do with the mantissa)
+  and it opts out. A BF16/Dst16b workload's three tables now cost **17.3 ms**
+  one-off against 70.8 ms for the naive build — break-even at ~157 MVMULs.
+- **Masking the index is not defensive.** `TF32InSrcToTF32`'s masks are
+  0x40000 / 0x3FF00 / 0xFF, so `x & 0x7FFFF` is the identity as far as the
+  arithmetic is concerned; the mask discards exactly the bits it already ignored,
+  and there is a test that says so.
+
+**2. `_fpu_accumulate_batch`, re-expressed with fewer calls** — 164 -> 119 us,
+−27 %, bit-identical. The win is removing four nested `where`s: the three
+alignment cases (no shift, a rounding shift, a shift large enough that the term
+vanishes) collapse into one table-indexed expression, because a group sum under
+2**28 plus 2**30 shifted right by 31 *is* zero. Likewise the renormalisation's
+shift-up and shift-down arms become one expression, and the saturation drops the
+mantissa instead of rebuilding the word.
+
+**3. `getDst16bRows` / `getDst32bRows` fast path.** The zero-flag select is
+skipped when every row in the rectangle is valid, which is all but a rectangle
+straddling a ZEROACC. 21.2 -> 16.7 us and 34.6 -> 31.4 us.
+
+## The A/B
+
+Two frozen trees differing only in the five files, ABBA order within each round,
+fresh subprocess per measurement, end-to-end wall, **10 rounds = 20 samples per
+arm**. `vecadd_sharding` (zero MVMULs) is the null control, in the same
+interleave.
+
+| workload | MVMULs | default env | `TT_SIM_NUMBA=0` |
+|---|---|---|---|
+| `six` | 4096 | **−7.10 %** | **−10.54 %** |
+| `matmulblock` | 1536 | **−3.42 %** | **−6.57 %** |
+| `reduce` | 36 | −0.07 % | +0.89 % |
+| `vecadd_sharding` (control) | 0 | −1.12 % | −0.31 % |
+
+Per-arm CV was 4.0–6.8 %, i.e. at this box's measured noise floor, which is why
+this needed ten rounds; the direction was consistent in every single round for
+both matmul workloads. Net of the control, `six` is −6.0 pp / −10.2 pp and
+`matmulblock` −2.3 pp / −6.3 pp. Pump-relative the effect is larger than wall —
+`matmulblock`'s pump goes 2533 -> 2124 ms (**−16 %**) with Numba off, per-call
+860 -> 711 us — because a guard's wall carries ~1.3 s of interpreter startup that
+no simulator change can touch.
+
+**Report the concentration honestly.** This is worth 6–10 % on matmul-class
+workloads and **nothing at all on 23 of the 30 Blackhole guards**, which issue no
+MVMUL and never build a table. `reduce`'s +0.89 % is the one place the change
+costs: 36 MVMULs cannot repay a 17.3 ms table build. It is below the noise floor
+and it buys the 6–10 %, but it is a real sign, and it is the reason the build was
+worth taking from 70.8 ms to 17.3 ms rather than shrugging at it.
+
+## Correctness
+
+The differential oracle is the real net and it holds: **nine optests PASS**
+against ttsim — `matmulblock`, `matmulidx`, `matmultranspose`, `matmuluntilize`,
+`tilizematmul`, `transpose`, `reduce`, `reduceneg`, `untilize` — with
+`TT_METAL_HOME` pinned to the **v0.74.0** tree (verified: `version.txt` says
+v0.74.0 and `api/compute/matmul.h` declares `SrcOrder`; the 0.70.1 tree is what
+produces the phantom "'SrcOrder' has not been declared" break). **No tt-sim /
+ttsim disagreement was found anywhere.**
+
+Above that, three new pins in `fpu_accumulate_test.py` and six in
+`conversion_batch_test.py`:
+
+- every `block*` conversion swept against its arithmetic form over its **entire**
+  input space (2**19 for Src, 2**16 for Dst16b, every equivalence class for the
+  FP32 ones), plus a test that the index mask changes nothing and one that the
+  tables are shared and frozen;
+- the accumulate **boundaries** swept rather than sampled: every shift from 0 to
+  34 in both directions against extreme mantissas (0, 1, 2, 2**13 either side,
+  2**28−1), both signs, six Dst words spanning zero / denormal / normal / max /
+  −inf, x both Dst widths x both arches — 17 640 cases per combination, all
+  bit-identical to the scalar reference;
+- the whole per-instruction chain from Src/Dst **storage words** in: both operand
+  styles (BF16, TF32) x both Dst widths x both arches x all four fidelity phases
+  x rectangles of 1, 2, 3 and 16 rows x broadcast and per-row SrcB, with a
+  quarter of trials forcing every lane to exponent 0x00 or 0xFF (zero, Inf, NaN)
+  and half the Dst to zero, so whole-group underflow, saturation and exact
+  cancellation are all hit.
+
+## Cycle identity
+
+Not a timing change, and proven rather than asserted: a shim checksums the whole
+per-dispatch stream — `(simulated cycle, instruction name, target unit, issuing
+thread)` for every instruction reaching `TensixBackend.issueInstruction`, in
+order — plus the dispatch count and the last cycle. Digests are **byte-identical
+between the two arms with the cost model both on and off**, on `matmulblock`
+(3532 dispatches, last cycle 13600; 4602 and 17600 under the model), `six`,
+`matmulidx`, `twolaunch`, `untilize`, `reduce`, `reduceneg`, `transpose`,
+`tilize` and `two`. (`two` run standalone under the model fails identically on
+*both* arms — it is one of the three budget-dependent guards the gate gives a 2x
+poll multiplier, so that is the documented pre-existing shape, not a regression.)
+Totals alone would not have caught a reordering, which is why the stream and not
+just the cycle count is hashed.
+
+## Gates
+
+`ruff check` / `ruff format --check` clean; `pytest tt_sim/ driver/` **1137
+passed** with the cost model off and again with `TT_SIM_COST_MODEL=1` (1120 at
+`97635b2` plus 17 new); **1136 passed, 1 skipped** with numba blocked by a
+`meta_path` finder, in both model states; **30/30** Blackhole replay guards
+standalone, with and without numba; `driver/tests/cost_model_gate.py --jobs 4`
+**RESULT: PASS**, exit 0, over 44 guards, with and without numba, poll-budget
+multipliers unchanged.
+
+This is not a cost-model instalment: no charged cost changed, so there is no
+`docs/plans/cost-model.md` entry and no provenance to record.
+
+## Left on the table
+
+- **The 672 ms Numba cache load** is now the single largest one-off in a matmul
+  guard — bigger than anything this instalment saved on `matmulblock`. It is
+  numba's own on-disk cache deserialisation, not compilation, and it is why the
+  jit is only break-even below `six`. Worth understanding before the threshold
+  (512) is tuned.
+- **`_fpu_group_sums_batch`'s remaining 9x** is a per-numpy-call-overhead gap, so
+  it is Numba's or nothing. A Numba-only path is explicitly out of scope for a
+  no-new-dependency change.
+- **The unpacker's `_unpack_block`** converts *into* the Src/Dst layouts with the
+  same arithmetic forms and would take the same tables. Untouched here, and it
+  wants its own A/B.
+- **The 104 us/call of prologue + epilogue** is config-register plumbing —
+  `getThreadConfigValue`, `get_base_row_ranges`, `applyAddrMod` — and is the same
+  shape as the `edge_masks_for_pacr` memoisation above: the work is all in making
+  invalidation correct, and it should not be attempted as a by-the-way change.
+
+## Reproducing
+
+```bash
+export PYTHONPATH=~/tt-sim
+
+# the interior profile: a shim that replaces MatrixUnit.perform_mvmul with a
+# copy instrumented between segments, plus MultiTileClock.run, then calls the
+# guard's main(). Time the *first* fused call separately or the numba cache
+# load lands in the per-call average and inflates it by 437 us.
+python3 -m driver.blackhole.server.matmulblock_replay_test   # under that shim
+TT_SIM_NUMBA=0 ...                                           # the numpy-only arm
+
+# the op-cost lens, which is what decides whether an idea is worth trying: time
+# one numpy call at 256 and at 4096 elements. If they are within 10 % of each
+# other, only removing calls will help, and moving work onto a smaller array
+# will not.
+
+# cycle identity: hook the wait gate's clock_tick for the cycle number and
+# TensixBackend.issueInstruction for the dispatch, blake2b the stream, and
+# compare digests across arms x {model on, off}.
+
+# the A/B: two frozen trees, ABBA within a round, fresh subprocess, >= 10 rounds,
+# and a zero-MVMUL control (vecadd_sharding) in the same interleave. Warm each
+# arm first -- numba's on-disk cache lives beside the source, so it is per-tree
+# and a cold one is a 0.7 s handicap on whichever arm ran first.
+
+TT_METAL_HOME=/home/nick/projects/hedgehope/tt-metal-0.74/tt-metal \
+TTSIM_ORACLE=~/projects/riscv/ttsim/oracle-bh ./optests/diff.sh matmulblock
+# check `version.txt` says v0.74.0 before reading anything into a compile break.
+```

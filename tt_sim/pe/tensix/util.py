@@ -1,8 +1,50 @@
 import importlib.resources as resources
 from copy import copy
 
+import numpy as np
+
 from tt_sim.util.bits import extract_bits, get_bits
 from tt_sim.util.yaml_cache import load_yaml_cached
+
+# Lookup tables for the block conversions at the end of DataFormatConversions,
+# built on first use and then frozen. Keyed by the name of the conversion they
+# stand in for; see that section's comment for why they exist and why they
+# cannot encode a different function.
+_BLOCK_LUTS = {}
+
+
+def _block_lut(key, bits, build, distributes=True):
+    """The table of ``build`` over the whole ``bits``-wide input space.
+
+    Building it has to be cheap, not just amortised: a workload with a couple of
+    hundred MVMULs in it would otherwise pay more to build the table than it
+    ever saves. Evaluating ``build`` over 2**19 directly is the expensive way --
+    it walks a 4 MB intermediate once per operation in the expression, and at
+    one page fault per 4 KB of freshly allocated memory that is ~58 ms.
+
+    So the default builds it as an outer OR of two half-width tables, which
+    touches the full-size array once (~8 ms). That is valid exactly when
+    ``build`` is a *permutation of bits* -- every output bit comes from one input
+    bit, with no carries, so the function distributes over an OR of disjoint
+    fields -- which is what the storage-layout conversions are. ``distributes``
+    is ``False`` for the one that is not (``FP32ToBF16``'s denormal flush reads
+    the exponent to decide what to do with the mantissa), and
+    ``conversion_batch_test`` walks every table against its arithmetic form over
+    the whole input space, so getting this wrong is a loud test failure rather
+    than a quietly approximate conversion.
+    """
+    lut = _BLOCK_LUTS.get(key)
+    if lut is None:
+        if distributes:
+            split = bits // 2
+            high = build(np.arange(1 << (bits - split), dtype=np.int64) << split)
+            low = build(np.arange(1 << split, dtype=np.int64))
+            lut = (high[:, np.newaxis] | low).reshape(-1)
+        else:
+            lut = build(np.arange(1 << bits, dtype=np.int64))
+        lut.setflags(write=False)
+        _BLOCK_LUTS[key] = lut
+    return lut
 
 
 class TensixCoprocessorDiagnostics:
@@ -504,3 +546,85 @@ class DataFormatConversions:
         man = x & (0x3FF << 8)
         explo = x & 0x1F
         return (sign >> 3) | (man >> 3) | explo
+
+    # -- Table-driven block conversions ---------------------------------------
+    #
+    # The conversions above are bit permutations of a *narrow* datum: a Src
+    # datum is 19 bits, a Dst16b datum 16, and the FP32 ones read nothing below
+    # bit 16 that survives into the result. So each one's entire input-output
+    # mapping fits in a table, and a whole block converts in one gather instead
+    # of the six to nine numpy calls the arithmetic form costs.
+    #
+    # That matters because of *where* they are called from. An MVMUL rectangle
+    # is at most 16x16 datums, so every one of those calls spends its time in
+    # numpy's dispatch and in allocating a 2 KB temporary, not on arithmetic.
+    # Measured on a 16x16 block: ``BF16InSrcToFP32`` 27.7 us -> 1.0 us,
+    # ``FP32ToDstFormatBF16`` 31.0 us -> 2.7 us, ``FP32InDstToFP32`` 34.9 us ->
+    # ~7 us.
+    #
+    # Two things keep them honest:
+    #
+    # - **The tables are built by the arithmetic form itself**, over its whole
+    #   input space, so they cannot encode a different function -- and
+    #   ``conversion_batch_test`` walks each block form against the scalar one
+    #   over the same space regardless.
+    # - **The masks are not defensive.** Each conversion reads only bits inside
+    #   its stated width (``TF32InSrcToTF32``'s masks are 0x40000 / 0x3FF00 /
+    #   0xFF, so ``x & 0x7FFFF`` is the identity as far as it is concerned), so
+    #   masking the index discards exactly the bits the arithmetic already
+    #   ignored.
+    #
+    # They are built lazily -- a 2**19 table is 4 MB, and a workload that never
+    # issues a TF32 MVMUL should not pay for one -- and cheaply; see
+    # :func:`_block_lut` for why the build is not simply the arithmetic form
+    # over an ``arange``, and what a BF16 MVMUL's three tables end up costing.
+
+    @classmethod
+    def blockBF16InSrcToFP32(cls, x):
+        return _block_lut("BF16InSrcToFP32", 19, cls.BF16InSrcToFP32)[x & 0x7FFFF]
+
+    @classmethod
+    def blockTF32InSrcToFP32(cls, x):
+        return _block_lut("TF32InSrcToFP32", 19, cls.TF32InSrcToFP32)[x & 0x7FFFF]
+
+    @classmethod
+    def blockBF16InDstToFP32(cls, x):
+        """``BF16InDstToBF16`` widened to FP32 -- the Dst16b MVMUL operand read.
+
+        The widening shift is folded into the table because the matrix unit
+        wants an FP32 bit pattern, never the BF16 one on its own.
+        """
+        lut = _block_lut("BF16InDstToFP32", 16, lambda a: cls.BF16InDstToBF16(a) << 16)
+        return lut[x & 0xFFFF]
+
+    @classmethod
+    def blockFP32InDstToFP32(cls, x):
+        """Only the high half is permuted, so only the high half is tabulated."""
+        lut = _block_lut("BF16InDstToBF16", 16, cls.BF16InDstToBF16)
+        return (lut[(x >> 16) & 0xFFFF] << 16) | (x & 0xFFFF)
+
+    @classmethod
+    def blockFP32ToDstFormatBF16(cls, x):
+        """A function of the high half alone, so one gather does the whole thing.
+
+        ``FP32ToBF16`` truncates toward zero and flushes denormals: the survivor
+        is either ``x >> 16`` or just its sign bit, and *which* is decided by
+        the exponent, which also lives in the high half. Nothing below bit 16
+        can affect the result, so tabulating over ``x >> 16`` is exact rather
+        than approximate.
+        """
+        lut = _block_lut(
+            "FP32ToDstFormatBF16",
+            16,
+            lambda a: cls.FP32ToDstFormatBF16(a << 16),
+            # The denormal flush reads the exponent to decide what to do with
+            # the mantissa, so this one does not distribute over a bit split.
+            distributes=False,
+        )
+        return lut[(x >> 16) & 0xFFFF]
+
+    @classmethod
+    def blockFP32ToDstFormatFP32(cls, x):
+        """Only the high half is permuted, so only the high half is tabulated."""
+        lut = _block_lut("BF16ToDstFormatBF16", 16, cls.BF16ToDstFormatBF16)
+        return (lut[(x >> 16) & 0xFFFF] << 16) | (x & 0xFFFF)
