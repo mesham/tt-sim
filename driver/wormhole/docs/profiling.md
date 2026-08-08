@@ -3799,3 +3799,201 @@ TT_METAL_HOME=/home/nick/projects/hedgehope/tt-metal-0.74/tt-metal \
 TTSIM_ORACLE=~/projects/riscv/ttsim/oracle-bh ./optests/diff.sh matmulblock
 # check `version.txt` says v0.74.0 before reading anything into a compile break.
 ```
+
+# What did not land: the Numba warm-up is a floor, and 512 is the right threshold
+
+**Measured 2026-08-08** against `97635b2`, machine as elsewhere in this
+document (12th Gen Core i7-12700H, 16 threads, CPython 3.12.13, numba 0.66.0 /
+llvmlite 0.48.0, `TT_SIM_THREADED` unset). This closes ROADMAP item 5, "the
+MVMUL gather/scatter residue", whose whole remaining content was the "672 ms
+numba on-disk cache load, worth ~20 % on `matmulblock`". **It is not worth
+~20 %, it is not a cache load, and it cannot be made cheaper.** No code
+changed; the two places that recorded it wrongly did.
+
+## The premise, re-measured
+
+Reproduced on a fresh worktree, fresh process, numpy already imported:
+
+| stage | cold | warm |
+| --- | --- | --- |
+| `import numba` | 438 ms | 446 ms |
+| import the kernel module (`@njit` decoration) | 13 ms | 7 ms |
+| first call — compile, or load from cache | **3352 ms** | **381 ms** |
+| **total** | **3803 ms** | **834 ms** |
+
+So the two prior figures were each measuring a different part of the same
+thing and neither said which. The docstring's "~0.5 s from cache" was the
+**first-call** row alone (381 ms). The later **672 ms** was `import numba` plus
+the first call *together*, measured on the newer table-driven-conversion tree —
+i.e. the same quantity this table calls 834 ms. Both were low, and both were
+labelled "cache load", which is the one thing it mostly is not.
+
+## Where the 381 ms actually goes — the diagnosis the label hid
+
+`cProfile` on the first call, warm cache:
+
+```
+1.120  dispatcher.py:342(_compile_for_args)
+1.095    caching.py:713(load_overload)
+1.074      base.py:261(refresh)              <- 96 % of it
+0.777        cpu.py:97(load_additional_registries)
+0.756          importlib _handle_fromlist
+0.398        typing/context.py:232(refresh)
+0.267          typing/context.py:482(_load_builtins)   2259 install_registry calls
+0.181            numba/cpython/charseq.py:1(<module>)
+0.153            numba/cpython/unicode.py:1(<module>)
+```
+
+**96 % of the "cache load" is `refresh()`** — numba importing its own
+`numba.cpython.*` / `numba.np.*` modules and installing ~250 typing and
+lowering registries. That is target-context initialisation numba defers to the
+first compile *or cache load*, and it has nothing to do with this kernel.
+Reading the `.nbc` is the ~30 ms residue.
+
+Three consequences, each checked rather than assumed:
+
+- **Kernel size is not a lever.** A one-line `njit(cache=True)` summation loop
+  measures 570 ms warm and 654 ms cold-compiled in the same harness — the same
+  fixed cost. There is nothing to win by shrinking or re-signaturing
+  `mvmul_fused`, or by cutting specialisations: a real `matmulblock` run
+  compiles **exactly one** signature and takes **one cache hit, zero misses**.
+- **`cache=True` is clearly right.** 3352 ms to compile cold against 381 ms to
+  load. Dropping it to avoid the cache machinery would cost 9x.
+- **No narrower import is cheaper.** `import numba` 369 ms, `from numba import
+  njit` 451 ms, `from numba.core.decorators import njit` 404 ms, `import
+  numba.core.registry` 319 ms, `import numba.core.dispatcher` 422 ms — all one
+  population. Reaching into `numba.core.*` would buy noise and cost a
+  dependency on internals.
+
+The floor is therefore ~800 ms, and the only routes below it are an
+ahead-of-time build or a second dependency. Those are the two things CLAUDE.md
+and the roadmap exist to refuse.
+
+## The one idea that was left: hide it on a thread. It is much worse.
+
+If the 800 ms cannot be removed it can in principle be *overlapped* — cross the
+threshold, start a daemon thread that imports and forces the specialisation,
+and keep taking the numpy path until it publishes. Bit-exactness is what makes
+that legal: the two paths agree, so the crossover point is a free variable.
+
+Built, and measured against blocking on 1536 MVMULs through the real numpy
+pair, three arms interleaved per round, nine rounds:
+
+| arm | median | vs blocking |
+| --- | --- | --- |
+| numpy only (never engage) | 1014 ms | −2 % |
+| **block** at 128 (today's shape) | **991 ms** | — |
+| **async** warm-up at 128 | **1404 ms** | **+42 %** |
+
+Checksums identical across all 27 runs, so the arms did the same arithmetic.
+The async arm switched at call 332–424 rather than the ~180 the CPU budget
+implies: **the main thread ran ~6x slower for the duration of the warm-up.**
+This is a GIL convoy, not a fair split. The numpy path releases and re-acquires
+the GIL thousands of times a second in ~3.5 µs calls; against a compile thread
+that holds it for whole 5 ms switch intervals, every release costs the main
+thread a full interval to get back in. Backgrounding the warm-up spends
+strictly more wall clock than paying it up front. Reverted.
+
+(This is not an argument against `nogil` on the kernel itself — running
+compiled code on a thread is exactly what `nogil` makes safe. It is an
+argument against *compiling* on one.)
+
+## So: is 512 the right threshold?
+
+This is the last question the item leaves open, and it now has an answer.
+Engaging costs ~800 ms and saves ~507 µs per subsequent MVMUL, so a workload of
+M MVMULs wins iff **M > threshold + 1580**. The in-tree population is sparse
+and bimodal — an MVMUL census over the Blackhole guards gives `six` 4096,
+`matmulblock` 1536, `matmulidx` 384, `reduce`/`reduceneg` 36, and **0** for
+every other guard, including all the SFPU ones.
+
+Interleaved sweeps, medians, control `two` (0 MVMULs, verified by census):
+
+| guard | MVMULs | off | t=128 | t=512 | t=1024 |
+| --- | --- | --- | --- | --- | --- |
+| `matmulidx` | 384 | 2540 ms | **3482 ms** | 2693 ms | 2587 ms |
+| `matmulblock` | 1536 | 4178 ms | 4182 ms | 4302 ms | 4563 ms |
+| `six` | 4096 | **7115 ms** | 5841 ms | 5987 ms | 6165 ms |
+
+**`six` is what the accelerator is for**: 1128 ms, −16 % against numpy, and the
+`off` arm was the slowest in 9 of 10 rounds. That alone justifies the feature.
+
+**Lowering the threshold is a clear loss.** At 128, `matmulidx` engages for
+only 256 further calls and pays the whole 800 ms: **+789 ms, +29 %, and the
+slowest of the four arms in 12 of 12 rounds.** It buys `six` 146 ms and
+`matmulblock` 120 ms, both inside noise. **Raising it is also a loss**: at
+1024 `matmulblock` pays the same 800 ms spread over 512 calls instead of 1024,
++260 ms.
+
+The internal control is the reason to believe this. On `matmulidx` the arms
+`off`, `t=512` and `t=1024` are all *the same code path* — the guard never
+reaches 512 MVMULs — and they came out 2540 / 2693 / 2587 ms, agreeing within
+noise, while `t=128` sat 789 ms clear of all three. A harness that separates
+three identical arms from one different one is measuring the switch.
+
+**512 stays.** It is a measured compromise, not a placeholder, and the
+roadmap's "would drop the break-even from ~1500 MVMULs to ~150" was conditional
+on removing a cost that cannot be removed.
+
+## What this means for `matmulblock` specifically
+
+The roadmap's "worth ~20 % on `matmulblock`" does not survive. `matmulblock`
+issues 1536 MVMULs and engages at 512, so it gets 1024 compiled calls against a
+800 ms bill — it is **below** break-even, which is exactly why the jit measured
+2557 ms with against 2533 ms without. The honest statement is that
+`matmulblock` is the workload where the accelerator is a small net *loss*, and
+no threshold fixes that: every arm that engages is slower than `off`
+(4178 / 4182 / 4302 / 4563 ms for off / 128 / 512 / 1024). The effect is a
+fixed one-off, so it shrinks as a fraction of longer runs and grows as a
+fraction of shorter ones — which is the whole reason a count threshold, rather
+than a rate, is the right control.
+
+## Cycle-identity
+
+The kernel is an accelerator, so nothing it does may move a simulated cycle.
+Checked rather than argued: `TT_SIM_TRACE` on `blackhole/matmulblock`, hashing
+the whole event stream keyed on `(cycle, instruction, unit, thread)` —
+151,578 events, 147,797 keyed — across numba off / threshold-engaged / forced
+on:
+
+```
+model off  digest 626c6001d0490788b39cd3cca93dae72  max_cycle 13698   (all three)
+model on   digest be5782d4d35df9a7771ee849ca2938a5  max_cycle 17695   (both)
+```
+
+Byte-identical within each row, including for a run that switched
+implementations *mid-workload* at MVMUL 475 of 1536.
+
+## Gates
+
+`pytest tt_sim/ driver/` **1120 passed** with the model off and again with
+`TT_SIM_COST_MODEL=1`; **1119 passed, 1 skipped** with numba made unimportable
+by a `meta_path` blocker; **30/30** Blackhole replay guards standalone;
+`driver/tests/cost_model_gate.py --jobs 4` **RESULT: PASS**, exit 0, 44 guards,
+no poll-budget multiplier change (`dramtop` 1x, `two` 2x, `offline` 4x);
+`ruff check` / `ruff format --check` clean.
+
+## Reproducing
+
+```bash
+# the breakdown: time import numba, the @njit decoration, and the first call
+# separately, in a fresh process, twice -- the first run compiles cold and
+# writes __pycache__/*.nbc, the second is the warm number that matters.
+
+# the diagnosis: cProfile the FIRST call only, warm, and sort by cumulative.
+# If base.py:refresh dominates, the cost is numba's target init, not the file.
+
+# the floor: do the same for @njit(cache=True) on a one-line summation loop.
+# Equal warm loads means kernel size is not a lever.
+
+# the threshold sweep: interleave off / 128 / 512 / 1024 WITHIN each round on
+# one tree (env arms, not code arms), 12 rounds, plus a 0-MVMUL control guard.
+# Pick a guard whose MVMUL count sits between two arms -- matmulidx (384) makes
+# off/512/1024 identical code paths, which is the internal control that says
+# the harness works. Count MVMULs first by wrapping get_fused_mvmul.
+
+# the async experiment, if anyone re-proposes it: three arms in ONE script over
+# the real numpy pair, checksum the result so the arms are provably equivalent,
+# and report the switch call index -- that index, not the total, is what
+# exposes the convoy.
+```

@@ -303,12 +303,23 @@ fuzzes the two against each other), and numba is **not a dependency**: without
 it the numpy path runs exactly as before, which is why the default is the
 pure-Python tree that CLAUDE.md promises.
 
-Compiling costs ~3.7 s the first time on a machine and ~0.5 s per process
-afterwards, from numba's on-disk cache under `__pycache__`. That is pure loss
-on a workload with a handful of MVMULs, so the compile is deferred until the
-first 512 have run, and a run that never issues an MVMUL never even imports
-numba. Set
-`TT_SIM_NUMBA=1` to compile on the first one, or `=0` to stay on numpy for
+Getting to a callable kernel costs ~3.4 s the first time on a machine and
+**~800 ms per process** afterwards. Only ~30 ms of that second figure is
+reading the kernel back out of numba's on-disk cache under `__pycache__`; the
+rest is numba itself — ~450 ms to import the package and ~350 ms for the lazy
+target-context initialisation it defers to the first compile *or cache load*.
+A one-line `njit` kernel measures the same, so there is nothing to win by
+making this kernel smaller, and backgrounding the warm-up on a thread is
+measurably worse (the compile thread and the simulator's numpy calls convoy on
+the GIL). Treat it as a floor.
+
+That is pure loss on a workload with a handful of MVMULs, so the compile is
+deferred until the first 512 have run, and a run that never issues an MVMUL
+never even imports numba. **512 is a measured compromise, not a placeholder** —
+engaging repays only after ~1580 further MVMULs, so lowering it to 128 costs
+`matmulidx` (384 MVMULs) 789 ms for nothing, while raising it to 1024 costs
+`matmulblock` 260 ms; see `tt_sim/pe/tensix/backends/fpu_jit.py`. Set
+`TT_SIM_NUMBA=1` to compile on the first MVMUL, or `=0` to stay on numpy for
 good.
 
 `TT_SIM_COST_MODEL=1` (truthy = `1/true/yes/on`) turns on the per-unit
