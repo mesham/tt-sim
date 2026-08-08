@@ -37,47 +37,36 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ### Tier 1 — load-bearing, start here
 
-1. **The outstanding-read-request credit limit** — successor to the
-   issue-loop model, which closed 2026-08-08. Half that item's
-   premise was wrong: the issuing-core path was never *unmodelled* —
-   tt-sim reproduces it to 0.0 cycles/transaction on both arches —
-   the rung-2 **harness** simply never ran it. Fixing that widened
-   rung 2 from 6 retained entries to 14 and closed every intercept by
-   24–28 cycles, charging nothing. What the check *found* is a real
-   gap on the read path: tt-sim's NIU imposes no outstanding-request
-   limit, worth **9 cycles/transaction on Wormhole, 16 on Blackhole**.
-   Measured but **unpublished** (`NoC/Counters.md` states the protocol
-   and gives no timing), so it cannot be charged at any provenance
-   rank this model has. **It needs a card, not a dataset** — fold it
-   into item 3.
+1. **DRAM residue** — endpoint occupancy first: pure model shape, no
+   new data needed, and now the only actionable fidelity item that
+   does **not** need a card. The rest is measurement-blocked.
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **DRAM residue** — endpoint occupancy first (pure model shape, no
-   new data needed); the rest is measurement-blocked.
-3. **Next silicon session on the Blackhole box** — a bundle of cheap
+2. **Next silicon session on the Blackhole box** — a bundle of cheap
    probes once a card is in hand, including the first-ever Wormhole
-   measurements.
-4. **Tensix issue latency & wait-gates**, then mover / PC-buffer
+   measurements. Now carries `perfbench/nocreadbench`, which is built
+   and ready to run.
+3. **Tensix issue latency & wait-gates**, then mover / PC-buffer
    timing point fixes.
 
 ### Tier 3 — larger or later
 
-5. **Rung-4 calibration against silicon traces** — the eventual bar
+4. **Rung-4 calibration against silicon traces** — the eventual bar
     for claiming anything stronger than "estimator".
 
 ### Tier 4 — opportunistic / housekeeping
 
-6. **Tracing & observability follow-ups** — the perf-budget decision,
+5. **Tracing & observability follow-ups** — the perf-budget decision,
     `chip_id`, the Jupyter / NoC-heatmap demonstration, and the long
     tail.
-7. **Functional backlog** (pick up when a kernel demands it) — Tensix
+6. **Functional backlog** (pick up when a kernel demands it) — Tensix
     backend gaps, NoC registers/atomics, device/tile infrastructure,
     Blackhole ISA extensions.
-8. **Architectural clarity & quick wins** — module boundaries,
+7. **Architectural clarity & quick wins** — module boundaries,
     docstring audit, diagrams, ISA index; shellcheck,
     `MEM_BOOT_CODE_BASE`.
-9. **Parked decisions & re-measurements** — Wormhole reset fan-out,
+8. **Parked decisions & re-measurements** — Wormhole reset fan-out,
     the Blackhole watchdog A/B, re-timing the example sweep.
 
 Closed and removed from this list: **bottleneck attribution for the
@@ -85,8 +74,10 @@ compiler team** (2026-08-07 — the frozen schema at
 [`docs/trace-schema.md`](docs/trace-schema.md), `StallEvent`,
 `TT_SIM_PROFILE`, source-level hotspots, honest framing), **Numba /
 the threading revival** (2026-08-07), **a cheaper live Tensix tile**
-and **the MVMUL gather/scatter** (2026-08-08), and **the issue-loop
-model** (2026-08-08, which became item 1's successor). See "Not to be
+and **the MVMUL gather/scatter** (2026-08-08), **the issue-loop
+model** (2026-08-08) and **the outstanding-read-request credit limit**
+(2026-08-09 — the number was wrong on one arch and the name wrong on
+both; what survives is a probe, now in item 2). See "Not to be
 started" for what each settled. History is in git;
 `driver/wormhole/docs/profiling.md` and `docs/plans/cost-model.md`
 have the numbers.
@@ -150,6 +141,32 @@ have the numbers.
   coverage** (no optest issues a plain `add_tiles`), the risk/reward
   is negative. Revisit only if a workload puts `handle_elwadd` above
   ~15 % of pump.
+- **Searching the docs for an outstanding-request bound** — **search
+  closed 2026-08-09, do not repeat.** All 319 ISA-doc markdown files
+  were swept, both NoC subtrees read in full (note Blackhole's is
+  `BlackholeA0/`), plus both arches' tt-metal headers. `credit`,
+  `backpressure`, `inflight`, `trid`, `depth`, `slots` and `command
+  buffer` appear **nowhere** in either NoC tree. Every
+  outstanding-request quantity that *is* published — 16 trids, 255
+  each, 4 request initiators, 4 command buffers, the 128 self-throttle
+  — is **byte-identical across the two parts**, so no arithmetic on
+  published numbers can ever yield the per-arch pair the measurement
+  needs. The one nearby hit is advice without a bound
+  (`WormholeB0/DRAMTile/README.md`: software "is encouraged to limit
+  its number of outstanding read requests"). The only route to a
+  chargeable `isa_doc` entry is Tenstorrent publishing the Blackhole
+  NIU request FIFO depth — **worth asking for; it is one number.**
+- **A credit-limit mechanism in the NIU** — **not to be built until
+  there is a number.** A bounded queue stalling at K predicts a rate
+  of `L/K`, which must rise with distance; the dataset's own geometry
+  pairs move `L` by 88 cycles (WH) and 147 (BH) while the sustained
+  rate moves by ≤ 0.01 and ≤ 0.06. Hiding that needs K ≥ 8800 / 2450
+  against an 8-bit counter. **The limiting mechanism is
+  distance-independent and is not a round-trip credit**, so building
+  the queue would install the hypothesis the evidence ranks last, at
+  the cost of a branch on the hot path of every NoC request.
+  `add_outstanding_noc_request` appending without a bound is not
+  currently known to be wrong.
 - **Congestion beyond the wired link step** — declared unmodellable
   with current evidence (needs a per-link flow census, not a
   coefficient); VC arbitration measured at ~1/50th of the link effect.
@@ -199,43 +216,7 @@ possible:
 
 ---
 
-## 1. The outstanding-read-request credit limit
-
-*(Successor to the issue-loop model, closed 2026-08-08. Instalment:
-`docs/plans/cost-model.md`, "The issue loop: the residual on every
-rung-2 prediction, and it was the harness".)*
-
-**What closed.** The residual was real — intercepts 77/80/94/89 on
-Wormhole's four L1 series, reproduced exactly — but "unmodelled" was
-wrong. tt-sim executes the issuing core's loop in every real workload;
-the rung-2 harness drove the NoC registers from Python and never ran
-it. Running it reproduces the measured per-transaction cost to **0.0
-cycles** on both arches: 22 on Wormhole, 23 on Blackhole, predicted
-*before* measuring from an instruction count (16 WH / 17 BH, from the
-vendor header's store list) plus the published 6-cycle load-use
-interlock on the `NOC_CMD_CTRL` poll. **Nothing was charged** — a term
-would have double-charged every real workload. Rung 2 widened 6 → 14
-retained entries, 60 → 148 points, and every N=1 intercept closed by
-24–28 cycles.
-
-**What is left.** The check found one genuinely unmodelled term: the
-NIU imposes no **outstanding-read-request credit limit**. tt-sim's
-read loop costs 18/19 cycles per transaction against a measured 27/35
-— an excess of **9 cycles/txn on Wormhole, 16 on Blackhole**. It is
-measured but **unpublished**: `NoC/Counters.md` states the protocol
-("must not write `NOC_CMD_CTRL` until it reverts to 0") and gives no
-timing, and no arithmetic on vendor numbers isolates it from the L1
-read ports. So it stays a named, sized `unknown` — it **cannot be
-charged at any provenance rank this model has**, and needs a card
-rather than a dataset. Fold it into item 3's silicon session.
-
-Also inseparable, and recorded as such: within the per-transaction
-slope, instruction stream and NIU command-buffer occupancy cannot be
-told apart. The instruction count alone explains the measurement,
-which bounds the command buffer near zero — but that is an inference
-from a coincidence, not a measurement.
-
-## 2. DRAM residue
+## 1. DRAM residue
 
 - **Endpoint occupancy** — a second request is not queued behind the
   first: latency without contention. Pure model shape; no new data
@@ -252,11 +233,31 @@ from a coincidence, not a measurement.
 - Bank conflicts / refresh windows — no DRAM bank model, nothing
   published; long-term.
 
-## 3. Next silicon session (Blackhole box)
+## 2. Next silicon session (Blackhole box)
 
 Cheap probes to bundle into one card session — plan and analyse here,
 run there:
 
+- **`perfbench/nocreadbench` on both parts** — the read-rate floor,
+  successor to the retired credit-limit term. Reads
+  `NIU_MST_REQS_OUTSTANDING_ID(0)` *during* a burst — a plateau below
+  burst length means the limit exists and `K` is read straight off a
+  register; a climb to N retires the term outright — and sweeps hop
+  distance, source fan-out and both bank-conflict axes to separate
+  four competing hypotheses. `run_card.sh`, 1–3 min, one CSV. **Needs
+  Wormhole *and* Blackhole**: the whole claim is a per-arch
+  difference. Built, JIT-compiles, and already run against tt-sim,
+  where it correctly reports the `DEGENERATE` null (tt-sim's NIU is
+  unbounded). Source fan-out is the axis the vendor dataset
+  *structurally cannot* express — all 740 rows have one source tile,
+  so responder- and initiator-side effects are perfectly confounded
+  there.
+- **Read `CMD_BUF_AVAIL` at rest** (`NOC_REGS_START_ADDR + 0x64`,
+  **Blackhole only**, four 5-bit fields). The ISA docs call `0x0064`
+  the "NIU request FIFO status" and give **no depth**; tt-metal
+  defines the address and never references it; Wormhole has no
+  analogue. A clean small integer there is the number the
+  documentation withholds. `nocreadbench` already records it.
 - A second `tensixbench` run (or a second part): every rung-3
   conclusion rests on one sample; `corroboration` fields are written
   to be extended.
@@ -287,7 +288,7 @@ run there:
   depth is a lower bound still growing at the longest burst; needed
   before the front-end bound's constant can ever be called calibrated.
 
-## 4. Tensix issue latency, wait-gates & PC-buffer timing
+## 3. Tensix issue latency, wait-gates & PC-buffer timing
 
 Wait-gate stalls on srcA/srcB availability and the documented per-op
 issue cadence, now expressible through the landed front-end bound.
@@ -300,7 +301,7 @@ cross-unpacker half of the address-phase interlock ("nor can any
 other thread start an `UNPACR`") — each needs a sourced arbitration
 rule that the docs do not currently give.
 
-## 5. Rung-4 calibration
+## 4. Rung-4 calibration
 
 The bar for claiming anything stronger than "first-order estimator":
 match a captured silicon cycle trace within X %. Needs golden traces —
@@ -309,7 +310,7 @@ under `driver/wormhole/server/traces/`. Until then, no in-tree cycle
 count has ever been compared to silicon; say "performance estimator",
 not "cycle-accurate".
 
-## 6. Tracing & observability follow-ups
+## 5. Tracing & observability follow-ups
 
 - **Perf-budget decision**: the ~30 % tracing overhead target is not
   met on RV-bound workloads (counters/Perfetto ~2×, JSONL ~4×) —
@@ -347,7 +348,7 @@ not "cycle-accurate".
   attribution item; the Jupyter template and NoC heatmap example are
   promoted to their own bullet above.)
 
-## 7. Functional backlog
+## 6. Functional backlog
 
 Pick up when a kernel or example actually demands it; everything here
 fails loudly today. Grep for `NotImplementedError` in the named files.
@@ -413,8 +414,15 @@ in-tree kernel): `mret`, F single-precision execution, the V vector
 unit (TRISC2), Zfh's BF16 CSR mode, the L1 cache tag search
 accelerator. Wormhole's RV32IM-only set is complete and correct.
 
-## 8. Architectural clarity & quick wins
+## 7. Architectural clarity & quick wins
 
+- **Disassemble the estimator kernel's non-stateful read loop.** It
+  reaches `ncrisc_noc_fast_read_any_len` via `Noc::async_read`, which
+  passes `read_req_vc = NOC_UNICAST_WRITE_VC` — **VC 1, the unicast
+  *write* VC** — where the stateful path leaves the sticky VC alone.
+  Two read paths on different VCs is a cheap candidate for why only
+  the non-stateful Wormhole rows show the burst-depth step. No card
+  needed.
 - Module boundaries per hardware block — `frontend.py` mixes decode
   and dispatch; `tt_noc.py` bundles NIU + both NoCs + directory.
   Acceptance: a table in `CLAUDE.md` mapping ISA-docs subsection → one
@@ -434,7 +442,7 @@ accelerator. Wormhole's RV32IM-only set is complete and correct.
   a captured trace whether tt-metal writes the `jal`; if not, the
   bridge should synthesise it.
 
-## 9. Parked decisions & re-measurements
+## 8. Parked decisions & re-measurements
 
 - **Wormhole NCRISC/TRISC reset fan-out**: the launch-message
   `enables` path is wired on Blackhole only; decide whether Wormhole

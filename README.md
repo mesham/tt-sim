@@ -13,6 +13,12 @@ This is written in Python, mainly to make it easy for people to hackaround and e
 - [Repository overview](#repository-overview)
 - [Key parts of the simulator](#key-parts-of-the-simulator)
 
+Profiling a kernel: [`driver/wormhole/docs/profiling.md`](driver/wormhole/docs/profiling.md)
+walks through every output the simulator can produce.
+Building tooling on those outputs: [`docs/trace-schema.md`](docs/trace-schema.md)
+is the stable, versioned schema — field meanings, units and what you may
+rely on.
+
 ## Installation
 
 tt-sim is pure Python and requires Python ≥ 3.10. Clone the repository and install it in

@@ -13,8 +13,11 @@ perfbench/
 ├── riscvbench/src/     the baby RISC-V front end: issue rate, `.ttinsn` push
 │                       cost, branch cost, instruction fetch, the Tensix
 │                       instruction queue's depth and whether it is shared
-└── nocbench/           NoC congestion: latency against hop count, and against
-                        the number of links two concurrent flows share
+├── nocbench/           NoC congestion: latency against hop count, and against
+│                       the number of links two concurrent flows share
+└── nocreadbench/       what caps the sustained NoC *read* rate: the initiator's
+                        outstanding-request counter, read directly, plus the
+                        source-fan-out axis tt-metal's dataset cannot express
 ```
 
 The first two are complements, and the second exists because of the first's headline
@@ -22,11 +25,16 @@ result: `tensixbench` measures what a Tensix unit costs, and found that against
 tt-sim **every** probe of **every** unit reads exactly 1.000 cycles because
 nothing back-pressures the core that issued it. `riscvbench` measures that core.
 
-| | tensixbench | riscvbench | nocbench |
-| --- | --- | --- | --- |
-| **Run it on hardware** | [`tensixbench/README.md`](tensixbench/README.md) | [`riscvbench/README.md`](riscvbench/README.md) | [`nocbench/README.md`](nocbench/README.md) — or just `nocbench/run_card.sh` |
-| **Why it is shaped this way** | [`../docs/plans/tensix-cost-benchmark.md`](../docs/plans/tensix-cost-benchmark.md) | [`../docs/plans/riscv-front-end-benchmark.md`](../docs/plans/riscv-front-end-benchmark.md) | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "Rung 2" and its addendum |
-| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.noc_congestion_sweep --measured <csv>` |
+| | tensixbench | riscvbench | nocbench | nocreadbench |
+| --- | --- | --- | --- | --- |
+| **Run it on hardware** | [`tensixbench/README.md`](tensixbench/README.md) | [`riscvbench/README.md`](riscvbench/README.md) | [`nocbench/README.md`](nocbench/README.md) — or just `nocbench/run_card.sh` | [`nocreadbench/README.md`](nocreadbench/README.md) — or just `nocreadbench/run_card.sh` |
+| **Why it is shaped this way** | [`../docs/plans/tensix-cost-benchmark.md`](../docs/plans/tensix-cost-benchmark.md) | [`../docs/plans/riscv-front-end-benchmark.md`](../docs/plans/riscv-front-end-benchmark.md) | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "Rung 2" and its addendum | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "The read floor" |
+| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.noc_congestion_sweep --measured <csv>` | by hand, against the README's prediction table |
+
+`nocreadbench` is the newest and the only one whose *most important* reading
+needs no arithmetic at all: `NIU_MST_REQS_OUTSTANDING_ID(0)` is a counter of the
+initiator's own in-flight read requests, and whether it plateaus decides on its
+own whether an outstanding-request limit exists to be modelled.
 
 `nocbench` is the odd one out in two ways. It is the only one whose experiment
 is *planned* by a separate, tested Python module

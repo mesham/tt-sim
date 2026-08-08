@@ -5681,6 +5681,319 @@ fail" is a claim about the change's shape rather than a hope.
 - **No change to `unit_costs.yaml`, `costs.py`, `model.py` or anything under
   `tt_sim/network/`, `tt_sim/device/` or `tt_sim/pe/`.**
 
+## The read floor: the number was wrong on one arch, and the name was wrong on both
+
+*(Successor to the instalment above. Nothing is charged here; no executable
+code changed at all. What changed is a headline number, a mechanism name, and
+the addition of a card program that can settle it.)*
+
+The previous instalment closed by naming one genuinely unmodelled term: an
+excess of **9 cycles per transaction on Wormhole and 16 on Blackhole** on the
+NoC read path, attributed to "the initiator's outstanding-read-request credit
+limit", declared unpublished, and sent to the silicon session. Three things
+were then done in the order the working rules ask for — reproduce the number,
+sweep for provenance, and only then design anything. In that order:
+
+1. **Blackhole's 16 reproduces exactly. Wormhole's 9 does not**, and the
+   Wormhole reading has a different shape from the Blackhole one.
+2. **No published bound exists**, in either architecture's ISA tree or in
+   tt-metal's headers. Both sweeps are written out below so nobody repeats
+   them.
+3. **The name is wrong on both architectures.** The dataset already in the
+   repository rules out a round-trip credit limit, using an axis nobody had
+   differenced.
+
+### The reproduction, and what it says instead
+
+Differencing `noc_latencies.yaml` along the transactions-per-barrier axis, for
+the unicast L1 read rows at 64-256 B (where nothing is link-bound), holding
+geometry, size, memory and direction fixed:
+
+| Wormhole, 64 B L1 read | N = 1→4 | 4→16 | 16→64 | 64→256 |
+| --- | --- | --- | --- | --- |
+| different-axis | 22.00 | **19.00** | 26.81 | **25.00** |
+| same-axis | 19.33 | **19.00** | 26.81 | **25.01** |
+| different-axis, `stateful` | 20.67 | 17.25 | 17.33 | **17.33** |
+
+| Blackhole, 64 B L1 read | N = 1→4 | 4→16 | 16→64 | 64→256 |
+| --- | --- | --- | --- | --- |
+| different-axis | 29.33 | 34.92 | 34.96 | **35.01** |
+| same-axis | 30.67 | 33.83 | 35.29 | **34.95** |
+| different-axis, `stateful` | 23.33 | 34.08 | 33.98 | **34.00** |
+
+Blackhole is one flat rate, 35.0, from N = 4 upwards; **35 − 19 = 16**, exactly
+as recorded. Wormhole is not. It is two exact straight lines with a step
+between them:
+
+```
+N ∈ {4, 16}    latency = 19 N + 283   (359, 587 — both exact)
+N ∈ {64, 256}  latency = 25 N + 274   (1874, 6674 — both exact)
+```
+
+The 26.81 that became "27" is the secant across the step, not a rate. There is
+no N at which Wormhole reads cost 27 cycles each. **The two Wormhole rates are
+19 and 25**, and against a modelled issue loop of 18 the excesses are **1.0 and
+7.0** — not 9. What is real on Wormhole is a **step of 6 cycles per transaction
+that appears once the burst exceeds some depth between 16 and 64**, and that is
+a smaller, differently-shaped claim than a flat 9.
+
+The `stateful` rows are the ones that decide the mechanism, and they had not
+been looked at because the exclusion ladder drops them:
+
+- **Wormhole**: shortening the issue loop takes the sustained rate from 25.00
+  to **17.33**, and removes the step entirely. A hardware floor of 25 cycles
+  per read cannot exist on a part that sustains 17.33 with a shorter loop.
+- **Blackhole**: the same shortening buys **1.0 cycle**, 35.0 → 34.0. The rate
+  is pinned by something that is not the instruction stream, and that thing is
+  worth about 15 cycles per read.
+
+So the honest per-architecture statement is not "9 and 16". It is: **Blackhole
+has a read-rate floor the issuing core cannot get under; Wormhole has a
+burst-depth-triggered step worth 6.** Those may not even be the same mechanism.
+
+### The dataset already refutes "credit limit", on both architectures
+
+A credit limit of `K` outstanding requests makes the sustained rate `L / K`,
+where `L` is the round trip. It is therefore obliged to move when `L` moves.
+`L` moves by a large, known amount between the two geometries the dataset
+measures — the N = 1 rows, which are one round trip each, differ by **88 cycles
+on Wormhole** (205 same-axis against 293 different-axis) and **147 on
+Blackhole** (226 against 373). The sustained rates do not move at all:
+
+| | same-axis | different-axis | difference | `K` required to hide it |
+| --- | --- | --- | --- | --- |
+| Wormhole, N ≥ 64 | 25.01 | 25.00 | ≤ 0.01 | ≥ 8800 |
+| Blackhole, N ≥ 64 | 34.95 | 35.01 | ≤ 0.06 | ≥ 2450 |
+
+Both required values are impossible: `NIU_MST_REQS_OUTSTANDING_ID` is **8 bits**
+in both architectures' `NoC/Counters.md`, and tt-metal's own self-throttle
+stalls at 128. A credit limit small enough to bind at N = 64 would show a
+per-geometry rate difference of several cycles. There is none, to two decimal
+places, on either part.
+
+**The limiting mechanism is distance-independent.** That is consistent with a
+per-request service occupancy — at the initiator's NIU, at the responder's L1
+read ports, or in a request FIFO — and inconsistent with a round-trip credit.
+The roadmap's name for the term was a hypothesis and the data it was drawn from
+already contradicted it.
+
+### Provenance: two exhaustive sweeps, both negative
+
+**The public ISA documentation.** All 319 markdown files of
+`tenstorrent/tt-isa-documentation` were fetched and swept; the complete NoC
+subtrees of both architectures were read in full (Wormhole `NoC/` 8 files plus
+`NoC/Overlay/` 9; Blackhole — the directory is `BlackholeA0/`, not `Blackhole/`
+— 6 files, with no `Ordering.md`, no `Alignment.md` and no `Overlay/` tree).
+Terms confirmed **absent** from both NoC trees (they do occur elsewhere — see
+the `DRAMTile` hit below, which is why "the NoC tree" is the right scope to
+state): `credit`, `backpressure`,
+`inflight`, `trid`, `out of order`, `concurrent`, `depth`, `slots`,
+`command buffer`, `tokens`. The earlier "no credit or backpressure anywhere"
+finding holds and now extends to the mechanism's other names.
+
+What the sweep did find, none of which yields a per-architecture number:
+
+- `NoC/Counters.md:23`, **identical in both trees** —
+  `NIU_MST_REQS_OUTSTANDING_ID(i)`, for `0 ≤ i ≤ 15`, *"8 bits each (gets both
+  incremented and decremented, so will only overflow or underflow if software
+  has too many outstanding requests)"*. A counter, and the only documented
+  consequence of many outstanding requests is counter overflow — no stall, no
+  limit, and not per-arch.
+- `NoC/MemoryMap.md`, both trees — *"Each NIU has four request initiators"*.
+  Not per-arch.
+- `WormholeB0/NoC/Ordering.md:20` — *"The recipient NIU can be acting on up to
+  12 different request packets (and 4 different response packets)
+  simultaneously"*. Recipient side, and Blackhole has no `Ordering.md` at all.
+- `WormholeB0/TensixTile/BabyRISCV/README.md` has a **"Maximum loads in
+  flight"** column giving **4** for the group that names *"NoC 0 configuration
+  and command"*; Blackhole's page **deletes the column** and documents an
+  *"eight-entry retire-order queue"* instead. A genuine per-arch 4 → 8, but it
+  bounds RISC-V load instructions, not NoC transactions, and 4/8 is not 9/16.
+- `NoC/README.md`, both trees — router-to-router latency **9 cycles**. A
+  published 9 exists and is a hop latency, identical on both parts; matching it
+  to Wormhole's excess would be numerology.
+
+The single closest hit in the entire corpus is **not in the NoC tree at all**,
+which is why the earlier search missed it. `WormholeB0/DRAMTile/README.md`
+advises the exact behaviour that was hypothesised, and gives no number for it:
+
+> Each router has a 2 KiB buffer per inbound port: each virtual channel has a
+> guaranteed 32 bytes, and then the remaining 1½ KiB is dynamically shared, with
+> each virtual channel able to claim up to 480 bytes from this shared pool. […]
+> In the converse direction, when performing large reads, the headers of each
+> read request consume 32 bytes of buffer space, so software is encouraged to
+> **limit its number of outstanding read requests** to avoid buffers being
+> filled by read request headers.
+
+So an outstanding-read-request limit is a real, named, documented concern — as
+*advice to software*, with the bound left to the reader. **Inference, labelled
+as such and not charged**: 480 B claimable per VC ÷ 32 B per read-request header
+is **15** headers per VC before that inbound port backpressures. That is 15, not
+9; it is a *router inbound port*, not the initiator; and **there is no Blackhole
+`DRAMTile/` tree at all**, so it has no per-arch counterpart and cannot produce
+a pair. It is recorded here because it is the one place the mechanism is named,
+not because it yields a number.
+
+**tt-metal 0.74's headers.** `NOC_MAX_TRANSACTION_ID 0xF` and
+`NOC_MAX_TRANSACTION_ID_COUNT 255` are **byte-identical** between
+`internal/tt-1xx/wormhole/noc/noc_parameters.h:25-26` and
+`internal/tt-1xx/blackhole/noc/noc_parameters.h:15-16`, as is
+`NIU_MST_REQS_OUTSTANDING_ID(id) (0x10 + (id))` and the self-throttle
+`while (NOC_STATUS_READ_REG(noc, NIU_MST_REQS_OUTSTANDING_ID(trid)) > ((NOC_MAX_TRANSACTION_ID_COUNT + 1) / 2));`.
+`NUM_NOC_CMD_BUFS` is 4 on both. No `*_DEPTH`, `*_ENTRIES` or `*_SLOTS`
+constant exists in either file. The read path differs by exactly one store
+(Blackhole adds `NOC_TARG_ADDR_MID`), which is the 5 → 6 already transcribed in
+`tt_sim/perf/noc_issue_loop.py`.
+
+**Verdict: there is no published bound, and no arithmetic on published numbers
+produces a per-architecture pair.** Every candidate is either identical across
+the two parts (16 trids, 255 per trid, 4 initiators, 4 command buffers, 16 VCs,
+the 9-cycle hop) or per-arch with the wrong values. This closes the search; it
+should not be repeated.
+
+### The one artefact worth going to a card for
+
+Two independent sources describe a structure Blackhole has and Wormhole does
+not, and **neither gives its size**:
+
+- `BlackholeA0/NoC/MemoryMap.md:21` — `NIU_BASE + 0x0064`, *"NIU request FIFO
+  status"*, read only, 8 bytes; and `:237`, `NIU_CFG_0` bit 16, *"Request FIFO
+  enable"*. There is no section, no anchor and no depth anywhere in the
+  repository. Wormhole's `NIU_BASE + 0x054` is *"NIU combined request initiator
+  status"* instead and its `NIU_CFG_0` has no such bit.
+- tt-metal `blackhole/noc/noc_parameters.h:56` —
+  `#define CMD_BUF_AVAIL (NOC_REGS_START_ADDR + 0x64)` with the comment
+  `[28:24], [20:16], [12:8], [4:0]`: four 5-bit per-command-buffer availability
+  fields, so a depth of at most 31. Wormhole has no analogue, and **no code in
+  tt-metal references it**.
+
+A per-architecture NIU request FIFO is exactly the shape a per-architecture
+rate floor needs, it is **readable**, and its depth is precisely what the
+documentation omits. That is the thing a card session should read.
+
+### `perfbench/nocreadbench` — the probe, and how it separates the two
+
+The instalment above stated the blocker as *"there is no arithmetic that
+separates the credit limit from the L1 read ports"*. There is not. A
+measurement does, two ways — and the first needs no arithmetic at all, which is
+why the separation problem does not arise for it.
+
+**Directly.** `NIU_MST_REQS_OUTSTANDING_ID(0)` counts the initiator's own
+in-flight requests and is readable from a kernel. Sample it inside a burst:
+
+- if it **plateaus below the burst length**, the initiator does hold a bounded
+  number in flight, and that bound is *read off a register* — no arithmetic, so
+  nothing to separate;
+- if it **climbs with the burst length**, there is no initiator-side limit, the
+  cap is downstream, and the term is **retired rather than sized**.
+
+The sample costs a `≥ 7`-cycle NIU load with a six-cycle interlock inside a loop
+whose whole per-iteration cost is under 40 cycles, so the kernel runs the burst
+**twice**: once timed and unsampled, once sampled and untimed. A rate is never
+reported from a sampled loop.
+
+**By shape.** Each experiment moves one axis, and the four candidates disagree
+about every one of them. `H1` credit limit; `H2` responder L1 read port; `H3`
+initiator NIU request occupancy; `H4` the initiator's L1 *write* port, which
+every row of tt-metal's dataset loads maximally because every transaction in it
+lands at the same address.
+
+| experiment | varies | H1 | H2 | H3 | H4 |
+| --- | --- | --- | --- | --- | --- |
+| `dist` | hop distance to the one source | **rises** | flat | flat | flat |
+| `srcfan` | number of distinct source tiles S | flat | **falls ∝ 1/S** | flat | flat |
+| `dstspread` | stride between landing addresses | flat | flat | flat | **falls** |
+| `srcspread` | stride between source addresses | flat | falls iff banks | flat | flat |
+| `size` | bytes per transaction | rises | flat, then link-bound | flat, then link-bound | flat, then link-bound |
+| `burst` | N — the control against `noc_latencies.yaml` | | | | |
+
+`srcfan` is the axis the shipped dataset **structurally cannot provide**: every
+`ONE_FROM_ONE` row has exactly one source tile, so responder-side and
+initiator-side effects are perfectly confounded in all 740 of them. Fan the
+same burst over 2, 4 and 8 equidistant sources and they come apart.
+
+The program is `perfbench/nocreadbench/`, in the shape `nocbench` established:
+one C++ host that builds against `TT::Metalium`, one data-movement kernel, one
+CSV with **the physical coordinates recorded in every row**, and a `run_card.sh`
+that prints a verdict and names the file to send back. It is checked in with
+its Wormhole simulator CSV, whose reading is a **known null and not a result** —
+tt-sim's NIU appends to an unbounded queue, so the counter reads 0 and every
+axis is flat by construction. It is run only to prove the harness executes,
+exactly the role `nocbench`'s `INVALID` verdict plays for congestion.
+
+### What was deliberately not built
+
+**No credit-limit mechanism was added to `tt_sim/network/tt_noc.py`**, not even
+one defaulting to unlimited. The roadmap has precedent for shape-first work —
+item 2's endpoint occupancy — but that precedent holds because the *shape* is
+known to be right and only the number is missing. Here the shape is what the
+evidence just contradicted: the mechanism that would have been built (bound the
+outstanding-request queue, stall the initiator at `K`) predicts a rate of
+`L / K` that rises with distance, and both parts say the rate does not move with
+distance at all. Building it would install the one hypothesis the data ranks
+last, and an unused mechanism is not neutral — it is a branch on the hot path of
+every NoC request and a shape that the next person reads as settled.
+
+The honest position is that `add_outstanding_noc_request` appending to a queue
+is **not currently known to be wrong**, and stays until a measurement says which
+of `H2`/`H3`/`H4` to build.
+
+### What would make it chargeable
+
+Nothing that exists today. Specifically:
+
+- **`isa_doc`** — would need the Blackhole NIU request FIFO's depth published.
+  The register is documented to exist; only its size is missing. This is a
+  documentation request to Tenstorrent, it is one number, and it is by far the
+  shortest route from here to a chargeable term.
+- **`isa_doc_derived` / `vendor_source_derived`** — unavailable. Every
+  outstanding-request quantity in both sources is identical across the two
+  architectures, so no arithmetic over them can produce a per-arch pair.
+- **`corroboration`** — where a `nocreadbench` result goes: a measurement on one
+  part, attached to an existing entry, never provenance, never a number the
+  model spends.
+
+If the FIFO depth is never published, the honest end state is a **permanently
+named `unknown`** — sized, per-arch, with the mechanism identified by the probe
+and the reason it may carry no number written next to it. That is the same end
+state `noc.congestion` has, and it is not a failure.
+
+### Also worth an hour, and needing no card
+
+Wormhole's non-stateful read loop measures 19.00 at N ≤ 16 against a modelled
+18 — good — and 17.33 when shortened. The gap between the modelled loop and the
+step-free regime is one cycle, so the reconstruction is sound. But
+`ncrisc_noc_fast_read_any_len` wraps the transcribed store list in a
+`while (len_bytes > NOC_MAX_BURST_SIZE)` test that the reconstruction does not
+model, and the estimator kernel reaches it through `Noc::async_read`, which
+passes `read_req_vc = NOC_UNICAST_WRITE_VC` — **virtual channel 1, the unicast
+*write* VC** — where the stateful path leaves the sticky VC alone. Two read
+paths on different virtual channels is a plausible, cheap explanation for why
+only the non-stateful Wormhole rows show the burst-depth step, and settling it
+needs a disassembly of the estimator kernel and a VC argument in the probe, not
+silicon.
+
+### The gate
+
+**PASS, exit 0.** Byte-identical by construction: this instalment changes **no
+executable code at all** — the new tree is C++ that only a card or an explicit
+`perfbench/run.sh` invocation compiles, and nothing under `tt_sim/` or `driver/`
+was touched. `dramtop` 1×, `two` 2× and `offline` 4× poll budgets unmoved, all
+44 guards' values unchanged, model on and off identical.
+
+### What changed in the repository
+
+- `perfbench/nocreadbench/` — **new**: `README.md` (the hypothesis table, the
+  degenerate-run checks, and what happens to the number afterwards),
+  `run_card.sh`, `src/CMakeLists.txt`, `src/nocreadbench.cpp`,
+  `src/kernels/nocreadbench_layout.h`,
+  `src/kernels/dataflow/reader.cpp`, and `src/nocreadbench-wormhole-sim.csv`
+  (the null).
+- `perfbench/README.md` — the new tree in the tree diagram and the table.
+- `docs/plans/cost-model.md` — this section.
+- **No change to `unit_costs.yaml`, `costs.py`, `model.py`, or anything under
+  `tt_sim/` or `driver/`.**
+
 ## Using it, when the time comes
 
 ```python
