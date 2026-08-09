@@ -5994,6 +5994,358 @@ was touched. `dramtop` 1×, `two` 2× and `offline` 4× poll budgets unmoved, al
 - **No change to `unit_costs.yaml`, `costs.py`, `model.py`, or anything under
   `tt_sim/` or `driver/`.**
 
+## The second rung-3 sample: sixteen probes corroborate, three contradict, and a retraction goes back in play
+
+Every rung-3 conclusion in this document rested on **one** tensixbench run. The
+2026-08-09 card session took a second, at the same parameters, plus five other
+probes aimed at named open bullets. This section records what the six say. It
+changes **no table**: a silicon measurement is `corroboration`, never
+provenance, and nothing below is charged.
+
+The session's own verdict lines are not repeated here uninspected. Several were
+checked against the raw CSVs and one of them is wrong; that one is
+"Phase R", below.
+
+### What was run
+
+`/mnt/ramdisk/tt_traces/card-session-blackhole/`, 13:41, a harvested Blackhole
+(addressed worker columns `{1..7, 10..14}`, two chips present, auto-discovery
+downgraded to 1×1). `tensixbench` was rebuilt from source at the head of the
+run — the session log records `rebuilding tensixbench (source newer than the
+binary: raw_probes.cpp)` — and invoked with `--dvalid-once`, the X1
+configuration, which its summary confirms as `dvalid setup: once -- one
+SETDVALID for the tile (X1, de-confounded)`.
+
+### Sixteen probes corroborate, and so does phase B
+
+Of the 19 series the sweep's exclusion ladder retains, **16 agree with the X1
+dataset to 0.012 cycles/instruction or better**, which is a third of the
+instrument's own declared resolution. `NOP` and `loop_overhead` are not merely
+close but **bit-identical** across the two runs — 2137/4235/6347/8459 and
+76/140/204/268 raw cycles — so the timer, the control subtraction and the clock
+are the same instrument on both days. `ADDDMAREG`, `CMPDMAREG`, `MULDMAREG` and
+`SHIFTDMAREG` all read 2.973 in both runs, and the whole SFPU family reads
+0.998 in both.
+
+Phase B corroborates too, and it is the half that matters to the tables:
+
+| | X1 (run 1) | run 2 | delta |
+|---|---|---|---|
+| LoFi, cycles/`matmul_tiles` | 34.92 | 35.20 | +0.8 % |
+| HiFi2 | 52.47 | 52.55 | +0.15 % |
+| HiFi4 | 86.12 | 86.13 | +0.01 % |
+| marginal MVMUL, `(HiFi4 − LoFi)/48` | **1.067** | **1.061** | −0.6 % |
+
+The ~1.07 figure §6.1 rebuilt the MATH occupancy argument on **reproduces to
+0.6 %**. That is the corroboration the roadmap asked for, and it is the one
+that licenses the tables' `occupancy: 1`.
+
+### Three probes contradict, and they are the three that matter
+
+`MVMUL`, `ELWADD` and `ELWMUL` — the phase-A MATH probes — do not reproduce at
+any thread count:
+
+| probe | | t1 | t2 | t3 | aggregate at t3 |
+|---|---|---|---|---|---|
+| `MVMUL` | X1 (run 1) | 5.989 | 12.012 | 18.035 | 6.01 |
+| `MVMUL` | run 2 | **0.998** | **6.080** | **12.100** | **4.03** |
+| `ELWADD` | X1 | 5.976 | 11.970 | 17.970 | 5.99 |
+| `ELWADD` | run 2 | 0.998 | 6.067 | 12.063 | 4.02 |
+| `ELWMUL` | X1 | 5.974 | 11.970 | 17.969 | 5.99 |
+| `ELWMUL` | run 2 | 0.998 | 6.066 | 12.063 | 4.02 |
+
+Every column moves by very nearly exactly 6 cycles/instruction. This is not
+drift and not scatter: it is the same offset at t1, t2 and t3, in a run whose
+other sixteen series are bit-identical or within 0.012.
+
+Two further facts pin it down.
+
+**Run 2's MATH t1 series is bit-identical to its own `NOP` series.** Raw cycles
+2137 / 4235 / 6347 / 8459 for `MVMUL`, against 2137 / 4235 / 6347 / 8459 for
+`NOP` and 2137 / 4235 / 6347 / 8459 for `INCRWC`. So run 2's `t1` MATH reading
+is not a measurement of the Matrix Unit at all — it is the front end's 1-IPC
+floor, which the sweep already marks `testable: no`. It cannot confirm the
+table and it cannot refute it.
+
+**Run 2 reproduces the `--dvalid-per-thread` control, not the `--dvalid-once`
+run it was configured as.** Compared row by row against the two tracked
+datasets:
+
+- against `tensixbench-blackhole-dvalid-per-thread.csv` (the *confounded*
+  control): **479 of 480 common rows agree within 1 %**, worst case 1.0 %.
+- against `tensixbench-blackhole.csv` (X1, the configuration run 2 actually
+  requested): agreement fails by **up to 83 %**.
+
+And it is not a one-off. `tensix-warm`, a **separate process** in the same
+session, also `--dvalid-once`, reads 0.999 / 6.064–6.071 / 12.063–12.083 — run
+2's numbers, not X1's. The effect reproduced twice in one session.
+
+### What this does and does not license
+
+It does **not** license calling run 2 a silicon finding. The most economical
+reading is a benchmark-configuration difference: the X1 dataset was taken on an
+older `raw_probes.cpp`, before `c752514` (the source-format axis) and `0daab58`
+(the Src-bank release), which is why its `#` header lacks the `src_format=` /
+`src_style=` / `variants=` tokens. `0daab58`'s own header comment records that
+a completed `SETDVALID` run **leaves `SrcA[0]`/`SrcB[0]` owned by the Matrix
+Unit** and that only `tt-smi -r 0` clears it, while deliberately giving the
+`--dvalid-once` and `--dvalid-per-thread` paths no release. A phase-A MATH
+probe's cost turns on exactly that state, so "which run started on a dirty
+card" is a live confound that neither run controlled.
+
+It does, however, **withdraw the support** under one published claim. §X1
+concluded that "with one legal `SETDVALID` the matrix unit is a plain shared
+port", on the strength of a t1 baseline of 5.989 that made aggregate throughput
+flat at ~6.0 across one, two and three threads. That conclusion came from
+comparing X1 against the per-thread control — a comparison in which **the
+dvalid mode and the binary changed together**. The comparison now available
+holds the binary fixed and varies only the mode, and it finds the two modes
+give the *same* answer to within 1 %. So the 6× step the retraction attributed
+to dvalid legality tracks the binary or the card state, not the mode. On run
+2's numbers aggregate throughput is **not** flat — it degrades 0.998 → 3.03 →
+4.03 from one thread to three — which is the shape the retraction retracted.
+
+At t1 specifically the retraction's premise does not hold up on inspection
+either: with one active thread (TRISC1, the only thread `t1` activates)
+`--dvalid-once` and `--dvalid-per-thread` both issue exactly one
+`TTI_SETDVALID(3)` from exactly one thread. They are the same program. They
+cannot differ by 6 cycles/instruction *because of the dvalid mode*, and the
+fact that the two banked datasets do is itself evidence that something else
+moved.
+
+**Nothing here is charged, and nothing here needs to be.** The MATH occupancy
+of 1 rests on phase B's MOP-issued marginal cost, which reproduced to 0.6 %.
+Both phase-A regimes remain `corroboration`. What must change is the
+*confidence* attached to the phase-A figure: it is now one observation against
+one, in a configuration that has been shown not to reproduce across sessions,
+and the honest record is that **phase A cannot currently measure the Matrix
+Unit reproducibly at all**.
+
+The experiment that would settle it is cheap and specific: on one card, in one
+session, run `--dvalid-once` and `--dvalid-per-thread` back to back, each
+immediately after a `tt-smi -r 0`, and again each on a deliberately dirtied
+card. Four runs, one binary. That separates mode from card state, which is the
+pair no run so far has held apart.
+
+### The warm-up bias, measured, and smaller than the term it sits next to
+
+`tensix-warm` is the same phase A with `--blocks 64`, so the cold `n = 32`
+burst is out of the fit. The difference between it and `tensix` **is** the
+warm-up bias, and it is now measured rather than assumed:
+
+- over all 114 common phase-A series: median **−0.0000**, mean −0.0008, range
+  **[−0.0222, +0.0208]** cycles/instruction.
+- over the **19 t1 series the exclusion ladder actually retains**: range
+  **[−0.0022, +0.0013]**, median +0.0010.
+
+Set that against the `resol` the sweep declares for the same series,
+0.033–0.034. `resol` is the sum of two terms, and the control over-subtraction
+alone is `slope(loop_overhead) / unroll = 2.00 / 64 = 0.031`. So on the
+retained series **the warm-up contributes about 6 % of the resolution and the
+control subtraction about 94 %**, and R² was already 0.99994–1.00000 before the
+cold burst was dropped.
+
+**Recommendation: do not make `--blocks 64` the default.** It doubles the work
+per point to remove a bias fifteen times smaller than the resolution it sits
+inside, and it changes no verdict — the residual table moves from −0.002/−0.027
+to −0.001/−0.029, both still "inside the instrument". Keep it as the option it
+is. The valuable output is the bound: anyone tempted to attack `resol` should
+now attack the **control subtraction** (a larger `unroll`), because the cold
+burst is not what is limiting it.
+
+### The instruction-fetch step: a ramp, not a cliff
+
+Phase G's three `--gset` runs bracket the boundary phase F left between 4 KiB
+and 8 KiB. The `g_1024` control is **bit-identical in all three files**
+(33169 / 65861 / 98778 / 131676 raw cycles), so the three runs are directly
+comparable without a cross-build correction:
+
+| loop body | cycles/instruction | step over 4096 B |
+|---|---|---|
+| 4096 B (`g_1024`) | 1.000 | — |
+| 5120 B (`g_1280`, gset 0) | 1.153 | +0.153 |
+| 6144 B (`g_1536`, gset 1) | 1.252 | +0.252 |
+| 7168 B (`g_1792`, gset 2) | 1.252 | +0.251 |
+| 8192 B (phase F) | 1.251 | +0.251 |
+
+**What the three points pin.** The step is *graded*, not a cliff: 5120 B sits
+at 61 % of the full step. And it **saturates at 6144 B** and is flat to ±0.001
+across three further footprints (6144, 7168, 8192). A single-point capacity
+cliff is therefore excluded *as a description of the whole boundary* — whatever
+the mechanism, its cost is complete by 6144 B and constant after.
+
+**What they cannot pin.** 4608 B and 5632 B were never built, so the onset is
+bracketed only to `(4096, 5120]` and the completion only to `(5120, 6144]`.
+These data cannot distinguish a smooth ramp from two smaller steps inside those
+brackets, and — as phase G's own read-out insists — narrowing a boundary in
+loop-body size still does not license the noun "cache". The plateau value,
+1.252, is suggestively 5 cycles per 4 instructions, but one part and one
+campaign cannot turn that into a mechanism.
+
+Resolving the onset needs the two missing builds, 4608 B and 5632 B, and
+nothing else.
+
+### The Tensix instruction queue: resolved, and per-thread
+
+The roadmap carried "~31–32-entry queue depth is a lower bound still growing".
+**It is not still growing.** `rv-qdrain`'s phase Q, loop form, out to n = 1024:
+
+```
+backlog:   n=16 +0   n=32 +28   n=64 +65   n=128 +65   n=256 +65   n=512 +65   n=1024 +65
+marginal:  16->32 1.25   32->64 1.84   64->128 3.00   128->256 3.00   256->512 3.00   512->1024 3.00
+```
+
+The backlog reaches 65 cycles at n = 64 and then does not move across **four
+consecutive doublings**, while the marginal cost pins to 3.00 against a drained
+rate of 3.000 — the core is back-pressured from n = 128 onward. That is
+saturation, unambiguously, and n = 1024 was more than enough; n = 128 would
+have sufficed. The cross-check run reads the same shape at a different absolute
+(83 cycles, flat from n = 64). So the sweep is **not** a lower bound for want of
+burst length, and no longer burst is needed.
+
+The two forms give different absolutes and the difference is understood: phase
+Q's ~65 cycles / 3.000 = **~22 instructions** drops the reference burst's own
+occupancy, which phase S adds back and reads as **~31 entries** at one thread.
+Across all nine measured slots the depth lands in **27–33 entries**, which is
+the honest spread; "~31–32" is the centre of it, not a resolved constant.
+
+**The queue is per-thread.** Phase S's discriminator, which `rv-qdrain` could
+not run (it was invoked `--variants t1` and says so) but the main `rv` run
+could:
+
+| | run 2 `rv` | run 2 `rv-cross` | shared predicts | per-thread predicts |
+|---|---|---|---|---|
+| t2 vs t1 | 32 vs 31 = **1.03×** | 30 vs 31 = **0.97×** | 0.50× | 1.00× |
+| t3 vs t1 | 33 vs 31 = **1.06×** | 33 vs 31 = **1.05×** | 0.33× | 1.00× |
+| spin control | 31 (1.00×) | 31 (1.00×) | 1.00× | 1.00× |
+
+Four independent readings, all within 6 % of the per-thread prediction and all
+a factor of two-to-three from the shared one. This is a decisive answer, not a
+marginal one: **each baby core has its own Tensix instruction queue.** The spin
+controls sitting exactly at 1.00× is what makes it readable — "another core is
+awake" costs nothing, only "another core is issuing" does.
+
+### `rv-pairs`: the cleanest repeatability in the set
+
+A focused single-thread re-run of the store-coalescing, multiply and divide
+probes, against the banked first sample and both of run 2's full sweeps:
+
+| probe | run 1 (tracked) | run 2 `rv` | run 2 `rv-cross` | run 2 `rv-pairs` |
+|---|---|---|---|---|
+| `rv_mul_indep` | 0.999 | 0.999 | 0.999 | 0.999 |
+| `rv_mul_dep` | 1.985 | 1.985 | 1.985 | 1.985 |
+| `rv_div` | 33.001 | 33.001 | 33.001 | 33.001 |
+| `rv_store_coalesce` | 0.999 | 0.999 | 0.999 | 0.999 |
+| `rv_store_spread` | 5.290 | 5.290 | 5.290 | 5.265 |
+
+Four independent samples, agreeing to the third decimal on four of five probes
+and to 0.5 % on the fifth, every R² = 1.0000. The Blackhole half of this
+comparison is as settled as this instrument can make it; the cross-arch half
+still waits on a Wormhole part, which the session did not have.
+
+### Phase R: the gate that fired is not the one the name suggests
+
+`TTRVBENCH_VALID_R: no (2 checks failed)` in both run-2 files. The natural
+reading — and the one the session summary invites — is monotonicity. **It is
+not.** riscvbench's phase counters are incremented from two places, and phase
+R's failures are all the other one: `R² < 0.99`, printed as `<-- NONLINEAR`.
+There is not a single `NOT MONOTONE: r/` line in either file; all 16 of those
+are phase Q.
+
+Every failure is the same probe, `rv_store_spread`, and only ever its
+multi-thread variants:
+
+| file | slot | R² |
+|---|---|---|
+| `rv.out` | t2 thread 0 | 0.9843 |
+| `rv.out` | t3 thread 0 | 0.9863 |
+| `rv-cross.out` | t2 thread 0 | 0.9702 |
+| `rv-cross.out` | t2 thread 1 | 0.9893 |
+
+Two runs at **identical parameters** fail a **different set of slots**, and
+`t3 thread 0` fails in one while `t3 thread 1`/`t3 thread 2` fail in neither.
+That is scatter about a threshold, not a defective point. Two further checks
+confirm it: dropping the cold `n = 32` point does *not* reliably rescue the fit
+(`rv` t3/thr0 goes 0.9863 → 0.9826, `cross` t2/thr1 goes 0.9893 → 0.9734), so
+it is not a warm-up artefact either; and the raw series curve in *opposite*
+directions between the two runs — `rv` t2/thr0 has increments 8765/11264/15353
+(convex) where `cross` t2/thr0 has 16407/9135/8225 (concave).
+
+**It is also new only in part.** Run 1's `rv.out` did read `VALID_R: yes`, but
+run 1's `rv-cross.out` read `VALID_R: no (1 checks failed)` — alongside C, Q, F
+and G, i.e. run 1's cross-check was the noisier of that pair overall. So phase
+R has failed in three of the four files across the two sessions, always on the
+same probe.
+
+**The cost-relevant column is untouched.** `rv_store_spread` at t1 reads
+R² = 1.0000 in all four samples, and `rv-pairs` — single-thread only — reports
+`TTRVBENCH_VALID_R: yes` with every probe at R² = 1.0000. Nothing that feeds a
+table is in question.
+
+**Does the verdict logic need changing? Yes, but not the way phase Q's does.**
+Phase Q's exemption is for `q_ctrl`, a probe with no burst to be monotone in;
+phase S's is a *measured* tolerance derived from a repeat probe. Neither
+transfers: phase R's failures are not concentrated at small n (they occur at
+n = 128 as readily as n = 32), so an n-threshold exemption would not catch them.
+The defensible narrow change is to **exempt the multi-thread variants of
+`rv_store_spread` from the R² gate specifically**, because the phase's
+linearity premise does not hold for it: two or three cores spreading stores
+across the same L1 have no reason to cost a constant per store, and requiring
+them to is asking the gate to enforce something the probe was not built to
+show. The alternative, and it is the better one if the phase gains a repeat
+probe, is phase S's device — run `rv_store_spread` twice and let the observed
+disagreement set the R² floor rather than a constant 0.99. Either way the fix
+should be recorded as a tolerance with a measured basis, not a loosened
+constant.
+
+Left as-is, the cost is small but real: `TTRVBENCH_VALID: no` on every
+multi-thread run makes the whole-run marker useless as a gate, which is
+precisely what the per-phase markers exist to avoid.
+
+### The congestion re-read, and one number to correct
+
+The congestion result was already analysed; regenerating both reports from the
+run-2 CSVs (the two `.report.txt` files in the session directory are stale
+11:25 leftovers containing only a `ModuleNotFoundError`, and were ignored)
+reproduces it. `noc.blackhole.csv` gives `RESULT: CONGESTION MEASURED`, FLAT at
+64 B (−0.01) and 512 B (+0.01), SATURATING at 2048 B (+2.49), 8192 B (+10.87)
+and 16384 B (+22.49); `noc-epoch.blackhole.csv` gives +2.63, +10.97 and +22.47
+for the same three and is correctly `INVALID` for congestion on its five
+zero-overlap runs.
+
+Two caveats belong on the record. **The hop coefficient is 8.85–9.03, not
+8.50.** The two run-2 files fit `4364.0 + 9.03 * hops` and
+`4361.7 + 8.85 * hops` respectively, r² 1.00 — a closer match to the ISA docs'
+~9 than the 8.50 that has been quoted. But that line is fitted over **three
+aggregated round-trip levels**, not 24 independent points: the per-family fits
+(`row`, `col`, `diag`) against forward hops come out *negative* with r² of
+0.02–0.44, so the hop effect is not resolvable within a family. **And the
+saturating slopes have r² 0.34–0.39.** `SATURATING` is a shape verdict off a
+poor linear fit; the magnitudes (+2.49, +10.87, +22.49) reproduce between files
+to 1–6 % but are not well-determined coefficients, and the sweep's own
+one-part-one-campaign caveat applies with full force.
+
+### Nothing contradicts a charged cost
+
+Explicitly, because it is the question the session existed to answer: **no
+measurement in this set contradicts a value in `unit_costs.yaml`.** The one
+result that could have — the phase-A MATH reading — does not, because run 2's
+t1 sits at the front end's 1-IPC floor and is `testable: no` by construction,
+and because the quantity the table describes is phase B's MOP-issued marginal
+cost, which corroborated to 0.6 %. The four THCON `range` entries read 2.973
+against a charged 3.00 in both runs, inside the instrument both times. The
+19-series residual verdict is `yes` — the table is a floor — in run 1, run 2
+and the warm run alike.
+
+### What changed in the repository
+
+- `docs/plans/cost-model.md` — this section.
+- **No change to `unit_costs.yaml`, `costs.py`, `model.py`,
+  `tensix_instruction_costs.yaml`, or anything under `tt_sim/`, `driver/` or
+  `perfbench/`.** No provenance entry was added, no coefficient was fitted into
+  a table, and no `estimated` entry exists anywhere as a result of this
+  session.
+
 ## Using it, when the time comes
 
 ```python
