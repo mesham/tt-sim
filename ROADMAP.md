@@ -43,10 +43,11 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **Next silicon session on the Blackhole box** — a bundle of cheap
-   probes once a card is in hand, including the first-ever Wormhole
-   measurements. Now carries `perfbench/nocreadbench`, which is built
-   and ready to run.
+2. **Silicon follow-ups** — a full ten-probe Blackhole session ran
+   2026-08-09 and settled seven bullets outright (see §2). What is
+   left is one card experiment (the dvalid mode-vs-card-state run,
+   which is what re-opens the Matrix Unit), two probes that need
+   *code* rather than card time, and the Wormhole follow-on.
 3. **Tensix issue latency & wait-gates**, then mover / PC-buffer
    timing point fixes.
 
@@ -77,8 +78,8 @@ the threading revival** (2026-08-07), **a cheaper live Tensix tile**
 and **the MVMUL gather/scatter** (2026-08-08), **the issue-loop
 model** (2026-08-08) and **the outstanding-read-request credit limit**
 (2026-08-09 — the number was wrong on one arch and the name wrong on
-both; what survives is a probe, now in item 2). See "Not to be
-started" for what each settled. History is in git;
+both; the probe that replaced it has since **retired the term on
+silicon**, see §2). See "Not to be started" for what each settled. History is in git;
 `driver/wormhole/docs/profiling.md` and `docs/plans/cost-model.md`
 have the numbers.
 
@@ -233,60 +234,115 @@ possible:
 - Bank conflicts / refresh windows — no DRAM bank model, nothing
   published; long-term.
 
-## 2. Next silicon session (Blackhole box)
+## 2. Silicon follow-ups (Blackhole box)
 
-Cheap probes to bundle into one card session — plan and analyse here,
-run there:
+**A full session ran 2026-08-09** via `perfbench/run_card_session.sh`,
+ten probes in one block. Analysis is in `docs/plans/cost-model.md`,
+"The second rung-3 sample" and "The read floor". What is below is what
+that session settled, and what it left.
 
-- **`perfbench/nocreadbench` on both parts** — the read-rate floor,
-  successor to the retired credit-limit term. Reads
-  `NIU_MST_REQS_OUTSTANDING_ID(0)` *during* a burst — a plateau below
-  burst length means the limit exists and `K` is read straight off a
-  register; a climb to N retires the term outright — and sweeps hop
-  distance, source fan-out and both bank-conflict axes to separate
-  four competing hypotheses. `run_card.sh`, 1–3 min, one CSV. **Needs
-  Wormhole *and* Blackhole**: the whole claim is a per-arch
-  difference. Built, JIT-compiles, and already run against tt-sim,
-  where it correctly reports the `DEGENERATE` null (tt-sim's NIU is
-  unbounded). Source fan-out is the axis the vendor dataset
-  *structurally cannot* express — all 740 rows have one source tile,
-  so responder- and initiator-side effects are perfectly confounded
-  there.
-- **Read `CMD_BUF_AVAIL` at rest** (`NOC_REGS_START_ADDR + 0x64`,
-  **Blackhole only**, four 5-bit fields). The ISA docs call `0x0064`
-  the "NIU request FIFO status" and give **no depth**; tt-metal
-  defines the address and never references it; Wormhole has no
-  analogue. A clean small integer there is the number the
-  documentation withholds. `nocreadbench` already records it.
-- A second `tensixbench` run (or a second part): every rung-3
-  conclusion rests on one sample; `corroboration` fields are written
-  to be extended.
-- `ATCAS` / `ATINCGETPTR` probes against a real L1 semaphore — the
-  `≥ 15` entries are the largest untested numbers left in the ThCon
-  table.
-- Latency-difference probes ((op + `STALLWAIT`) − (1-cycle op +
-  `STALLWAIT`)) — `RDCFG`'s `≥ 2` latency is the only unchecked half
-  of an entry left.
-- The unroll sweep (`TTBENCH_UNROLL` ∈ {16, 32, 64, 128}) — closes the
-  per-instruction-vs-per-block ambiguity under the ~6-cycle Wait-Gate
-  MVMUL figure.
-- Drop `tensixbench`'s n = 32 burst or add a warm-up — makes the fits
-  exact and shrinks instrument resolution.
-- `riscvbench` phase-G points at 4608/5632 B bodies — settles the
-  instruction-fetch cliff's shape; seconds each.
-- Congestion points between the 64 B and 16 KiB regimes
-  (`--shared-sizes`); the `DIR_BIDIR` hang; the (11,2) tile clock
-  epoch.
-- **Wormhole, first measurements ever**: the store-coalescing pair
-  (predicted identical on WH, measured 5.2× apart on BH) and the
-  multiply pair are the cheapest cross-arch discriminators.
-- A divide magnitude sweep (several dividend widths) — the only route
-  to the 6–33 curve, since the docs publish no formula and one point
-  cannot pin one (recorded as a negative result in the RV cost-fixes
-  instalment).
-- The longer `.ttinsn` burst sweep — silicon's ~31–32-entry queue
-  depth is a lower bound still growing at the longest burst; needed
-  before the front-end bound's constant can ever be called calibrated.
+### Settled — do not re-run
+
+- **The initiator credit limit is RETIRED.** Read off the register
+  with a clean instrument (`inflight_rest = 0` in every row, two
+  independent in-flight measures agreeing): in-flight is **2–3 at
+  every burst length** (4/16/64/128), reaching 13 only in three rows
+  at one transaction size, so it tracks size by Little's law rather
+  than hitting a ceiling. Decisively, `cycles_per_tx` is **flat to
+  1.5 % across hops 1–13**, and a credit limit `K` caps the rate at
+  `round_trip/K`, which must rise with distance. This confirms on
+  silicon what the vendor-dataset geometry argument concluded.
+- **The Tensix instruction queue is resolved, and it is per-thread.**
+  Backlog flat across four doublings to n = 1024; depth **27–33
+  entries** (the old "~31–32" is the centre, not a constant). Phase S
+  separates the hypotheses outright: t2 reads 1.03x/0.97x and t3
+  1.06x/1.05x against a *shared* queue's 0.50x/0.33x, with spin
+  controls at exactly 1.00x. **One queue per baby core.** The "longer
+  `.ttinsn` burst sweep" bullet is closed — n = 128 would have done.
+- **The `tensixbench` warm-up bias is measured, and is not worth
+  acting on**: ≤ 0.0022 cycles/instruction on the retained t1 series,
+  about **6 % of `resol`** against the control subtraction's 94 %.
+  `--blocks 64` should **not** become the default — it doubles work
+  per point to remove a bias 15x smaller than the resolution
+  containing it. To shrink `resol`, attack `unroll`.
+- **The instruction-fetch step is a ramp, not a cliff** — 4096 B
+  1.000, 5120 B 1.153, 6144 B 1.252, and flat to ±0.001 across two
+  further footprints. It **saturates at 6144 B**; the plateau is fully
+  resolved.
+- **Congestion is measured**, and reproduced across three independent
+  runs to ~0.2 %: FLAT at 64 B and 512 B, **SATURATING** at 2 KiB
+  (+2.49 cycles/shared link), 8 KiB (+10.87) and 16 KiB (+22.49), with
+  the transition between 512 B and 2 KiB. Caveat that must travel with
+  these: r2 is 0.34–0.39, so they are **shape verdicts off poor fits**
+  — reproducible, not well-determined coefficients, and
+  `vendor_source`-grade at best.
+- **The hop line corroborates the ISA docs**: `4364.0 + 9.03*hops` and
+  `4361.7 + 8.85*hops`, r2 1.00, against a published ~9 cycles
+  router-to-router.
+- **The (11,2) tile clock epoch is NOT a per-core constant.** It reads
+  +323,438,586, then −495,379,666, then *absent* across three runs.
+  The detector's "reproduced over 5 runs" counts repeats *inside* one
+  invocation, so the "a constant that reproduces across independent
+  runs cannot be a scheduling delay" argument never applied to it.
+  Same-core durations, which every coefficient is fitted to, remain
+  unaffected — this closes the bullet as a non-issue.
+- **`CMD_BUF_AVAIL` is unreadable, and no re-run will change that.**
+  It is an *occupancy* (reset default 0, paired with `CMD_BUF_OVFL`),
+  and it reads `0x00000000` at rest **and** in every in-loop sample.
+  Zero at rest is correct and is not a depth. The remaining route to
+  the FIFO depth is **Tenstorrent publishing it — one number**, not
+  measurement.
+
+### Still open, and what each needs
+
+- **Phase A cannot currently measure the Matrix Unit reproducibly.**
+  16 of 19 probes and all of phase B corroborate the X1 dataset
+  (≤ 0.012 cycles/instruction; the marginal MVMUL reproduces to
+  0.6 %), but `MVMUL`/`ELWADD`/`ELWMUL` moved ~6 cycles and run 2's
+  MATH t1 series is **bit-identical to its own NOP series** — the
+  front end's 1-IPC floor, carrying no information about the unit.
+  The X1 retraction ("with one legal SETDVALID the matrix unit is a
+  plain shared port") rested on a comparison in which the dvalid mode
+  and the binary changed *together*; its support is withdrawn.
+  **Needs:** `--dvalid-once` vs `--dvalid-per-thread` on **one**
+  binary, four runs, each after `tt-smi -r 0` and each on a
+  deliberately dirtied card. Card state is the confound neither run
+  controlled — SETDVALID runs leave the Src banks owned by the Matrix
+  Unit with no release.
+- **The fetch ramp's onset** is bracketed to (4096, 5120] and needs
+  exactly the two builds that were never made: **4608 B and 5632 B**.
+  New probe code, no card time.
+- **What caps the read rate at ~50 cycles/tx**, now that the credit
+  limit is retired and the rate is flat over 13 hops. A new question
+  the session raised; the issue loop is the leading suspect, so it is
+  better designed after the `riscvbench` work than before.
+- **riscvbench phase R's verdict logic.** The failures are the R2
+  gate, not monotonicity, and every one is multi-thread
+  `rv_store_spread`; two runs at identical parameters fail *different*
+  slots, so it is scatter about a threshold. Phase Q's n-threshold
+  device will not help — this wants a measured tolerance, as phase S
+  uses. No cost-relevant number is affected (t1 reads r2 1.0000 in all
+  four samples). No card needed.
+
+### Needs the planned Wormhole follow-on
+
+- The store-coalescing and multiply pairs — predicted identical on
+  Wormhole, measured 5.2x apart on Blackhole, and the cheapest
+  cross-arch discriminators. Blackhole repeatability is already
+  closed: four samples agreeing to three decimals.
+- Any first-ever Wormhole rung-3 sample.
+- The per-arch half of the read floor.
+
+### Not built, by design
+
+`ATCAS`/`ATINCGETPTR` against a real L1 semaphore; `RDCFG`'s latency
+as `(op + STALLWAIT) - (1-cycle op + STALLWAIT)` (the cheapest, and
+the obvious next one); the `TTBENCH_UNROLL` sweep (three blockers,
+none a flag); a divide magnitude sweep (the dividend is hardcoded).
+`perfbench/README.md`'s "Designed, not built" carries the recipes.
+**Closed, do not build: the `DIR_BIDIR` hang** — `check_invariants`
+refuses bidirectional flows under two tests, and tt-metal skips its
+own `core_bidirectional` family with `// Timeout issue (#36428)`.
 
 ## 3. Tensix issue latency, wait-gates & PC-buffer timing
 
