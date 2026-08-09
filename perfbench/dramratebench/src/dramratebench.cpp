@@ -427,9 +427,19 @@ int main(int argc, char** argv) {
     // write off the end of the tile's 2 GiB address space -- which is how it
     // was found: `IndexError: 0x802d4c40 does not match any registered memory
     // spaces` from the simulator, on the first Wormhole run.
+    // One tag per SLICE, not one per bank. Reader `i` reads slice `i % slices`,
+    // so tagging only slice 0 leaves every other reader with nothing to check
+    // against -- which is exactly what the 2026-08-09 card run showed: `tags_ok`
+    // came back 1 where `num_readers` was 24, the whole file was refused, and
+    // the rates behind it were in fact clean (onechan flat at ~46 B/cycle from
+    // 1 to 24 readers while fanchan scaled 46 -> 212). A verification that
+    // cannot pass is worse than none: it condemns good data. `slices` is at
+    // most 16 and each tag is 32 bytes, so this is half a kibibyte per bank.
     for (const Bank& b : banks) {
         std::vector<uint32_t> tag(8, b.tag);
-        detail::WriteToDeviceDRAMChannel(device, (int)b.id, dram_base, tag);
+        for (uint32_t s = 0; s < slices; ++s) {
+            detail::WriteToDeviceDRAMChannel(device, (int)b.id, dram_base + s * slice_bytes, tag);
+        }
     }
 
     printf("dramratebench: arch=%s grid=%ux%u clock=%dMHz banks=%u readers<=%u points=%zu\n",
@@ -530,10 +540,10 @@ int main(int argc, char** argv) {
                 args[DRAMRATEBENCH_A_DRAM_ADDR] =
                     dram_base + b.offset + (i % slices) * slice_bytes;
                 args[DRAMRATEBENCH_A_SLICE_BYTES] = slice_bytes;
-                // Only slice 0 carries the tag. Every other slice would need its
-                // own write, and the point of the check is to prove the reader
-                // reached the right BANK, which slice 0 establishes.
-                args[DRAMRATEBENCH_A_TAG] = ((i % slices) == 0) ? b.tag : 0;
+                // Every slice carries this bank's tag, so every reader can prove
+                // it reached the right BANK -- see the tag write above for why
+                // tagging slice 0 alone made the check unpassable.
+                args[DRAMRATEBENCH_A_TAG] = b.tag;
                 for (const CoreCoord& c : reader_phys) {
                     args.push_back((uint32_t)c.x);
                     args.push_back((uint32_t)c.y);
