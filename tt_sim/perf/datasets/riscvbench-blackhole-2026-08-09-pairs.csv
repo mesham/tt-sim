@@ -1,0 +1,38 @@
+# riscvbench -- 2026-08-09 Blackhole card session, rv-pairs probe.
+#
+# device=blackhole-silicon simulator=no campaign=2026-08-09
+# Card is HARVESTED: addressed worker columns {1..7, 10..14}, physical
+# {1..6, 11..16}; two chips present, auto-discovery downgrades to a 1x1 mesh.
+# Collected by perfbench/run_card_session.sh (probe `rv-pairs`).
+# Store-coalescing, multiply and divide probes. Four samples now agree to
+# three decimals; the cross-arch comparison waits on a Wormhole part.
+#
+# Analysis: docs/plans/cost-model.md, "The second rung-3 sample". A silicon
+# measurement is `corroboration`, never provenance -- nothing here is charged.
+# riscvbench raw points -- see docs/plans/riscv-front-end-benchmark.md
+# arch=blackhole magic=0x7B10CF03 probe_mask=0x339 phases=r variants=t1 base_blocks=32 gset=0 group_reps=16 pad=16 stack_addr=0xFFB00F98 scratch_addr=0x0017D440 div_dividend=0x12345678 div_divisor=3
+phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
+r,t1,0,loop_overhead,-,1,1,32,64,82
+r,t1,0,loop_overhead,-,1,1,64,64,140
+r,t1,0,loop_overhead,-,1,1,96,64,204
+r,t1,0,loop_overhead,-,1,1,128,64,268
+r,t1,3,rv_mul_indep,RV,1,1,32,64,2138
+r,t1,3,rv_mul_indep,RV,1,1,64,64,4235
+r,t1,3,rv_mul_indep,RV,1,1,96,64,6347
+r,t1,3,rv_mul_indep,RV,1,1,128,64,8459
+r,t1,4,rv_mul_dep,RV,1,1,32,64,4145
+r,t1,4,rv_mul_dep,RV,1,1,64,64,8273
+r,t1,4,rv_mul_dep,RV,1,1,96,64,12401
+r,t1,4,rv_mul_dep,RV,1,1,128,64,16529
+r,t1,5,rv_div,RV,1,1,32,64,67661
+r,t1,5,rv_div,RV,1,1,64,64,135309
+r,t1,5,rv_div,RV,1,1,96,64,202957
+r,t1,5,rv_div,RV,1,1,128,64,270605
+r,t1,8,rv_store_spread,RV_LSU,1,1,32,64,10863
+r,t1,8,rv_store_spread,RV_LSU,1,1,64,64,21689
+r,t1,8,rv_store_spread,RV_LSU,1,1,96,64,32542
+r,t1,8,rv_store_spread,RV_LSU,1,1,128,64,43397
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,32,64,2139
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,64,64,4235
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,96,64,6347
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,128,64,8459
