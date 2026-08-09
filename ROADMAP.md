@@ -37,17 +37,30 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ### Tier 1 — load-bearing, start here
 
-1. **DRAM residue** — endpoint occupancy first: pure model shape, no
-   new data needed, and now the only actionable fidelity item that
-   does **not** need a card. The rest is measurement-blocked.
+1. **DRAM residue** — endpoint occupancy closed 2026-08-09 (see §1).
+   What remains is blocked, but **not all of it on measurement**:
+   Blackhole's `dram.bandwidth` is `unknown` because BlackholeA0 has
+   **no DRAM tile directory in the ISA docs at all**, and a silicon
+   measurement is `corroboration`, never provenance — so no card run
+   can make it chargeable. That is a documentation gap, like
+   `CMD_BUF_AVAIL`. What a card *could* do it now **has**: the
+   endpoint-occupancy term is **corroborated on silicon** — one
+   channel flat across 1 → 120 readers while a fan-out control scales
+   x4.9, at a rate matching rung 2's independent derivation to
+   ~0.05 %. See item 2.
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **Silicon follow-ups** — a full ten-probe Blackhole session ran
-   2026-08-09 and settled seven bullets outright (see §2). What is
-   left is one card experiment (the dvalid mode-vs-card-state run,
-   which is what re-opens the Matrix Unit), two probes that need
-   *code* rather than card time, and the Wormhole follow-on.
+2. **Silicon follow-ups** — three Blackhole sessions ran 2026-08-09
+   (see §2). The endpoint-occupancy term is **corroborated on
+   silicon**, the fetch onset is bracketed by five measured
+   footprints, and the session is twelve probes. What is left splits:
+   **analysis here** (the fetch ramp's shape, two DEFERRED congestion
+   reports including the (11,2) epoch, `rv-cross`'s phase-Q failure at
+   n = 32); **one card experiment** (the dvalid mode-vs-card-state run
+   that re-opens the Matrix Unit); **one probe redesign** (`RDCFG` —
+   the built construction never reaches the config unit); and the
+   **Wormhole follow-on**.
 3. **Tensix issue latency & wait-gates**, then mover / PC-buffer
    timing point fixes.
 
@@ -219,13 +232,33 @@ possible:
 
 ## 1. DRAM residue
 
-- **Endpoint occupancy** — a second request is not queued behind the
-  first: latency without contention. Pure model shape; no new data
-  needed. Do this one first.
-- **Blackhole `dram.bandwidth`** stays `unknown` ⇒ no channel
-  serialisation on BH — explicitly worth ~24 % on `six`, but BH
+- **Endpoint occupancy — DONE 2026-08-09.** The premise held, and was
+  worse than written: three same-cycle 4 KiB reads were *all* serviced
+  on one cycle, and end to end a Wormhole DRAM channel sustained the
+  NoC link's **32 B/cycle against the 24 B/cycle its own ISA page
+  publishes**. `dram.channel_serialisation` existed but was only ever
+  spent as a latency, never held as a resource; it is now both. **No
+  number entered any table** — the charged quantity is the existing
+  `isa_doc_derived` entry. The device's own re-issue interval stays
+  `unknown` and uncharged: charging `access_latency` as occupancy
+  would assert 0.32 B/cycle against 24 published on the same page.
+  A second premise failed usefully — a tt-sim DRAM tile fronts **two**
+  GDDR6 channels, so one queue per tile would over-charge, and each
+  physical channel now has its own watermark. Six Wormhole guards move
+  +0.05 % to +0.75 % and **every guard with zero waits moved by
+  exactly zero**; all 30 Blackhole guards are cycle-identical.
+- **Blackhole `dram.bandwidth`** stays `unknown` ⇒ **neither channel
+  serialisation nor endpoint occupancy on BH** — one missing figure
+  now gates *two* terms, which is why every BH guard is untouched by
+  the work above. Worth ~24 % on `six` for the size term alone, but BH
   read/write rates differ by 26 % so a scaled Wormhole number is
-  wrong. Needs measurement.
+  wrong. Needs measurement — and **the same experiment that measures
+  it is the only thing that can validate endpoint occupancy on either
+  arch**: rung 2 cannot, because every retained DRAM row is
+  `num_transactions = 1` and a lone request never finds the channel
+  busy. That experiment is the sustained-rate sweep `wh_dram`'s own
+  table describes — N tiles reading 1 MiB from one channel, N swept.
+  Two open items, one card measurement.
 - The BH DRAM-write over-charge (8 negative residuals, −12 to −28,
   pinned in `KNOWN_OVER_CHARGED`) — splitting `access_latency` by
   request action still rests on one arch's data.
@@ -295,6 +328,27 @@ that session settled, and what it left.
 
 ### Still open, and what each needs
 
+- **The DRAM sustained-rate sweep — validation, not unblocking.** N
+  Tensix tiles reading 1 MiB from **one** DRAM channel, N swept, as
+  `wh_dram`'s own performance table describes. It is the **only
+  validation available for the endpoint occupancy term on either
+  arch**, because rung 2 cannot reach it: every retained DRAM row is
+  `num_transactions = 1`, and a lone request never finds the channel
+  busy. Predict against the published table before running — 1 / 12 /
+  48 tiles on one channel measure 22.2 / 22.3 / 22.3 GB/s, an
+  aggregate that does **not** grow with readers, which is endpoint
+  occupancy as a vendor measurement.
+  **What it does NOT do is make Blackhole chargeable.** Its
+  `dram.bandwidth` is `unknown` for want of a published page, not for
+  want of a number, and silicon enters as `corroboration` only —
+  `costs_test.py::test_the_dram_channel_rate_is_exactly_its_own_derivation`
+  exists precisely to stop Wormhole's 24 being laundered into that
+  gap. Rung 2 already *sizes* Blackhole at 47.1 B/cycle reading and
+  59.4 writing; the 26 % asymmetry is why a scaled Wormhole number is
+  wrong, and it would remain wrong with a measured one.
+  **No probe exists yet** — code to write before a card visit, not
+  card time.
+
 - **Phase A cannot currently measure the Matrix Unit reproducibly.**
   16 of 19 probes and all of phase B corroborate the X1 dataset
   (≤ 0.012 cycles/instruction; the marginal MVMUL reproduces to
@@ -309,9 +363,10 @@ that session settled, and what it left.
   deliberately dirtied card. Card state is the confound neither run
   controlled — SETDVALID runs leave the Src banks owned by the Matrix
   Unit with no release.
-- **The fetch ramp's onset** is bracketed to (4096, 5120] and needs
-  exactly the two builds that were never made: **4608 B and 5632 B**.
-  New probe code, no card time.
+- **The fetch ramp's onset** — the two builds it needed, 4608 B and
+  5632 B, exist as `--gset 3`/`4` and **have run**. Five measured
+  footprints now sit around the onset. What is left is *analysis*, not
+  measurement: is it one step or a linear rise?
 - **What caps the read rate at ~50 cycles/tx**, now that the credit
   limit is retired and the rate is flat over 13 hops. A new question
   the session raised; the issue loop is the leading suspect, so it is
@@ -333,12 +388,66 @@ that session settled, and what it left.
 - Any first-ever Wormhole rung-3 sample.
 - The per-arch half of the read floor.
 
+### Built and RUN on the card, 2026-08-09 — twelve probes
+
+- **`dram`** (`perfbench/dramratebench/`) — **the endpoint-occupancy
+  term is CORROBORATED on silicon.** One channel is flat at
+  **46.33 → 47.12 B/cycle across 1 → 120 readers** (x1.02) while the
+  same readers fanned across banks reach **227 B/cycle** (x4.90);
+  per-reader throughput on one channel falls as exactly 1/N (46.3,
+  23.1, 11.3, 5.68, 3.84, 2.89, 1.95, 1.47, 0.98, 0.39), which is what
+  perfect serialisation at an endpoint looks like. Same reader count,
+  same issue loop, same transaction size — only the endpoint differed.
+  **And 47.1 B/cycle is what rung 2 already derives for Blackhole DRAM
+  reads from the vendor's 8,140-point NoC dataset**: two wholly
+  independent methods agreeing to ~0.05 %, which is the strongest
+  cross-check this model has had.
+  Still `corroboration`, never provenance — BlackholeA0 publishes no
+  DRAM page, so `dram.bandwidth` stays unchargeable there. And the
+  `samecore` arm fires on neither descriptor (tt-metal maps every bank
+  to a distinct NoC coord), so this separates **the endpoint from the
+  fabric**, not the GDDR6 channel from its inbound router link.
+  Dataset: `tt_sim/perf/datasets/dramratebench-blackhole-2026-08-09.csv`.
+  *First run was refused by its own tag check — the tag was written
+  only at slice 0, so every reader past the first had nothing to match
+  and the guard condemned data that was in fact clean. A check that
+  cannot pass is as damaging as one that cannot fail.*
+- **`tensix-rdcfg`** — **ran, and the construction does not reach the
+  quantity.** The control moved (`SETDMAREG`+`STALLWAIT` 2.968 against
+  0.998 bare, so the stall instruction costs something) but the paired
+  difference is **0.0000 cycles/pair**, under the half-cycle floor.
+  `STALL_THREAD`/`TRISC_CFG` never observes the config unit, so
+  `RDCFG`'s documented `>= 2` latency **stays unchecked**. This is a
+  probe-design negative, not a card fault; a different stall condition
+  is needed.
+- **phase G at 4608/5632 B** — ran; four gsets written, all rows
+  differing. With gset 0 that is **five measured footprints — 4608,
+  5120, 5632, 6144, 7168 B** — around a ramp whose onset was bracketed
+  only to (4096, 5120]. Whether it is one step or a linear rise is an
+  analysis-box question, still open.
+
+Both magics bumped, which is safe: the sweep readers parse `magic=` as
+metadata and never validate it (proven three ways). **Renumbering**
+would not have been — `probe_id` is a CSV column *and* a bit of every
+`--probes` mask — so all four slots are appended rather than inserted
+in footprint order.
+
+Also from that session: a **third** rung-3 `tensix` sample (86.144,
+against 86.125 and X1's 86.12 — reproducing to 0.02 %); `nocread`
+correctly re-graded `DEGENERATE` by the falsifying dist test, on
+silicon; and `rv-cross` failing phase Q at **n = 32**, above the
+small-burst scatter the README accounts for, where the primary failed
+only at n <= 16. Two runs, identical parameters, different outcomes —
+still unexplained.
+
 ### Not built, by design
 
-`ATCAS`/`ATINCGETPTR` against a real L1 semaphore; `RDCFG`'s latency
-as `(op + STALLWAIT) - (1-cycle op + STALLWAIT)` (the cheapest, and
-the obvious next one); the `TTBENCH_UNROLL` sweep (three blockers,
-none a flag); a divide magnitude sweep (the dividend is hardcoded).
+`ATCAS`/`ATINCGETPTR` against a real L1 semaphore (not side-effect-free
+under a 64x-unrolled replayed block, which the plan doc does not
+mention); the `TTBENCH_UNROLL` sweep (three blockers, none a flag); a
+divide magnitude sweep (the dividend is hardcoded, and the interesting
+end is the *narrow* 9-12 bit dividends real kernels use, not this
+benchmark's 29 significant bits).
 `perfbench/README.md`'s "Designed, not built" carries the recipes.
 **Closed, do not build: the `DIR_BIDIR` hang** — `check_invariants`
 refuses bidirectional flows under two tests, and tt-metal skips its
