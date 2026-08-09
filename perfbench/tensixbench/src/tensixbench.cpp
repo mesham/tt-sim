@@ -99,6 +99,22 @@ const Probe PROBES[TTBENCH_NUM_PROBES] = {
     {"MVMUL", "MATH"},        // 17
     {"ELWADD", "MATH"},       // 18
     {"ELWMUL", "MATH"},       // 19
+    // The latency-difference pair. APPENDED, never inserted: `probe_id` is a
+    // column of every CSV already collected and bit `i` of every `--probes`
+    // mask in the runbook, so slots 0-19 keep their numbers.
+    //
+    // Both bodies are an op PLUS an identical TTI_STALLWAIT, so `cyc/instr`
+    // below is cycles per PAIR rather than per instruction -- the `unit` column
+    // says `CFG-LAT` / `THCON-LAT` rather than `CFG` / `THCON` so the summary
+    // cannot be read as an occupancy. The reading is the DIFFERENCE of the two
+    // and nothing else; neither row means anything alone.
+    //
+    // The names deliberately do not match any entry in the shipped cost tables.
+    // `attach_table` looks a probe up by name, and a second series called
+    // `RDCFG` would have merged with slot 14's under the same series key while
+    // measuring a different quantity.
+    {"RDCFG_STALL", "CFG-LAT"},     // 20  RDCFG      + STALLWAIT(THREAD, TRISC_CFG)
+    {"SETDMA_STALL", "THCON-LAT"},  // 21  SETDMAREG  + the identical STALLWAIT
 };
 
 // Probes that need the SrcA/SrcB data-valid bits set. Reported so the operator
@@ -712,7 +728,7 @@ int main(int argc, char** argv) {
         }
     }
     printf("\n");
-    printf("%-14s %-7s %-6s %-4s %12s %10s %8s\n", "probe", "variant", "unit", "thr", "cyc/block", "cyc/instr", "R^2");
+    printf("%-14s %-7s %-9s %-4s %12s %10s %8s\n", "probe", "variant", "unit", "thr", "cyc/block", "cyc/instr", "R^2");
 
     struct Key {
         std::string phase, variant, probe;
@@ -788,7 +804,7 @@ int main(int argc, char** argv) {
             mm_slopes.push_back(MMSlope{r.variant, r.thread, fit.slope});
         }
         printf(
-            "%-14s %-7s %-6s %-4d %12.2f %10.3f %8.4f%s\n",
+            "%-14s %-7s %-9s %-4d %12.2f %10.3f %8.4f%s\n",
             r.probe.c_str(),
             r.variant.c_str(),
             r.unit.c_str(),
@@ -811,6 +827,95 @@ int main(int argc, char** argv) {
             printf("  NOT MONOTONE: %s/%s/%s thread %d: n=%u -> %u cycles, n=%u -> %u cycles\n",
                    a.phase.c_str(), a.variant.c_str(), a.probe.c_str(), a.thread, a.n, a.cycles, b.n, b.cycles);
             (a.phase == "A" ? fail_a : fail_b)++;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The latency difference, read out. Slots 20 and 21 are a PAIR and the only
+    // thing either says is their difference; printing them as two more rows of
+    // the table above and leaving the subtraction to the reader is how a
+    // per-pair figure gets quoted as a per-instruction occupancy.
+    //
+    // Both bodies are (op + the identical STALLWAIT), unrolled 64 times, so
+    // each slope is per BLOCK of 64 pairs and the per-pair difference is
+    // (slope20 - slope21) / TTBENCH_UNROLL. The loop control cancels between
+    // them without being subtracted, since it is the same loop in both.
+    // -----------------------------------------------------------------------
+    {
+        bool any = false;
+        for (const auto& r : rows) {
+            if (r.phase == "A" && r.probe == PROBES[TTBENCH_P_RDCFG_STALL].name) {
+                any = true;
+            }
+        }
+        if (any) {
+            printf("\n%s\n", std::string(78, '-').c_str());
+            printf("phase A: RDCFG latency, as (RDCFG + STALLWAIT) - (SETDMAREG + the same STALLWAIT)\n");
+            printf("%s\n", std::string(78, '-').c_str());
+            printf("  %-7s %-4s %12s %12s %12s\n", "variant", "thr", "rdcfg/pair", "base/pair", "difference");
+            double best = 0;
+            int pairs = 0;
+            // The (variant, thread) keys this run actually produced, taken from
+            // the rows themselves rather than from a thread-set table that is
+            // scoped to the launch loop -- so a `--variants` subset or a masked
+            // probe simply yields fewer lines instead of empty ones.
+            std::vector<std::pair<std::string, int>> keys;
+            for (const auto& r : rows) {
+                if (r.phase != "A" || r.probe != PROBES[TTBENCH_P_RDCFG_STALL].name) {
+                    continue;
+                }
+                const auto key = std::make_pair(r.variant, r.thread);
+                if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+                    keys.push_back(key);
+                }
+            }
+            for (const auto& key : keys) {
+                auto [fa, na] = fit_for("A", key.first, PROBES[TTBENCH_P_RDCFG_STALL].name, key.second);
+                auto [fb, nb] = fit_for("A", key.first, PROBES[TTBENCH_P_SETDMA_STALL].name, key.second);
+                if (na == 0 || nb == 0) {
+                    continue;
+                }
+                const double a = fa.slope / (double)TTBENCH_UNROLL;
+                const double b = fb.slope / (double)TTBENCH_UNROLL;
+                printf("  %-7s %-4d %12.3f %12.3f %+12.3f\n", key.first.c_str(), key.second, a, b, a - b);
+                pairs++;
+                if (a - b > best) {
+                    best = a - b;
+                }
+            }
+            // HALF A CYCLE PER PAIR is the floor a claim about RDCFG has to
+            // clear, and it is not a tuned number: the quantity under test is a
+            // latency the ISA doc gives as ">= 2", and a difference under half a
+            // cycle cannot tell a 2-cycle latency from none. Below it the
+            // reading is the null, whatever its sign. Against tt-sim this is the
+            // branch that fires -- the simulator's Wait Gate answers an unmapped
+            // STALLWAIT condition with "satisfied" and maps TRISC_CFG on neither
+            // architecture, so both slots pay for the stall INSTRUCTION while
+            // neither stall ever observes the config unit, and the residue is
+            // fit noise rather than a small latency.
+            if (pairs == 0) {
+                printf("  neither slot produced a fit; nothing to difference\n");
+            } else if (best <= 0.5) {
+                printf(
+                    "\n  DIFFERENCE %.3f, BELOW THE 0.5 CYCLE/PAIR FLOOR. The quantity under\n"
+                    "  test is a latency the ISA doc gives as `>= 2`, and half a cycle cannot\n"
+                    "  tell that from nothing, so this is the NULL and not a small value.\n"
+                    "  EXPECTED against tt-sim, whose Wait Gate answers an unmapped STALLWAIT\n"
+                    "  condition with `satisfied` and maps TRISC_CFG on neither architecture:\n"
+                    "  both slots pay for the stall INSTRUCTION while neither stall observes\n"
+                    "  the config unit. On a card it means this construction did not reach the\n"
+                    "  quantity, and the doc's `>= 2` stays as unchecked as it was.\n",
+                    best);
+            } else {
+                printf(
+                    "\n  Largest difference %.3f cycles per pair, clear of the 0.5 floor. That\n"
+                    "  is a LOWER BOUND on RDCFG's latency beyond its issue slot, minus\n"
+                    "  SETDMAREG's one documented cycle of occupancy. It is CORROBORATION\n"
+                    "  for the ISA doc's `>= 2` and\n"
+                    "  never provenance, and it is NOT an occupancy: slot 14 measures that,\n"
+                    "  separately, and the two numbers describe different quantities.\n",
+                    best);
+            }
         }
     }
 

@@ -360,9 +360,36 @@ enforce because a violation is a finding rather than a fault:
 A run where every single probe reads exactly `1.000` is *possible* and is itself
 informative (it means nothing back-pressures the issuing core) — but on silicon
 we expect `ADDDMAREG`, `MULDMAREG`, `SHIFTDMAREG` and `CMPDMAREG` to come out
-near **3**, and `RDCFG` near **2**, because that is what the ISA documentation
-says. If they all read 1.0 on hardware, that is the most interesting possible
-result and we want to hear about it immediately.
+near **3** because that is what the ISA documentation says. If they all read 1.0
+on hardware, that is the most interesting possible result and we want to hear
+about it immediately.
+
+`RDCFG` is the one to be careful with, and slot 14 is not the probe that answers
+it. The ISA doc's `>= 2` for `RDCFG` is a **latency**; every probe in phase A
+measures **occupancy**, and a pipelined unit releases its issuer immediately, so
+slot 14 reading exactly 1.000 on silicon is not a contradiction — the two are
+statements about different quantities, and charging the doc's 2 as an occupancy
+is what made tt-sim's `matmulblock` guard compute the wrong answer. The latency
+is reached by **slots 20 and 21** instead, as a difference:
+
+```
+./build/tensixbench --phase a --blocks 32 --iters 64 --variants t1 --probes 0x304201
+```
+
+That mask is slots 0, 9, 14, 20 and 21 — the loop control, the two paired ops
+bare, and the two paired slots. It is run on its own because phase A's validity
+gate is per-PHASE: one nonlinear new slot would flip `TTBENCH_VALID_A` for all
+twenty-two series at once. Both new bodies are an op plus an identical
+`TTI_STALLWAIT(STALL_THREAD, TRISC_CFG)`, so their `cyc/instr` column is cycles
+per **pair** — the `unit` column says `CFG-LAT` / `THCON-LAT` rather than `CFG` /
+`THCON` so it cannot be read as an occupancy — and the reading is the difference
+of the two and nothing else. The program prints it, with a floor: a difference
+under **0.5 cycles per pair** cannot tell a latency documented `>= 2` from none,
+so below that it reports the null rather than a small value.
+
+To reproduce a run comparable with the tracked datasets in
+`tt_sim/perf/datasets/`, pass `--probes 0xFFFFF`: those were collected before
+slots 20 and 21 existed, and the two default ON.
 
 ---
 

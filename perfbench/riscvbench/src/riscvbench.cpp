@@ -202,6 +202,13 @@ const Probe PROBES[RVBENCH_NUM_PROBES] = {
     {"g_1280", "RV_FETCH", 'g', 1280, G_PROBE(0)},
     {"g_1536", "RV_FETCH", 'g', 1536, G_PROBE(1)},
     {"g_1792", "RV_FETCH", 'g', 1792, G_PROBE(2)},
+    // Appended, not inserted in footprint order: see RVBENCH_P_G_1152's comment
+    // in rvbench_layout.h. `unroll` is the footprint in instructions, and it is
+    // what the phase-G read-out multiplies by 4 to print bytes -- so these two
+    // print 4608 B and 5632 B, the pair the fetch ramp's onset was bracketed
+    // between and never measured at.
+    {"g_1152", "RV_FETCH", 'g', 1152, G_PROBE(3)},
+    {"g_1408", "RV_FETCH", 'g', 1408, G_PROBE(4)},
 };
 
 // 64 bits wide, because there are more than 32 probes and phase F's six live
@@ -354,11 +361,15 @@ int main(int argc, char** argv) {
                 "                    three), i.e. how many TRISCs run the identical\n"
                 "                    probes at once. Each is a separate program launch.\n"
                 "  --gset N          phase G's compile-time footprint set, 0..%d\n"
-                "                    (default 0): 0 is 1024+1280, 1 is 1024+1536, 2 is\n"
-                "                    1024+1792. It is a SET rather than a flag because\n"
-                "                    all three intermediates in one kernel exceed\n"
-                "                    tt-metal's kernel config buffer -- measured, see\n"
-                "                    rvbench_layout.h. Run phase G three times.\n"
+                "                    (default 0): 0 is 1024+1280 (5120 B), 1 is\n"
+                "                    1024+1536 (6144 B), 2 is 1024+1792 (7168 B), 3 is\n"
+                "                    1024+1152 (4608 B), 4 is 1024+1408 (5632 B). It is\n"
+                "                    a SET rather than a flag because the intermediates\n"
+                "                    in one kernel exceed tt-metal's kernel config\n"
+                "                    buffer -- measured, see rvbench_layout.h. Run phase\n"
+                "                    G five times. Sets 3 and 4 are the two that land\n"
+                "                    INSIDE the (4096, 5120] bracket the ramp's onset\n"
+                "                    currently sits in; run them if you run any.\n"
                 "  --out FILE        CSV path (default riscvbench-<arch>.csv)\n",
                 RVBENCH_NUM_PROBES,
                 PHASE_LETTERS,
@@ -1641,7 +1652,12 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 const double anchor_per = (anchor.slope - base) / 1024.0;
-                for (int p = RVBENCH_P_G_1280; p <= RVBENCH_P_G_1792; p++) {
+                // Slots 48..52: the four original intermediates plus the two appended
+                // ones. Iterated in SLOT order, which is no longer footprint
+                // order -- only one intermediate is compiled per --gset, so at
+                // most one line prints per (variant, thread) and the order
+                // cannot be read as a curve.
+                for (int p = RVBENCH_P_G_1280; p <= RVBENCH_P_G_1408; p++) {
                     const Fit fit = fit_for('g', ts.variant, PROBES[p].name, t);
                     if (fit.slope == 0) {
                         continue;
@@ -1656,9 +1672,11 @@ int main(int argc, char** argv) {
         printf(
             "\n  A STEP at the intermediate puts the boundary at or below that many bytes\n"
             "  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it\n"
-            "  from the other side. Read the three --gset runs together: they bracket it\n"
-            "  between two footprints that were actually run, and that bracket is the\n"
-            "  whole claim.\n");
+            "  from the other side. Read the FIVE --gset runs together: they bracket it\n"
+            "  between footprints that were actually run, and that bracket is the whole\n"
+            "  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the\n"
+            "  onset was bracketed only to (4096, 5120] and neither endpoint of that\n"
+            "  bracket had ever been measured from INSIDE it.\n");
     }
 
     // -----------------------------------------------------------------------
@@ -1720,11 +1738,11 @@ int main(int argc, char** argv) {
         };
         if (ran[6]) {
             printf("  phase G probes:        ");
-            for (const char* nm : {"g_1024", "g_1280", "g_1536", "g_1792"}) {
+            for (const char* nm : {"g_1024", "g_1152", "g_1280", "g_1408", "g_1536", "g_1792"}) {
                 printf("%s %s  ", nm, ran_probe('g', nm) ? "ran" : "not in this --gset");
             }
             printf(
-                "\n    Exactly one intermediate is compiled per --gset, so two of the three\n"
+                "\n    Exactly one intermediate is compiled per --gset, so four of the five\n"
                 "    read `not in this --gset` in every healthy run and that is not an\n"
                 "    absence. Against tt-sim all of them must read the SAME as each other:\n"
                 "    it models no instruction cache at all, so a flat row is forced there\n"

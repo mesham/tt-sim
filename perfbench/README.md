@@ -16,9 +16,12 @@ perfbench/
 │                       instruction queue's depth and whether it is shared
 ├── nocbench/           NoC congestion: latency against hop count, and against
 │                       the number of links two concurrent flows share
-└── nocreadbench/       what caps the sustained NoC *read* rate: the initiator's
-                        outstanding-request counter, read directly, plus the
-                        source-fan-out axis tt-metal's dataset cannot express
+├── nocreadbench/       what caps the sustained NoC *read* rate: the initiator's
+│                       outstanding-request counter, read directly, plus the
+│                       source-fan-out axis tt-metal's dataset cannot express
+└── dramratebench/      does a DRAM channel's aggregate read rate grow with the
+                        number of tiles reading it? The only probe that can
+                        reach the endpoint-occupancy term at all
 ```
 
 The first two are complements, and the second exists because of the first's headline
@@ -26,11 +29,11 @@ result: `tensixbench` measures what a Tensix unit costs, and found that against
 tt-sim **every** probe of **every** unit reads exactly 1.000 cycles because
 nothing back-pressures the core that issued it. `riscvbench` measures that core.
 
-| | tensixbench | riscvbench | nocbench | nocreadbench |
-| --- | --- | --- | --- | --- |
-| **Run it on hardware** | `tensixbench/run_card.sh` — or [its README](tensixbench/README.md) | `riscvbench/run_card.sh` — or [its README](riscvbench/README.md) | `nocbench/run_card.sh` — or [its README](nocbench/README.md) | `nocreadbench/run_card.sh` — or [its README](nocreadbench/README.md) |
-| **Why it is shaped this way** | [`../docs/plans/tensix-cost-benchmark.md`](../docs/plans/tensix-cost-benchmark.md) | [`../docs/plans/riscv-front-end-benchmark.md`](../docs/plans/riscv-front-end-benchmark.md) | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "Rung 2" and its addendum | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "The read floor" |
-| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.noc_congestion_sweep --measured <csv>` | by hand, against the README's prediction table |
+| | tensixbench | riscvbench | nocbench | nocreadbench | dramratebench |
+| --- | --- | --- | --- | --- | --- |
+| **Run it on hardware** | `tensixbench/run_card.sh` — or [its README](tensixbench/README.md) | `riscvbench/run_card.sh` — or [its README](riscvbench/README.md) | `nocbench/run_card.sh` — or [its README](nocbench/README.md) | `nocreadbench/run_card.sh` — or [its README](nocreadbench/README.md) | `dramratebench/run_card.sh` — or [its README](dramratebench/README.md) |
+| **Why it is shaped this way** | [`../docs/plans/tensix-cost-benchmark.md`](../docs/plans/tensix-cost-benchmark.md) | [`../docs/plans/riscv-front-end-benchmark.md`](../docs/plans/riscv-front-end-benchmark.md) | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "Rung 2" and its addendum | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "The read floor" | `dram.channel_serialisation` in [`../tt_sim/perf/unit_costs.yaml`](../tt_sim/perf/unit_costs.yaml), and `DramChannels` in `tt_sim/device/tiles.py` |
+| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.noc_congestion_sweep --measured <csv>` | by hand, against the README's prediction table | by hand: the program prints the two arms' scaling next to each other |
 
 `nocreadbench` is the newest and the only one whose *most important* reading
 needs no arithmetic at all: `NIU_MST_REQS_OUTSTANDING_ID(0)` is a counter of the
@@ -99,15 +102,15 @@ measured responded. The rule is now stated once, in one place, and tested:
 before a session:
 
 ```bash
-perfbench/card_session_verdicts_test.sh     # 28 checks, no card needed
+perfbench/card_session_verdicts_test.sh     # 61 checks, no card needed
 ```
 
-**About 90 minutes cold**, of which ~60 is building the four programs; about 30
+**About 105 minutes cold**, of which ~70 is building the five programs; about 40
 once the build trees exist. `--list` breaks it down per probe.
 
 ### What to copy to the card box
 
-**`perfbench/` alone is enough for all ten probes**, because the one step that
+**`perfbench/` alone is enough for all twelve probes**, because the one step that
 needs a planner ships its plan pre-built (below). That is the whole of it:
 
 ```bash
@@ -122,7 +125,7 @@ where tt-metal lives; no path is baked in.
 absolute path it was generated in, so shipping a build tree from a machine that
 ever built here makes cmake refuse on the card — *"the current CMakeCache.txt
 directory ... is different than the directory ... where CMakeCache.txt was
-created"*. That failed eight of ten probes on 2026-08-09, and only
+created"*. That failed eight of the then-ten probes on 2026-08-09, and only
 `nocreadbench` survived because this box had never built it. The session now
 recognises a foreign cache and discards it (a build tree is derived and always
 safe to throw away), so the exclude is a second line of defence rather than the
@@ -133,7 +136,7 @@ Two steps are *analysis*, not collection, and they do need `tt_sim/`:
 - the **`nocbench` planner**, which decides the congestion experiment; and
 - the three **report generators** (`*_bench_sweep`, `noc_congestion_sweep`).
 
-If `tt_sim/` is not importable the session says so, runs the four benches
+If `tt_sim/` is not importable the session says so, runs the five benches
 anyway, collects every CSV, and skips only the planner-dependent `noc` and
 `noc-epoch` probes. Nothing is silently lost: `nocbench-grid.csv` is still
 dumped and sent back, and it is what lets the plan be built at home. Analysis of
@@ -151,7 +154,7 @@ python3 -m tt_sim.perf.noc_congestion_plan \
   --shared-sizes 64,512,2048,8192,16384
 ```
 
-It rsyncs with `perfbench/`, so **all ten probes run from `perfbench/` alone**.
+It rsyncs with `perfbench/`, so **all twelve probes run from `perfbench/` alone**.
 The session picks it up automatically for a matching `--arch`; `--plan FILE`
 overrides.
 
@@ -233,6 +236,8 @@ observed result of `--sim --arch blackhole` at smoke sizes with the cost model
 | `rv`, `rv-pairs` | `DEGENERATE` — riscvbench's own live-instrument check fires: `mul_dep`, `div` and `store_spread` all read ~1.0 | meaningful |
 | `rv-qdrain` | `COLLECTED` — it is the knee hunt; nothing in-session grades it | `COLLECTED` |
 | `rv-gset` | `SKIPPED` — minutes per gset against the simulator | `COLLECTED` |
+| `tensix-rdcfg` | `DEGENERATE` — tt-sim's Wait Gate answers an unmapped `STALLWAIT` condition with "satisfied", and neither arch maps `TRISC_CFG`, so the stall is vacuous and the difference is two identical things subtracted | `MEANINGFUL`, or an evidenced negative |
+| `dram` | `MEANINGFUL`, reporting **NO ENDPOINT BOUND** — and that is correct there. The probe widens `TT_SIM_TENSIX_COORDS` to two tiles for its own run, so the sweep and the barrier really do execute (`max_barrier_spins` 22, both tags verified), and both arms then scale ×2.00 exactly. On **Blackhole** the endpoint queue is switched off by construction: no DRAM tile page is published for that part, so `dram_gddr_channel_size` is `None`, `DramChannels.bytes_per_cycle` is `None`, and every `claim()` is a no-op. Perfect linear scaling is what an unmodelled endpoint gives. With one tile it reads `DEGENERATE` instead, for want of a second point. **On Wormhole with `TT_SIM_COST_MODEL=1` it reads `ENDPOINT BOUND`** — see below | the whole question |
 | `noc`, `noc-epoch` | `SKIPPED` — see below | the experiment, or `DEFERRED` if the box has no `tt_sim/` |
 
 **The congestion probes do not merely read `INVALID` against tt-sim; they hang**,
@@ -244,9 +249,69 @@ lost by skipping: tt-sim models no link congestion, so the honest verdict there
 is `INVALID` by construction. To force them, set a multi-tile
 `TT_SIM_TENSIX_COORDS` and name the probe.
 
-So **eight of the ten probes read `DEGENERATE` or `SKIPPED` against the
+So **ten of the twelve probes read `DEGENERATE` or `SKIPPED` against the
 simulator and every one of those is correct.** The simulator is not the
 instrument; it is how you check the instrument runs.
+
+Two readings are worth stating twice, because at the card they will look like
+differences and are not. `tensix-rdcfg`'s sub-floor difference comes from a
+reason internal to tt-sim's Wait Gate — `case _: return True` for an unmapped
+`STALLWAIT` condition, in `tt_sim/pe/tensix/frontend.py`, and neither
+architecture maps `TRISC_CFG` — rather than from anything about the hardware,
+which is also why it cannot hang the simulator. And `dram` reporting **NO
+ENDPOINT BOUND** on Blackhole is not a refutation of anything: the term is
+**live only on Wormhole**, because Blackhole has no published DRAM tile page at
+all, so `ArchProfile.dram_gddr_channel_size` is `None` there and the queue the
+whole probe is about is switched off by construction. Neither is a fault and
+neither should be retaken.
+
+### The `dram` probe against the term it exists to test
+
+Two things were learned by running it against tt-sim before any card time, and
+both change how its result must be read.
+
+**It detects the endpoint-occupancy term where the term is live.** Blackhole
+publishes no DRAM tile page, so `DramChannels.bytes_per_cycle` is `None` there
+and the queue is a no-op — but Wormhole's is real, and
+`TT_SIM_COST_MODEL=1 TT_SIM_TENSIX_COORDS=1-1,2-1,3-1,4-1` with four readers
+gives, in B/cycle aggregate:
+
+| readers | `onechan` | `fanchan` |
+| --- | --- | --- |
+| 1 | 8.75 | 8.75 |
+| 2 | 15.40 | 17.21 |
+| 4 | **19.32** | **34.71** |
+
+The control scales ×3.97 — four distinct banks contend for nothing. The same
+four readers concentrated on one bank reach ×2.21, which is **56%** of it, and
+bend away from linear towards Wormhole's published 24 B/cycle channel rate. The
+experiment works, and it works against a term whose only other validation was
+that it is arithmetically the same number the model already spends as a latency.
+
+**And it is why the verdict is a RATIO, not a threshold.** The first version
+asked "did `onechan` stay under ×1.5" — and on those very numbers, ×2.21, it
+would have reported the endpoint-occupancy term REFUTED by the run that
+demonstrates it. A channel cannot flatten a load that does not saturate it, so
+an absolute threshold is really a question about how wide the sweep was. The
+question the experiment asks is *did concentrating the readers cost anything
+relative to spreading them*, and that is `onechan_scale / fanchan_scale`. It is
+graded at 0.75 — concentrating cost at least a quarter of the scaling that
+spreading achieved — and tt-sim's own 0.56 is a regression case in
+`card_session_verdicts_test.sh`.
+
+**The `samecore` arm does not fire on either part, and that is measured.** It
+wants two banks on one physical NoC coordinate, so that the inbound router link
+is held fixed while the GDDR6 channel changes — the one control that could
+separate a channel limit from the limit of the link every `onechan` flow
+converges on. tt-metal maps every bank to a distinct coordinate on both
+descriptors: Blackhole has one view per DRAM core, and Wormhole's twelve banks
+come back on twelve different coordinates even though their `get_bank_offset`
+values alternate `0x0` / `0x4000_0000`, which is exactly the two-channels-per-
+tile split `wh_dram` describes. The pairs that share a tile are reached through
+aliased sub-endpoints a host program cannot tell apart from independent ones. So
+**the link-versus-channel ambiguity stays open**, the arm is skipped by name
+with that reason on both parts, and a clean `ENDPOINT BOUND` must be reported as
+"the endpoint" rather than "the channel".
 
 ### Blackhole now, Wormhole as a follow-on
 
@@ -254,7 +319,7 @@ The lab has a Blackhole part and no Wormhole part; a Wormhole session is
 **planned, not abandoned**. Every probe here already runs on both — `--arch
 wormhole` executes the same block — so the follow-on is a hardware booking
 rather than new work. That is checked, not assumed: `--sim --arch wormhole` has
-been run end to end and all ten probes execute or skip with the right reason,
+been run end to end and all twelve probes execute or skip with the right reason,
 `cmdbuf` correctly reporting `needs a blackhole part; this is wormhole`. So the
 follow-on should be a pure hardware run rather than a debugging session.
 
@@ -284,28 +349,30 @@ What Blackhole *uniquely* answers is the more valuable half anyway:
 
 ### Designed, not built
 
-Six roadmap probes are deliberately absent, because each needs new device code
-and a shipped block covering ten beats a half-built one covering sixteen. What
-each would take, established by reading rather than guessed:
+Four roadmap probes are deliberately absent, because each needs new device code
+and a shipped block covering twelve beats a half-built one covering sixteen.
+What each would take, established by reading rather than guessed. Two more used
+to be on this list and were built on 2026-08-09 — the `RDCFG` latency difference
+(now the `tensix-rdcfg` probe, slots 20 and 21) and phase G at 4608 / 5632 B
+(now `--gset 3` and `--gset 4`) — and what that cost is recorded under "The
+magic bump, answered" below, because the question it turned on is the one the
+next probe to widen a layout will hit too.
 
 - **`ATCAS` / `ATINCGETPTR` against a real L1 semaphore.** No probe exists — the
   strings appear nowhere in `perfbench/`. `docs/plans/tensix-cost-benchmark.md`
   calls the probe "straightforward" and names it as one of two next steps; it
   needs two new `RUN(...)` slots in
-  `tensixbench/src/kernels/compute/raw_probes.cpp` past the current 20, which
+  `tensixbench/src/kernels/compute/raw_probes.cpp` past the current 22, which
   crosses `TTBENCH_NUM_PROBES` and so the result-buffer size and
-  `TTBENCH_MAGIC`. The wrinkle the plan does not spell out is that, unlike every
-  existing phase-A probe, these are **not side-effect-free**: the block is
+  `TTBENCH_MAGIC` — all three of which slots 20 and 21 have now done once, so
+  the pattern to copy is in the tree rather than in this list. The wrinkle the
+  plan does not spell out is that, unlike every existing phase-A probe, these
+  are **not side-effect-free**: the block is
   unrolled 64× and replayed at four burst lengths, so the semaphore's value
   moves under the measurement. `ATINCGETPTR` tolerates that (it increments
   regardless); `ATCAS` does not, since a compare-and-swap that stops swapping
   stops costing the same. Pick the compare/set values so every iteration
   succeeds, or the slope measures two different instructions.
-- **`RDCFG` latency, as `(op + STALLWAIT) − (1-cycle op + STALLWAIT)`.** Slot 14
-  measures `RDCFG` *throughput* only. `TTI_STALLWAIT` already appears in the
-  tree (`raw_probes.cpp`, in the `UNPACR_NOP` setup) so the instruction is
-  reachable; the work is two more paired slots and the same magic bump. This is
-  the cheapest of the six and the obvious next one to build.
 - **The `TTBENCH_UNROLL` sweep over {16, 32, 64, 128}.** Three separate
   blockers, none of them a flag: `TTBENCH_UNROLL` is a `#define` in
   `bench_layout.h`; `tensixbench`'s `CMakeLists.txt` has no
@@ -315,11 +382,6 @@ each would take, established by reading rather than guessed:
   factor is also a literal `REP64` token in the `PROBE` macro rather than
   derived from the `#define`. Today the sweep means editing the header and
   rebuilding four times.
-- **`riscvbench` phase-G at 4608 / 5632 B.** Those are 1152 and 1408
-  instructions; the built points are 1024/1280/1536/1792 (4096/5120/6144/7168 B)
-  and there is no `REP1152`/`REP1408`. Needs both macros, two probe slots,
-  `RVBENCH_G_SETS` 3 → 5, and a magic bump. The kernel-size ceiling is *not* the
-  obstacle: 1024+1408 is smaller than the 1024+1792 set that already builds.
 - **A divide magnitude sweep.** `rv_probes.cpp` hardcodes
   `dividend = 0x12345678, k = 3`, and `riscvbench.cpp` hardcodes the same
   literals into the CSV header as text. Nothing can vary them; the file says so
@@ -356,6 +418,44 @@ each would take, established by reading rather than guessed:
   safety invariant and risks hanging the card mid-session. The virtual-channel
   question it was there to answer already survives in better, unidirectional
   form.
+
+### The magic bump, answered
+
+Both probes built on 2026-08-09 widened a result layout, and every tracked
+dataset in `tt_sim/perf/datasets/` carries its collecting binary's magic in the
+`#` header — `magic=0x7B10CE02` for tensixbench, `magic=0x7B10CF03` for
+riscvbench. **Whether the sweep readers validate that was established before
+either was bumped**, not after, because a bump that made eleven reference
+datasets unreadable would have been a far worse outcome than the probes are
+worth.
+
+They do not, and three independent things say so:
+
+1. `read_csv` in both `tt_sim/perf/tensix_bench_sweep.py` and
+   `riscv_bench_sweep.py` splits every `#` line into `key=value` tokens and
+   stores them in a `meta` dict. `magic` lands there like any other token, and
+   **no code path anywhere consults `meta["magic"]`** — the only greps for the
+   word in `tt_sim/` are in two test fixtures.
+2. Re-reading every tracked dataset with its header rewritten to a bumped value
+   yields byte-identical rows.
+3. The strongest one is already in the tree and has been for a while:
+   `riscv_bench_sweep_test.py`'s fixture carries `magic=0x7B10CF01` against a
+   then-current `0x7B10CF03`, and passes. Magic tolerance is not a new promise;
+   it is a property the suite already relies on.
+
+The magic is a **wire check between a host binary and the kernel it just
+built** — both hosts compare it against the stamp in the result buffer and
+abort fatally on a mismatch — and a CSV comment everywhere else.
+
+**What would have broken the datasets is renumbering, and that is the rule to
+carry forward.** `probe_id` is a column of every CSV already collected and bit
+`i` of every `--probes` mask in the runbooks. So both pairs of slots were
+*appended*: tensixbench's at 20 and 21, riscvbench's at 51 and 52, even though
+riscvbench's `g_1152` and `g_1408` belong between `g_1024` and `g_1280` in
+footprint order. Putting them there would have shifted three ids and silently
+re-labelled five tracked datasets. The read-out iterates in slot order and says
+so; only one phase-G intermediate is compiled per `--gset`, so at most one line
+prints per key and the order cannot be misread as a curve.
 
 The **(11,2) clock epoch** needed no new probe: `noc_congestion_sweep`'s
 `clock_skew_report` already detects a per-core wall-clock offset, and only

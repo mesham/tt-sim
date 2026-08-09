@@ -4,7 +4,25 @@
 // trusting a constant duplicated in two places.
 #pragma once
 
-#define TTBENCH_MAGIC 0x7B10CE02u  // bump on any layout change
+// Bump on any layout change. Bumped 0x7B10CE02 -> 0x7B10CE03 on 2026-08-09 when
+// slots 20 and 21 (the RDCFG latency difference) widened TTBENCH_NUM_PROBES and
+// so the per-thread stride through the result buffer.
+//
+// THIS DOES NOT INVALIDATE THE TRACKED DATASETS, and that was established
+// before the bump rather than after. The magic is a wire check between a host
+// binary and the kernel it just built (`tensixbench.cpp` compares it against the
+// stamp in the result buffer, twice, fatally); it is written into every CSV's
+// `#` header as metadata, but NOTHING reads it back. `tt_sim/perf/
+// tensix_bench_sweep.read_csv` parses that line into a `meta` dict and no code
+// path anywhere consults `meta["magic"]` -- verified by grep and by re-reading
+// every tracked dataset with the header rewritten to a bumped value, which
+// yields byte-identical rows. The in-tree precedent is stronger still:
+// `tt_sim/perf/riscv_bench_sweep_test.py` has always fed its fixture the STALE
+// magic 0x7B10CF01 against a current 0x7B10CF03 and passes.
+//
+// What would have broken the datasets is renumbering, not the magic: `probe_id`
+// is the CSV's own column. Slots 20 and 21 are APPENDED for that reason.
+#define TTBENCH_MAGIC 0x7B10CE03u
 
 // Header word indices.
 #define TTBENCH_HDR_MAGIC 0
@@ -23,8 +41,37 @@
 // Number of (blocks, cycles) points per probe. blocks = base_blocks * (p + 1).
 #define TTBENCH_NUM_POINTS 4
 
-#define TTBENCH_NUM_PROBES 20
+#define TTBENCH_NUM_PROBES 22
 #define TTBENCH_MAX_THREADS 3
+
+// The two latency-difference slots, named because two places have to agree
+// about which they are: the kernel's `RUN` calls and the host's `--probes`
+// recipe. `(slot 20) - (slot 21)` is the whole reading; neither is meaningful
+// alone. See "THE LATENCY DIFFERENCE" in raw_probes.cpp.
+#define TTBENCH_P_RDCFG_STALL 20
+#define TTBENCH_P_SETDMA_STALL 21
+// The mask that runs the difference and its controls, and nothing else.
+// Isolating it matters because phase A's validity gate is per-PHASE, not
+// per-probe: one nonlinear new slot would flip TTBENCH_VALID_A for all
+// twenty-two series at once, condemning the nineteen good ones with it.
+//
+// FIVE slots, not three, because the difference cannot be graded alone:
+//   0   the empty-loop control every slope phase needs
+//   9   SETDMAREG bare. Slot 21 is the same op PLUS the stall, so
+//       (21 - 9) is what the STALLWAIT itself costs -- and a STALLWAIT that
+//       costs nothing is a stall that never engaged, which makes (20 - 21)
+//       uninterpretable. This is the probe's movement control.
+//   14  RDCFG bare, so the OCCUPANCIES of the two paired ops can be compared
+//       in the same run. If they differ, part of (20 - 21) is occupancy rather
+//       than latency and the difference is confounded.
+//   20  RDCFG    + STALLWAIT
+//   21  SETDMAREG + the identical STALLWAIT
+#define TTBENCH_LATENCY_PROBE_MASK                                          \
+    ((1u << 0) | (1u << 9) | (1u << 14) | (1u << TTBENCH_P_RDCFG_STALL) |   \
+     (1u << TTBENCH_P_SETDMA_STALL))  // = 0x304201
+// What every tracked dataset in tt_sim/perf/datasets/ was collected with, so a
+// run meant to be compared against them can ask for exactly that experiment.
+#define TTBENCH_LEGACY_PROBE_MASK 0xFFFFFu
 
 // How the three MATH probes get their SrcA/SrcB data-valid bits. Runtime arg 5
 // of kernels/compute/raw_probes.cpp; the host names them on the command line and

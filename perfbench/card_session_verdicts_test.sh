@@ -222,11 +222,169 @@ check "rv-qdrain on a sweep that swept" COLLECTED "$r"
 printf 'phase,variant,probe\ng,t1,g_1536\n' > "$TMP/gset1.csv"
 cp "$TMP/gset1.csv" "$TMP/gset2.csv"
 : > "$TMP/gset.out"
-r="$(rv_gset_verdict "$TMP/gset1.csv" "$TMP/gset2.csv" "$TMP/gset.out")"
+r="$(rv_gset_verdict "$TMP/gset.out" "$TMP/gset1.csv" "$TMP/gset2.csv")"
 check "rv-gset when both gsets built the same footprint" DEGENERATE "$r"
 printf 'phase,variant,probe\ng,t1,g_1792\n' > "$TMP/gset2.csv"
-r="$(rv_gset_verdict "$TMP/gset1.csv" "$TMP/gset2.csv" "$TMP/gset.out")"
+r="$(rv_gset_verdict "$TMP/gset.out" "$TMP/gset1.csv" "$TMP/gset2.csv")"
 check "rv-gset when the two footprints differ" COLLECTED "$r"
+
+# Phase G grew to five compile-time sets on 2026-08-09 (4608 and 5632 B), so the
+# session now runs four gsets and the verdict takes all four. A define that
+# fails to reach the build makes them ALL identical, which is why the check is
+# pairwise rather than adjacent: an adjacent-only check catches that by luck of
+# ordering, and a duplicate anywhere is the same bug.
+printf 'phase,variant,probe\ng,t1,g_1152\n' > "$TMP/gset3.csv"
+printf 'phase,variant,probe\ng,t1,g_1408\n' > "$TMP/gset4.csv"
+r="$(rv_gset_verdict "$TMP/gset.out" "$TMP/gset1.csv" "$TMP/gset2.csv" "$TMP/gset3.csv" "$TMP/gset4.csv")"
+check "rv-gset over four distinct gsets" COLLECTED "$r"
+check_says "rv-gset names the five measured footprints" "4608, 5120, 5632, 6144 and 7168" "$r"
+cp "$TMP/gset1.csv" "$TMP/gset4.csv"   # a duplicate at the far END of the list
+r="$(rv_gset_verdict "$TMP/gset.out" "$TMP/gset1.csv" "$TMP/gset2.csv" "$TMP/gset3.csv" "$TMP/gset4.csv")"
+check "rv-gset catches a duplicate that is not adjacent" DEGENERATE "$r"
+
+echo
+echo "== tensix-rdcfg: the difference is graded by a control that is not itself"
+
+# The summary table this parses is seven fields wide; the latency table is five.
+# Both are written by the same run, so a check that matched loosely would read
+# one as the other.
+_mk_rdcfg() { # file, setdma_bare, setdma_stall, rdcfg_bare, difference
+  { echo "probe          variant unit   thr    cyc/block  cyc/instr      R^2"
+    echo "loop_overhead  t1      -      0        64.00      0.000   1.0000"
+    echo "SETDMAREG      t1      THCON  0       $2.00      $2   1.0000"
+    echo "RDCFG          t1      CFG    0       $4.00      $4   1.0000"
+    echo "SETDMA_STALL   t1  THCON-LAT  0       $3.00      $3   1.0000"
+    echo "RDCFG_STALL    t1    CFG-LAT  0       $3.00      $3   1.0000"
+    echo "phase A: RDCFG latency, as (RDCFG + STALLWAIT) - (SETDMAREG + the same STALLWAIT)"
+    echo "  variant thr   rdcfg/pair    base/pair   difference"
+    echo "  t1      0          9.000        7.000       $5"
+    echo "TTBENCH_VALID_A: yes"
+  } > "$1"
+}
+
+# tt-sim: the stall is vacuous, so SETDMAREG+STALLWAIT costs the same as
+# SETDMAREG bare. The difference could be anything and would still mean nothing.
+_mk_rdcfg "$TMP/rdcfg_vacuous.out" 1.000 1.000 1.000 +2.000
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_vacuous.out")"
+check "tensix-rdcfg when the STALLWAIT is free" DEGENERATE "$r"
+check_says "tensix-rdcfg names the vacuous stall" "STALLWAIT is free" "$r"
+
+# The baseline op does not cost what the measured op costs bare, so part of the
+# difference is occupancy. Not a latency, whatever its size.
+_mk_rdcfg "$TMP/rdcfg_confounded.out" 1.000 7.000 3.500 +2.000
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_confounded.out")"
+check "tensix-rdcfg when the two bare occupancies differ" SUSPECT "$r"
+check_says "tensix-rdcfg says the difference is not latency" "OCCUPANCY" "$r"
+
+# A live stall and a real difference clear of the half-cycle floor: the reading
+# the probe exists for.
+_mk_rdcfg "$TMP/rdcfg_ok.out" 1.000 7.000 1.000 +2.000
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_ok.out")"
+check "tensix-rdcfg on a live stall with a difference" MEANINGFUL "$r"
+check_says "tensix-rdcfg refuses to call it provenance" "CORROBORATION" "$r"
+
+# A live stall and a SUB-FLOOR difference. 0.381 is what tt-sim actually reads:
+# the STALLWAIT instruction costs cycles there, but its condition is answered
+# "satisfied" (TRISC_CFG is mapped on neither arch), so the residue is fit noise.
+# Half a cycle per pair cannot tell a latency documented ">= 2" from none, so
+# this is the NULL. Quoting 0.381 as a lower bound would be the measurement
+# grading itself.
+_mk_rdcfg "$TMP/rdcfg_subfloor.out" 1.000 4.020 1.000 +0.381
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_subfloor.out")"
+check "tensix-rdcfg on the sub-floor difference tt-sim reads" DEGENERATE "$r"
+check_says "tensix-rdcfg names the floor" "half-cycle floor" "$r"
+_mk_rdcfg "$TMP/rdcfg_zero.out" 1.000 7.000 1.000 +0.000
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_zero.out")"
+check "tensix-rdcfg on a live stall with a zero difference" DEGENERATE "$r"
+
+# The gate condemns the whole phase, so no slope in the run is usable.
+{ _mk_rdcfg "$TMP/rdcfg_bad.out" 1.000 7.000 1.000 +2.000
+  sed -i 's/TTBENCH_VALID_A: yes/TTBENCH_VALID_A: no (2 checks failed)/' "$TMP/rdcfg_bad.out"; }
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_bad.out")"
+check "tensix-rdcfg when phase A failed its gate" SUSPECT "$r"
+
+echo
+echo "== dram: a flat measurement is only a result when the CONTROL moved"
+
+_dram_hdr='# dramratebench arch=blackhole magic=0x44524231 grid=13x10 clock_mhz=1350 banks=8
+arm,repeat,point,num_readers,num_tx,tx_bytes,bytes_per_reader,total_bytes,max_cycles,min_cycles,agg_bytes_per_cycle,agg_gb_per_s,per_reader_bytes_per_cycle,distinct_banks,distinct_dram_cores,tags_ok,max_barrier_spins,measured_readers'
+
+# The headline case: one channel flat at ~24 B/cycle while the fan-out control
+# scales nearly linearly. This is what silicon should look like if the
+# endpoint-occupancy term shipped on 2026-08-09 is right.
+{ echo "$_dram_hdr"
+  echo "onechan,0,0,1,256,4096,1048576,1048576,44000,44000,23.8309,32.171,23.8309,1,1,1,0,1"
+  echo "fanchan,0,1,1,256,4096,1048576,1048576,44000,44000,23.8309,32.171,23.8309,1,1,1,0,1"
+  echo "onechan,0,2,12,256,4096,1048576,12582912,525000,520000,23.9674,32.356,1.9973,1,1,12,900,12"
+  echo "fanchan,0,3,12,256,4096,1048576,12582912,46000,44000,273.5416,369.28,22.7951,8,8,12,850,12"
+} > "$TMP/dram_good.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_good.csv")"
+check "dram: control scales, one channel flat" MEANINGFUL "$r"
+check_says "dram says the endpoint saturated" "endpoint is what cost the difference" "$r"
+check_says "dram refuses to call it provenance" "never provenance" "$r"
+
+# The nocread mistake, replayed in this probe's own shape: BOTH arms flat. The
+# one-channel curve is exactly as flat as the good case above, and means nothing.
+sed 's/^fanchan,0,3,12,.*$/fanchan,0,3,12,256,4096,1048576,12582912,520000,515000,24.1979,32.667,2.0165,8,8,12,850,12/' \
+  "$TMP/dram_good.csv" > "$TMP/dram_flatcontrol.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_flatcontrol.csv")"
+check "dram when the fan-out control did NOT move" DEGENERATE "$r"
+check_says "dram names the control rather than the measurement" "CONTROL did not move" "$r"
+
+# One reader read something other than its bank's tag. Every rate in the file is
+# from an endpoint that may not be the one its row names.
+sed 's/,1,1,12,900,12$/,1,1,11,900,12/' "$TMP/dram_good.csv" > "$TMP/dram_badtag.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_badtag.csv")"
+check "dram when a reader missed its target bank" DEGENERATE "$r"
+check_says "dram says the endpoint is not the one named" "endpoint the plan names" "$r"
+
+# Nobody waited at the barrier in any multi-reader point, so the readers ran one
+# after another. That produces a flat aggregate from an experiment that did not
+# happen, which is the failure mode hardest to see in the numbers alone.
+sed 's/,900,12$/,0,12/; s/,850,12$/,0,12/' "$TMP/dram_good.csv" > "$TMP/dram_noverlap.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_noverlap.csv")"
+check "dram when no reader ever waited at the barrier" DEGENERATE "$r"
+check_says "dram names the overlap failure" "did not overlap" "$r"
+
+# The evidenced negative: the control moved AND one channel KEPT UP with it. If
+# silicon reads this, the term shipped on 2026-08-09 is wrong.
+sed 's/^onechan,0,2,12,.*$/onechan,0,2,12,256,4096,1048576,12582912,46000,44000,273.5416,369.28,22.7951,1,1,12,900,12/' \
+  "$TMP/dram_good.csv" > "$TMP/dram_refutes.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_refutes.csv")"
+check "dram when one channel scales too" MEANINGFUL "$r"
+check_says "dram states the term is refuted" "NOT serialised by it" "$r"
+
+# THE CASE AN ABSOLUTE THRESHOLD GETS WRONG, and these are tt-sim's own numbers:
+# Wormhole with the cost model on, four readers, onechan x2.21 against fanchan
+# x3.97. The concentrated arm reaches 56% of what the same readers reach fanned
+# out -- the endpoint plainly costing something -- and a rule of "onechan must
+# stay under x1.5" calls that a refutation of the very term it is evidence for.
+# The discriminator is the RATIO of the two scalings.
+{ echo "$_dram_hdr"
+  echo "onechan,0,0,1,16,512,8192,8192,936,936,8.7521,0.000,8.7521,1,1,1,0,1"
+  echo "fanchan,0,1,1,16,512,8192,8192,936,936,8.7521,0.000,8.7521,1,1,1,0,1"
+  echo "onechan,0,4,4,16,512,8192,32768,1696,1552,19.3208,0.000,4.8302,1,1,4,21,4"
+  echo "fanchan,0,5,4,16,512,8192,32768,944,936,34.7119,0.000,8.6780,4,4,4,21,4"
+} > "$TMP/dram_underpowered.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_underpowered.csv")"
+check "dram on tt-sim's own Wormhole cost-model numbers" MEANINGFUL "$r"
+check_says "dram reads a partial bound as a bound" "endpoint is what cost the difference" "$r"
+
+# One reader count only -- the shape a simulator run has, because only the tiles
+# in TT_SIM_TENSIX_COORDS exist. There is no control to move.
+{ echo "$_dram_hdr"
+  echo "onechan,0,0,1,16,512,8192,8192,1400,1400,5.8514,7.899,5.8514,1,1,1,0,1"
+  echo "fanchan,0,1,1,16,512,8192,8192,1400,1400,5.8514,7.899,5.8514,1,1,1,0,1"
+} > "$TMP/dram_single.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_single.csv")"
+check "dram with a single reader count (the --sim shape)" DEGENERATE "$r"
+check_says "dram explains the simulator case" "TT_SIM_TENSIX_COORDS" "$r"
+
+# A schema this session does not know how to grade must say so rather than
+# grading what it can find.
+printf 'a,b,c\n1,2,3\n' > "$TMP/dram_alien.csv"
+r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_alien.csv")"
+check "dram on an unknown schema" UNCLEAR "$r"
 
 echo
 echo "$pass passed, $fail failed"

@@ -467,21 +467,33 @@ class RV_I_ISA(RV_ISA):
                         f"{hex(immediate if signed_op else immediate_unsigned)} else 0 : "
                         f"{'TRUE' if result == 1 else 'FALSE'}"
                     )
+            # The three bitwise forms take the immediate in its UNSIGNED 32-bit
+            # spelling, not as a Python int. The immediate is sign-extended, so
+            # a negative one is an arbitrary-precision negative here, and
+            # Python's bitwise operators on it produce an arbitrary-precision
+            # negative result: `x ^ -1` is `-(x + 1)`, not the 32-bit NOT. That
+            # then reaches `conv_to_bytes(..., signed=False)` and raises
+            # `OverflowError: can't convert negative int to unsigned` — a crash
+            # rather than a wrong answer, and one the RV32I `not` pseudo-op
+            # (`xori rd, rs, -1`, which is what any `~x` in a kernel compiles
+            # to) hits every time. `ori` with any negative immediate is the same
+            # bug. `andi` was already correct for a non-negative `rs1_val`;
+            # it is written the same way so the three cannot drift apart.
             elif type_val == 0x4:
                 # xori
-                result = rs1_val ^ immediate
+                result = rs1_val ^ immediate_unsigned
                 snoop_str = "xori"
                 if snoop:
                     info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} ^ {hex(immediate)}"
             elif type_val == 0x6:
                 # ori
-                result = rs1_val | immediate
+                result = rs1_val | immediate_unsigned
                 snoop_str = "ori"
                 if snoop:
                     info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} | {hex(immediate)}"
             elif type_val == 0x7:
                 # andi
-                result = rs1_val & immediate
+                result = rs1_val & immediate_unsigned
                 snoop_str = "andi"
                 if snoop:
                     info_msg = f"{cls.get_reg_name(rd1)} = {cls.get_reg_name(rs1)} & {hex(immediate)}"

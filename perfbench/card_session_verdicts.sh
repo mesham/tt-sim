@@ -248,6 +248,211 @@ tensix_verdict() { # out-file, label
   fi
 }
 
+# ------------------------------------------------- tensixbench, RDCFG latency
+#
+# The reading is a DIFFERENCE -- (RDCFG + STALLWAIT) minus (SETDMAREG + the
+# identical STALLWAIT) -- so its null is zero rather than one, and "the
+# difference is non-zero" would be the measurement grading itself. The control
+# is a different pair entirely:
+#
+#     slot 21 (SETDMAREG + STALLWAIT) must cost MORE than slot 9 (SETDMAREG
+#     bare).
+#
+# If it does not, the STALLWAIT never engaged, the stall is vacuous in both
+# paired slots, and (20 - 21) is a difference of two identical things. That is
+# exactly what happens against tt-sim, whose Wait Gate answers an unmapped
+# STALLWAIT condition with "satisfied" and which maps the TRISC_CFG bit on
+# neither architecture -- so the simulator reads DEGENERATE here by
+# construction, and correctly.
+#
+# There is a second check that is a validity gate rather than a control: slots 9
+# and 14 measure the two paired ops' OCCUPANCIES bare, and both are documented
+# and previously measured at 1.000. If they disagree in this run, part of the
+# difference is occupancy and none of it can be called latency.
+_ttb_col() { # out-file, probe-name, column-index-within-the-7-field-row
+  awk -v want="$2" -v c="$3" 'NF==7 && $1==want && $6+0==$6 { print $c; exit }' "$1"
+}
+
+# Largest value in the `difference` column of the latency table. That table is
+# five fields wide where the main summary is seven, and it only ever appears
+# after its own banner, so both are matched exactly and neither can be read as
+# the other.
+_ttb_latency_max() { # out-file
+  awk '
+    /^phase A: RDCFG latency/ { in_tab = 1; next }
+    in_tab && NF == 5 && $5 + 0 == $5 { if (best == "" || $5 + 0 > best) best = $5 + 0 }
+    in_tab && /^-----/ { next }
+    END { printf "%.4f", best + 0 }' "$1"
+}
+
+tensix_rdcfg_verdict() { # out-file
+  local out="$1" bad occ_rdcfg occ_setdma stall_pair bare_setdma diff
+  [ -s "$out" ] || { echo "FAILED|no tensix-rdcfg.out"; return; }
+  if ! grep -q '^TTBENCH_VALID' "$out" 2>/dev/null; then
+    echo "UNCLEAR|no TTBENCH_VALID lines; the run did not reach its own gate"
+    return
+  fi
+  if ! grep -q '^phase A: RDCFG latency' "$out" 2>/dev/null; then
+    echo "UNCLEAR|the run produced no latency-difference table, so the two paired slots did not both fit. This binary may predate them"
+    return
+  fi
+  bad="$(_tensix_failed_phases "$out")"
+  if [ -n "$bad" ]; then
+    echo "SUSPECT|phase(s) $bad failed their linearity/monotonicity checks, so no slope in this run is trustworthy -- including the two the difference is taken between"
+    return
+  fi
+  # Column 6 of the seven-field summary row is cyc/instr.
+  occ_rdcfg="$(_ttb_col "$out" RDCFG 6)"
+  occ_setdma="$(_ttb_col "$out" SETDMAREG 6)"
+  bare_setdma="$occ_setdma"
+  stall_pair="$(_ttb_col "$out" SETDMA_STALL 6)"
+  if [ -z "$occ_rdcfg" ] || [ -z "$occ_setdma" ] || [ -z "$stall_pair" ]; then
+    echo "UNCLEAR|the run is missing one of RDCFG, SETDMAREG or SETDMA_STALL from its summary; the controls cannot be applied. Run with --probes 0x304201"
+    return
+  fi
+  if ! awk -v a="$occ_rdcfg" -v b="$occ_setdma" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= 0.05) }'; then
+    echo "SUSPECT|RDCFG and SETDMAREG do not cost the same bare ($occ_rdcfg against $occ_setdma cyc/instr), so part of the paired difference is OCCUPANCY and none of it can be read as latency. The baseline op is the wrong one on this part"
+    return
+  fi
+  # THE CONTROL. Adding the STALLWAIT to SETDMAREG must cost something.
+  if ! awk -v s="$stall_pair" -v b="$bare_setdma" 'BEGIN { exit !(s > b + 0.05) }'; then
+    echo "DEGENERATE|the STALLWAIT is free: SETDMAREG + STALLWAIT costs $stall_pair against $bare_setdma bare, so the stall never engaged and the paired difference is two identical things subtracted. EXPECTED against tt-sim, whose Wait Gate answers an unmapped condition with 'satisfied' and maps the TRISC_CFG bit on neither arch. On a card this means the stall condition is the wrong one and the reading must be retaken"
+    return
+  fi
+  # HALF A CYCLE PER PAIR, and not a tuned number: the quantity under test is a
+  # latency the ISA doc gives as ">= 2", and a difference under half a cycle
+  # cannot tell a 2-cycle latency from none. Below the floor the reading is the
+  # null whatever its sign -- and the null is exactly what the STALLWAIT costing
+  # its instruction WITHOUT its condition engaging produces, which is what
+  # tt-sim does. Calling a sub-floor residue "an evidenced negative" would be
+  # the measurement grading itself with fit noise.
+  diff="$(_ttb_latency_max "$out")"
+  if awk -v d="$diff" 'BEGIN { exit !(d <= 0.5) }'; then
+    echo "DEGENERATE|the stall INSTRUCTION costs something (SETDMAREG+STALLWAIT $stall_pair against $bare_setdma bare) but the paired difference is only $diff cycles per pair, under the half-cycle floor a claim about a latency documented '>= 2' has to clear. The stall never observed the config unit. EXPECTED against tt-sim, whose Wait Gate answers an unmapped STALLWAIT condition with 'satisfied' and maps TRISC_CFG on neither arch; on a card it means this construction did not reach the quantity and the doc's '>= 2' stays unchecked"
+    return
+  fi
+  echo "MEANINGFUL|RDCFG latency difference $diff cycles per pair, clear of the half-cycle floor, against a stall proven live by SETDMAREG+STALLWAIT costing $stall_pair over $bare_setdma bare and the two bare occupancies agreeing at $occ_rdcfg. A LOWER BOUND on RDCFG's latency beyond its issue slot, and CORROBORATION for the doc's '>= 2' -- never provenance, and never an occupancy: slot 14 measures that separately"
+}
+
+# ---------------------------------------------------- dramratebench (both)
+#
+# THE FLAT CURVE IS THE EXPECTED ANSWER, SO IT CANNOT BE THE EVIDENCE. N tiles
+# reading one DRAM channel are predicted to measure the same aggregate at N = 1,
+# 12 and 48 (`wh_dram#performance`: 22.2 / 22.3 / 22.3 GB/s). Flat is also what a
+# saturated NoC link looks like, what a saturated issue rate looks like, and what
+# N readers that never overlapped look like. Accepting a flat one-channel arm as
+# a result would repeat the `nocread` mistake exactly, where a constant register
+# read was reported as a finding.
+#
+# So the thing that must MOVE is the fan-out control: the same N readers, the
+# same issue loop, the same transaction size, on N DISTINCT banks. Four checks,
+# in this order, and each one can only ever fail the run:
+#
+#   1. every reader verified the tag of the bank it was aimed at, or it measured
+#      some other endpoint;
+#   2. some reader waited at the barrier in some multi-reader point, or the
+#      bursts did not overlap and there was no simultaneity to measure;
+#   3. the fan-out arm's aggregate grew, or something upstream caps both arms;
+#   4. only then does the one-channel arm's flatness mean anything.
+dram_verdict() { # out-file, csv
+  local out="$1" csv="$2"
+  [ -s "$csv" ] || { echo "FAILED|no CSV; send dram.out"; return; }
+  local c_arm c_n c_agg c_tags c_spins c_ok
+  c_arm="$(_csv_col "$csv" arm)"
+  c_n="$(_csv_col "$csv" num_readers)"
+  c_agg="$(_csv_col "$csv" agg_bytes_per_cycle)"
+  c_tags="$(_csv_col "$csv" tags_ok)"
+  c_spins="$(_csv_col "$csv" max_barrier_spins)"
+  c_ok="$(_csv_col "$csv" measured_readers)"
+  if [ -z "$c_arm" ] || [ -z "$c_n" ] || [ -z "$c_agg" ] || [ -z "$c_tags" ] || [ -z "$c_spins" ]; then
+    echo "UNCLEAR|the CSV has no arm/num_readers/agg_bytes_per_cycle/tags_ok/max_barrier_spins columns; the schema is not one this session knows how to grade"
+    return
+  fi
+  local rows bad_tags multi overlapped
+  # shellcheck disable=SC2016
+  rows="$(awk -F, -v n="$c_n" -v t="$c_tags" -v s="$c_spins" -v k="${c_ok:-0}" '
+      /^#/ { next }
+      !hdr { hdr = 1; next }
+      { r++
+        if ($t + 0 != $n + 0) bt++
+        if (k > 0 && $k + 0 != $n + 0) bt++
+        if ($n + 0 > 1) { m++; if ($s + 0 > 0) ov++ } }
+      END { printf "%d %d %d %d", r + 0, bt + 0, m + 0, ov + 0 }' "$csv")"
+  # shellcheck disable=SC2086
+  set -- $rows
+  rows="$1"; bad_tags="$2"; multi="$3"; overlapped="$4"
+  if [ "$rows" = 0 ]; then
+    echo "UNCLEAR|the CSV has no data rows"
+    return
+  fi
+  if [ "$bad_tags" != 0 ]; then
+    echo "DEGENERATE|$bad_tags of $rows point(s) held a reader that did not read back the tag its target DRAM bank was given, or did not stamp a result at all. The readers were not all talking to the endpoint the plan names, so no rate in this file means what its row says. On a harvested part this is the easiest failure to mistake for a measurement"
+    return
+  fi
+  if [ "$multi" -gt 0 ] && [ "$overlapped" = 0 ]; then
+    echo "DEGENERATE|no reader waited at the barrier in any of the $multi multi-reader point(s), so the bursts did not overlap. N readers running one after another produce exactly the flat aggregate this probe is looking for, from an experiment that never happened"
+    return
+  fi
+  # The control. Widest and narrowest reader count the fan-out arm reached.
+  local fan
+  fan="$(awk -F, -v a="$c_arm" -v n="$c_n" -v g="$c_agg" '
+      /^#/ { next }
+      !hdr { hdr = 1; next }
+      $a == "fanchan" && $g + 0 > 0 {
+        v = $n + 0
+        if (lo == "" || v < lo) { lo = v; lov = $g + 0 }
+        if (hi == "" || v > hi) { hi = v; hiv = $g + 0 } }
+      END { if (lo != "" && hi > lo && lov > 0) printf "%d %d %.4f %.4f %.3f", lo, hi, lov, hiv, hiv / lov }' "$csv")"
+  if [ -z "$fan" ]; then
+    echo "DEGENERATE|the fan-out control has no pair of reader counts to compare, so nothing separates the endpoint from the NoC link or from the readers' own issue rate. EXPECTED against tt-sim, which instantiates only the tiles named in TT_SIM_TENSIX_COORDS and so cannot sweep the reader count far enough to load anything"
+    return
+  fi
+  # shellcheck disable=SC2086
+  set -- $fan
+  local f_lo="$1" f_hi="$2" f_lov="$3" f_hiv="$4" f_scale="$5"
+  if awk -v s="$f_scale" 'BEGIN { exit !(s < 1.5) }'; then
+    echo "DEGENERATE|the fan-out CONTROL did not move: $f_lo -> $f_hi readers on DISTINCT banks took the aggregate only from $f_lov to $f_hiv B/cycle (x$f_scale). Something upstream of the endpoint caps both arms, so the one-channel arm's flatness says nothing about the endpoint. EXPECTED against tt-sim, which models no link congestion and, on Blackhole, publishes no per-channel DRAM rate for an endpoint queue to be built from"
+    return
+  fi
+  local one
+  one="$(awk -F, -v a="$c_arm" -v n="$c_n" -v g="$c_agg" -v lo="$f_lo" -v hi="$f_hi" '
+      /^#/ { next }
+      !hdr { hdr = 1; next }
+      $a == "onechan" && $g + 0 > 0 {
+        v = $n + 0
+        if (v == lo) lov = $g + 0
+        if (v == hi) hiv = $g + 0 }
+      END { if (lov > 0 && hiv > 0) printf "%.4f %.4f %.3f", lov, hiv, hiv / lov }' "$csv")"
+  if [ -z "$one" ]; then
+    echo "UNCLEAR|the control moved (x$f_scale over $f_lo -> $f_hi readers) but the one-channel arm has no comparable pair at the same reader counts, so there is nothing to read its flatness off"
+    return
+  fi
+  # shellcheck disable=SC2086
+  set -- $one
+  local o_lov="$1" o_hiv="$2" o_scale="$3" eff
+  # THE DISCRIMINATOR IS THE RATIO OF THE TWO SCALINGS, not a threshold on the
+  # one-channel arm alone. A fixed "onechan must stay under x1.5" rule reads a
+  # genuine endpoint bound as a refutation the moment the sweep is not wide
+  # enough to saturate the channel: tt-sim on Wormhole with the cost model on
+  # gives onechan x2.21 against fanchan x3.97 at four readers -- the
+  # concentrated arm reaching 56% of what the SAME readers reach fanned out,
+  # which is the endpoint costing something, and an absolute x1.5 rule called it
+  # a refutation. The question the experiment asks is "did concentrating the
+  # readers on one endpoint cost anything relative to spreading them", and that
+  # is a ratio. 0.75: concentrating cost at least a quarter of the scaling that
+  # spreading achieved.
+  # The parentheses around the ternary are load-bearing. Without them awk parses
+  # `printf "%.3f", f > 0 ? ...` as printf REDIRECTED into a file called `0`,
+  # leaving `eff` empty -- and an empty string compares as 0, which is <= 0.75,
+  # so every run would have reported ENDPOINT BOUND including the refutations.
+  eff="$(awk -v o="$o_scale" -v f="$f_scale" 'BEGIN { printf "%.3f", (f > 0 ? o / f : 1) }')"
+  if awk -v e="$eff" 'BEGIN { exit !(e <= 0.75) }'; then
+    echo "MEANINGFUL|the fan-out control MOVED x$f_scale over $f_lo -> $f_hi readers while the same readers on ONE channel managed only x$o_scale ($o_lov -> $o_hiv B/cycle), which is $eff of it. Same reader count, same issue loop, same transaction size: only the endpoint differed, so the endpoint is what cost the difference -- the shape tt-sim's DramChannels term asserts. CORROBORATION and never provenance: it cannot make dram.bandwidth chargeable, least of all on a part with no published DRAM page"
+    return
+  fi
+  echo "MEANINGFUL|the control moved x$f_scale and one channel KEPT UP, x$o_scale ($o_lov -> $o_hiv B/cycle) or $eff of it. N readers on one channel are NOT serialised by it, which is what tt-sim's endpoint-occupancy term asserts they are. Before reading that as a refutation check the DEMAND: a channel cannot flatten a load it is not saturated by, so a sweep topping out at $f_hi readers and $o_hiv B/cycle may be under-powered rather than unserialised -- Wormhole publishes 24 B/cycle per channel and the vendor's own flat table used 12 and 48 tiles. EXPECTED against tt-sim on BLACKHOLE, where the term is switched off by construction -- no DRAM tile page is published for that part, so ArchProfile.dram_gddr_channel_size is None, DramChannels.bytes_per_cycle is None and every claim() is a no-op; it is live only on Wormhole. On a CARD this is a real refutation of a term shipped on 2026-08-09, so send the CSV back"
+}
+
 # --------------------------------------------------------- riscvbench (both)
 #
 # Two fixes over the session that ran on 2026-08-09.
@@ -342,21 +547,44 @@ rv_cross_verdict() { # cross-out, primary-csv, cross-csv
 # question -- but "the file exists" is not evidence that anything was measured.
 # The two gsets compile DIFFERENT intermediate footprints, so if their rows are
 # identical the build did not vary and neither will the cliff.
-rv_gset_verdict() { # csv1, csv2, out-file
-  local a="$1" b="$2" out="$3"
-  if [ ! -s "$a" ] || [ ! -s "$b" ]; then
-    echo "FAILED|one or both gset runs produced no CSV"
+# Takes the .out first and then ANY number of gset CSVs, because phase G grew
+# from three compile-time sets to five on 2026-08-09: sets 3 and 4 build the
+# 4608 B and 5632 B bodies, which are the two footprints INSIDE the (4096, 5120]
+# bracket the fetch ramp's onset had been narrowed to and which no run had ever
+# measured from within.
+rv_gset_verdict() { # out-file, csv...
+  local out="$1"
+  shift
+  local n=$# i j
+  if [ "$n" -lt 2 ]; then
+    echo "FAILED|fewer than two gset CSVs to compare"
     return
   fi
+  for i in "$@"; do
+    if [ ! -s "$i" ]; then
+      echo "FAILED|a gset run produced no CSV ($i)"
+      return
+    fi
+  done
   if [ -s "$out" ] && grep -q '^TTRVBENCH_VALID_G: no' "$out"; then
     echo "SUSPECT|a gset run failed phase G's validity gate; read rv-gset.out"
     return
   fi
-  if cmp -s "$a" "$b"; then
-    echo "DEGENERATE|gsets 1 and 2 produced byte-identical CSVs, so the two builds compiled the same footprint and the fetch cliff has nothing to be read off"
-    return
-  fi
-  echo "COLLECTED|gsets 1 and 2 written (6144 and 7168 B bodies) and their rows differ; with gset 0's 5120 B from the rv probe they bracket the fetch cliff. The cliff's shape is read at the analysis box. 4608/5632 B are NOT built -- see the README"
+  # Each --gset compiles a DIFFERENT intermediate footprint into the kernel, so
+  # two byte-identical CSVs mean the define did not reach the build and every
+  # run measured the same body. "The files exist" is not evidence of that; this
+  # is. Pairwise rather than adjacent, because a define that is ignored entirely
+  # makes all of them identical while any two adjacent comparison would catch it
+  # only by luck of ordering.
+  for i in "$@"; do
+    for j in "$@"; do
+      if [ "$i" != "$j" ] && cmp -s "$i" "$j"; then
+        echo "DEGENERATE|two gset runs produced byte-identical CSVs ($(basename "$i") and $(basename "$j")), so RVBENCH_G_SET did not reach the build and every run compiled the same footprint. The fetch ramp has nothing to be read off"
+        return
+      fi
+    done
+  done
+  echo "COLLECTED|$n gset runs written and all of their rows differ; with gset 0's 5120 B from the rv probe they put five measured footprints -- 4608, 5120, 5632, 6144 and 7168 B -- around a ramp whose onset was bracketed only to (4096, 5120]. Whether that is one step or a linear rise is an analysis-box question, which is why this is COLLECTED and not a verdict"
 }
 
 # --------------------------------------------------------------- rv-qdrain

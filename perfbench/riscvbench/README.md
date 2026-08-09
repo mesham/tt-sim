@@ -1,12 +1,12 @@
 # riscvbench — running it on real hardware
 
 **You have a Tenstorrent card. This page is everything you need; you do not need
-to know anything about tt-sim.** It asks you to build one program, run it five
-times, and send back five CSV files. Budget **20 minutes**, most of it the
+to know anything about tt-sim.** It asks you to build one program, run it seven
+times, and send back seven CSV files. Budget **20 minutes**, most of it the
 build: the two main runs are a minute or two each and the two extra phase G runs
 and the phase-Q drain run are seconds.
 
-**`./run_card.sh` does all of it** — build, all five documented runs plus a
+**`./run_card.sh` does all of it** — build, all seven documented runs plus a
 focused sixth for the store-coalescing, multiply and divide probes, the
 analysis, and a list of what to check before sending. The rest of this page is
 what it does and why, and is worth reading once. If you are running the whole
@@ -98,6 +98,8 @@ unset TT_METAL_SIMULATOR                 # make sure you are on the real card
 # because its three bodies do not fit in one kernel either.
 ./build/riscvbench --phase g --variants t1 --blocks 32 --gset 1 --out riscvbench-g1.csv
 ./build/riscvbench --phase g --variants t1 --blocks 32 --gset 2 --out riscvbench-g2.csv
+./build/riscvbench --phase g --variants t1 --blocks 32 --gset 3 --out riscvbench-g3.csv
+./build/riscvbench --phase g --variants t1 --blocks 32 --gset 4 --out riscvbench-g4.csv
 
 # Run 5 -- seconds, and it is the one open question this benchmark has a
 # written prediction for. See "Run 5" under "What the interesting answers look
@@ -204,7 +206,7 @@ is **within a few hundred bytes of tt-metal's kernel config buffer** on the
 release this was written against. If yours refuses to build or place it, run
 `--phase rtcqsg` and say so; the other phases are unaffected. That ceiling is
 also why the footprints *between* 1024 and 2048 are phase G rather than three
-more phase F probes, and why phase G itself takes three runs — putting all three
+more phase F probes, and why phase G itself takes five runs — putting them all
 in one kernel aborts the launch with `Program size (125040) too large for kernel
 config buffer (70656)`, which is measured rather than predicted.
 
@@ -212,7 +214,7 @@ config buffer (70656)`, which is measured rather than predicted.
 
 ## What to send back
 
-**All five CSVs, plus the terminal output of each run if you have it** — the
+**All seven CSVs, plus the terminal output of each run if you have it** — the
 summary tables, the per-phase read-outs and the validity verdicts are in the
 terminal output and not in the CSV. The phase S verdict and the phase G step are
 *only* in the terminal output.
@@ -414,9 +416,13 @@ row says instruction fetch is not the limit anywhere in that range. A step
 locates **a boundary in loop-body size** that nothing publishes — and the 2026-08-05
 Blackhole run found one, flat at 0.998 through a 4 KiB body and 1.251 at 8 KiB.
 
-Phase G narrows that octave. Each `--gset` compiles one intermediate — 1280,
-1536 or 1792 instructions, i.e. 5, 6 and 7 KiB — against a 1024-instruction body
-**in the same kernel**, and prints the step between them. Read the three runs
+Phase G narrows that octave. Each `--gset` compiles one intermediate — 1152,
+1280, 1408, 1536 or 1792 instructions, i.e. 4.5, 5, 5.5, 6 and 7 KiB — against a
+1024-instruction body **in the same kernel**, and prints the step between them.
+Sets 3 (4608 B) and 4 (5632 B) were added on 2026-08-09 and are the two that
+land INSIDE the (4096, 5120] bracket the ramp's onset had been narrowed to;
+4608 says whether the rise has begun by then and 5632 whether it is linear in
+footprint or a second step. Read the five runs
 together: they bracket the boundary between two footprints that were actually
 run, and that bracket is the whole claim.
 
@@ -606,8 +612,8 @@ nothing about any hardware: tt-sim has no instruction cache, no branch
 predictor, and an unbounded Tensix instruction queue, so a null in each of those
 is guaranteed by its own construction. Specifically, and verified:
 
-- **Phase G** reads 1.001 cycles/instruction at 1024, 1280, 1536 and 1792 alike,
-  step `-0.000` in every `--gset`. Nothing models an instruction cache, so a
+- **Phase G** reads 1.001 cycles/instruction at 1024, 1152, 1280, 1408, 1536 and
+  1792 alike, step `-0.000` in every `--gset`. Nothing models an instruction cache, so a
   flat row is the only row available.
 - **Phase S** refuses a depth in every slot — the backlog is still growing at
   n = 512 because `TensixFrontend.push_mop_instruction` is a list append — and

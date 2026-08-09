@@ -176,3 +176,37 @@ def test_sra_and_srl_register_forms():
     assert _shift(_shift_reg(0x20), 0xFFFFFF00, 8) == 0xFFFFFFFF
     assert _shift(_shift_reg(0x20), 0x20, 2) == 8
     assert _shift(_shift_reg(0x00), 0xFFFFFF00, 8) == 0x00FFFFFF
+
+
+def _i_arith(funct3, imm):
+    """Encode an I-type ALU op (`opcode 0x13`) with a 12-bit signed immediate."""
+    return ((imm & 0xFFF) << 20) | (RS1 << 15) | (funct3 << 12) | (RD << 7) | 0x13
+
+
+def _alu_imm(funct3, rs1v, imm):
+    rf = _RF()
+    rf.r[RS1].v = rs1v & M
+    assert RV_I_ISA.run(rf, _Mem(_i_arith(funct3, imm)), False) is True
+    return rf.r[RD].v
+
+
+def test_bitwise_immediates_are_32_bit_not_arbitrary_precision():
+    """`xori rd, rs, -1` is the RV32I `not`, and it must not raise.
+
+    The immediate is sign-extended, so in Python a negative one is an
+    arbitrary-precision negative integer. Applying a bitwise operator to it
+    keeps it negative -- `x ^ -1` is `-(x + 1)` -- and the result then reaches
+    `conv_to_bytes(..., signed=False)`, which raises `OverflowError: can't
+    convert negative int to unsigned`. That is a CRASH rather than a wrong
+    answer, and every `~x` in a C kernel compiles to exactly this instruction:
+    `dramratebench`'s reader kernel hit it on its first run against tt-sim.
+    `ori` with any negative immediate is the same bug.
+    """
+    assert _alu_imm(0x4, 0x44524231, -1) == 0xBBADBDCE  # xori: the NOT idiom
+    assert _alu_imm(0x4, 0x00000000, -1) == 0xFFFFFFFF
+    assert _alu_imm(0x6, 0x0000000F, -16) == 0xFFFFFFFF  # ori with a negative
+    assert _alu_imm(0x7, 0xFFFFFFFF, -16) == 0xFFFFFFF0  # andi, unchanged
+    # The non-negative immediates every existing workload uses are untouched.
+    assert _alu_imm(0x4, 0xF0F0F0F0, 0x0FF) == 0xF0F0F00F
+    assert _alu_imm(0x6, 0xF0F0F0F0, 0x00F) == 0xF0F0F0FF
+    assert _alu_imm(0x7, 0xF0F0F0F0, 0x0FF) == 0x000000F0

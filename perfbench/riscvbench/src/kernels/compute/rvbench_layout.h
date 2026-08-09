@@ -5,7 +5,25 @@
 // the same reasoning, as perfbench/tensixbench/src/kernels/compute/bench_layout.h.
 #pragma once
 
-#define RVBENCH_MAGIC 0x7B10CF03u  // bump on any layout change
+// Bump on any layout change. Bumped 0x7B10CF03 -> 0x7B10CF04 on 2026-08-09 when
+// phase-G slots 51 and 52 widened RVBENCH_NUM_PROBES and so the per-thread
+// stride through the result buffer.
+//
+// THIS DOES NOT INVALIDATE THE TRACKED DATASETS, established before the bump.
+// The magic is a wire check between a host binary and the kernel it just built
+// (`riscvbench.cpp` compares it against the stamp, fatally); it is written into
+// every CSV's `#` header as metadata and NOTHING reads it back.
+// `tt_sim/perf/riscv_bench_sweep.read_csv` parses that line into a `meta` dict
+// and no code path consults `meta["magic"]` -- verified by grep, and by
+// re-reading every tracked dataset with a bumped header, which yields
+// byte-identical rows. The in-tree precedent is stronger than either: this
+// file's own sweep test, `riscv_bench_sweep_test.py`, has fed its fixture the
+// stale magic 0x7B10CF01 against a current 0x7B10CF03 since that bump, and
+// passes.
+//
+// What would have broken the datasets is renumbering, not the magic: `probe_id`
+// is the CSV's own column. Slots 51 and 52 are APPENDED for that reason.
+#define RVBENCH_MAGIC 0x7B10CF04u
 
 // Header word indices.
 #define RVBENCH_HDR_MAGIC 0
@@ -305,12 +323,32 @@
 #define RVBENCH_P_G_1280 48
 #define RVBENCH_P_G_1536 49
 #define RVBENCH_P_G_1792 50
+// APPENDED rather than inserted in footprint order between g_1024 and g_1280,
+// for the reason slots 38-46 were appended: a probe's slot number is the
+// `probe_id` column of every CSV already collected. Inserting g_1152 at 48
+// would shift 48/49/50 up by one and silently re-label five tracked datasets
+// (riscvbench-blackhole.csv, -gset1, -gset2, -2026-08-09-gset1, -gset2).
+#define RVBENCH_P_G_1152 51
+#define RVBENCH_P_G_1408 52
 
-#define RVBENCH_NUM_PROBES 51
+#define RVBENCH_NUM_PROBES 53
 
 // How many compile-time footprint sets phase G has, and which intermediate
 // each carries. The host validates `--gset` against this.
-#define RVBENCH_G_SETS 3
+//
+//     set 0   g_1024 + g_1280    5120 B
+//     set 1   g_1024 + g_1536    6144 B
+//     set 2   g_1024 + g_1792    7168 B
+//     set 3   g_1024 + g_1152    4608 B   <- added 2026-08-09
+//     set 4   g_1024 + g_1408    5632 B   <- added 2026-08-09
+//
+// The two new sets are the SMALLEST of the five (1024+1152 = 2176 instructions
+// and 1024+1408 = 2432, against set 2's 1024+1792 = 2816), so the kernel config
+// buffer ceiling that forced the split in the first place is not in play. They
+// exist because the fetch ramp's onset is bracketed only to (4096, 5120] and
+// these two land inside that bracket: 4608 says whether the rise has begun by
+// then, 5632 whether it is linear in footprint or a second step.
+#define RVBENCH_G_SETS 5
 
 #define RVBENCH_RESULT_WORDS \
     (RVBENCH_HDR_WORDS + RVBENCH_MAX_THREADS * RVBENCH_NUM_PROBES * RVBENCH_MAX_POINTS)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One card session: every silicon probe ROADMAP.md item 2 asks for, in one run.
 #
-# This is the HARDWARE side. It builds the four perfbench programs, runs each
+# This is the HARDWARE side. It builds the five perfbench programs, runs each
 # probe the roadmap names, labels every output with the probe and the part, and
 # prints a per-probe verdict so you can tell a real reading from a degenerate
 # one before you pack the results up. Do NOT use perfbench/run.sh here -- that
@@ -28,8 +28,8 @@
 #                              sizes. Every output is stamped NOT-A-MEASUREMENT.
 #   -h, --help                 this text
 #
-# Runtime: about 90 minutes cold, of which ~60 is building the four programs;
-# about 30 minutes if the build trees already exist. `--list` prints the
+# Runtime: about 105 minutes cold, of which ~70 is building the five programs;
+# about 40 minutes if the build trees already exist. `--list` prints the
 # per-probe breakdown. Nothing here writes a card's flash, changes any clock,
 # or needs root.
 #
@@ -74,8 +74,10 @@ PROBES=(
   "cmdbuf|blackhole|0|CMD_BUF_AVAIL at rest -- the depth the ISA docs withhold"
   "tensix|both|6|a second tensixbench sample; every rung-3 result rests on one"
   "tensix-warm|both|4|drop tensixbench's cold n=32 burst (--blocks 64)"
+  "tensix-rdcfg|both|2|RDCFG LATENCY by (op+STALLWAIT) - (1cyc+STALLWAIT)"
+  "dram|both|7|N tiles reading ONE DRAM channel: the endpoint-occupancy shape"
   "rv|both|8|riscvbench primary + a repeat cross-check at the SAME parameters"
-  "rv-gset|both|1|phase-G footprint cliff, --gset 1 and 2"
+  "rv-gset|both|3|phase-G footprint ramp, --gset 1..4 (4608/5632 B are new)"
   "rv-qdrain|both|2|Tensix queue depth and whether it is shared (.ttinsn burst)"
   "rv-pairs|both|1|store-coalescing pair, multiply pair, divide, in one focused run"
   "noc|both|5|congestion, with points filled in between the 64 B and 16 KiB regimes"
@@ -145,7 +147,7 @@ if [ "$DO_LIST" = 1 ]; then
     total=$((total + m))
   done
   echo
-  echo "run time once built: ~${total} min. Cold, add ~60 min to build the four"
+  echo "run time once built: ~${total} min. Cold, add ~70 min to build the five"
   echo "programs (tensixbench and riscvbench are ~15 min each)."
   echo
   echo "Awaiting the planned Wormhole follow-on (every probe below already runs"
@@ -156,9 +158,7 @@ if [ "$DO_LIST" = 1 ]; then
   echo
   echo "Not built, by design -- see perfbench/README.md 'Designed, not built':"
   echo "  ATCAS / ATINCGETPTR against a real L1 semaphore   (needs new probes)"
-  echo "  RDCFG latency by (op+STALLWAIT) - (1cyc+STALLWAIT) (needs new probes)"
   echo "  the TTBENCH_UNROLL sweep over {16,32,64,128}       (needs build plumbing)"
-  echo "  riscvbench phase-G at 4608 / 5632 B                (needs new probes)"
   echo "  a divide magnitude sweep                           (dividend is hardcoded)"
   echo "  the DIR_BIDIR hang                                 (refused on purpose)"
   exit 0
@@ -305,6 +305,7 @@ TB="$PB/tensixbench/src"
 RB="$PB/riscvbench/src"
 NRB="$PB/nocreadbench/src"
 NB="$PB/nocbench/src"
+DRB="$PB/dramratebench/src"
 
 build_once() { # dir, binary
   [ "$DO_DRY" = 1 ] && { echo "   + build $2"; return 0; }
@@ -410,8 +411,15 @@ probe_cmdbuf() {
 probe_tensix() {
   build_once "$TB" tensixbench || { verdict tensix FAILED "build failed"; return; }
   local csv="$OUT/tensix.$ARCH.csv" args
-  if [ "$DO_SIM" = 1 ]; then args="--phase a --blocks 1 --variants t1"
-  else args="--blocks 32 --iters 64"; fi
+  # --probes 0xFFFFF pins this to the twenty slots every tracked dataset in
+  # tt_sim/perf/datasets/ was collected with. tensixbench gained slots 20 and 21
+  # (the RDCFG latency difference) on 2026-08-09 and they default ON, so without
+  # this the second sample rung 3 needs would silently be a different experiment
+  # from the first -- and phase A's validity gate is per-PHASE, so one nonlinear
+  # new slot would condemn all nineteen good series with it. The new slots have
+  # their own probe.
+  if [ "$DO_SIM" = 1 ]; then args="--phase a --blocks 1 --variants t1 --probes 0xFFFFF"
+  else args="--blocks 32 --iters 64 --probes 0xFFFFF"; fi
   # shellcheck disable=SC2086
   ( cd "$TB" && ./build/tensixbench $args --out "$csv" ) >"$OUT/tensix.out" 2>&1
   cat "$OUT/tensix.out" >> "$LOG"
@@ -431,14 +439,95 @@ probe_tensix_warm() {
   # so --blocks 64 starts the fit at 64 and the cold first burst is gone.
   build_once "$TB" tensixbench || { verdict tensix-warm FAILED "build failed"; return; }
   local csv="$OUT/tensix-warm.$ARCH.csv" args
-  if [ "$DO_SIM" = 1 ]; then args="--phase a --blocks 2 --variants t1"
-  else args="--blocks 64 --iters 64 --phase a"; fi
+  if [ "$DO_SIM" = 1 ]; then args="--phase a --blocks 2 --variants t1 --probes 0xFFFFF"
+  else args="--blocks 64 --iters 64 --phase a --probes 0xFFFFF"; fi
   # shellcheck disable=SC2086
   ( cd "$TB" && ./build/tensixbench $args --out "$csv" ) >"$OUT/tensix-warm.out" 2>&1
   cat "$OUT/tensix-warm.out" >> "$LOG"
   [ -s "$csv" ] || { verdict tensix-warm FAILED "no CSV; send tensix-warm.out"; return; }
   say "   highest cyc/instr over all probes: $(_tensix_peak "$OUT/tensix-warm.out")"
   graded tensix-warm tensix_verdict "$OUT/tensix-warm.out" tensix-warm
+}
+
+probe_tensix_rdcfg() {
+  # The one quantity phase A is structurally blind to. Every other tensixbench
+  # probe measures OCCUPANCY -- how long the issuing thread is kept out of a
+  # unit -- and a pipelined unit releases its issuer immediately, so LATENCY is
+  # invisible to all twenty of them. RDCFG is the case that made that matter:
+  # the ISA doc gives it ">= 2", slot 14 measures 1.000 on silicon, and charging
+  # the doc's 2 as an occupancy is what made tt-sim's matmulblock guard compute
+  # the wrong answer.
+  #
+  # 0x304201 = slots 0, 9, 14, 20, 21: the empty-loop control, the two paired
+  # ops BARE (so the difference can be shown to be latency and not occupancy),
+  # and the two paired slots. Run in isolation because phase A's validity gate
+  # is per-PHASE: a nonlinear new slot inside the `tensix` probe would flip
+  # TTBENCH_VALID_A for all nineteen good series at once.
+  build_once "$TB" tensixbench || { verdict tensix-rdcfg FAILED "build failed"; return; }
+  local csv="$OUT/tensix-rdcfg.$ARCH.csv" args
+  if [ "$DO_SIM" = 1 ]; then args="--phase a --blocks 1 --variants t1 --probes 0x304201"
+  else args="--phase a --blocks 32 --iters 64 --variants t1 --probes 0x304201"; fi
+  # shellcheck disable=SC2086
+  ( cd "$TB" && ./build/tensixbench $args --out "$csv" ) >"$OUT/tensix-rdcfg.out" 2>&1
+  cat "$OUT/tensix-rdcfg.out" >> "$LOG"
+  [ -s "$csv" ] || { verdict tensix-rdcfg FAILED "no CSV; send tensix-rdcfg.out"; return; }
+  graded tensix-rdcfg tensix_rdcfg_verdict "$OUT/tensix-rdcfg.out"
+}
+
+probe_dram() {
+  # Safe on a HARVESTED part in both of its coordinate spaces, and neither is
+  # derived arithmetically. The readers come from `compute_with_storage_grid_size`
+  # in LOGICAL space, so a missing worker column is simply not addressable. The
+  # DRAM banks come from `logical_core_from_dram_channel` + `get_bank_offset`,
+  # which is what the allocator itself uses -- and every reader then reads back a
+  # per-bank tag the host wrote, so a row that reached the wrong endpoint says so
+  # instead of looking like a measurement.
+  build_once "$DRB" dramratebench || { verdict dram FAILED "build failed"; return; }
+  # Scoped to this probe's own run below rather than exported, so widening the
+  # simulator's tile set for the reader sweep cannot slow or alter any probe
+  # that runs after it.
+  local csv="$OUT/dram.$ARCH.csv" args sim_coords=""
+  if [ "$DO_SIM" = 1 ]; then
+    # TWO tiles, not the session's default one. The reader count is the axis
+    # this whole probe sweeps, and at one reader it cannot sweep at all -- the
+    # barrier is never exercised, no burst ever overlaps another, and the run
+    # checks nothing but that the binary starts. A simulator materialises only
+    # the tiles in TT_SIM_TENSIX_COORDS while `compute_with_storage_grid_size()`
+    # still reports the whole grid, so a second reader on an unlisted tile is
+    # NullCore-swallowed and never stamps a result -- which the program reports
+    # as a failure, correctly, but pointlessly. Name the second tile instead.
+    # Logical (0,0) and (1,0) are the first two entries of the descriptor's
+    # `functional_workers`: 1-2, 2-2 on Blackhole and 1-1, 2-1 on Wormhole.
+    # An operator who has already asked for more tiles keeps them.
+    case "$ARCH" in
+      blackhole) local pair=1-2,2-2 ;;
+      *) local pair=1-1,2-1 ;;
+    esac
+    case "$TT_SIM_TENSIX_COORDS" in
+      *,*) pair="$TT_SIM_TENSIX_COORDS" ;;      # already multi-tile; leave it
+    esac
+    sim_coords="$pair"
+    args="--bytes 8192 --tx-bytes 512 --repeats 1 --readers 1,2 --max-readers 2"
+  else
+    # 1 MiB per reader is the figure `wh_dram#performance` states its own
+    # measurement at, and 1 / 12 / 48 readers are the three counts it reports.
+    args="--bytes 1048576 --tx-bytes 4096 --repeats 3"
+  fi
+  # shellcheck disable=SC2086
+  ( cd "$DRB" || exit 2
+    [ -n "$sim_coords" ] && export TT_SIM_TENSIX_COORDS="$sim_coords"
+    ./build/dramratebench $args --out "$csv" ) >"$OUT/dram.out" 2>&1
+  local r=$?
+  cat "$OUT/dram.out" >> "$LOG"
+  [ -s "$csv" ] || { verdict dram FAILED "no CSV (rc=$r); send dram.out"; return; }
+  say "   $(grep -m1 'fanchan aggregate' "$OUT/dram.out" 2>/dev/null || echo 'no fanchan control line')"
+  say "   $(grep -m1 'onechan aggregate' "$OUT/dram.out" 2>/dev/null || echo 'no onechan line')"
+  graded dram dram_verdict "$OUT/dram.out" "$csv"
+  say "   note: this is CORROBORATION of a SHAPE and never provenance. Blackhole"
+  say "         has no published DRAM tile page at all -- no per-channel rate, no"
+  say "         address map -- so nothing measured here can make dram.bandwidth"
+  say "         chargeable on it. What it can do is confirm that an aggregate"
+  say "         refuses to grow with readers while the fan-out control grows."
 }
 
 probe_rv() {
@@ -470,15 +559,19 @@ probe_rv() {
 probe_rv_gset() {
   build_once "$RB" riscvbench || { verdict rv-gset FAILED "build failed"; return; }
   [ "$DO_SIM" = 1 ] && { skip rv-gset "phase G is minutes per gset against tt-sim; covered on the card"; return; }
-  local g ok=1
-  for g in 1 2; do
+  # Four sets, not two. Sets 3 and 4 build the 4608 B and 5632 B bodies, the
+  # two footprints INSIDE the (4096, 5120] bracket the ramp's onset sits in and
+  # the two nothing has ever measured. With gset 0's 5120 B from the `rv` probe
+  # that is five measured footprints across the ramp instead of three.
+  local g ok=1 csvs=()
+  for g in 1 2 3 4; do
     ( cd "$RB" && ./build/riscvbench --phase g --variants t1 --blocks 32 --gset "$g" \
         --out "$OUT/rv-gset$g.$ARCH.csv" ) >>"$OUT/rv-gset.out" 2>&1
-    [ -s "$OUT/rv-gset$g.$ARCH.csv" ] || ok=0
+    if [ -s "$OUT/rv-gset$g.$ARCH.csv" ]; then csvs+=("$OUT/rv-gset$g.$ARCH.csv"); else ok=0; fi
   done
   cat "$OUT/rv-gset.out" >> "$LOG" 2>/dev/null
-  if [ "$ok" != 1 ]; then verdict rv-gset FAILED "one or both gset runs produced no CSV"; return; fi
-  graded rv-gset rv_gset_verdict "$OUT/rv-gset1.$ARCH.csv" "$OUT/rv-gset2.$ARCH.csv" "$OUT/rv-gset.out"
+  if [ "$ok" != 1 ]; then verdict rv-gset FAILED "one or more gset runs produced no CSV"; return; fi
+  graded rv-gset rv_gset_verdict "$OUT/rv-gset.out" "${csvs[@]}"
 }
 
 probe_rv_qdrain() {
@@ -641,7 +734,7 @@ probe_noc_epoch() {
 say "== card session: arch=$ARCH out=$OUT$SIM_NOTE"
 say "   started $(date -Is)"
 if [ "$HAVE_TT_SIM" != 1 ]; then
-  say "   tt_sim/ is not importable here: the four benches still run and every"
+  say "   tt_sim/ is not importable here: the five benches still run and every"
   say "   CSV is still collected. The congestion probes use the pre-built plan"
   say "   nocbench/noc-plan-<arch>.csv (checked against this card's live grid"
   say "   before use), so they run too; only the report GENERATORS are deferred"
@@ -738,10 +831,9 @@ done
     printf '  - %s\n' "$d" | fold -s -w 74 | sed '2,$s/^/    /'
   done
   echo
-  echo "  Not attempted, by design -- ATCAS/ATINCGETPTR, the RDCFG latency"
-  echo "  difference, the TTBENCH_UNROLL sweep, phase-G at 4608/5632 B, the"
-  echo "  divide magnitude sweep, and DIR_BIDIR. perfbench/README.md says what"
-  echo "  each would need. Do not improvise them at the card."
+  echo "  Not attempted, by design -- ATCAS/ATINCGETPTR, the TTBENCH_UNROLL"
+  echo "  sweep, the divide magnitude sweep, and DIR_BIDIR. perfbench/README.md"
+  echo "  says what each would need. Do not improvise them at the card."
   echo "  finished $(date -Is)"
   [ "$bad" -gt 0 ] && echo "  ($bad probe(s) need a look)"
   true

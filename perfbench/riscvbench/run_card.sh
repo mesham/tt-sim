@@ -12,8 +12,11 @@
 # Stages (default: main cross gset qdrain pairs):
 #   main    --blocks 32                      all seven phases, all thread sets
 #   cross   --blocks 8                       the second, shorter cross-check
-#   gset    --phase g --gset 1 and --gset 2  the instruction-footprint cliff;
-#                                            --gset 0 already rides in `main`
+#   gset    --phase g --gset 1..4            the instruction-footprint ramp;
+#                                            --gset 0 already rides in `main`.
+#                                            Sets 3 and 4 are 4608 and 5632 B,
+#                                            the two inside the (4096, 5120]
+#                                            bracket the onset sits in.
 #   qdrain  --phase qs --variants t1         Tensix queue depth + is it shared
 #   pairs   --phase r --probes 0x339         store-coalescing, multiply, divide
 #                                            in one fast focused run -- on
@@ -103,7 +106,7 @@ if want cross; then
   run_stage "cross: --blocks 8" --blocks 8 --out "$OUT/riscvbench-blocks8.csv"
 fi
 if want gset; then
-  for g in 1 2; do
+  for g in 1 2 3 4; do
     run_stage "gset $g: --phase g --variants t1" \
       --phase g --variants t1 --blocks "$BLOCKS" --gset "$g" \
       --out "$OUT/riscvbench-g$g.csv"

@@ -234,7 +234,9 @@ FOOTPRINT_PROBES = (
     "f_1024",
     "f_2048",
     "g_1024",
+    "g_1152",
     "g_1280",
+    "g_1408",
     "g_1536",
     "g_1792",
 )
@@ -1818,7 +1820,7 @@ SHARE_SHARED_SLACK = 1.25
 
 #: Phase G's intermediates, one per ``--gset``. Named here so the presence
 #: check can say that seeing one of them is a complete run.
-SHARE_G_INTERMEDIATES = ("g_1280", "g_1536", "g_1792")
+SHARE_G_INTERMEDIATES = ("g_1152", "g_1280", "g_1408", "g_1536", "g_1792")
 
 
 def _sharing_check(rows, emit):

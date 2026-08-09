@@ -197,7 +197,9 @@
 #define REP256(...) REP128(__VA_ARGS__) REP128(__VA_ARGS__)
 #define REP512(...) REP256(__VA_ARGS__) REP256(__VA_ARGS__)
 #define REP1024(...) REP512(__VA_ARGS__) REP512(__VA_ARGS__)
+#define REP1152(...) REP1024(__VA_ARGS__) REP128(__VA_ARGS__)
 #define REP1280(...) REP1024(__VA_ARGS__) REP256(__VA_ARGS__)
+#define REP1408(...) REP1024(__VA_ARGS__) REP256(__VA_ARGS__) REP128(__VA_ARGS__)
 #define REP1536(...) REP1024(__VA_ARGS__) REP512(__VA_ARGS__)
 #define REP1792(...) REP1024(__VA_ARGS__) REP512(__VA_ARGS__) REP256(__VA_ARGS__)
 #define REP2048(...) REP1024(__VA_ARGS__) REP1024(__VA_ARGS__)
@@ -889,18 +891,34 @@ void kernel_main() {
 #endif
 #ifdef RVBENCH_PHASE_G
     RUN(RVBENCH_P_G_1024, REP1024(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+    // Every arm is an explicit `== N`, and the last is an `#error` rather than
+    // a bare `#else`. Before sets 3 and 4 existed the chain ended in `#else`,
+    // which meant `--gset 3` would have compiled the 1792 body while the host
+    // emitted only the g_1152 rows -- an empty phase-G CSV from a build that
+    // silently measured something else. The host validates `--gset` against
+    // RVBENCH_G_SETS, so this arm is unreachable through it; it is here so that
+    // widening RVBENCH_G_SETS without widening this chain fails at the compiler
+    // rather than at the card.
 #if RVBENCH_G_SET == 0
     RUN(RVBENCH_P_G_1280, REP1280(asm volatile("addi %0, %0, 1" : "+r"(a0));));
 #elif RVBENCH_G_SET == 1
     RUN(RVBENCH_P_G_1536, REP1536(asm volatile("addi %0, %0, 1" : "+r"(a0));));
-#else
+#elif RVBENCH_G_SET == 2
     RUN(RVBENCH_P_G_1792, REP1792(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+#elif RVBENCH_G_SET == 3
+    RUN(RVBENCH_P_G_1152, REP1152(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+#elif RVBENCH_G_SET == 4
+    RUN(RVBENCH_P_G_1408, REP1408(asm volatile("addi %0, %0, 1" : "+r"(a0));));
+#else
+#error "RVBENCH_G_SET names no compiled footprint; add an arm above"
 #endif
 #else
     PROBE_SKIP(RVBENCH_P_G_1024, RVBENCH_SLOPE_POINTS);
     PROBE_SKIP(RVBENCH_P_G_1280, RVBENCH_SLOPE_POINTS);
     PROBE_SKIP(RVBENCH_P_G_1536, RVBENCH_SLOPE_POINTS);
     PROBE_SKIP(RVBENCH_P_G_1792, RVBENCH_SLOPE_POINTS);
+    PROBE_SKIP(RVBENCH_P_G_1152, RVBENCH_SLOPE_POINTS);
+    PROBE_SKIP(RVBENCH_P_G_1408, RVBENCH_SLOPE_POINTS);
 #endif
 
     // -----------------------------------------------------------------------

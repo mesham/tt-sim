@@ -398,6 +398,68 @@ void kernel_main() {
     RUN(18, TTI_ELWADD(0, 0, 0, 0, 0););
     RUN(19, TTI_ELWMUL(0, 0, 0, 0, 0););
 
+    // -----------------------------------------------------------------------
+    // THE LATENCY DIFFERENCE. Slots 20 and 21, and neither means anything on
+    // its own -- the reading is `slot 20 - slot 21`.
+    //
+    // Every other probe in this phase measures OCCUPANCY: how long the issuing
+    // thread is kept out of the unit. Latency -- how long the unit is busy
+    // AFTER it has taken the instruction -- is structurally invisible to that,
+    // because a pipelined unit releases the issuer immediately. `RDCFG` is the
+    // case that made the difference matter: the ISA doc gives it ">= 2", slot
+    // 14 measures 1.000 on silicon, and both are true statements about
+    // different quantities. Charging the doc's 2 as an occupancy is what made
+    // tt-sim's matmulblock guard compute the wrong answer.
+    //
+    // `docs/plans/tensix-cost-benchmark.md` names the measurable form:
+    //
+    //     (op + STALLWAIT) minus (a known 1-cycle op + STALLWAIT) cancels the
+    //     sync overhead and leaves a latency difference.
+    //
+    // THE CANCELLATION IS ONLY EXACT IF THE STALLWAIT IS THE SAME INSTRUCTION,
+    // and here it is, operand for operand:
+    //
+    //   stall_res = STALL_THREAD -- block EVERY one of this thread's issue
+    //     paths, not just the config path. A narrower `STALL_CFG` would block
+    //     slot 20's next instruction (another RDCFG) and NOT slot 21's (a ThCon
+    //     op), so the two slots would be stalled by different amounts and
+    //     nothing would cancel.
+    //   wait_res = TRISC_CFG -- wait for the CONFIG unit to go idle. In slot 20
+    //     it has just been given an RDCFG and must drain it; in slot 21 it was
+    //     never touched, so the identical instruction clears at its floor.
+    //
+    // So the difference is the cycles the config unit stayed busy after RDCFG
+    // was issued, minus the one cycle SETDMAREG's documented occupancy costs.
+    // Read it as a LOWER BOUND on RDCFG's latency: a difference of zero says
+    // the config unit released before the stall could observe it, not that the
+    // latency is zero.
+    //
+    // `SETDMAREG` is the baseline because it is the ThCon op this benchmark
+    // already documents at occupancy 1 (slot 9) and already measures at exactly
+    // 1.000 on silicon, and because it does not touch the config unit -- so its
+    // STALLWAIT is genuinely the floor rather than a second measurement.
+    //
+    // Both bodies are TWO instructions, and `PROBE` unrolls with a literal
+    // `REP64`, so a block is 64 PAIRS. The host divides by TTBENCH_UNROLL as it
+    // does for every other slot, which makes the reported `cyc/instr` cycles
+    // per PAIR here. That is the right divisor for a difference of pairs and
+    // the wrong one for a per-instruction occupancy; the host's probe table
+    // labels both slots so the summary cannot be misread.
+    //
+    // Against tt-sim this is EXPECTED to read ~0. Its Wait Gate answers an
+    // unmapped STALLWAIT condition with "satisfied" (`case _: return True` in
+    // tt_sim/pe/tensix/frontend.py), and neither arch maps the TRISC_CFG bit,
+    // so the stall is vacuous there and both slots cost the same. That is a
+    // correct simulator reading, not a broken probe -- and it is also why this
+    // cannot hang the simulator.
+    // -----------------------------------------------------------------------
+    RUN(TTBENCH_P_RDCFG_STALL,
+        TTI_RDCFG(60, 0);
+        TTI_STALLWAIT(ckernel::p_stall::STALL_THREAD, ckernel::p_stall::TRISC_CFG););
+    RUN(TTBENCH_P_SETDMA_STALL,
+        TTI_SETDMAREG(0, 7, 0, 120);
+        TTI_STALLWAIT(ckernel::p_stall::STALL_THREAD, ckernel::p_stall::TRISC_CFG););
+
     // Give the Src banks back. OUTSIDE every timed region -- the last PROBE has
     // written its last result word before this runs -- so the measurement is
     // untouched; see "LEAVING THE CARD CLEAN" in the header comment.
