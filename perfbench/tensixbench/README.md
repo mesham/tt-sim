@@ -5,6 +5,12 @@ to know anything about tt-sim.** It asks you to build one program, run it a
 handful of times, and send back the CSV files. Budget **20 minutes**, most of it
 the build.
 
+**`./run_card.sh` does all of it** — build, the six documented runs, the
+analysis, and a list of what to check before sending. The rest of this page is
+what it does and why, and is worth reading once. If you are running the whole
+roadmap block rather than this one program, use
+[`../run_card_session.sh`](../README.md) instead.
+
 If you want to know *why* the benchmark is shaped the way it is, and what its
 numbers can and cannot prove, read
 [`docs/plans/tensix-cost-benchmark.md`](../../docs/plans/tensix-cost-benchmark.md)

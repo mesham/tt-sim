@@ -6,6 +6,13 @@ times, and send back five CSV files. Budget **20 minutes**, most of it the
 build: the two main runs are a minute or two each and the two extra phase G runs
 and the phase-Q drain run are seconds.
 
+**`./run_card.sh` does all of it** — build, all five documented runs plus a
+focused sixth for the store-coalescing, multiply and divide probes, the
+analysis, and a list of what to check before sending. The rest of this page is
+what it does and why, and is worth reading once. If you are running the whole
+roadmap block rather than this one program, use
+[`../run_card_session.sh`](../README.md) instead.
+
 If you want to know *why* the benchmark is shaped the way it is, and what its
 numbers can and cannot prove, read
 [`docs/plans/riscv-front-end-benchmark.md`](../../docs/plans/riscv-front-end-benchmark.md)
@@ -125,6 +132,30 @@ noise; on silicon they cost milliseconds.
 > reproduce every loop-form point to within two cycles at a quarter the block
 > count. A run whose slope phases are refused can still be read for phase Q —
 > and one of them is where the queue depth in §Q comes from.
+>
+> **This is not a licence to use `--blocks 8` as a cross-check, and the card
+> session used to.** A cross-check establishes *repeatability*, which means the
+> same experiment twice; a shorter run is a different experiment whose slope
+> phases are expected to fail. On 2026-08-09 the `--blocks 8` cross-check was
+> refused on R, C, Q, F **and** G while the `--blocks 32` primary was refused on
+> phase Q alone, and because both runs wrote into one `.out` file the session
+> greped, the short run's failures condemned the long one. `run_card_session.sh`
+> now runs the cross-check at the same `--blocks 32`, into its own `.out`, and
+> grades the two separately.
+
+### Phase Q's small-burst failures are expected on silicon
+
+The 2026-08-09 primary run failed `TTRVBENCH_VALID_Q` on 15 monotonicity checks
+and **every one of them was at n ≤ 16** — `n=1 -> 14 cycles, n=2 -> 13 cycles`
+and the like. That is the same 6–23 cycle scatter of a cold, once-only burst
+that the phase-S measured tolerance exists to absorb, and this page has
+documented it since phase S was added. So the session's verdict logic
+(`perfbench/card_session_verdicts.sh`) treats a **phase-Q-only** failure whose
+complaints are all at n ≤ 16 as expected, and still reports `SUSPECT` for a
+phase-Q complaint at any larger n, or for any other phase failing. The
+threshold is this page's own, not one picked to make a particular run pass;
+`card_session_verdicts_test.sh` asserts a synthetic complaint at n = 64 is still
+`SUSPECT`.
 
 The first run writes `riscvbench-<arch>.csv` next to the binary. It is rewritten
 after **every** program launch, so a run you have to kill part-way still leaves
