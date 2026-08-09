@@ -33,6 +33,15 @@ charged, so two queues in series cost the slower and not the sum), and the
 refusal — Blackhole publishes no per-channel bandwidth, and the deep-merged
 overrides mean declining Wormhole's number takes an explicit provenance check.
 
+Since 2026-08-09 that same rate is spent a *second* way and the endpoint has a
+queue: the channel carries one transfer at a time, so a request arriving while
+it is busy waits ``ceil(N / 24)`` for it. What is pinned here is that it needed
+no new number, that it is inert for a lone request (hence no rung-2 row and no
+single-transaction prediction can move), that it bites on a stream — four
+concurrent 4 KiB reads used to come back at the NoC link's 32 B/cycle and now
+come back at the channel's 24 — and that the *device* behind the bus is still
+not a queue, because nothing publishes its re-issue interval.
+
 Runs standalone (``python3 -m tt_sim.device.dram_cost_model_test``) or under
 pytest.
 """
@@ -43,9 +52,9 @@ from contextlib import contextmanager
 
 import pytest
 
-from tt_sim.arch import WORMHOLE_PROFILE
+from tt_sim.arch import BLACKHOLE_PROFILE, WORMHOLE_PROFILE
 from tt_sim.device.blackhole import Blackhole
-from tt_sim.device.tiles import DRAMEndpointNUI
+from tt_sim.device.tiles import DramChannels, DRAMEndpointNUI
 from tt_sim.device.wormhole import Wormhole
 from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.network.tt_noc import NUI, noc_hop_count
@@ -201,13 +210,118 @@ def test_the_gaps_are_named_rather_than_implied():
     """ROADMAP §I asks for bank-conflict and refresh-window costs by name. No
     source quantifies either, and there is no DRAM bank model in tt-sim at all,
     so neither is charged — and the model says so rather than leaving a reader
-    to infer that a "DRAM latency" covers them. Occupancy likewise: a second
-    request is not queued behind the first."""
+    to infer that a "DRAM latency" covers them.
+
+    Occupancy is the one that changed on 2026-08-09, and it changed by *half*:
+    the channel is now a queue, the device behind it is still not one. Both
+    halves are flagged, because ``occupancy_modelled`` alone would read as a
+    claim about the endpoint rather than about its bus."""
     with _env("1"):
         model = dram_cost_model("wormhole")
     assert model.bank_conflicts_modelled is False
     assert model.refresh_modelled is False
-    assert model.occupancy_modelled is False
+    assert model.occupancy_modelled is True
+    assert model.device_occupancy_modelled is False
+
+
+def test_occupancy_is_modelled_exactly_where_the_channel_rate_is_published():
+    """The flag is not a global switch, it is a per-arch consequence. Blackhole
+    publishes no per-channel DRAM bandwidth, so it gets no occupancy — the same
+    refusal ``channel_excess_cycles`` already makes, reported rather than left
+    for a reader to deduce from a zero."""
+    with _env("1"):
+        assert dram_cost_model("wormhole").occupancy_modelled is True
+        assert dram_cost_model("blackhole").occupancy_modelled is False
+        assert dram_cost_model("blackhole").device_occupancy_modelled is False
+
+
+def test_the_channel_occupancy_is_the_serialisation_and_not_a_second_number():
+    """The whole provenance of the term. A held channel costs
+    ``ceil(N / 24)`` — the figure ``channel_serialisation`` already carries at
+    ``isa_doc_derived`` and the latency term already spends as an excess. One
+    number on two axes, so nothing new had to be sourced to make a second
+    request wait."""
+    with _env("1"):
+        model = dram_cost_model("wormhole")
+        channels = Wormhole().dram_tiles[0].channels
+    assert channels.bytes_per_cycle == model.channel_bytes_per_cycle
+    for size in (32, 64, 256, 1024, 4096, 8192):
+        assert channels.occupancy_cycles(size) == model.channel_serialisation_cycles(
+            size
+        )
+
+
+def test_an_idle_channel_charges_nothing_so_a_lone_request_cannot_move():
+    """The property that keeps this from being a second bill: ``claim`` answers
+    0 whenever the channel is free, so a workload issuing one transfer at a
+    time is bit-identical to the model without it — and rung 2, whose DRAM rows
+    are all one transaction per barrier, cannot move either."""
+    channels = DramChannels(24)
+    assert channels.claim(1000, 4096) == 0
+    assert channels.free_cycle() == 1000 + math.ceil(4096 / 24)
+    assert channels.waits == 0
+    # A request arriving after the first has finished still waits for nothing.
+    assert channels.claim(1000 + math.ceil(4096 / 24), 4096) == 0
+    assert channels.waits == 0
+    assert channels.claims == 2
+
+
+def test_a_channel_with_no_published_rate_never_makes_anything_wait():
+    """Blackhole's shape, asserted on the mechanism rather than on the arch, so
+    it stays true for the next architecture whose bandwidth is unpublished."""
+    channels = DramChannels(None)
+    assert channels.occupancy_cycles(8192) is None
+    assert channels.claim(0, 8192) == 0
+    assert channels.claim(0, 8192) == 0
+    assert channels.claims == 0
+    with _env("1"):
+        assert Blackhole().dram_tiles[0].channels.bytes_per_cycle is None
+
+
+def test_the_two_nocs_share_one_set_of_channels_because_the_hardware_does():
+    """Two GDDR6 channels behind two NoC interfaces. A per-NIU queue would let
+    a NoC 0 and a NoC 1 request stream across the same bus at once, which is
+    the contention the term exists to remove."""
+    with _env("1"):
+        tile = Wormhole().dram_tiles[0]
+    assert tile.noc0_router.channels is tile.noc1_router.channels is tile.channels
+
+
+def test_a_wormhole_dram_tile_fronts_two_independent_gddr6_channels():
+    """``wh_dram``: "DRAM tiles occur in groups of three, with two channels of
+    GDDR6 present in each group", and the group's NoC address map puts "GDDR6
+    Channel 0 data" at 0 and "GDDR6 Channel 1 data" at 0x4000_0000. Modelling
+    the pair as one queue would serialise two independent controllers against
+    each other — an over-charge, and the direction this project's policy
+    forbids. Blackhole has no DRAM tile page at all, so it declines to split
+    and (publishing no rate either) queues nothing regardless."""
+    assert WORMHOLE_PROFILE.dram_gddr_channel_size == 0x4000_0000
+    assert WORMHOLE_PROFILE.dram_gddr_channels_per_tile == 2
+    assert BLACKHOLE_PROFILE.dram_gddr_channel_size is None
+    assert BLACKHOLE_PROFILE.dram_gddr_channels_per_tile == 1
+    with _env("1"):
+        channels = Wormhole().dram_tiles[0].channels
+    assert channels.count == 2
+    assert channels.index_for(0) == 0
+    assert channels.index_for(0x3FFF_FFFF) == 0
+    assert channels.index_for(0x4000_0000) == 1
+    assert channels.index_for(0x7FFF_FFFF) == 1
+    # Past the last window (the register aperture) clamps rather than raising.
+    assert channels.index_for(0xFFB2_0000) == 1
+
+
+def test_traffic_to_the_two_halves_of_a_tile_does_not_contend():
+    """The consequence of the split, on the mechanism: two transfers landing on
+    the same cycle in opposite 1 GiB halves are two controllers' work and
+    neither waits. Charged as one queue, the second would have paid the first's
+    whole occupancy."""
+    channels = DramChannels(24, count=2, channel_size=0x4000_0000)
+    assert channels.claim(100, 8192, 0x0000_1000) == 0
+    assert channels.claim(100, 8192, 0x4000_1000) == 0
+    assert channels.waits == 0
+    # Same half, and now it does wait.
+    assert channels.claim(100, 8192, 0x0000_2000) == math.ceil(8192 / 24)
+    assert channels.waits == 1
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +410,73 @@ def test_a_large_dram_read_ends_up_limited_by_the_channel_and_not_the_link():
     grew = landed[big] - landed[small]
     assert grew == math.ceil(big / 24) - math.ceil(small / 24)
     assert (big - small) / grew == pytest.approx(24, abs=0.1)
+
+
+def _concurrent_reads(count, size):
+    """``count`` reads issued back to back from one tile, all to one channel.
+
+    Returns the cycle each landed on. Distinct initiators and distinct landing
+    addresses, so nothing but the endpoint can serialise them.
+    """
+    with _env("1"):
+        device = Wormhole()
+        tile = device.tensix_tiles[0]
+        dram = device.dram_tiles[0]
+    payload = bytes((i * 7) & 0xFF for i in range(size))
+    for k in range(count):
+        device.write(dram.get_coord_pair(), 0x1000 + k * 0x10000, payload)
+    unified = tile.get_coord_pair()
+    for k in range(count):
+        initiator = tile.noc0_router.request_initiators[k]
+        _set_coord(initiator, "target", dram.noc0_router.id_pair)
+        initiator.target_addr_low = 0x1000 + k * 0x10000
+        initiator.ret_addr_low = _L1_DST + k * 0x10000
+        initiator.at_len_be = size
+        initiator.ctrl = 0
+        initiator.cmd_ctrl = 1
+        initiator.initiate()
+    landed = {}
+    for cycle in range(1, 20000):
+        device.run(1)
+        for k in range(count):
+            if k not in landed and (
+                bytes(device.read(unified, _L1_DST + k * 0x10000, size)) == payload
+            ):
+                landed[k] = cycle
+        if len(landed) == count:
+            break
+    return [landed[k] for k in sorted(landed)], dram.channels
+
+
+def test_a_second_request_waits_for_the_channel_the_first_is_streaming_across():
+    """The item, end to end, and the measurement that motivated it.
+
+    Before 2026-08-09 four concurrent 4 KiB reads came back 128 cycles apart —
+    ``ceil(4096 / 32)``, the NoC *link's* rate — so a tt-sim Wormhole DRAM
+    channel sustained 32 B/cycle against the 24 GB/s the ISA docs publish for
+    it. They now come back ``ceil(4096 / 24)`` apart, and the sustained rate is
+    the channel's."""
+    size = 4096
+    landed, channel = _concurrent_reads(4, size)
+    occupancy = math.ceil(size / 24)
+    gaps = [b - a for a, b in zip(landed, landed[1:])]
+    assert gaps == [occupancy] * 3
+    assert size / occupancy == pytest.approx(24, abs=0.1)
+    # Three of the four found the channel busy, and the first did not.
+    assert channel.claims == 4
+    assert channel.waits == 3
+
+
+def test_one_request_at_a_time_is_unmoved_by_the_queue():
+    """The control for the test above, and the reason no single-transaction
+    prediction in the tree moves: a lone read never finds the channel busy, so
+    not a cycle is charged and its landing is the one the two tests above
+    already pin from the flight, the service time and the excess."""
+    landed, channel = _concurrent_reads(1, 4096)
+    assert channel.claims == 1
+    assert channel.waits == 0
+    assert channel.cycles_waited == 0
+    assert len(landed) == 1
 
 
 def test_the_untimed_dram_still_answers_in_two_cycles():

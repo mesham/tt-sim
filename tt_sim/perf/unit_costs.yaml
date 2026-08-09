@@ -494,9 +494,23 @@ dram:
       bottleneck rate and the faster stage contributes only its fill, which is
       a constant and is already inside ``access_latency``.
 
-      Not modelled, and unchanged by this: channel *occupancy* (a second
-      request is still not queued behind the first), bank conflicts, refresh
-      windows, read/write turnaround, and the docs' own 92% achievable
+      CONSUMED A SECOND WAY since 2026-08-09, and it is the same number rather
+      than another one: the channel is *occupied* for ceil(N / 24) cycles, so a
+      request arriving while it is busy waits. The excess above is what one
+      transfer's size costs in latency; this is what it costs everyone behind
+      it, and one figure spent on those two axes is exactly what
+      ``noc.hops.router_to_router.throughput_flits_per_cycle`` already is (a
+      packet's tail, its NIU's injection port, and every router link it
+      crosses). The claim is zero whenever the channel is idle, so no
+      single-transfer prediction moves and rung 2's rows are untouched; what
+      moves is a *sustained* rate, which before this charge ran at the NoC
+      link's 32 B/cycle -- above the 24 this very entry publishes for the
+      channel.
+
+      Still not modelled, and none of it folded in here: the DRAM device's own
+      re-issue interval (``access_latency`` is a latency and nothing publishes
+      the pipelining behind it, so occupancy stops at the bus), bank conflicts,
+      refresh windows, read/write turnaround, and the docs' own 92% achievable
       fraction -- which is a statement about sustained software behaviour, not
       about one transfer, and folding it in here would be an efficiency fudge
       of exactly the kind these tables refuse.
@@ -1004,10 +1018,16 @@ arch_overrides:
           What is NOT modelled, and none of it is folded into this number:
           bank conflicts and refresh windows (ROADMAP section I names both;
           no source quantifies either, and tt-sim has no bank model for DRAM
-          at all), read/write turnaround, and *occupancy* -- a second request
-          arriving during the first's service window is not queued behind it,
-          so this term adds latency and no contention. Nor is transfer time:
-          a 32-byte poke and an 8 KiB burst are charged the same 99.
+          at all), read/write turnaround, and the *device's* own occupancy --
+          how long the array is unavailable to a second request. This 99 is a
+          latency; no source publishes the re-issue interval or the pipelining
+          depth behind it, and reading one as the other would assert a
+          throughput of one request per 99 cycles, which is 0.3 B/cycle
+          against a channel the same page publishes at 24. So the endpoint's
+          queue stops at the *channel*, which ``channel_serialisation`` sizes
+          and which since 2026-08-09 a second request does wait for. Nor is
+          transfer time folded in here: a 32-byte poke and an 8 KiB burst are
+          charged the same 99.
 
           **This note used to end by arguing that size dependence therefore
           belonged nowhere near DRAM, and that argument was wrong.** It read:

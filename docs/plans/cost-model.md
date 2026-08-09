@@ -1753,6 +1753,11 @@ them and ROADMAP §I asks for two of them by name:
 - **Occupancy.** A second request arriving during the first's service window is
   *not* queued behind it. The endpoint adds latency and no contention, which is
   the under-charging direction every bound in these files leans.
+  (**Half superseded 2026-08-09.** The *channel* is now a queue, at the same
+  `ceil(N / 24)` the bandwidth bullet below eventually got consumed as; the
+  *device* behind it still is not, because nothing publishes its re-issue
+  interval. See ["Endpoint occupancy: the queue was missing, the number was
+  already there"](#endpoint-occupancy-the-queue-was-missing-the-number-was-already-there).)
 - **Bandwidth.** A 32-byte poke and an 8 KiB burst are charged the same 99.
   DRAM bandwidth is well sourced (24 GB/s per channel, `isa_doc`) and
   deliberately still unconsumed: turning a byte count into cycles is the *same
@@ -1761,7 +1766,10 @@ them and ROADMAP §I asks for two of them by name:
 
 `DramCostModel` carries `bank_conflicts_modelled` / `refresh_modelled` /
 `occupancy_modelled`, all `False`, so a report can name the gaps instead of
-letting a reader assume a "DRAM latency" covered them.
+letting a reader assume a "DRAM latency" covered them. (Since 2026-08-09
+`occupancy_modelled` is `True` on Wormhole and `False` on Blackhole — a per-arch
+consequence of whether a channel rate is published — and
+`device_occupancy_modelled` is the flag for the half that is still a gap.)
 
 ### Measured, at one-cycle poll resolution
 
@@ -5926,7 +5934,12 @@ exactly the role `nocbench`'s `INVALID` verdict plays for congestion.
 **No credit-limit mechanism was added to `tt_sim/network/tt_noc.py`**, not even
 one defaulting to unlimited. The roadmap has precedent for shape-first work —
 item 2's endpoint occupancy — but that precedent holds because the *shape* is
-known to be right and only the number is missing. Here the shape is what the
+known to be right and only the number is missing. (That item landed on
+2026-08-09, and the distinction held: the shape was right, and the number turned
+out to be already in the table rather than missing. See ["Endpoint occupancy: the
+queue was missing, the number was already
+there"](#endpoint-occupancy-the-queue-was-missing-the-number-was-already-there).)
+Here the shape is what the
 evidence just contradicted: the mechanism that would have been built (bound the
 outstanding-request queue, stall the initiator at `K`) predicts a rate of
 `L / K` that rises with distance, and both parts say the rate does not move with
@@ -6345,6 +6358,253 @@ and the warm run alike.
   `perfbench/`.** No provenance entry was added, no coefficient was fitted into
   a table, and no `estimated` entry exists anywhere as a result of this
   session.
+
+## Endpoint occupancy: the queue was missing, the number was already there
+
+ROADMAP item 1's first bullet — *"a second request is not queued behind the
+first: latency without contention. Pure model shape; no new data needed"* — and
+it is the rare case where both halves of that claim survive checking. The shape
+really was missing, the duration really is already in the table at
+`isa_doc_derived`, and **no number entered any file**. What changed is where
+`dram.channel_serialisation.bytes_per_cycle: 24` is *spent*: it was charged as a
+latency, once, per request; it is now also held as a **resource**, so a request
+arriving while the channel is busy waits for it.
+
+It is the same move ["The congestion step,
+wired"](#the-congestion-step-wired-one-number-spent-a-third-time) made — a
+figure already in a table, spent on one more axis rather than replaced by a
+bigger one, there `noc.hops.router_to_router.throughput_flits_per_cycle` going
+from the injecting NIU to every router link a packet crosses. It is deliberately
+the *only* move available here, because every alternative shape needs a number
+nobody publishes.
+
+### The premise, checked before anything was built
+
+Three 4 KiB reads handed to a Wormhole DRAM endpoint on the same cycle, model
+on. Before:
+
+```
+delayed_arrivals -> {143: [req, req, req]}
+```
+
+All three serviced on cycle 143. `DRAMEndpointNUI.transmit` added
+`service_cycles + channel_excess` to each arriving request independently; there
+was no state at the endpoint that one request could leave behind for the next.
+End to end, four concurrent 4 KiB reads from one Tensix tile landed 128 cycles
+apart — `ceil(4096 / 32)`, the **NoC link's** rate, because the only queue on
+the return path was the DRAM NIU's own injection port.
+
+So the endpoint was not merely uncontended: **a tt-sim Wormhole DRAM channel
+sustained 32 B/cycle, above the 24 GB/s the ISA docs publish for it**, and the
+model was over-predicting DRAM throughput by a third while under-predicting
+every latency around it. That is a sharper statement of the gap than "occupancy
+is not modelled", and it is what makes the fix a floor rather than a guess: the
+bytes have to cross a 24 B/cycle bus, so the channel cannot be busy for less
+than `ceil(N / 24)`.
+
+The same three reads now land at 143, 314, 485 — exactly `ceil(4096 / 24)`
+apart — and the four concurrent reads come back at 23.95 B/cycle.
+
+### The duration, and why only half of it is chargeable
+
+Endpoint occupancy has a shape *and* a duration, and the honest answer splits
+them:
+
+- **The channel data bus: derivable, and already derived.**
+  `dram.channel_serialisation` is `isa_doc_derived` from
+  `dram.bandwidth.per_channel_gb_per_s: 24` (`isa_doc`, `wh_dram#performance`)
+  at the `isa_doc` 1 GHz clock. A transfer of N bytes occupies the bus for
+  `ceil(N / 24)` cycles. Nothing was fitted, nothing was measured, and the
+  quantity was *already being spent* as `channel_excess_cycles`.
+- **The device behind the bus: `unknown`, and therefore uncharged.**
+  `dram.access_latency` is 99 on Wormhole and 126 on Blackhole, and it is a
+  **latency**. Nothing in the ISA docs, tt-metal or ttsim publishes the
+  re-issue interval or the pipelining depth behind it. Reading the latency as
+  an occupancy would assert that a channel serves one request per 99 cycles —
+  0.32 B/cycle for a 32-byte access, against 24 B/cycle published on the same
+  page. It would have been the largest single over-charge in the file. It is
+  not charged, and `DramCostModel.device_occupancy_modelled` names the gap so a
+  report cannot imply otherwise.
+
+The bound is charged at its low end in both directions: `ceil(N / 24)` is the
+shortest the endpoint can possibly be busy, and the docs' own 92 % achievable
+fraction — which would make the true occupancy ~9 % *longer* — is deliberately
+not folded in, exactly as it is not folded into the latency term.
+
+### Corroboration, from the same page, and not consumed as a number
+
+`wh_dram#performance` prints a measured table nobody had had a use for: 1, 12
+and 48 Tensix tiles each reading 1 MiB **from one DRAM channel simultaneously**
+measure 22.2, 22.3 and 22.3 GB/s. The aggregate does not grow with the number
+of readers. That *is* endpoint occupancy, stated as a vendor measurement, and
+it is the shape this instalment installs — 48 readers of one channel share it
+rather than each getting a link's worth. It stays a corroboration: what it
+confirms is where an `isa_doc` figure belongs, not what it is.
+
+### One tile is two channels, and modelling it as one would over-charge
+
+The premise check turned up a second thing, and it is the reason this instalment
+touches `ArchProfile`. A tt-sim `DRAMTile` is not a GDDR6 channel. `wh_dram`:
+*"There are 18 DRAM tiles per Wormhole ASIC, collectively exposing 12x 1 GiB
+channels of GDDR6 ... DRAM tiles occur in groups of three, with two channels of
+GDDR6 present in each group."* tt-sim models a group as one tile covering the
+group's whole 2 GiB, and the group's NoC address map names the halves: *"GDDR6
+Channel 0 data"* from `0x0_0000_0000`, *"GDDR6 Channel 1 data"* from
+`0x0_4000_0000`.
+
+Two independent controllers. One queue for the pair would serialise traffic
+that the hardware runs concurrently — an **over-charge**, the direction this
+project's cost policy forbids, and one that a workload using tt-metal's second
+1 GiB DRAM view would have hit. So `DramChannels` holds one watermark per
+physical channel and picks by address, and `ArchProfile.dram_gddr_channel_size`
+carries the split (`0x4000_0000` on Wormhole, `None` on Blackhole, which has no
+DRAM tile page in the ISA docs at all).
+
+It costs nothing today and that is worth stating plainly: every in-tree guard's
+DRAM traffic lands in the low 1 GiB, so the split-channel and single-channel
+models produce byte-identical claim, wait and cycle counts on every Wormhole
+guard (and Blackhole queues nothing at all). It is in because the shape is
+right, not because it moved a number.
+
+### What was built, and where
+
+- `DramChannels` (`tt_sim/device/tiles.py`) — one free-cycle watermark per
+  physical GDDR6 channel, plus `claims` / `waits` / `cycles_waited`.
+  Structurally the same object as `NocLinkRegistry` and `NUI._tx_free_cycle`,
+  and owned by the **tile** rather than an NIU for `NocLinkRegistry`'s reason
+  one level down: a channel is one piece of hardware behind two NoC interfaces,
+  so a per-NIU queue would let a NoC 0 and a NoC 1 request cross the same bus
+  at once.
+- `DRAMEndpointNUI._channel_wait` — claims the channel at the request's
+  *arrival* (`now + flight`), and adds the wait to the delay it was already
+  computing. The claim start is the arrival rather than the moment the bytes
+  really cross the bus, which is `service_cycles` later; that offset is the same
+  constant for every request, so it can move a phase and not a spacing.
+- `ArchProfile.dram_gddr_channel_size` / `dram_gddr_channels_per_tile`.
+- `DramCostModel.occupancy_modelled` now answers **True on Wormhole and False
+  on Blackhole**, because it is a per-arch consequence of whether the rate is
+  published rather than a global switch; `device_occupancy_modelled` is the new
+  flag for the half that is still a gap.
+
+**Blackhole gets nothing, and for a reason already on the roadmap.** Its
+`dram.bandwidth` is `provenance: unknown` (BlackholeA0 has no `DRAMTile`
+directory), so `channel_bytes_per_cycle` is `None`, so no claim is ever made:
+**every Blackhole guard is cycle-identical**, `six` included. This is the
+second time that one missing figure has been the whole of a Blackhole gap — it
+already costs ~24 % on `six` through `channel_serialisation` — and it makes the
+roadmap's *"Blackhole `dram.bandwidth` stays unknown"* bullet strictly more
+valuable than it was: measuring it would now buy the size term **and** the
+occupancy term at once.
+
+### No new consumer, and no new rank
+
+`tt_sim/device/tiles.py` was already on `EXPECTED_CONSUMERS`; the new tests went
+into `tt_sim/device/dram_cost_model_test.py`, also already on it. `PROVENANCE_
+RANK` is untouched, `estimated` still has zero entries, and the only YAML edits
+are notes that asserted the opposite of what the code now does.
+
+### Which guards moved, and why each
+
+Wormhole value guards at **one-cycle poll resolution**, cost model on, against
+the same tree with `DramChannels.claim` returning 0 — a like-for-like A/B in
+one checkout rather than a comparison across two.
+
+| Wormhole guard | before | after | Δ | DRAM claims | waits | cycles waited |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `matmulblock` | 15,087 | **15,177** | **+90** (+0.60 %) | 14 | 1 | 321 |
+| `tilize` | 9,328 | **9,398** | **+70** (+0.75 %) | 7 | 2 | 185 |
+| `matmulidx` | 9,864 | **9,904** | **+40** (+0.41 %) | 7 | 1 | 150 |
+| `untilize` | 58,986 | **59,016** | **+30** (+0.05 %) | 5 | 1 | 66 |
+| `reduce` | 9,684 | **9,704** | **+20** (+0.21 %) | 7 | 1 | 66 |
+| `reduceneg` | 9,684 | **9,704** | **+20** (+0.21 %) | 7 | 1 | 66 |
+| `pipestall` | 32,055 | 32,055 | 0 | 24 | 0 | 0 |
+| `sfpumath` | 20,593 | 20,593 | 0 | 4 | 0 | 0 |
+| `softplus` | 19,955 | 19,955 | 0 | 2 | 0 | 0 |
+| `transpose` | 8,820 | 8,820 | 0 | 4 | 0 | 0 |
+| `offline` | 8,178 | 8,178 | 0 | 3 | 0 | 0 |
+| `noc_tile_transfer` | 7,711 | 7,711 | 0 | 2 | 0 | 0 |
+| `examples` (†) | 80,501 | 80,501 | 0 | 233 | 13 | 1,219 |
+
+(†) `examples` replays several programs in one process, so its figure is the
+longest constituent run rather than a total — a change confined to a shorter
+program would not show in it. Its 13 waits are counted across all of them.
+
+Blackhole, all 28 guards the same harness can drive: **every one
+cycle-identical, zero claims**, for the structural reason above. (`blackhole/two`
+and `blackhole/offline` are the poll-budget guards, which this harness cannot
+run at one-cycle resolution by construction; the gate covers them, and their
+multipliers are unmoved.)
+
+Every guard that moved has exactly the shape the mechanism predicts: a handful
+of DRAM requests, one or two of which arrive while a previous one is still
+streaming. `cycles_waited` is the charge; the delta is how much of it reached
+the total, and the gap between them is the same critical-path story every
+instalment in this file tells. **The nine guards with `waits = 0` did not move
+at all**, which is the property that makes the term safe: it charges contention
+and nothing else.
+
+`wormhole/examples` is the interesting non-mover: 233 claims and 13 waits worth
+1,219 cycles, and a total unmoved. It is the multi-program guard, and its waits
+land inside `noc_async_read_barrier` polls that were already waiting on
+something slower.
+
+### Rung 2: byte-identical, and that is the result
+
+`python3 -m tt_sim.perf.noc_dataset_sweep` produces **byte-identical output**
+before and after — all 148 retained points, every residual, every percentile,
+every fitted slope and every sustained-rate line. Not one statistic improved
+and not one worsened.
+
+That is not a disappointment, it is the control. Every DRAM row in the retained
+set is `num_transactions = 1` per barrier, and an isolated request never finds
+the channel busy. A change that moved a rung-2 residual here would have meant
+the queue was charging something a *lone* transfer does, which is precisely the
+double-billing this shape is constructed to avoid.
+
+The corollary is that rung 2 **cannot validate this term**, and nothing in the
+tree can. The dataset's multi-transaction rows are all L1, and its DRAM rows are
+all N=1; the shipped `noc_latencies.yaml` has no "N flows into one DRAM channel"
+configuration at all. What would validate it is the sustained-rate experiment
+`wh_dram`'s own table describes — N Tensix tiles reading 1 MiB from one channel,
+N swept — which is a card session, on the axis `perfbench/nocbench` already
+knows how to sweep.
+
+### The gate
+
+**All 44 guards pass**, and no poll-budget multiplier moved — `dramtop` 1x,
+`two` 2x, `offline` 4x, unchanged. That is the point of a term charging
+contention and nothing else: it can move a total, and it may not move a result.
+All 30 Blackhole replay guards also pass standalone.
+
+The gate nevertheless reports `RESULT: FAIL`, exit 1, and it does so **at this
+instalment's base commit too**, on two stage-1 unit tests that have nothing to
+do with the cost model: `riscv_bench_sweep_test::test_the_tracked_datasets_
+carry_their_own_provenance` and `tensix_bench_sweep_test::test_the_tracked_
+dataset_carries_its_own_provenance`. The eleven 2026-08-09 campaign CSVs added
+under `tt_sim/perf/datasets/` carry `device=blackhole-silicon` but none of the
+`firmware_bundle=` / `kmd=` / `ONE RUN, ON ONE CARD` / `valid:` lines those
+tests require. **Fixing it means writing down a card's firmware and KMD
+versions, which is provenance and cannot be invented**, so it is left for
+whoever ran the session. The gate output is otherwise byte-identical before and
+after this change, modulo timings and the nine new tests (`2 failed, 1123
+passed` -> `2 failed, 1132 passed`).
+
+### What changed in the repository
+
+- `tt_sim/device/tiles.py` — `DramChannels`; `DRAMEndpointNUI._channel_wait`
+  and its `channels` argument; `DRAMTile` builds the set from the profile.
+- `tt_sim/arch/profile.py`, `tt_sim/arch/wormhole.py` —
+  `dram_gddr_channel_size` and `dram_gddr_channels_per_tile`.
+- `tt_sim/perf/model.py` — `occupancy_modelled` becomes a per-arch consequence,
+  `device_occupancy_modelled` is the remaining named gap, and two prose blocks
+  that asserted the opposite were rewritten rather than deleted.
+- `tt_sim/perf/unit_costs.yaml` — notes only, on `dram.channel_serialisation`
+  and both arches' `dram.access_latency`. **No number changed, no entry was
+  added, no provenance moved.**
+- `tt_sim/device/dram_cost_model_test.py` — nine new tests: the premise as a
+  regression, the inertness control, the per-channel split, and the two gap
+  flags.
+- `docs/plans/cost-model.md` — this section.
 
 ## Using it, when the time comes
 

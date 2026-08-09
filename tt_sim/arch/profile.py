@@ -141,6 +141,29 @@ class ArchProfile:
     #: same physical endpoint, e.g. Wormhole's captured single-NoC flows).
     dram_channel_physical_noc1_coords: tuple[tuple[int, int], ...] | None = None
 
+    #: Bytes of a ``DRAMTile``'s address space served by one **physical** GDDR6
+    #: channel, or ``None`` when the split is not published. This is not the
+    #: same thing as :attr:`dram_channel_size`, which is the whole flat range a
+    #: tile answers for: ``wh_dram`` says "DRAM tiles occur in groups of three,
+    #: with two channels of GDDR6 present in each group", and its NoC address
+    #: map names the halves -- "GDDR6 Channel 0 data" from ``0x0_0000_0000``
+    #: and "GDDR6 Channel 1 data" from ``0x0_4000_0000``. Consumed only by the
+    #: cost model, which queues requests per physical channel: two independent
+    #: controllers must not be modelled as one queue, because that would invent
+    #: serialisation the hardware does not have. ``None`` (Blackhole, which has
+    #: no DRAM tile page in the ISA docs at all) means one queue per tile,
+    #: which is moot there -- Blackhole publishes no channel rate either, so
+    #: nothing is ever queued.
+    dram_gddr_channel_size: int | None = None
+
+    @property
+    def dram_gddr_channels_per_tile(self) -> int:
+        """Physical GDDR6 channels behind one ``DRAMTile``; 1 when unpublished."""
+        size = self.dram_gddr_channel_size
+        if not size:
+            return 1
+        return max(1, self.dram_channel_size // size)
+
     @property
     def noc_kwargs(self) -> dict:
         """The per-arch NoC parameters a tile passes to each ``NUI`` it builds."""

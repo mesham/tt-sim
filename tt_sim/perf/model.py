@@ -966,9 +966,20 @@ def noc_cost_model(arch):
 #   no bank geometry or conflict cost for the DRAM tile;
 # * **refresh windows** -- unpublished, and periodic rather than per-request, so
 #   it is not even this shape;
-# * **occupancy** -- the endpoint does not hold off a second request while it
-#   services the first, so this adds latency and no contention. The
-#   under-charging direction, like every other bound in these files.
+# * **device occupancy** -- how long the array itself is unavailable to a second
+#   request. ``service_cycles`` is a latency and says nothing about the re-issue
+#   interval behind it, so reading one as the other would assert a throughput no
+#   source supports. The under-charging direction, like every other bound here.
+#
+# What *is* held off, since 2026-08-09, is the **channel**: a GDDR6 channel
+# carries one transfer at a time, so a request arriving while the previous one
+# is still streaming waits for it. That needed no new number --
+# ``channel_serialisation`` is already in the table at ``isa_doc_derived`` and
+# already spent as a latency -- and it is a floor twice over: it is the shortest
+# any endpoint can possibly be busy (the bytes have to cross the bus), and it is
+# charged only where the rate is published, which is Wormhole and not Blackhole.
+# Before it, a tt-sim Wormhole DRAM channel sustained 32 B/cycle, the NoC link's
+# rate, against the 24 the ISA docs publish for the channel.
 #
 # Size dependence is the *fifth* shape and arrives with the same class, as of
 # 2026-08-04. It used to be argued away: DRAM bandwidth is well sourced
@@ -1033,10 +1044,18 @@ class DramCostModel:
         #: the low end, so a modelled cycle count is a floor.
         self.bound = None if cost is None else cost.bound
         #: Named so a report can say the gaps are gaps rather than imply they
-        #: were modelled. All three are unquantified by every available source.
+        #: were modelled. Both are unquantified by every available source.
         self.bank_conflicts_modelled = False
         self.refresh_modelled = False
-        self.occupancy_modelled = False
+        #: The part of endpoint occupancy that is **not** modelled, and the
+        #: reason :attr:`occupancy_modelled` below is not the whole story: how
+        #: long the DRAM array itself is unavailable to a second request. That
+        #: is the device's re-issue interval, and no source publishes it or the
+        #: pipelining depth it implies -- :attr:`service_cycles` is a *latency*,
+        #: and reading a latency as an occupancy would assert a throughput of
+        #: one request per 99 cycles, which is 0.3 B/cycle against a channel
+        #: the same page publishes at 24. So it stays a named gap.
+        self.device_occupancy_modelled = False
         #: Bytes the DRAM channel moves per cycle, or ``None``. Provenance is
         #: checked rather than assumed, and that check is load-bearing: the
         #: arch overrides deep-merge, so Wormhole's 24 is still *present* under
@@ -1048,13 +1067,30 @@ class DramCostModel:
             if channel.get("provenance") in SOURCED_PROVENANCE
             else None
         )
+        #: Whether a second request is held off while the first is being
+        #: serviced -- and it means the **channel data bus** only, because that
+        #: is the only part of an endpoint's occupancy any source sizes. Where
+        #: the channel rate is sourced this is the same
+        #: :meth:`channel_serialisation_cycles` the latency term already
+        #: spends, held as a resource rather than added as a delay; where it is
+        #: not (Blackhole, whose ``dram.bandwidth`` is ``unknown``) the
+        #: endpoint stays contention-free and this reads False. See
+        #: :attr:`device_occupancy_modelled` for the half that is still a gap.
+        self.occupancy_modelled = self.channel_bytes_per_cycle is not None
 
     def channel_serialisation_cycles(self, payload_bytes):
         """Cycles the channel itself needs to move ``payload_bytes``, or ``None``.
 
-        The raw ``ceil(N / rate)``. Nothing charges this directly — see
-        :meth:`channel_excess_cycles` for why — but it is the quantity the
-        derivation in the table is about, so it is reachable on its own.
+        The raw ``ceil(N / rate)``, and it is spent twice on two different
+        axes — one number, not two, exactly as the NoC link's occupancy is:
+
+        * as a **latency**, through :meth:`channel_excess_cycles`, which charges
+          only the excess over what the link already billed so a single
+          transfer's size cost is ``ceil(N / rate)`` once rather than twice;
+        * as an **occupancy**, since 2026-08-09: the channel carries one
+          transfer at a time, so a request arriving while it is busy waits.
+          That charge is zero for an isolated request and bites only on a
+          stream, which is why it moves a sustained rate and not a latency.
         """
         rate = self.channel_bytes_per_cycle
         if not rate:

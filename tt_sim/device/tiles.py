@@ -8,6 +8,8 @@ the required ``profile`` argument, never a hard-coded default. The per-arch
 assemble these into a netlist. See ``docs/plans/blackhole-support.md``.
 """
 
+import threading
+
 from tt_sim.device.tt_device import (
     TTDeviceTile,
 )
@@ -25,6 +27,149 @@ from tt_sim.pe.tensix.tensix import TensixCoProcessor
 from tt_sim.perf.model import dram_cost_model
 from tt_sim.trace import Unit, get_registry
 from tt_sim.util.conversion import conv_to_bytes
+
+
+class DramChannels:
+    """The GDDR6 channels behind one DRAM tile: the endpoint's occupancy.
+
+    One free-cycle watermark per physical channel — structurally identical to
+    :class:`~tt_sim.network.tt_noc.NocLinkRegistry` and to
+    ``NUI._tx_free_cycle``, "the cycle this resource finishes what is already
+    on it" — and it exists for the reason a router-to-router link got one: a
+    second request really does wait. Until 2026-08-09 a DRAM endpoint served
+    every arrival independently, so three 4 KiB reads landing on the same cycle
+    were all answered on the same cycle, and a Wormhole channel sustained the
+    *NoC link's* 32 B/cycle against the 24 its own ISA doc page publishes.
+
+    Three properties, and each is what keeps this from being a second bill for
+    something already charged:
+
+    * **The number is not a new one.** The occupancy is
+      ``ceil(N / dram.channel_serialisation.bytes_per_cycle)``, the same
+      quantity ``DramCostModel.channel_excess_cycles`` already spends as a
+      latency. One figure on two axes — a delay and a resource — which is
+      exactly what ``NUI._bandwidth_delay`` does with the link's.
+    * **It is inert for an isolated request.** :meth:`claim` returns 0 when the
+      channel is free, so nothing issuing one transfer at a time can move and
+      rung 2's single-transaction rows are untouched by construction. What it
+      changes is a *sustained* rate, which is what was wrong.
+    * **There is more than one channel, and they do not contend.** A tt-sim
+      ``DRAMTile`` is what ``wh_dram`` calls a *group*: "DRAM tiles occur in
+      groups of three, with two channels of GDDR6 present in each group", and
+      the group's NoC address map splits them at 1 GiB — "GDDR6 Channel 0 data"
+      from ``0x0_0000_0000``, "GDDR6 Channel 1 data" from ``0x0_4000_0000``.
+      Two independent controllers, so one queue for the pair would invent
+      serialisation the hardware does not have, which is the over-charging
+      direction this project's cost policy forbids. ``channel_size`` is that
+      split, and ``count`` how many the tile fronts.
+
+    Owned by the **tile**, not by an NIU, because a channel is one piece of
+    hardware behind two NoC interfaces — the same ownership argument
+    ``NocLinkRegistry`` makes, one level down. ``bytes_per_cycle`` of ``None``
+    (the cost model off, or an architecture that publishes no per-channel
+    bandwidth — Blackhole, which has no DRAM tile page at all) makes every
+    claim a no-op, so the endpoint stays exactly as contention-free as it was.
+
+    What this is *not*: the device's own re-issue interval. ``access_latency``
+    is a latency, nothing publishes the pipelining behind it, and charging 99
+    cycles of occupancy would claim a throughput of 0.3 B/cycle against a
+    channel the same page rates at 24 B/cycle. The bytes crossing the bus are
+    the floor under any true occupancy, and a floor is what this model charges.
+
+    Corroboration, from the same page and not consumed as a number: 1, 12 and
+    48 Tensix tiles each reading 1 MiB *from one DRAM channel simultaneously*
+    measure 22.2, 22.3 and 22.3 GB/s. The aggregate does not grow with the
+    number of readers, which is endpoint occupancy stated as a measurement.
+    """
+
+    __slots__ = (
+        "bytes_per_cycle",
+        "channel_size",
+        "_free_cycles",
+        "_lock",
+        "claims",
+        "waits",
+        "cycles_waited",
+    )
+
+    def __init__(self, bytes_per_cycle=None, count=1, channel_size=None):
+        #: Bytes one channel moves per cycle, or ``None`` for "not modelled".
+        self.bytes_per_cycle = bytes_per_cycle
+        #: Bytes of address space per physical channel, or ``None`` when the
+        #: tile is modelled as one. Only meaningful with ``count > 1``.
+        self.channel_size = channel_size
+        #: One watermark per channel: the cycle it finishes what is on it.
+        self._free_cycles = [0] * max(1, count)
+        self._lock = threading.Lock()
+        #: Diagnostic only, and the instrument that makes "this workload has no
+        #: DRAM channel contention" checkable rather than assumed — the same
+        #: three counters ``NocLinkRegistry`` keeps, for the same reason.
+        self.claims = 0
+        self.waits = 0
+        self.cycles_waited = 0
+
+    @property
+    def count(self):
+        """How many physical channels this tile fronts."""
+        return len(self._free_cycles)
+
+    def free_cycle(self, index=0):
+        """The cycle channel ``index`` next comes free; 0 for an idle one."""
+        return self._free_cycles[index]
+
+    def index_for(self, address):
+        """Which physical channel ``address`` lands on.
+
+        The ISA doc's address map, nothing cleverer: consecutive 1 GiB windows,
+        channel 0 first. Clamped rather than wrapped, so an address past the
+        last window (the register aperture, or a tile modelled as a single
+        channel) lands on the last one instead of raising on the hot path.
+        """
+        size = self.channel_size
+        if not size or len(self._free_cycles) == 1:
+            return 0
+        return min(address // size, len(self._free_cycles) - 1)
+
+    def occupancy_cycles(self, payload_bytes):
+        """Cycles this transfer holds its channel, or ``None`` when unmodelled."""
+        rate = self.bytes_per_cycle
+        if not rate:
+            return None
+        return -(-payload_bytes // rate)  # ceil, without the import
+
+    def claim(self, start_cycle, payload_bytes, address=0):
+        """Hold ``address``'s channel for ``payload_bytes`` from ``start_cycle``.
+
+        Returns the cycles the request waited for that channel to come free —
+        the delay to add to its arrival, and 0 whenever it did not wait.
+
+        ``start_cycle`` is the request's *arrival* at the endpoint rather than
+        the moment its bytes really cross the bus, which is ``service_cycles``
+        later. The difference is the same constant for every request, so it
+        cannot change the spacing between two of them — only a phase — and
+        charging from the arrival keeps the claim next to the one decision that
+        depends on it.
+
+        Claims arrive in the order senders call :meth:`NUI.transmit`, which for
+        two *different* senders need not be arrival order. That is the same
+        ordering looseness ``NocLinkRegistry`` documents and it conserves total
+        occupancy either way: what can differ is which of two requests waits,
+        never how long the channel is busy.
+        """
+        occupancy = self.occupancy_cycles(payload_bytes)
+        if not occupancy:
+            return 0
+        index = self.index_for(address)
+        with self._lock:
+            waited = self._free_cycles[index] - start_cycle
+            if waited > 0:
+                self.waits += 1
+                self.cycles_waited += waited
+            else:
+                waited = 0
+            self._free_cycles[index] = start_cycle + waited + occupancy
+            self.claims += 1
+        return waited
 
 
 class DRAMEndpointNUI(NUI):
@@ -50,6 +195,15 @@ class DRAMEndpointNUI(NUI):
     the sum is the double-billing that (wrongly) kept ``dram.bandwidth``
     unconsumed until rung 2 measured a Wormhole DRAM read plateauing at 24.38
     B/cycle — the channel's published 24, not a fraction of the link's 32.
+
+    Three terms, since 2026-08-09, and the third is again not a third number.
+    The channel that streams those bytes carries one transfer at a time, so a
+    request arriving while it is busy waits: :class:`DramChannel` holds it for
+    the same ``ceil(N / channel_rate)`` the excess above is computed from, and
+    ``_channel_wait`` is how long this request found it held. Zero for anything
+    issuing one transfer at a time — which is why no single-transaction
+    prediction moves — and the difference between a modelled channel sustaining
+    the NoC link's 32 B/cycle and the 24 B/cycle its own page publishes.
 
     Modelled by holding the *request* rather than delaying the response, which
     is both the more faithful ordering — the data really is not read until the
@@ -81,13 +235,19 @@ class DRAMEndpointNUI(NUI):
         }
     )
 
-    def __init__(self, *args, service_cycles=None, dram_cost=None, **kwargs):
+    def __init__(
+        self, *args, service_cycles=None, dram_cost=None, channels=None, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.service_cycles = service_cycles
         #: The :class:`~tt_sim.perf.model.DramCostModel`, or ``None``. Only its
         #: channel rate is read here; the service time is unpacked above so the
         #: hot path is one attribute read rather than a method call.
         self.dram_cost = dram_cost
+        #: The :class:`DramChannels` this endpoint shares with the tile's other
+        #: NIU, or ``None``. One set of channels, two NoC interfaces — so the
+        #: queues have to be the tile's and not this object's.
+        self.channels = channels
 
     def _channel_excess(self, data_request):
         """Cycles the channel is slower than the link, for this request's bytes.
@@ -109,10 +269,34 @@ class DRAMEndpointNUI(NUI):
         )
         return model.channel_excess_cycles(data_request.data_length_bytes, link)
 
+    def _channel_wait(self, data_request, delay):
+        """Cycles this request waits for its channel to finish the last one.
+
+        Zero unless something else is already streaming across *that* channel
+        when this request lands — which is why a workload issuing one transfer
+        at a time is untouched, and why two flows to opposite halves of a
+        Wormhole DRAM tile do not contend. ``delay`` is the flight the sender
+        computed, so ``now + delay`` is where the request arrives; an endpoint
+        with no clock (the unit tests, ``driver/simple``) cannot place an
+        arrival on a timeline at all and is charged nothing, exactly as
+        :meth:`NUI.claim_injection_port` declines for the same reason.
+        """
+        channels = self.channels
+        if channels is None or channels.bytes_per_cycle is None:
+            return 0
+        now = self._current_cycle()
+        if now is None:
+            return 0
+        arrival = now + (delay if delay is not None and delay > 1 else 1)
+        return channels.claim(
+            arrival, data_request.data_length_bytes, data_request.tgt_address or 0
+        )
+
     def transmit(self, data_request, delay=None):
         service = self.service_cycles
         if service is not None and data_request.action in self._SERVICED_ACTIONS:
             service += self._channel_excess(data_request)
+            service += self._channel_wait(data_request, delay)
             delay = service if delay is None else delay + service
         NUI.transmit(self, data_request, delay)
 
@@ -155,6 +339,18 @@ class DRAMTile(TTDeviceTile):
         latency = dram_cost_model(profile.name)
         service_cycles = None if latency is None else latency.service_cycles
 
+        # The channels themselves, shared by both NIUs because each is one
+        # piece of hardware behind two NoC interfaces, and kept apart from each
+        # other because a Wormhole DRAM tile fronts two independent GDDR6
+        # controllers (profile.dram_gddr_channel_size). The rate is None with
+        # the model off and on Blackhole (no published per-channel bandwidth),
+        # and a channel with no rate never makes anything wait.
+        self.channels = DramChannels(
+            None if latency is None else latency.channel_bytes_per_cycle,
+            count=profile.dram_gddr_channels_per_tile,
+            channel_size=profile.dram_gddr_channel_size,
+        )
+
         # tile_kind="D" so NoC reads sourced from this tile pick the DRAM
         # congruence rule (32 B Wormhole / 64 B Blackhole) rather than L1's 16 B.
         r0 = DRAMEndpointNUI(
@@ -165,6 +361,7 @@ class DRAMTile(TTDeviceTile):
             tile_kind="D",
             service_cycles=service_cycles,
             dram_cost=latency,
+            channels=self.channels,
             **profile.noc_kwargs,
         )
         r1 = DRAMEndpointNUI(
@@ -175,6 +372,7 @@ class DRAMTile(TTDeviceTile):
             tile_kind="D",
             service_cycles=service_cycles,
             dram_cost=latency,
+            channels=self.channels,
             **profile.noc_kwargs,
         )
 

@@ -52,6 +52,12 @@ WORMHOLE_PROFILE = ArchProfile(
     # (`dram_view_size` = 1073741824 at address_offset 0 and 1 GiB), so the
     # second view is just the top half of this one range.
     dram_channel_size=0x8000_0000,
+    # ...of which each *physical* GDDR6 channel serves 1 GiB. WormholeB0/
+    # DRAMTile/README.md's "NoC to DRAM tile" map: "GDDR6 Channel 0 data"
+    # 0x0_0000_0000-0x0_3FFF_FFFF, "GDDR6 Channel 1 data" 0x0_4000_0000-
+    # 0x0_7FFF_FFFF. Two independent controllers behind one tile, which the
+    # cost model's endpoint occupancy has to keep apart.
+    dram_gddr_channel_size=0x4000_0000,
     # Default: a single Tensix at the historical (18, 18) coord every single-tile
     # example bakes in.
     tensix_unified_coords=((18, 18),),
