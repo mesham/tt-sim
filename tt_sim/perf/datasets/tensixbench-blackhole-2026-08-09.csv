@@ -1,5 +1,26 @@
 # tensixbench -- 2026-08-09 Blackhole card session, tensix probe.
 #
+# device=blackhole-silicon simulator=no
+# firmware_bundle=19.6.0 kmd=2.10.0
+# collected=2026-08-09 campaign=2026-08-09 host=nextgenio-amd02
+# (firmware and KMD read from the run's own UMD log, not recalled.)
+#
+# ONE RUN, ON ONE CARD, by one operator, on one day, collected by
+# perfbench/run_card_session.sh. The card is HARVESTED: addressed worker
+# columns {1..7, 10..14}, physical {1..6, 11..16}; two chips present,
+# auto-discovery downgrades to a 1x1 mesh.
+# flags: --blocks 32 --iters 64
+# valid=yes
+# dvalid_setup=once is what this run was INVOKED with, and the flag is
+# recorded below by the benchmark itself. It is NOT established that the
+# hardware behaved that way: this file matches the --dvalid-per-thread
+# control on 479/480 common rows while diverging from X1
+# (tensixbench-blackhole.csv, the same configuration) by up to 83 %, and
+# tensix-warm reproduced it in a separate process. Phase A t1 here is the
+# front end's 1-IPC floor, bit-identical to its own NOP series, so it
+# measures no MATH unit at all. Do NOT read this as a de-confounded X1
+# repeat. See docs/plans/cost-model.md, "The second rung-3 sample".
+#
 # device=blackhole-silicon simulator=no campaign=2026-08-09
 # Card is HARVESTED: addressed worker columns {1..7, 10..14}, physical
 # {1..6, 11..16}; two chips present, auto-discovery downgrades to a 1x1 mesh.

@@ -1,5 +1,17 @@
 # riscvbench -- 2026-08-09 Blackhole card session, rv-qdrain probe.
 #
+# device=blackhole-silicon simulator=no
+# firmware_bundle=19.6.0 kmd=2.10.0
+# collected=2026-08-09 campaign=2026-08-09 host=nextgenio-amd02
+# (firmware and KMD read from the run's own UMD log, not recalled.)
+#
+# ONE RUN, ON ONE CARD, by one operator, on one day, collected by
+# perfbench/run_card_session.sh. The card is HARVESTED: addressed worker
+# columns {1..7, 10..14}, physical {1..6, 11..16}; two chips present,
+# auto-discovery downgrades to a 1x1 mesh.
+# flags: --phase qs --variants t1 --blocks 32
+# valid: Q yes, S yes
+#
 # device=blackhole-silicon simulator=no campaign=2026-08-09
 # Card is HARVESTED: addressed worker columns {1..7, 10..14}, physical
 # {1..6, 11..16}; two chips present, auto-discovery downgrades to a 1x1 mesh.

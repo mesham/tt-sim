@@ -1,5 +1,18 @@
 # riscvbench -- 2026-08-09 Blackhole card session, rv probe.
 #
+# device=blackhole-silicon simulator=no
+# firmware_bundle=19.6.0 kmd=2.10.0
+# collected=2026-08-09 campaign=2026-08-09 host=nextgenio-amd02
+# (firmware and KMD read from the run's own UMD log, not recalled.)
+#
+# ONE RUN, ON ONE CARD, by one operator, on one day, collected by
+# perfbench/run_card_session.sh. The card is HARVESTED: addressed worker
+# columns {1..7, 10..14}, physical {1..6, 11..16}; two chips present,
+# auto-discovery downgrades to a 1x1 mesh.
+# flags: --blocks 32
+# valid: T yes, C yes, F yes, S yes, G yes, R no (2 R^2 checks failed),
+#   Q no (16 monotonicity checks, all at n <= 16)
+#
 # device=blackhole-silicon simulator=no campaign=2026-08-09
 # Card is HARVESTED: addressed worker columns {1..7, 10..14}, physical
 # {1..6, 11..16}; two chips present, auto-discovery downgrades to a 1x1 mesh.
