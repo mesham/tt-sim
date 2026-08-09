@@ -1,0 +1,7 @@
+nocreadbench: highest NIU_MST_REQS_OUTSTANDING_ID(0) seen = 83 (burst length 64)
+  VERDICT: NO INITIATOR LIMIT -- in-flight requests track the burst
+  length, so the initiator is not holding a bounded number in flight and
+  the sustained rate is capped downstream of it. The credit-limit term
+  is retired, not sized.
+2026-08-09 11:17:16.055 | info     |    BuildKernels | JIT cache stats: 0/1 hits (0.0%) [0 cached, 128 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-09 11:17:16.055 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)

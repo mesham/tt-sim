@@ -1,0 +1,45 @@
+2026-08-09 13:41:20.344 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-09 13:41:20.345 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-09 13:41:20.346 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:95)
+2026-08-09 13:41:20.346 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-09 13:41:20.357 | info     |             UMD | Established firmware bundle version: 19.6.0 (topology_discovery.cpp:574)
+2026-08-09 13:41:20.358 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-09 13:41:20.513 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {} (cluster.cpp:168)
+2026-08-09 13:41:20.513 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-09 13:41:20.513 | info     |             UMD | KMD version: 2.10.0 (cluster.cpp:145)
+2026-08-09 13:41:20.513 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-09 13:41:20.517 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-09 13:41:20.655 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-09 13:41:21.353 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-09 13:41:21.353 | info     |     Distributed | Using auto discovery to generate mesh graph. (metal_env.cpp:408)
+2026-08-09 13:41:21.353 | info     |     Distributed | Constructing control plane using auto-discovery (no mesh graph descriptor). (metal_env.cpp:470)
+2026-08-09 13:41:21.353 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=0 (bus_id=0x27) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-09 13:41:21.353 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=1 (bus_id=0x83) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-09 13:41:21.354 | warning  |          Fabric | TopologyMapper auto-discovery: Downgrading to mesh shape 1x1 (1 total nodes) for 2 physical chips. Some physical chips may not be used. This may indicate connectivity issues, topology mismatches, or insufficient fabric links between chips. Verify your physical chip connectivity and ensure that the fabric links are correctly configured. (topology_mapper.cpp:1696)
+2026-08-09 13:41:21.355 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:1} (topology_mapper_utils.cpp:2342)
+2026-08-09 13:41:21.355 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:2} (topology_mapper_utils.cpp:2350)
+2026-08-09 13:41:21.361 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-09 13:41:21.376 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-09 13:41:21.376 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-09 13:41:21.401 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+2026-08-09 13:41:21.403 | warning  |           Metal | Failed to create shared memory /tt_device_10250473090254239707_memory: Permission denied (memory_stats_shm.cpp:60)
+nocreadbench: arch=blackhole grid=12x10 points=43 repeats=3 num_tx=64 data_addr=0x0017C000 results_addr=0x0017BF80
+nocreadbench: wrote /home/nx09/nx09/nebriscv/tt_traces/card-session-blackhole/nocread.blackhole.csv (0 failures)
+nocreadbench: highest occupancy over rest, per-trid counter = 8; trid-independent RD_REQ_SENT - RD_RESP_RECEIVED = 13 (longest burst 128)
+nocreadbench: CMD_BUF_AVAIL left its rest value in 0 of 43 points
+  VERDICT: BOUNDED AT 13 -- the initiator holds at most this many read
+  requests in flight (per-trid occupancy peaked at 8). Check it against
+  the `dist` rows: a credit limit predicts cycles_per_tx = round_trip / 13,
+  so cycles_per_tx MUST rise with hops. If the `dist` rows are flat, this
+  bound is not what caps the rate either.
+  CMD_BUF_AVAIL: DEGENERATE -- identical at rest and in every in-loop
+  sample, so the register reports nothing about the command-buffer depth.
+  Do not quote its value as a depth: it is an occupancy (reset default 0,
+  paired with CMD_BUF_OVFL), and an occupancy that never moves is silence.
+2026-08-09 13:41:21.956 | info     |    BuildKernels | JIT cache stats: 1/1 hits (100.0%) [1 cached, 128 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-09 13:41:21.956 | info     |    BuildKernels | JIT telemetry: 3 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-09 13:41:21.963 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-09 13:41:21.963 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-09 13:41:23.068 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-09 13:41:23.068 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-09 13:41:23.068 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

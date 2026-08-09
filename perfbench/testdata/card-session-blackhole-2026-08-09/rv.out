@@ -1,0 +1,42 @@
+    `s_co_plain` at every burst length -- a drain cannot be free. If the
+    two are equal the phase measured nothing whatever the verdict said.
+    Against tt-sim the backlog grows without bound (its Tensix queue is a
+    list append), so every slot refuses a depth and there is no verdict:
+    forced, and a fact about the simulator rather than about any card.
+
+wrote 1590 rows to /home/nx09/nx09/nebriscv/tt_traces/card-session-blackhole/rv.blackhole.csv
+TTRVBENCH_VALID_R: yes
+TTRVBENCH_VALID_T: yes
+TTRVBENCH_VALID_C: yes
+TTRVBENCH_VALID_Q: no (15 checks failed)
+TTRVBENCH_VALID_F: yes
+TTRVBENCH_VALID_S: yes
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: no -- but the verdict above is PER PHASE. Send the CSV
+  regardless: the rows of a phase that passed are unaffected by one that did
+  not, and at least one phase here is usable.
+2026-08-09 11:17:54.375 | info     |    BuildKernels | JIT cache stats: 0/21 hits (0.0%) [0 cached, 14 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-09 11:17:54.375 | info     |    BuildKernels | JIT telemetry: 1 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-09 11:17:54.382 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-09 11:17:54.382 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+g_1024             g   t3      RV_FETCH 1         1026.61       1.001   1.0000
+g_1280             g   t3      RV_FETCH 1         1477.88       1.153   1.0000
+loop_overhead      g   t3      -        2            2.00       0.000   1.0000
+g_1024             g   t3      RV_FETCH 2         1026.39       1.000   1.0000
+g_1280             g   t3      RV_FETCH 2         1477.83       1.153   1.0000
+  NOT MONOTONE: q/t1/q_setdmareg thread 1: n=1 -> 14 cycles, n=2 -> 13 cycles
+  NOT MONOTONE: q/t1/q_adddmareg_sync thread 1: n=1 -> 21 cycles, n=2 -> 21 cycles
+  NOT MONOTONE: q/t2/q_setdmareg thread 0: n=8 -> 37 cycles, n=16 -> 30 cycles
+  NOT MONOTONE: q/t2/q_adddmareg thread 0: n=8 -> 35 cycles, n=16 -> 30 cycles
+  NOT MONOTONE: q/t2/q_adddmareg_sync thread 0: n=1 -> 28 cycles, n=2 -> 21 cycles
+  NOT MONOTONE: q/t2/q_nop thread 1: n=1 -> 14 cycles, n=2 -> 13 cycles
+  NOT MONOTONE: q/t2/q_setdmareg thread 1: n=1 -> 21 cycles, n=2 -> 20 cycles
+  NOT MONOTONE: q/t3/q_nop thread 0: n=1 -> 14 cycles, n=2 -> 13 cycles
+  NOT MONOTONE: q/t3/q_adddmareg_sync thread 0: n=1 -> 23 cycles, n=2 -> 21 cycles
+  NOT MONOTONE: q/t3/q_setdmareg thread 1: n=2 -> 20 cycles, n=4 -> 16 cycles
+  NOT MONOTONE: q/t3/q_adddmareg_sync thread 1: n=1 -> 21 cycles, n=2 -> 21 cycles
+  NOT MONOTONE: q/t3/q_nop thread 2: n=4 -> 28 cycles, n=8 -> 28 cycles
+  NOT MONOTONE: q/t3/q_adddmareg thread 2: n=1 -> 18 cycles, n=2 -> 13 cycles
+  NOT MONOTONE: q/t3/q_adddmareg thread 2: n=8 -> 35 cycles, n=16 -> 34 cycles
+  NOT MONOTONE: q/t3/q_adddmareg_sync thread 2: n=1 -> 21 cycles, n=2 -> 21 cycles
+
