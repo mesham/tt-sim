@@ -72,11 +72,15 @@ the initiator may hold in flight. The four candidates are:
 | **E7** `size` | bytes per transaction | rises with size | flat then link-bound | flat then link-bound | flat then link-bound |
 | **E6** `burst` | N, the control | reproduces the shipped dataset — if it does not, stop |
 
-**E0 is the one that needs no arithmetic.** `NIU_MST_REQS_OUTSTANDING_ID(i)` is
-documented in both architectures' `NoC/Counters.md` and defined identically in
-both `noc_parameters.h` as `NOC_STATUS(0x10 + i)`. It counts the initiator's own
-in-flight requests. Sample it inside a burst and the credit limit either is
-there, with its value printed, or is not:
+**E0 is the one that needs no arithmetic**, and the 2026-08-09 Blackhole card
+session is why it now takes three readings instead of one. See
+[E0 needs a baseline](#e0-needs-a-baseline-and-did-not-have-one) below before
+reading anything off it. `NIU_MST_REQS_OUTSTANDING_ID(i)` is documented in both
+architectures' `NoC/Counters.md` and defined identically in both
+`noc_parameters.h` as `NOC_STATUS(0x10 + i)`. It counts the initiator's own
+in-flight requests. Sample it inside a burst, **subtract that point's own rest
+sample**, and the credit limit either is there, with its value printed, or is
+not:
 
 - **plateaus well below the burst length** → H1 is live and `K` is *measured*,
   not derived. Then check E1: H1 also requires the rate to rise with distance.
@@ -98,6 +102,54 @@ every transaction in it reads the same source address into the same destination
 address, so every landing is a write-port conflict at the initiator and every
 fetch is a bank conflict at the responder. Neither has ever been measured apart
 from the rest.
+
+## E0 needs a baseline, and did not have one
+
+The 2026-08-09 Blackhole card session returned `outstanding_max` = **72 in all
+129 rows** — at `num_tx` 4, 16, 64 and 128 alike — with
+`outstanding_max == outstanding_end` everywhere. Four requests cannot put 72 in
+a counter of requests in flight, so the column was not an occupancy. The
+program's own verdict then compared 83 against a burst of 64, found
+`worst + 4 >= num_tx`, and printed **NO INITIATOR LIMIT**, which the session
+reported as *retiring* the credit-limit term. That conclusion is withdrawn: it
+was reached from a control that never moved.
+
+Three things were wrong, and all three are fixed in the NRB2 layout.
+
+**1. The counter is live hardware state and does not start at zero.** The kernel
+inherits whatever the NIU has been left holding. The card's readings were not
+noise — 71 for one family of points, 72 for most, 83 for the single 4096-byte
+point — but with no reference they could not be read. The kernel now samples
+every counter once **at rest**, before a single request is issued, and the
+occupancy is `outstanding_delta = outstanding_max - outstanding_rest`. On that
+reading the card's own numbers become a *delta of 0–1 at 64 B and about 12 at
+4096 B*, which is a sensible in-flight depth for an issue loop running at ~50
+cycles per transaction — but it is a reconstruction, not a measurement, because
+the baseline was never sampled. It has to be retaken.
+
+**2. Plain `noc_async_read` does not set a transaction id, so sampling counter 0
+was an assumption.** `ncrisc_noc_fast_read` in tt-metal's
+`blackhole/noc_nonblocking_api.h` (and Wormhole's) writes `NOC_RET_ADDR_*`,
+`NOC_TARG_ADDR_*`, `NOC_AT_LEN_BE` and `NOC_CMD_CTRL` — and never
+`NOC_PACKET_TAG`. The id a read carries is therefore whatever that command
+buffer's sticky tag last held; tt-metal has a separate
+`noc_async_read_set_trid` / `ncrisc_noc_fast_read_with_transaction_id` pair for
+when it wants one. tt-sim models the same sticky behaviour
+(`extract_bits(self.packet_tag, 4, 10)` in `tt_sim/network/tt_noc.py`). The
+kernel now calls `noc_async_read_set_trid(trid)` first, so the id is
+*established*. For `trid` 0 that write is a literal zero — the same value
+tt-metal's own `noc_clear_packet_tag` writes — so it disturbs no other tag field.
+
+**3. One instrument cannot check itself.** The same quantity is now measured a
+second, id-independent way: `NIU_MST_RD_REQ_SENT - NIU_MST_RD_RESP_RECEIVED`.
+Both are cumulative one-per-read counters — tt-metal's own
+`ncrisc_noc_reads_flushed` compares `RD_RESP_RECEIVED` against a software count
+of `noc_async_read` calls — so their difference is the in-flight count whatever
+id the requests carry, and it must read **zero at rest** because the kernel
+starts after a barrier. That zero is the check that the status block is being
+addressed at all. If `inflight_max` and `outstanding_delta` disagree, the
+per-trid counter is not watching these reads and the id-free pair is the one to
+believe; the program says so rather than picking one.
 
 ## The one place the documentation names the mechanism
 
@@ -132,13 +184,40 @@ Two independent sources agree, and neither gives a number:
   tt-metal references it.**
 
 A per-architecture NIU request FIFO that Blackhole has and Wormhole does not is
-exactly the shape a per-architecture rate difference needs. The kernel therefore
-reads `CMD_BUF_AVAIL` twice — once at rest before any request is issued, which
-should read the FIFO's *depth*, and once mid-burst, which reads its remaining
-space — and reports both. On Wormhole those columns read `0xFFFFFFFF`.
+exactly the shape a per-architecture rate difference needs. On Wormhole these
+columns read `0xFFFFFFFF`.
 
-If the at-rest read gives a clean small integer in all four fields, **that is the
-number the documentation omits**, and it is a register read rather than a fit.
+### It is an occupancy, so the at-rest read can never be the depth
+
+The 2026-08-09 card session read `cmdbuf_avail_rest` **and**
+`cmdbuf_avail_busy` as `0x00000000` in all 129 rows — identical at rest and
+mid-burst — and the session called that MEANINGFUL because its only check was
+"not `0xFFFFFFFF`". Two separate mistakes:
+
+- **The register is a fill level, not a count of free slots.** No code in
+  tt-metal reads it on Wormhole or Blackhole. The only register *descriptor* for
+  it anywhere in the tree is Quasar's `noc/registers/noc_niu_reg.h`, where its
+  reset value is `NOC_NIU_CMD_BUF_AVAIL_REG_DEFAULT (0x00000000)` and its
+  immediate neighbour is `CMD_BUF_OVFL`. A field that resets to zero and is
+  paired with an overflow register is an occupancy. **Zero at rest is the
+  correct reading and says nothing at all about the depth**, so an earlier
+  version of this page was wrong to say the at-rest read "should read the FIFO's
+  depth". A maximum occupancy under load is a *lower bound* on the depth, and
+  only `CMD_BUF_OVFL` moving proves the buffer was driven to its limit.
+- **The "busy" sample was not taken while anything was busy.** It was read after
+  the issue loop had ended, by which point every command buffer has long since
+  handed its entry to the NIU. It is now sampled *inside* the loop, immediately
+  after each `noc_async_read`, and the peak is reported as `cmdbuf_avail_max`.
+  `CMD_BUF_OVFL` is read at rest and at the end as `cmdbuf_ovfl_rest` /
+  `cmdbuf_ovfl_end`.
+
+If `cmdbuf_avail_max` still equals `cmdbuf_avail_rest` on the next run, the
+register is not backed on this part and the depth stays a named `unknown` — say
+that, rather than quoting a flat reading as a number.
+
+Both reads also go through the NoC instance offset now
+(`CMD_BUF_AVAIL + (noc_index << NOC_INSTANCE_OFFSET_BIT)`); the previous kernel
+dereferenced the bare macro and so read NoC 0's block whatever NoC it ran on.
 
 ## Running it
 
@@ -156,19 +235,33 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 `NoC/Counters.md` warns it "will only overflow or underflow if software has too
 many outstanding requests".
 
-The timed burst and the sampled burst are **separate runs of the same loop**.
+The timed burst and the sampled bursts are **separate runs of the same loop**.
 Sampling costs a `>= 7` cycle NIU load with a six-cycle load-use interlock, in a
 loop whose whole per-iteration cost is under 40 cycles — sampling inside the
 timed region would change the rate it is meant to explain. So `cycles` never
-contains a sample, and `outstanding_max` never comes from a timed loop.
+contains a sample, and no high-water mark ever comes from a timed loop. With
+NRB2 there are three bursts per point: one timed and unsampled, one sampling the
+per-trid counter and `CMD_BUF_AVAIL`, and one sampling the id-free
+`RD_REQ_SENT - RD_RESP_RECEIVED` pair. Sampling slows the issue rate, and a
+slower issue rate can only make an occupancy look *smaller* — every high-water
+mark here is read as a lower bound.
 
 ## Telling a good run from a degenerate one
 
-The program prints a verdict. Three of them mean *do not read the rate columns*:
+The program prints a verdict. These mean *do not read the rate columns*:
 
-- `DEGENERATE — the counter never moved.` Either the sampling load was hoisted
-  out of the loop, or every read completed before the next iteration. Send the
-  CSV anyway and say which build flags you used.
+- `DEGENERATE — neither instrument moved off its rest value.` Either the
+  sampling load was hoisted out of the loop, or every read completed before the
+  next iteration. Send the CSV anyway and say which build flags you used.
+- `DEGENERATE — the two instruments disagree.` One of the per-trid counter and
+  the id-free pair saw requests in flight and the other did not, so at least one
+  of them is not watching these reads.
+- `DEGENERATE — requests already in flight before issuing anything.` The kernel
+  starts after a barrier, so `inflight_rest` must be zero. If it is not, the
+  status block is not being read the way this program assumes and nothing in the
+  file means anything.
+- `CMD_BUF_AVAIL: DEGENERATE` — rest, last in-loop sample and peak all agree, so
+  the register reported nothing. **This is not a depth of zero.**
 - The `burst` rows disagree with `noc_latencies.yaml` (25.0 cycles/transaction
   on Wormhole, 35.0 on Blackhole, at 64 B and N ≥ 64). If this control does not
   reproduce, nothing downstream of it is worth reading. Note that at
@@ -195,15 +288,25 @@ named, sized `unknown`, which is the honest end state and is written up in
 ## Against the simulator
 
 ```bash
-TT_METAL_HOME=/path/to/tt-metal TT_SIM_ARCH=wormhole \
-  TT_SIM_TENSIX_COORDS=1-1,2-1,3-1,4-1,1-2,1-3,1-4,1-5 \
-  TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4 \
-  ./perfbench/run.sh nocreadbench -- --num-tx 8 --repeats 1
+TT_METAL_HOME=/path/to/tt-metal ./perfbench/run_card_session.sh --sim --arch wormhole  nocread cmdbuf
+TT_METAL_HOME=/path/to/tt-metal ./perfbench/run_card_session.sh --sim --arch blackhole nocread cmdbuf
 ```
 
-`src/nocreadbench-wormhole-sim.csv` is exactly that run, cost model **off**, at
-`--num-tx 8 --repeats 1`. It is checked in as a shape reference for the columns,
-not as a measurement of anything.
+`src/nocreadbench-wormhole-sim.csv` and `src/nocreadbench-blackhole-sim.csv` are
+exactly those two runs, cost model **off**, at the session's smoke settings
+(`--num-tx 8 --repeats 1`). They are checked in as shape references for the
+columns, not as measurements of anything, and they are what proves the NRB2
+layout builds and runs on both parts.
+
+The Blackhole one could not exist until recently: the Blackhole build reads
+`CMD_BUF_AVAIL` and `CMD_BUF_OVFL`, and tt-sim's NUI raised
+`NotImplementedError` on `NOC_REGS_START_ADDR + 0x64` and `+ 0x68`, so the
+Blackhole half of this program aborted against the simulator rather than
+running. Both addresses now read as the all-ones "register absent" sentinel —
+the same value this program's own `#else` branch produces on a part that does
+not define them — so a simulator run reports the fields as *absent* instead of
+inventing a plausible occupancy, and every `cmdbuf_*` column agrees on one value
+for "absent". See `tt_sim/network/noc_registers_test.py`.
 
 The simulator answer is a **known null and is not a result**: tt-sim's NIU
 appends to an unbounded queue (`add_outstanding_noc_request`), so E0 reads the

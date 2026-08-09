@@ -1968,6 +1968,20 @@ class NUI(MemMapable, Clockable):
             return conv_to_bytes(self.noc_node_id)
         elif addr == 0x0030 or addr == 0x0430 or addr == 0x830 or addr == 0xC30:
             return conv_to_bytes(self.noc_endpoint_id)
+        elif addr == 0x64 or addr == 0x68:
+            # CMD_BUF_AVAIL (0x64) and CMD_BUF_OVFL (0x68), Blackhole only;
+            # Wormhole's noc_parameters.h has no analogue for either. 0x64 is
+            # four 5-bit per-command-buffer occupancy fields whose depth the ISA
+            # docs decline to state, and 0x68 is the overflow register beside
+            # it -- the only reading that can turn a measured peak occupancy
+            # into a depth rather than a lower bound. Reading both on silicon is
+            # the whole point of perfbench/nocreadbench. This NUI models no
+            # command buffer at all, so there is no honest value to return and
+            # a fabricated small integer would be indistinguishable from the
+            # measurement. Return the all-ones sentinel nocreadbench already
+            # uses for "this part does not expose the register", so a simulator
+            # run reads as *absent* rather than as a number.
+            return conv_to_bytes(0xFFFFFFFF)
         elif addr == 0x0:
             return conv_to_bytes(self.request_initiators[0].target_addr_low)
         elif addr == 0x4:

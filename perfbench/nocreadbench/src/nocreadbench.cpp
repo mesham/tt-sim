@@ -86,6 +86,11 @@ struct Point {
     uint32_t hops = 0;  // planned Manhattan-ish distance, for E1's abscissa
     std::vector<uint32_t> result;
     bool measured = false;
+    // Derived at write-out time and reused by the verdict, so the verdict and
+    // the CSV can never disagree about what was measured.
+    uint32_t outstanding_delta = 0;  // max - rest; the occupancy, not the raw counter
+    uint32_t inflight_max = 0;       // the transaction-id-independent cross-check
+    bool cmdbuf_moved = false;       // did CMD_BUF_AVAIL ever leave its rest value
 };
 
 // The directional-torus hop count both NoCs use: NoC 0 increases x then y,
@@ -274,7 +279,9 @@ int main(int argc, char** argv) {
     fprintf(out,
             "experiment,repeat,point,mst_x,mst_y,mst_node_x,mst_node_y,num_src,src0_x,src0_y,"
             "hops,num_tx,tx_bytes,dst_stride,src_stride,cycles,cycles_per_tx,"
-            "outstanding_max,outstanding_end,samples,cmdbuf_avail_rest,cmdbuf_avail_busy\n");
+            "outstanding_max,outstanding_end,samples,cmdbuf_avail_rest,cmdbuf_avail_busy,"
+            "outstanding_rest,outstanding_delta,inflight_max,inflight_rest,trid,"
+            "cmdbuf_avail_max,cmdbuf_ovfl_rest,cmdbuf_ovfl_end\n");
 
     size_t failures = 0;
     for (uint32_t rep = 0; rep < repeats; rep++) {
@@ -310,7 +317,7 @@ int main(int argc, char** argv) {
             args[NOCREADBENCH_A_DST_STRIDE] = p.dst_stride;
             args[NOCREADBENCH_A_SRC_STRIDE] = p.src_stride;
             args[NOCREADBENCH_A_NUM_SRC] = (uint32_t)p.sources.size();
-            args[NOCREADBENCH_A_NUM_TRID] = 0;
+            args[NOCREADBENCH_A_TRID] = 0;
             args[NOCREADBENCH_A_SAMPLE] = sample;
             for (const CoreCoord& c : src_phys) {
                 args.push_back((uint32_t)c.x);
@@ -331,19 +338,40 @@ int main(int argc, char** argv) {
                 continue;
             }
             const uint32_t cycles = p.result[NOCREADBENCH_R_CYCLES];
+            // The occupancy is the DIFFERENCE. The counter is live hardware
+            // state the kernel inherits, so its raw value carries a baseline
+            // that has nothing to do with this burst -- 71 or 72 on the
+            // 2026-08-09 Blackhole card, in rows whose bursts were 4 requests
+            // long. Written out as a column rather than left to the reader.
+            const uint32_t out_max = p.result[NOCREADBENCH_R_OUTSTANDING_MAX];
+            const uint32_t out_rest = p.result[NOCREADBENCH_R_OUTSTANDING_REST];
+            const uint32_t out_delta = out_max > out_rest ? out_max - out_rest : 0;
+            p.outstanding_delta = out_delta;
+            p.inflight_max = p.result[NOCREADBENCH_R_INFLIGHT_MAX];
+            p.cmdbuf_moved =
+                p.result[NOCREADBENCH_R_CMDBUF_AVAIL_REST] != 0xFFFFFFFFu &&
+                p.result[NOCREADBENCH_R_CMDBUF_AVAIL_MAX] != p.result[NOCREADBENCH_R_CMDBUF_AVAIL_REST];
             fprintf(out,
-                    "%s,%u,%zu,%u,%u,%u,%u,%zu,%u,%u,%u,%u,%u,%u,%u,%u,%.3f,%u,%u,%u,0x%08X,0x%08X\n",
+                    "%s,%u,%zu,%u,%u,%u,%u,%zu,%u,%u,%u,%u,%u,%u,%u,%u,%.3f,%u,%u,%u,0x%08X,0x%08X,"
+                    "%u,%u,%u,%u,%u,0x%08X,0x%08X,0x%08X\n",
                     p.experiment.c_str(), rep, pi,
                     (unsigned)p.master.x, (unsigned)p.master.y,
                     p.result[NOCREADBENCH_R_NODE_X], p.result[NOCREADBENCH_R_NODE_Y],
                     p.sources.size(), (unsigned)src_phys[0].x, (unsigned)src_phys[0].y,
                     p.hops, p.num_tx, p.tx_bytes, p.dst_stride, p.src_stride,
                     cycles, (double)cycles / (double)p.num_tx,
-                    p.result[NOCREADBENCH_R_OUTSTANDING_MAX],
+                    out_max,
                     p.result[NOCREADBENCH_R_OUTSTANDING_END],
                     p.result[NOCREADBENCH_R_SAMPLES],
                     p.result[NOCREADBENCH_R_CMDBUF_AVAIL_REST],
-                    p.result[NOCREADBENCH_R_CMDBUF_AVAIL_BUSY]);
+                    p.result[NOCREADBENCH_R_CMDBUF_AVAIL_BUSY],
+                    out_rest, out_delta,
+                    p.result[NOCREADBENCH_R_INFLIGHT_MAX],
+                    p.result[NOCREADBENCH_R_INFLIGHT_REST],
+                    p.result[NOCREADBENCH_R_TRID],
+                    p.result[NOCREADBENCH_R_CMDBUF_AVAIL_MAX],
+                    p.result[NOCREADBENCH_R_CMDBUF_OVFL_REST],
+                    p.result[NOCREADBENCH_R_CMDBUF_OVFL_END]);
             fflush(out);
         }
     }
@@ -359,29 +387,77 @@ int main(int argc, char** argv) {
     // no arithmetic at all.
     printf("nocreadbench: wrote %s (%zu failures)\n", out_path.c_str(), failures);
     if (sample != 0) {
-        uint32_t worst = 0;
+        // Everything below is a DIFFERENCE against each point's own rest
+        // sample. The previous revision took the maximum RAW counter value and
+        // compared it against `num_tx`; on the 2026-08-09 Blackhole card that
+        // was 83 against a burst of 64 and it printed NO INITIATOR LIMIT from a
+        // control that had never moved. A raw counter cannot be compared to a
+        // burst length, because it does not start at zero.
+        uint32_t worst_delta = 0, worst_inflight = 0, bad_rest = 0, cmdbuf_moves = 0;
+        uint32_t max_num_tx = 0;
         for (const Point& p : plan) {
-            if (p.measured) {
-                worst = std::max(worst, p.result[NOCREADBENCH_R_OUTSTANDING_MAX]);
+            if (!p.measured) {
+                continue;
+            }
+            worst_delta = std::max(worst_delta, p.outstanding_delta);
+            worst_inflight = std::max(worst_inflight, p.inflight_max);
+            max_num_tx = std::max(max_num_tx, p.num_tx);
+            // The in-flight pair must read zero before anything is issued: the
+            // kernel enters after a barrier. If it does not, both instruments
+            // are being read through something that is not what we think.
+            if (p.result[NOCREADBENCH_R_INFLIGHT_REST] != 0) {
+                bad_rest++;
+            }
+            if (p.cmdbuf_moved) {
+                cmdbuf_moves++;
             }
         }
-        printf("nocreadbench: highest NIU_MST_REQS_OUTSTANDING_ID(0) seen = %u (burst length %u)\n",
-               worst, num_tx);
-        if (worst == 0) {
-            printf("  VERDICT: DEGENERATE -- the counter never moved. Either the sampling\n"
-                   "  load is being hoisted, or reads are completing before the next sample.\n"
-                   "  Do not read anything into the rate columns until this is non-zero.\n");
-        } else if (worst + 4 >= num_tx) {
+        printf("nocreadbench: highest occupancy over rest, per-trid counter = %u; "
+               "trid-independent RD_REQ_SENT - RD_RESP_RECEIVED = %u (longest burst %u)\n",
+               worst_delta, worst_inflight, max_num_tx);
+        printf("nocreadbench: CMD_BUF_AVAIL left its rest value in %u of %zu points\n",
+               cmdbuf_moves, plan.size());
+        if (bad_rest != 0) {
+            printf("  VERDICT: DEGENERATE -- %u point(s) saw a non-zero in-flight count\n"
+                   "  BEFORE issuing anything, and the kernel starts after a read barrier.\n"
+                   "  The status block is not being read the way this program assumes; no\n"
+                   "  occupancy in this file means anything until that is explained.\n",
+                   bad_rest);
+        } else if (worst_delta == 0 && worst_inflight == 0) {
+            printf("  VERDICT: DEGENERATE -- neither instrument moved off its rest value in\n"
+                   "  any point. Either the sampling load is being hoisted, or reads complete\n"
+                   "  before the next sample. EXPECTED against tt-sim, whose responses resolve\n"
+                   "  inside the pump that issued them. On a card this is a broken run: do not\n"
+                   "  read anything into the rate columns.\n");
+        } else if (worst_delta == 0 || worst_inflight == 0) {
+            printf("  VERDICT: DEGENERATE -- the two instruments disagree about whether\n"
+                   "  anything was in flight at all (per-trid delta %u, trid-independent %u).\n"
+                   "  The one reading zero is not watching these reads. Believe neither until\n"
+                   "  the disagreement is explained; the trid-independent pair is the one that\n"
+                   "  does not depend on which counter the requests landed in.\n",
+                   worst_delta, worst_inflight);
+        } else if (worst_inflight + 4 >= max_num_tx) {
             printf("  VERDICT: NO INITIATOR LIMIT -- in-flight requests track the burst\n"
                    "  length, so the initiator is not holding a bounded number in flight and\n"
                    "  the sustained rate is capped downstream of it. The credit-limit term\n"
                    "  is retired, not sized.\n");
         } else {
             printf("  VERDICT: BOUNDED AT %u -- the initiator holds at most this many read\n"
-                   "  requests in flight. Check it against the `dist` rows: a credit limit\n"
-                   "  predicts cycles_per_tx = round_trip / %u, so cycles_per_tx MUST rise\n"
-                   "  with hops. If the `dist` rows are flat, this bound is not what caps\n"
-                   "  the rate either.\n", worst, worst);
+                   "  requests in flight (per-trid occupancy peaked at %u). Check it against\n"
+                   "  the `dist` rows: a credit limit predicts cycles_per_tx = round_trip / %u,\n"
+                   "  so cycles_per_tx MUST rise with hops. If the `dist` rows are flat, this\n"
+                   "  bound is not what caps the rate either.\n",
+                   worst_inflight, worst_delta, worst_inflight);
+        }
+        if (cmdbuf_moves == 0) {
+            printf("  CMD_BUF_AVAIL: DEGENERATE -- identical at rest and in every in-loop\n"
+                   "  sample, so the register reports nothing about the command-buffer depth.\n"
+                   "  Do not quote its value as a depth: it is an occupancy (reset default 0,\n"
+                   "  paired with CMD_BUF_OVFL), and an occupancy that never moves is silence.\n");
+        } else {
+            printf("  CMD_BUF_AVAIL: moved. Its peak is a LOWER BOUND on the depth unless\n"
+                   "  cmdbuf_ovfl_end also moved off cmdbuf_ovfl_rest, which is the only\n"
+                   "  reading that proves the buffer was driven to its limit.\n");
         }
     }
     return failures == 0 ? 0 : 1;
