@@ -473,9 +473,18 @@ _rv_failed_phases() { # out-file
 }
 
 # Largest burst length named by a phase-Q monotonicity complaint, or 0.
+#
+# A complaint names a PAIR -- "n=16 -> 70 cycles, n=32 -> 48 cycles" -- and the
+# burst length it is evidence about is the SMALLER of the two, because either
+# point may be the one that moved and only the smaller one can be inside the
+# small-burst scatter band. Reading the larger one mis-grades a run: the
+# 2026-08-09 22:24 `rv-cross` was called SUSPECT "at n = 32" on a pair whose
+# n = 32 point was bit-identical to the primary run's and whose n = 16 point
+# had scattered by 24 cycles -- a textbook small-burst wobble, reported as
+# something above the threshold.
 _rv_q_worst_n() { # out-file
-  sed -n 's/.*NOT MONOTONE: q\/.*n=[0-9]* -> [0-9]* cycles, n=\([0-9]*\) ->.*/\1/p' "$1" 2>/dev/null |
-    awk 'BEGIN { m = 0 } { if ($1 + 0 > m) m = $1 + 0 } END { print m }'
+  sed -n 's/.*NOT MONOTONE: q\/.*n=\([0-9]*\) -> [0-9]* cycles, n=\([0-9]*\) ->.*/\1 \2/p' "$1" 2>/dev/null |
+    awk 'BEGIN { m = 0 } { lo = ($1 + 0 < $2 + 0) ? $1 + 0 : $2 + 0; if (lo > m) m = lo } END { print m }'
 }
 
 rv_verdict() { # out-file, label

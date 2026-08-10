@@ -458,6 +458,38 @@ def test_a_delay_that_fits_inside_the_session_is_not_an_epoch(rows):
     assert sweep.sweep(late, emit=_quiet)["verdict"] == "INVALID"
 
 
+def test_a_session_that_crosses_the_stamp_wrap_still_finds_its_epoch():
+    """The bar an epoch must clear is the session length, which is modular too.
+
+    Computing it as ``max - min`` over 32-bit stamps reads nearly ``2**32``
+    whenever the wall clock happens to wrap mid-run, and no real offset can
+    clear that -- so a wrapping session silently swallows every epoch it has.
+    Both 2026-08-09 Blackhole ``noc-epoch`` runs were graded INVALID for
+    exactly this reason, and their flows had overlapped perfectly.
+    """
+    span = 400_000_000
+    stamps = [(1 << 32) - span // 2 + step for step in range(0, span, span // 40)]
+    assert max(stamps) >= 1 << 32  # this session really does cross the wrap
+    wrapped = [s % (1 << 32) for s in stamps]
+
+    assert max(wrapped) - min(wrapped) > (1 << 31)  # what the old span read
+    assert sweep._elapsed_span(wrapped) == pytest.approx(span, rel=0.05)
+
+
+def test_the_banked_wrapping_run_reads_its_epoch_and_its_congestion():
+    """The 22:24 ``noc-epoch`` file, kept as the fixture for the bug above."""
+    path = sweep.DEFAULT_MEASURED.with_name(
+        "nocbench-blackhole-2026-08-09-2224-epoch.csv"
+    )
+    rows, _ = sweep.load_measured(path)
+    skew = sweep.clock_skew_report(rows)
+    assert skew[(11, 2)]["offset"] == -1_760_493_889
+    assert skew[(11, 2)]["runs"] == 5
+    overlaps = sweep.overlap_report(rows, skew)
+    assert min(overlaps.values()) > 0.9
+    assert sweep.sweep(rows, emit=_quiet)["verdict"] != "INVALID"
+
+
 def test_the_stamp_wrapping_does_not_break_the_overlap(rows):
     """The stamps are 32 bits; a run that straddles the wrap is still a run."""
     measured = _synthesise(rows, congestion=0.0)

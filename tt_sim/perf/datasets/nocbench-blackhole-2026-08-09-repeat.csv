@@ -4,13 +4,31 @@
 # Card is HARVESTED: addressed worker columns {1..7, 10..14}, physical
 # {1..6, 11..16}; two chips present, auto-discovery downgrades to a 1x1 mesh.
 # Collected by perfbench/run_card_session.sh (probe `noc-epoch`).
-# The repeat run. INVALID for congestion -- 5 multi-flow runs had ~0.00
-# timed-region overlap, so those flows never contended. Its value is the
-# clock-epoch reading: core (11,2) shows NO epoch here, against +323438586
-# and -495379666 in two other runs. The epoch is per-RUN, not per-core.
+# The repeat run. CORRECTION, 2026-08-10: this file was banked as "INVALID for
+# congestion -- 5 multi-flow runs had ~0.00 timed-region overlap" and as
+# evidence that "core (11,2) shows NO epoch here ... the epoch is per-RUN, not
+# per-core". BOTH READINGS WERE ARTEFACTS OF A BUG IN THE READER, not
+# properties of the card.
 #
-# Analysis: docs/plans/cost-model.md, "The second rung-3 sample". A silicon
-# measurement is `corroboration`, never provenance -- nothing here is charged.
+# Its wall-clock stamps cross 2**32 part-way through the run. The old session
+# span in tt_sim.perf.noc_congestion_sweep was `max - min` over those modular
+# stamps, so it read 4,289,112,683 against a true elapsed of 383,858,750 --
+# and that span is the bar an epoch offset must clear to be believed. It
+# swallowed a perfectly good -782897612 cycle offset on core (11,2), tight to
+# 4 cycles over the five flows that core appears in. With the offset not
+# subtracted, those same five runs reported ~0.00 overlap and the file was
+# graded INVALID. With the span computed wrap-aware all five overlap 1.00 and
+# the file reads CONGESTION MEASURED, with slopes that reproduce the other
+# runs' to within 0.2 cycles/shared-link.
+#
+# The (11,2) epoch is present in 5 of 5 nocbench invocations, never twice with
+# the same value (+1143914610, -495379666, -782897612, -1460817587,
+# -1760493889). It is constant WITHIN a launch and re-derived per file, which
+# is what the reader already does. Same-core durations are unaffected.
+#
+# Analysis: docs/plans/cost-model.md, "The congestion pair, and the epoch that
+# was never absent". A silicon measurement is `corroboration`, never
+# provenance -- nothing here is charged.
 # PRE-BUILT PLAN for the harvested Blackhole card, so the card box needs no
 # tt_sim/ and no numpy/pyyaml. Generated at home by:
 #   python3 -m tt_sim.perf.noc_congestion_plan \

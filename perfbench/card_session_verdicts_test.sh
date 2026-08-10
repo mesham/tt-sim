@@ -187,6 +187,17 @@ check "rv, phase Q complaint at n = 64" SUSPECT "$r"
 r="$(rv_verdict "$TMP/q_and_r.out" rv)"
 check "rv, phase Q plus another phase" SUSPECT "$r"
 
+# A pair is evidence about its SMALLER burst: either point may be the one that
+# moved, and only the smaller can be inside the documented scatter band. This
+# is the 2026-08-09 22:24 `rv-cross` line, which was graded SUSPECT "at n = 32"
+# on a pair whose n = 32 point had not moved at all.
+{ echo "TTRVBENCH_VALID_R: yes"
+  echo "TTRVBENCH_VALID_Q: no (1 checks failed)"
+  echo "  NOT MONOTONE: q/t1/q_loop_adddmareg thread 1: n=16 -> 70 cycles, n=32 -> 48 cycles"
+} > "$TMP/q_pair.out"
+r="$(rv_verdict "$TMP/q_pair.out" rv)"
+check "rv, phase Q pair is graded on its smaller burst" MEANINGFUL "$r"
+
 echo
 echo "== the remaining probes"
 

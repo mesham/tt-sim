@@ -6606,6 +6606,364 @@ passed` -> `2 failed, 1132 passed`).
   flags.
 - `docs/plans/cost-model.md` — this section.
 
+## The endpoint term, corroborated on silicon, and three reports re-read
+
+The section above shipped `DramChannels` and then said, plainly, what it could
+not do: "rung 2 **cannot validate this term**, and nothing in the tree can ...
+What would validate it is the sustained-rate experiment `wh_dram`'s own table
+describes — N Tensix tiles reading 1 MiB from one channel, N swept — which is a
+card session."
+
+That card session ran the same day, at 22:34, on the harvested Blackhole part.
+This section records what it returned, together with three other probes from the
+22:24 session whose reports were collected but never read — and two of those
+three turn out to have been misread by the tools rather than by the card.
+
+**Nothing here is charged.** Every number below is `corroboration`, on one part,
+on one day. No `unit_costs.yaml` entry moved and none became chargeable.
+
+### 47.1 B/cycle, twice, from two methods that share nothing
+
+The cross-check is the part worth leading with, because it is the rarest kind of
+evidence this file has collected.
+
+`dramratebench` puts N Tensix tiles on one DRAM channel and sweeps N. Its
+one-channel arm saturates at **47.14 B/cycle** (mean of three repeats at 120
+readers; the run's own summary line reads 47.171 for its last repeat).
+
+Rung 2 derives Blackhole's DRAM read rate from tt-metal's 8,140-point measured
+NoC dataset, by fitting the large-transfer slope of the diff-axis series. Run
+today, `python3 -m tt_sim.perf.noc_dataset_sweep --arch blackhole` prints:
+
+```
+  implied sustained bandwidth, from the large-transfer slope
+    DRAM read diff-axis    measured  47.08 B/cycle   model  64.00 B/cycle
+    DRAM write diff-axis   measured  59.36 B/cycle   model  64.00 B/cycle
+```
+
+**47.08 against 47.14 — 0.13 %.** The two have no input in common: one is a
+vendor dataset of single-transaction latencies at many transfer sizes, fitted
+for a slope; the other is a bandwidth sweep of many concurrent readers at one
+transfer size, read off its plateau. They do not share a card, a kernel, a
+harness, or a year. Agreement at this level is not a coincidence and it is not
+circularity, because neither derivation can see the other.
+
+It also retires a worry the previous section left open. That 47.1 was quoted as
+"74 % of a 64 B/cycle link" and read as *suspicious* — Wormhole's two directions
+agree to 0.6 % while Blackhole's differ by 26 %, "which is not" what one channel
+rate looks like. The card says the read figure is simply correct. Whatever
+explains Blackhole's read/write asymmetry, it is not an artefact of the rung-2
+fit.
+
+### One channel, 120 readers, and exactly 1/N
+
+The shape is as clean as the rate.
+
+| readers | 1 | 2 | 4 | 8 | 12 | 16 | 24 | 32 | 48 | 120 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| one channel, aggregate | 46.30 | 46.06 | 45.91 | 45.69 | 46.09 | 46.40 | 47.10 | 47.08 | 47.09 | 47.14 |
+| one channel, per reader | 46.30 | 23.03 | 11.48 | 5.71 | 3.84 | 2.90 | 1.96 | 1.47 | 0.98 | 0.39 |
+| fanned across 8 banks | 46.35 | 92.86 | 148.1 | 188.7 | 172.4 | 212.2 | 205.3 | 233.0 | 192.2 | 233.5 |
+
+Per-reader throughput on one channel is `46.30 / N` to within 1.8 % at every
+point in a 120× sweep. The aggregate moves by **×1.018** while the same readers,
+the same issue loop and the same 4096 B transactions fanned across eight banks
+move by **×5.04**.
+
+The strongest way to say it: **one reader already saturates the channel.** A
+single tile gets 46.3 B/cycle; a hundred and twenty tiles together get 47.1.
+Adding 119 readers bought 1.8 %. That is what perfect serialisation at an
+endpoint looks like, and it is the shape `DramChannels` asserts.
+
+What it does *not* give is a depth. The term models a queue; this measures the
+queue's output rate when it is permanently full, which is the one regime in
+which depth does not matter. The card confirms the shape and says nothing about
+the parameter.
+
+### Two caveats that must travel with the number
+
+**It is `corroboration`, never provenance.** BlackholeA0 publishes no DRAM tile
+page at all, so `dram.bandwidth` stays `provenance: unknown` and unchargeable
+there, exactly as the previous section left it. A measurement on one card is not
+a published figure, and the guard in `DramCostModel` that refuses Wormhole's
+deep-merged 24 must keep refusing. **This section adds evidence, not a source.**
+
+**The `samecore` arm did not run**, and its absence is load-bearing.
+`dramratebench` is built with three arms; `samecore` was to put N readers on two
+banks that share one physical DRAM core — same inbound NoC link, different GDDR6
+channel — and it is the arm that separates a *channel* limit from the limit of
+the one router link every `onechan` flow converges on. On this part no physical
+DRAM core fronts two banks (all eight are one bank each), so the benchmark
+skipped it and said so.
+
+So what is established is that **the endpoint costs the difference, not the
+fabric** — the fan-out control travelled the same fabric and scaled ×5. What is
+*not* established is which endpoint: the GDDR6 channel and its inbound router
+link remain confounded. `DramChannels` charges the channel. That is still the
+better-motivated of the two, and it is now unrefuted rather than corroborated
+down to the component.
+
+### `tensix-rdcfg`: a probe-design negative, recorded as one
+
+`RDCFG`'s latency is documented `>= 2`, and the 22:24 session tried to measure it
+as `(RDCFG + STALLWAIT) - (SETDMAREG + the same STALLWAIT)`.
+
+The control moved: `SETDMAREG` alone reads 0.998 cycles/instruction and
+`RDCFG + STALLWAIT` reads 2.968, so the stall instruction plainly costs
+something. The paired difference is **+0.000 cycles per pair** (3.000 against
+2.999), under the 0.5 cycle/pair floor a claim about a `>= 2` latency has to
+clear.
+
+This is the null, not a small value. Both slots pay for the stall *instruction*
+while neither stall ever observes the config unit — `STALL_THREAD` on
+`TRISC_CFG` is the condition that would have made the second operand wait, and
+the construction never engaged it. The doc's `>= 2` stays as unchecked as it was,
+and the next attempt needs a different construction rather than more repeats.
+
+### The fetch ramp, resolved: graded, not a step
+
+The previous section left phase G's instruction-fetch ramp bracketed: the onset
+was somewhere in `(4096, 5120]` and everything between was interpolation. Four
+`--gset` runs at 22:24 filled it in. With gset 0's 5120 B from the primary
+dataset there are now **five measured intermediate footprints**, none inferred.
+
+The `g_1024` baseline rows are bit-identical across all four gset files bar one
+cell (gset 3 at n = 128, off by one cycle in 131,688), so the files compare
+directly without renormalising — checked before comparing, because it is the
+assumption the whole table rests on.
+
+| footprint (B) | 4096 | 4608 | 5120 | 5632 | 6144 | 7168 |
+| --- | --- | --- | --- | --- | --- | --- |
+| cycles/instruction | 1.0022 | 1.0938 | 1.1598 | 1.2141 | 1.2565 | 1.2556 |
+| normalised to 4096 | 1.0000 | 1.0915 | 1.1573 | 1.2115 | 1.2538 | 1.2529 |
+| step from previous | — | +0.0915 | +0.0658 | +0.0542 | +0.0423 | −0.0009 |
+
+**It is a graded ramp, and emphatically not one step.** Four resolved,
+monotonically decreasing increments carry the cost from 1.000 to 1.254 across
+4096 → 6144 B, and then it stops: 7168 B is 0.0009 *below* 6144 B, and the
+session's own phase-F 8192 B point sits at 1.2522. Phase F also brackets the
+ramp from below: 256, 512, 1024, 2048 and 4096 B all read 1.000–1.027, so
+nothing happens until 4 KiB and everything happens in the 2 KiB above it. Any
+single-step reading is excluded by the
+data — a step would have put two adjacent footprints on 1.000 and 1.25 with
+nothing between, and there are four points between.
+
+The rising region has a specific shape, and it is the one a fixed-capacity
+buffer predicts. If a buffer of capacity `C` covers the loop and everything
+outside it costs `k` extra, the cost is `1 + k(1 − C/F)` — linear in `1/F`.
+Fitted over the four rising points:
+
+```
+  cost = 1.7430 − 3000.2 / footprint      r2 = 0.99983
+  implied k = 0.743,  implied capacity C = 4038 B
+```
+
+r2 0.99983 over four points, and an implied capacity of **4038 B against a
+natural 4096**. That is a 1.4 % miss on a parameter the fit was not told about,
+and it is the strongest single result in the phase-G series.
+
+But the same fit **fails above 6144 B**, and the failure is the interesting
+half. Extrapolated to 7168 B it predicts 1.3245; the card measured 1.2529. The
+1/F curve should keep climbing towards 1.743 and instead the cost stops dead at
+1.253 and stays there to 8192 B (1.2522).
+
+So two mechanisms, not one. A **~4 KiB covered window** whose shrinking coverage
+produces the graded 1/F rise, and a **ceiling at ~1.253 cycles/instruction** that
+takes over once the window covers little enough. A pure capacity-miss model
+cannot produce the plateau; a pure bandwidth model cannot produce the graded
+rise. The ceiling is what a fetch path that can no longer be run ahead of looks
+like — every instruction costs the same delivery cost, however much bigger the
+loop gets.
+
+One arithmetic observation, offered as a hypothesis and not a conclusion:
+1.253 is within 0.3 % of **1.25 = four instructions per five cycles**, which is
+what a 16 B fetch line delivered with one bubble per line would give. The
+measurement cannot distinguish that from 1.253 exactly, and nothing in this file
+should treat it as though it could.
+
+`tt_sim` charges no instruction-fetch term on either architecture, so none of
+this contradicts a charged cost. What it does is turn a "there is a step
+somewhere above 4 KiB" note into a two-parameter shape with a capacity, a
+ceiling, and five measured points between them.
+
+### The congestion pair, and the epoch that was never absent
+
+Both 22:24 congestion CSVs were collected and marked DEFERRED, because the
+report generator needs `tt_sim/` and the card box does not have it. Run here they
+say two things, one confirming and one correcting.
+
+**The shape reproduces across sessions.** Four independent nocbench invocations
+now agree:
+
+| shared-link slope | 64 B | 512 B | 2048 B | 8192 B | 16384 B |
+| --- | --- | --- | --- | --- | --- |
+| 13:41 `noc` | −0.01 | +0.01 | +2.49 | +10.87 | +22.49 |
+| 13:41 `noc-epoch` | −0.01 | +0.01 | +2.63 | +10.97 | +22.47 |
+| 22:24 `noc` | −0.01 | +0.00 | +2.48 | +10.94 | +22.39 |
+| 22:24 `noc-epoch` | −0.01 | +0.00 | +2.45 | +10.92 | +22.50 |
+
+FLAT at 64 and 512 B, SATURATING at 2048 B and above, across two sessions nine
+hours apart. **The caveat that has to travel with every one of those numbers is
+unchanged: r2 is 0.03–0.47.** These are *shape* verdicts read off poor fits. The
+shapes reproduce; the coefficients are not well determined and must not be
+quoted as though they were.
+
+**The correction is larger.** Both `noc-epoch` runs were graded `INVALID` — "5
+multi-flow runs whose timed regions barely overlapped; those flows did not
+contend" — and the 13:41 one was banked with a header saying the (11,2) clock
+epoch "shows NO epoch here ... The epoch is per-RUN, not per-core."
+
+All of that was a bug in the reader.
+
+An epoch offset is only believed if it is *impossible as a delay*, which the
+sweep tested by requiring it to exceed the session length. The session length
+was computed as `max(t0) − min(t0)` over stamps that are the low 32 bits of a
+free-running counter. Both `noc-epoch` runs happen to cross `2**32` part-way
+through, so that span read **4,289,112,683** and **4,288,408,164** against true
+elapsed times of 383,858,750 and 386,257,520. No real offset can clear a bar of
+nearly `2**32`, so both files' offsets were discarded — and, not being
+subtracted, the five runs core (11,2) appears in then reported ~0.00 overlap and
+took the whole file down with them.
+
+With the span computed wrap-aware, both files find their offset, all five of
+those runs overlap **1.00**, and both read `CONGESTION MEASURED`. Nothing about
+the card changed. `_elapsed_span` now walks the stamps in run order accumulating
+signed-wrapped steps, and the 22:24 file is banked as the regression fixture.
+
+That leaves the (11,2) question, and it can now be answered with the runs
+pooled. The epoch is present in **5 of 5** nocbench invocations, never twice with
+the same value:
+
+| run | (11,2) offset (cycles) | spread |
+| --- | --- | --- |
+| 2026-08-05 | +1,143,914,610 | 1 over 2 flows |
+| 08-09 13:41 `noc` | −495,379,666 | 4 over 5 |
+| 08-09 13:41 `noc-epoch` | −782,897,612 | 4 over 5 |
+| 08-09 22:24 `noc` | −1,460,817,587 | 4 over 5 |
+| 08-09 22:24 `noc-epoch` | −1,760,493,889 | 6 over 5 |
+
+So the detector's "reproduced over 5 runs" does count repeats *inside* one
+invocation, exactly as suspected — but the conclusion drawn from that, that the
+epoch is flaky or absent, was wrong. It is rock solid within a launch and
+different in every launch.
+
+It is **not a frequency difference**, and that can be shown from within a single
+file without any modular ambiguity. Across the 22:24 `noc-epoch` run the offset
+moved by 1 cycle while 212,681,996 cycles elapsed on the reference tile — a rate
+difference below `5e-9`. Over the few minutes between that probe and the one
+before it, that rate could produce at most a few thousand cycles of drift; the
+observed change is 299,676,302. Refuted by five orders of magnitude. Whatever
+re-bases that tile's counter happens *between* program launches, not during one.
+
+The practical consequence is the one that closes the bullet: the offset must be
+re-derived per file and never carried between files, which is what the reader
+already does — and **same-core durations, which every coefficient in this file
+is fitted to, never involve two tiles' stamps at all.** No cost model number is
+exposed to this. It is a property of the harness's cross-core timestamps and of
+nothing else.
+
+### Phase Q at "n = 32": a mislabel, not a threshold
+
+The 22:24 session ran `riscvbench` twice at identical parameters. The primary
+was graded MEANINGFUL — phase Q's monotonicity complaints all at n ≤ 16, which
+`riscvbench/README.md` documents as expected small-burst scatter. The repeat was
+graded **SUSPECT**, "phase Q failed its gate at n = 32, above the small-burst
+scatter the README accounts for."
+
+Same binary, same flags, different verdict. The whole difference is one line:
+
+```
+NOT MONOTONE: q/t1/q_loop_adddmareg thread 1: n=16 -> 70 cycles, n=32 -> 48 cycles
+```
+
+Read the series against the primary run's and the diagnosis is immediate:
+
+| n | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| primary | 46 | 48 | 107 | 299 | 683 | 1451 | 2987 |
+| repeat | **70** | 48 | 107 | 299 | 683 | 1451 | 2987 |
+
+**Every point from n = 32 up is bit-identical between the two runs.** The n = 16
+point moved by 24 cycles and nothing else moved at all. The violation is a
+scatter at n = 16 — inside the documented band — and it was labelled "n = 32"
+because `card_session_verdicts.sh` extracted the *second* n from the complaint
+line. A pair is evidence about its smaller burst, since either point may be the
+one that moved and only the smaller can be inside the scatter band.
+
+It is scatter and not something systematic, on the phase-R precedent: of the
+complaint slots the two runs raise, only 4 are common; the rest fall on
+different `(variant, thread, probe, n)` slots, which is the same signature phase
+R's R2 failures showed when they landed on different slots in two runs.
+
+The honest tolerance question has a measured answer rather than a chosen one,
+which is the precedent phase S set. Differencing the 390 phase-Q slots the two
+runs have in common gives the run-to-run scatter, and comparing it to the
+monotone step the gate is testing gives this:
+
+| pair | median step (cycles) | max run-to-run scatter | testable? |
+| --- | --- | --- | --- |
+| 1 → 2 | 5.0 | 7 | no |
+| 2 → 4 | 9.5 | 7 | marginal |
+| 4 → 8 | 12.0 | 11 | marginal |
+| 8 → 16 | 9.0 | 21 | **no** |
+| 16 → 32 | 20.0 | 45 | **no** |
+| 32 → 64 | 54.5 | 39 | yes |
+| 64 → 128 | 192.0 | 42 | yes |
+| 128 → 256 | 768.0 | 30 | yes |
+| 256 → 512 | 1536.0 | 21 | yes |
+
+The scatter is roughly **constant in absolute cycles** (21–45) while the step
+the gate checks grows with the burst. So the gate is testing noise below the
+crossover and hardware above it, and the crossover sits between the 16 → 32 pair
+and the 32 → 64 pair. **The first pair phase Q can honestly be gated on is
+32 → 64.**
+
+That makes the README's "n ≤ 16" threshold defensible but one notch tight, and
+it makes the labelling — not the threshold — the actual defect here. Grading a
+pair by its smaller burst re-grades this run MEANINGFUL without moving the
+threshold at all, and that is the change made. Anyone who wants to widen the
+threshold to n ≤ 32 now has the measurement to justify it; it was not needed to
+fix this run and so was not done.
+
+### Nothing contradicts a charged cost
+
+Worth stating explicitly, because it is the thing this file has to check every
+time. Of everything above:
+
+- The DRAM rate **agrees** with rung 2's derivation to 0.13 % and contradicts
+  nothing; `dram.bandwidth` stays unchargeable on Blackhole.
+- The congestion slopes are unchanged from the readings already recorded, and
+  no congestion coefficient is charged anywhere.
+- The fetch ramp measures a term `tt_sim` does not model on either
+  architecture, so there is no charged value to contradict.
+- `RDCFG` returned a null, which leaves its `>= 2` exactly as unchecked as it
+  was.
+- The (11,2) epoch is a cross-core timestamp artefact and touches no fitted
+  coefficient.
+
+Two *tools* were wrong and are fixed; no measured or charged number was.
+
+### What changed in the repository
+
+- `tt_sim/perf/noc_congestion_sweep.py` — `_elapsed_span`, and the session-span
+  guard in `clock_skew_report` now uses it. **No coefficient, threshold or
+  verdict rule changed**; a modular quantity is computed modularly.
+- `tt_sim/perf/noc_congestion_sweep_test.py` — two tests: the wrap in the
+  abstract, and the banked 22:24 file as a real fixture.
+- `perfbench/card_session_verdicts.sh` — `_rv_q_worst_n` grades a phase-Q
+  complaint by the smaller burst in its pair. The `n <= 16` threshold is
+  untouched.
+- `perfbench/card_session_verdicts_test.sh` — the 22:24 `rv-cross` line as a
+  regression.
+- `tt_sim/perf/datasets/` — four new files: the 22:24 congestion pair
+  (`nocbench-blackhole-2026-08-09-2224.csv` and `-2224-epoch.csv`, the second
+  being the wrap fixture) and the two new footprints
+  (`riscvbench-blackhole-2026-08-09-gset3.csv`, `-gset4.csv`, 4608 and 5632 B).
+- `tt_sim/perf/datasets/nocbench-blackhole-2026-08-09-repeat.csv` — header
+  corrected. It asserted the file was INVALID and that (11,2) had no epoch;
+  both were artefacts of the wrap bug and the file reads clean.
+- `docs/plans/cost-model.md` — this section.
+
 ## Using it, when the time comes
 
 ```python

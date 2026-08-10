@@ -1,0 +1,42 @@
+# riscvbench -- 2026-08-09 Blackhole card session (the 22:24 run), rv-gset probe.
+#
+# device=blackhole-silicon simulator=no
+# firmware_bundle=19.6.0 kmd=2.10.0
+# collected=2026-08-09 campaign=2026-08-09 host=nextgenio-amd02
+# (firmware and KMD read from the run's own UMD log, not recalled.)
+#
+# ONE RUN, ON ONE CARD, by one operator, on one day, collected by
+# perfbench/run_card_session.sh. The card is HARVESTED: addressed worker
+# columns {1..7, 10..14}, physical {1..6, 11..16}; two chips present,
+# auto-discovery downgrades to a 1x1 mesh.
+# flags: --phase g --variants t1 --blocks 32 --gset 4
+# valid: G yes
+#
+# gset 4: 5632 B body -- a footprint NOT measured before this run. The two
+# 13:41 gset files banked beside this one carry 6144 and 7168 B, and the
+# primary dataset's gset 0 carries 5120 B. With 5632 B this file is one of
+# the two points that turn the phase-G fetch ramp from a bracket into a
+# resolved shape: 4096 / 4608 / 5120 / 5632 / 6144 / 7168 / 8192 B all
+# measured, none interpolated.
+#
+# The `g_1024` rows are the in-file baseline and are bit-identical across all
+# four 22:24 gset files bar one cell (gset 3, n = 128, off by 1 cycle), so the
+# files may be compared directly without renormalising.
+#
+# Analysis: docs/plans/cost-model.md, "The fetch ramp, resolved". A silicon
+# measurement is `corroboration`, never provenance -- nothing here is charged.
+# riscvbench raw points -- see docs/plans/riscv-front-end-benchmark.md
+# arch=blackhole magic=0x7B10CF04 probe_mask=0x1FFFFFFFFFFFFF phases=g variants=t1 base_blocks=32 gset=4 group_reps=16 pad=16 stack_addr=0xFFB00F98 scratch_addr=0x0017D380 div_dividend=0x12345678 div_divisor=3
+phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
+g,t1,0,loop_overhead,-,1,1,32,64,76
+g,t1,0,loop_overhead,-,1,1,64,64,140
+g,t1,0,loop_overhead,-,1,1,96,64,204
+g,t1,0,loop_overhead,-,1,1,128,64,268
+g,t1,47,g_1024,RV_FETCH,1,1,32,1024,33173
+g,t1,47,g_1024,RV_FETCH,1,1,64,1024,65864
+g,t1,47,g_1024,RV_FETCH,1,1,96,1024,98777
+g,t1,47,g_1024,RV_FETCH,1,1,128,1024,131688
+g,t1,52,g_1408,RV_FETCH,1,1,32,1408,54782
+g,t1,52,g_1408,RV_FETCH,1,1,64,1408,109450
+g,t1,52,g_1408,RV_FETCH,1,1,96,1408,164166
+g,t1,52,g_1408,RV_FETCH,1,1,128,1408,218886

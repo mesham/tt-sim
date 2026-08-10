@@ -260,6 +260,27 @@ def _signed_wrap(delta):
     return delta - _WRAP if delta > _WRAP // 2 else delta
 
 
+def _elapsed_span(stamps):
+    """How long the session ran, from stamps that are only 32 bits wide.
+
+    ``max - min`` is wrong here: the stamps are modular, so a session whose
+    wall clock happens to cross ``2**32`` part-way through reports a span of
+    nearly ``2**32`` -- and this span is the bar an epoch offset has to clear
+    to be believed. A wrapping session therefore silently swallows every real
+    offset, which is exactly what happened to two of the Blackhole runs.
+
+    ``stamps`` arrive in file order, which is run order, and successive runs
+    are milliseconds apart, so each step is unambiguous: reduce it into
+    ``(-2**31, 2**31]`` and accumulate.
+    """
+    if not stamps:
+        return 0
+    walk = [0]
+    for prev, cur in zip(stamps, stamps[1:]):
+        walk.append(walk[-1] + _signed_wrap(cur - prev))
+    return max(walk) - min(walk)
+
+
 def _master(row):
     return (row.get("mst_px"), row.get("mst_py"))
 
@@ -334,7 +355,7 @@ def clock_skew_report(rows):
     frame = max(sizes, key=lambda root: sizes[root])
 
     in_frame = [r for r in rows if r.get("measured") and find(_master(r)) == frame]
-    session = max(r["t0"] for r in in_frame) - min(r["t0"] for r in in_frame)
+    session = _elapsed_span([r["t0"] for r in in_frame])
 
     implied = defaultdict(list)
     for a, b, delta, _run in pairs:
