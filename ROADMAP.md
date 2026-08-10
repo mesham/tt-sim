@@ -54,13 +54,14 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 2. **Silicon follow-ups** — three Blackhole sessions ran 2026-08-09
    (see §2). The endpoint-occupancy term is **corroborated on
    silicon**, the fetch onset is bracketed by five measured
-   footprints, and the session is twelve probes. What is left splits:
-   **analysis here** (the fetch ramp's shape, two DEFERRED congestion
-   reports including the (11,2) epoch, `rv-cross`'s phase-Q failure at
-   n = 32); **one card experiment** (the dvalid mode-vs-card-state run
-   that re-opens the Matrix Unit); **one probe redesign** (`RDCFG` —
-   the built construction never reaches the config unit); and the
-   **Wormhole follow-on**.
+   footprints, and the session is twelve probes. **All four offline
+   analyses are done** (2026-08-10): the congestion pair reproduces,
+   the (11,2) epoch is closed, the fetch ramp is a graded 1/F rise to
+   a ceiling, and phase Q's failure was a grader mislabel. What is
+   left needs hardware or new code: **one card experiment** (the
+   dvalid mode-vs-card-state run that re-opens the Matrix Unit), **one
+   probe redesign** (`RDCFG` — the built construction never reaches
+   the config unit), and the **Wormhole follow-on**.
 3. **Tensix issue latency & wait-gates**, then mover / PC-buffer
    timing point fixes.
 
@@ -312,13 +313,21 @@ that session settled, and what it left.
 - **The hop line corroborates the ISA docs**: `4364.0 + 9.03*hops` and
   `4361.7 + 8.85*hops`, r2 1.00, against a published ~9 cycles
   router-to-router.
-- **The (11,2) tile clock epoch is NOT a per-core constant.** It reads
-  +323,438,586, then −495,379,666, then *absent* across three runs.
-  The detector's "reproduced over 5 runs" counts repeats *inside* one
-  invocation, so the "a constant that reproduces across independent
-  runs cannot be a scheduling delay" argument never applied to it.
-  Same-core durations, which every coefficient is fitted to, remain
-  unaffected — this closes the bullet as a non-issue.
+- **The (11,2) tile clock epoch is real in 5 of 5 runs, and its two
+  "absences" were a reader bug.** `noc_congestion_sweep`'s session-span
+  guard used `max − min` over **32-bit** stamps; both `noc-epoch` runs
+  cross `2**32` mid-run, so the span read ~4.29e9 against a true
+  ~3.8e8 and swallowed every real offset — which also forced their
+  congestion verdicts to `INVALID`. Fixed (`_elapsed_span` accumulates
+  signed-wrapped steps); both now read `CONGESTION MEASURED` with all
+  five runs overlapping 1.00. The offset is constant *within* a launch
+  and different in **every** launch (+1,143,914,610 / −495,379,666 /
+  −782,897,612 / −1,460,817,587 / −1,760,493,889), and is **not**
+  frequency drift: the within-file rate is < 5e-9, predicting a few
+  thousand cycles between probes against 3e8 observed — refuted by
+  five orders of magnitude. Same-core durations, which every
+  coefficient is fitted to, never involve two tiles' stamps, so
+  **closed as a non-issue** — for a sharper reason than first thought.
 - **`CMD_BUF_AVAIL` is unreadable, and no re-run will change that.**
   It is an *occupancy* (reset default 0, paired with `CMD_BUF_OVFL`),
   and it reads `0x00000000` at rest **and** in every in-loop sample.
@@ -363,10 +372,17 @@ that session settled, and what it left.
   deliberately dirtied card. Card state is the confound neither run
   controlled — SETDVALID runs leave the Src banks owned by the Matrix
   Unit with no release.
-- **The fetch ramp's onset** — the two builds it needed, 4608 B and
-  5632 B, exist as `--gset 3`/`4` and **have run**. Five measured
-  footprints now sit around the onset. What is left is *analysis*, not
-  measurement: is it one step or a linear rise?
+- **The fetch ramp is a GRADED ramp, not a step — analysis closed.**
+  1.0000 / 1.0915 / 1.1573 / 1.2115 / 1.2538 at 4096–6144 B, then flat
+  (1.2529 at 7168, 1.2522 at 8192). Four *decreasing* increments
+  exclude a single step outright. The rising region is linear in
+  **1/footprint, r2 0.99983**, implying a **~4038 B covered window
+  against a natural 4096 — 1.4 % on a parameter the fit was never
+  given**. But that fit predicts 1.3245 at 7168 B against a measured
+  1.2529, so there are **two mechanisms**: the ~4 KiB window producing
+  the 1/F rise, and a **~1.253 cycles/instruction ceiling** taking
+  over. A capacity model cannot make the plateau; a bandwidth model
+  cannot make the rise.
 - **What caps the read rate at ~50 cycles/tx**, now that the credit
   limit is retired and the rate is flat over 13 hops. A new question
   the session raised; the issue loop is the leading suspect, so it is
@@ -423,8 +439,8 @@ that session settled, and what it left.
 - **phase G at 4608/5632 B** — ran; four gsets written, all rows
   differing. With gset 0 that is **five measured footprints — 4608,
   5120, 5632, 6144, 7168 B** — around a ramp whose onset was bracketed
-  only to (4096, 5120]. Whether it is one step or a linear rise is an
-  analysis-box question, still open.
+  only to (4096, 5120]. **Answered 2026-08-10: a graded 1/F rise to a
+  ~1.253 cycles/instruction ceiling, not a step** — see item 1.
 
 Both magics bumped, which is safe: the sweep readers parse `magic=` as
 metadata and never validate it (proven three ways). **Renumbering**
@@ -435,10 +451,14 @@ in footprint order.
 Also from that session: a **third** rung-3 `tensix` sample (86.144,
 against 86.125 and X1's 86.12 — reproducing to 0.02 %); `nocread`
 correctly re-graded `DEGENERATE` by the falsifying dist test, on
-silicon; and `rv-cross` failing phase Q at **n = 32**, above the
-small-burst scatter the README accounts for, where the primary failed
-only at n <= 16. Two runs, identical parameters, different outcomes —
-still unexplained.
+silicon; and `rv-cross`'s phase-Q failure, which was a **mislabel, not
+a threshold breach** — the pair was `n=16 → 70, n=32 → 48`, everything
+from n=32 up is **bit-identical** between the two runs, and the grader
+read the pair's *larger* n. Fixed to grade by the smaller burst.
+Measured run-to-run scatter is roughly constant at 21–45 cycles while
+the monotone step grows with burst, so **the first pair phase Q can
+honestly be gated on is 32 → 64**; the README's `n <= 16` is
+defensible but one notch tight.
 
 ### Not built, by design
 
