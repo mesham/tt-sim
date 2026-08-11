@@ -86,6 +86,47 @@ class TensixBackend:
         # point at a *different* unit as the cause -- see ``_refuse``.
         self.last_refusal_reason = ""
         self.last_refusal_blocked_on = ""
+        # The documented *whole-thread* issue interlock, as a deadline per
+        # Tensix thread: while ``cycle_num < thread_issue_block[i]``, nothing
+        # from thread ``i`` may leave its Wait Gate, whichever unit it is bound
+        # for. That is what the existing per-unit issue refusal cannot express
+        # -- it can only refuse the unit an instruction was offered to, and a
+        # held thread's next instruction is usually offered somewhere else.
+        #
+        # ``0`` means "not blocked", which is what every entry reads for a
+        # whole run with ``TT_SIM_COST_MODEL`` unset: the deadline is armed
+        # from a *modelled occupancy*, and nothing arms one with the model off.
+        # The wait gate therefore pays one list index and one integer
+        # comparison per tick in the default configuration.
+        #
+        # One unit arms it today, from ``TensixCoprocessor/ScalarUnit.md``:
+        # "once a thread has started executing a Scalar Unit instruction, it
+        # cannot start executing its next instruction until the Scalar Unit
+        # instruction completes, regardless of which unit that next instruction
+        # executes in." The unpackers publish an identically-shaped interlock
+        # for an ``UNPACR``'s address phase and are deliberately NOT wired to
+        # this: see the ``UNPACR`` entry's note in the Tensix cost table for
+        # the mechanism that blocks it (tt-sim flips Src ``AllowedClient`` at
+        # retire, hardware at the end of the transfer).
+        #
+        # ``thread_issue_block_unit`` carries the ``ex_resource`` name of
+        # whichever unit imposed the live deadline, so the StallEvent the gate
+        # publishes names the unit responsible rather than a bare reason.
+        self.thread_issue_block = [0, 0, 0]
+        self.thread_issue_block_unit = ["", "", ""]
+
+    def block_thread_issue(self, thread_id, until_cycle, unit_name):
+        """Hold thread ``thread_id`` at its Wait Gate until ``until_cycle``.
+
+        Called by the unit whose documentation states the interlock, from the
+        same anchor cycle its occupancy is charged from, so the block is
+        exactly as long as the charge and inherits its "low end of the bound"
+        floor. A later, longer deadline extends the block; a shorter one is
+        ignored, because the thread is already held past it.
+        """
+        if until_cycle > self.thread_issue_block[thread_id]:
+            self.thread_issue_block[thread_id] = until_cycle
+            self.thread_issue_block_unit[thread_id] = unit_name
 
     def getDiagnosticSettings(self):
         return self.diags_settings

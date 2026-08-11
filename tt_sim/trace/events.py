@@ -138,6 +138,17 @@ STALL_REASONS = frozenset(
         #: The slot was free but yielded to a thread granted less recently, so
         #: the grant rotates rather than following wait-gate tick order.
         "issue_yield_fairness",
+        # -- whole-thread issue interlock -------------------------------------
+        #: A documented interlock is holding *everything* this thread has,
+        #: whichever unit the held instruction is bound for -- as opposed to
+        #: ``unit_busy``, which only refuses the unit the instruction was
+        #: offered to. One unit publishes one today: the Scalar Unit, for the
+        #: whole of an instruction's execution ("it cannot start executing its
+        #: next instruction ... regardless of which unit that next instruction
+        #: executes in"), so ``blocked_on`` is ``THCON``. Cost-model state: the
+        #: deadline is armed from a modelled occupancy, so this never fires
+        #: with ``TT_SIM_COST_MODEL`` unset.
+        "thread_issue_block",
     }
 )
 

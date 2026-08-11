@@ -6964,6 +6964,174 @@ Two *tools* were wrong and are fixed; no measured or charged number was.
   both were artefacts of the wrap bug and the file reads clean.
 - `docs/plans/cost-model.md` — this section.
 
+## The whole-thread issue interlock: one sentence wired, one blocked by a mechanism
+
+Landed 2026-08-11 — ROADMAP item 3's "documented per-op issue cadence". Two
+units publish an interlock that is about the **thread**, not about the unit,
+and neither could be expressed by the machinery that existed: `is_occupied`
+refuses the unit an instruction was *offered to*, and the instruction a
+held thread wants to issue next is usually offered somewhere else entirely.
+**One of the two is now charged. The other is sourced, needs no new number,
+and is still not charged — because wiring it turns three value guards red for
+a reason that is on the other side of the handshake.**
+
+> `TensixCoprocessor/ScalarUnit.md`: "No instructions of any kind from the
+> issuing thread can pass through its Wait Gate. In other words, once a thread
+> has started executing a Scalar Unit instruction, it cannot start executing
+> its next instruction until the Scalar Unit instruction completes, **regardless
+> of which unit that next instruction executes in**."
+
+`TensixBackend.thread_issue_block` is one deadline per Tensix thread; the Wait
+Gate refuses to pass anything from that thread until the cycle it names, and
+publishes a `thread_issue_block` `StallEvent` naming `THCON` while it does.
+**No cost-table entry was added and no number in either YAML changed.** The
+deadline *is* the occupancy the table already charges, armed from the same
+acceptance-anchored cycle, so it inherits the low-end-of-the-bound floor the
+occupancy was charged at: `ADDDMAREG` is "3 or 4" charged at 3, so a thread
+that issues one may not start anything anywhere for 3 cycles, and `ATCAS`'s
+">= 15" holds it for 15.
+
+### The unpacker's identical sentence, and why it is not wired
+
+> `TensixCoprocessor/UNPACR_Regular.md`: "An `UNPACR` instruction spends at
+> least two cycles calculating the initial input address ... For the duration
+> of these cycles, **the issuing thread cannot start its next instruction**,
+> nor can any other thread start an `UNPACR` instruction."
+
+Same shape, same mechanism, and the deadline would be the 2 the table already
+charges as the address phase. It was implemented, and the cost-model gate
+failed: **`wormhole/softplus`, `wormhole/tilize` and `wormhole/untilize` all
+raise `SrcDvalidError`** ("`SETRWC` from thread 1 cleared dvalid on SrcB bank
+0, but that bank's `AllowedClient` is `Unpackers`"). Everything else — all 30
+Blackhole guards, the Wormhole matmuls, `six`, the poll-budget proofs — passed.
+
+The traced cause, at one-cycle resolution, is not the charge:
+
+```
+  passing        failing (with the interlock)
+  c11012 t0 UNPACR          c11012 t0 UNPACR       <- acquires SrcA
+  c11013 t0 UNPACR_NOP      c11013     (held: address phase)
+  c11014 t0 UNPACR_NOP      c11014 t0 UNPACR_NOP
+  c11014    SrcB -> FPU     c11015 t0 UNPACR_NOP   <- SrcB acquire, executes c11016
+  c11015 t1 SETRWC          c11015 t1 SETRWC       <- release, executes c11016, first
+```
+
+The LLK datacopy loop runs `UNPACR; UNPACR_NOP; UNPACR_NOP` on the unpack
+thread against `MOVA2D; MOVA2D; SETRWC` on the math thread, with no semaphore
+between them: the only ordering is that `MOVA2D` waits at the gate for SrcA,
+after which the two threads race three instructions against two. That leaves
+**exactly one cycle** between the `UNPACR_NOP` that hands SrcB to the FPU and
+the `SETRWC` that hands it back — and `SETRWC` does *not* wait at the gate
+(its page has no Wait Gate paragraph; it assigns `AllowedClient` outright).
+A correctly anchored two-cycle interlock spends that one cycle, and the
+backend tick order (`matrix_unit` first, `unpacker_units` last) resolves the
+resulting tie in the release's favour.
+
+**What the margin really rests on is a mechanism tt-sim does not have.**
+tt-sim performs an unpack and flips its Src `AllowedClient` in the tick the
+instruction retires; the hardware flips it at the *end* of a pipelined
+transfer, tens of cycles later, which is what actually keeps the math thread
+behind the unpack thread on silicon. Charging one side of that asymmetry and
+not the other is what breaks the loop. So the honest disposition is: the term
+is **sourced and deferred on a named blocker** — time the unpacker's dvalid
+flip against its own occupancy — rather than deferred for want of a number.
+It is recorded in the `UNPACR` entry's `note` and pinned by
+`test_the_address_phase_holds_the_unit_and_deliberately_not_the_thread`.
+
+The **cross-unpacker half** of the same sentence ("nor can any other thread
+start an `UNPACR`") is unchanged and unmodelled for the older reason: it needs
+an arbitration rule between two unpackers that no source gives, exactly as the
+joint 80 B/cycle ceiling does. Two gaps in one sentence, two different causes.
+
+### Measured, at one-cycle resolution
+
+Seven Wormhole guards, replayed socket-free and pumped to `RUN_MSG_DONE` one
+cycle at a time, each run on this tree and on a pristine copy of `702c156`:
+
+| guard | model off, before | model off, after | model on, before | model on, after |
+| --- | --- | --- | --- | --- |
+| `wormhole/offline` (`one`) | 793 | **793** | 2,578 | **2,578** |
+| `sfpumath` | 7,006 | **7,006** | 8,293 | **8,293** |
+| `matmulblock` | 2,141 | **2,141** | 7,577 | **7,577** |
+| `softplus` | 6,245 | **6,245** | 8,355 | **8,355** |
+| `reduce` | 809 | **809** | 3,404 | **3,404** |
+| `transpose` | 624 | **624** | 2,720 | **2,720** |
+| `matmulidx` | 817 | **817** | 3,604 | **3,614** |
+
+Model off: byte-identical on all seven, because nothing arms an occupancy with
+`TT_SIM_COST_MODEL` unset, so no deadline is ever set and the gate's new check
+is one list index that is always false. Model on: **exactly one total moves,
+`matmulidx` by +10 cycles**, and the interlock fires on all of them —
+`matmulblock` charges it 71 times for 97 gate-stall cycles, `reduce` 18 for
+20, `sfpumath` 13 for 10, `softplus` 10 for 6 — the first `thread_issue_block`
+rows a bottleneck report has ever printed.
+
+That totals barely move is the expected shape and not a disappointment: a
+launch's completion is gated on the backend draining, and on these guards the
+span is set by the RV load-use interlock and by semaphore waits, not by how
+soon a thread may issue its next instruction. What the interlock buys is
+*attribution* and a core-visible cadence, which is what ROADMAP item 3 was
+for — and, structurally, the ability to stall a thread out of a unit it was
+not offered to at all, which nothing else in the model can do.
+
+### What was already there, and what is deliberately still missing
+
+- **The srcA/srcB dvalid gating at the Wait Gate was already implemented**, on
+  both sides — `WaitGate.checkIfFPUInstructionShouldStall` for the FPU's
+  acquire and `UnPackerUnit.handle_regular`'s `blocked` for the unpacker's
+  mid-execution wait, which is the asymmetry the WaitGate page's footnote
+  describes. Re-checked against the per-instruction pages: every entry of
+  `MATH_ALLOWED_CLIENT_INSTRUCTIONS` matches its document's `while
+  (Src?[MatrixUnit.Src?Bank].AllowedClient != MatrixUnit)` block, with one
+  exception recorded rather than fixed — `MOVDBGA2D`, whose page says to read
+  `MOVA2D`'s model "ignoring the paragraph about the Wait Gate", is listed as
+  waiting on SrcA. It is an over-charge, it is unreachable (the opcode is
+  decode-only), and the list is pinned by a test whose purpose is to make
+  edits to it deliberate.
+- **PC-buffer write delays cannot be sourced at the point that matters.** The
+  depth is published exactly — `BabyRISCV/PCBufs.md`, identical on both
+  arches: "Each FIFO queue can hold up to 16 32-bit values" — but the next
+  sentence is what a charge would need and does not give: "attempting to push
+  more values than this will cause the writes to sit in **shared buffers within
+  the RISCV B memory subsystem**. If those shared buffers become full, RISCV B
+  will be stalled until space becomes available." The shared buffers' capacity
+  is published nowhere, so the honest bound on when RISCV B stalls is ">= 16
+  pending pushes", and for a *queue depth* the low end is the over-charging
+  end — a bound of 16 invents back-pressure the hardware does not have, which
+  is the one direction the floor policy forbids. (This is the same reasoning
+  that put `CORE_PUSH_INFLIGHT_BOUND` safely *above* its measured floor rather
+  than at it.) So the write delay stays uncosted and the FIFO stays unbounded.
+  Two independent facts make that cheap: no in-tree workload touches a PCBuf
+  at all (instrumented across `matmulblock` / `sfpumath` / `one`: zero reads,
+  zero writes — tt-metal 0.74 launches TRISCs through mailboxes), and the RV
+  side's PCBuf *load* latency is already charged, at the ">= 3" row
+  `riscv.load_latency.mailboxes_pcbufs_ttsync_semaphores` gives it.
+- **The MOP Expander's one-cycle transition penalty** ("After expanding a
+  `MOP` instruction, if the next instruction is _not_ a `MOP` instruction,
+  there is a one cycle transition penalty") is documented, exact, and
+  unobservable here: tt-sim's expander emits a whole template in one tick and
+  the rate downstream is set by the Replay Expander and the Wait Gate, which
+  already move one instruction per cycle. Charging it would model a bubble in
+  a stage that has no rate to bubble. Recorded, not wired.
+
+### What changed in the repository
+
+- `tt_sim/pe/tensix/backend.py` — `thread_issue_block` / `block_thread_issue`,
+  with the sentence quoted at the state it justifies.
+- `tt_sim/pe/tensix/frontend.py` — the Wait Gate's check, first among the
+  gate's refusal branches because the interlock outranks them all.
+- `tt_sim/pe/tensix/backends/thcon.py` — the arming site, anchored where the
+  occupancy is anchored.
+- `tt_sim/trace/events.py`, `docs/trace-schema.md` — the
+  `thread_issue_block` stall reason.
+- `tt_sim/pe/tensix/tensix_instruction_costs.yaml` — two `note:` fields, one
+  recording what is now consumed and one recording the deferral and its named
+  blocker. **No number changed.**
+- Tests: three in `frontend_backpressure_test.py` (the interlock reaches a
+  different unit, holds only the issuing thread, and is absent with the model
+  off) and a renamed one in `unpacker_cost_model_test.py` pinning that the
+  address phase holds the *unit* and deliberately not the thread.
+
 ## Using it, when the time comes
 
 ```python

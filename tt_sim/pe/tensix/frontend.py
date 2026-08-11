@@ -620,6 +620,24 @@ class WaitGate(TensixFrontendUnit):
                     instruction_info = TensixInstructionDecoder.getInstructionInfo(
                         instruction
                     )
+                    thread_id = self.frontend.thread_id
+                    if self.backend.thread_issue_block[thread_id] > cycle_num:
+                        # A documented whole-thread interlock is live -- today
+                        # only the Scalar Unit's, which holds the thread for
+                        # the whole of its instruction's execution. *Nothing*
+                        # from this thread may pass the gate while it is,
+                        # whichever unit it is bound for, which is what
+                        # separates this from the per-unit issue refusal below
+                        # and why it is checked first. See
+                        # ``TensixBackend.block_thread_issue`` for the sentence
+                        # it comes from.
+                        self._note_stall(
+                            cycle_num,
+                            "thread_issue_block",
+                            blocked_on=self.backend.thread_issue_block_unit[thread_id],
+                            opcode=instruction_info["name"],
+                        )
+                        return
                     if instruction_info["ex_resource"] == "MATH":
                         # For FPU instructions need to ensure that srcA and srcB
                         # being consumed has allowed client of MatrixUnit

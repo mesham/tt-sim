@@ -252,6 +252,36 @@ def test_the_address_phase_is_the_documented_two_cycles_at_its_low_end():
     assert entry == {"cycles": 2, "bound": "at_least"}
 
 
+def test_the_address_phase_holds_the_unit_and_deliberately_not_the_thread():
+    """The sentence's other two halves are both recorded gaps, for one reason.
+
+    ``UNPACR_Regular.md`` says the address phase blocks three things: this
+    unpacker (charged, as ``busy_until``), *the issuing thread* ("the issuing
+    thread cannot start its next instruction"), and *every* thread's `UNPACR`
+    ("nor can any other thread start an ``UNPACR``"). Only the first is
+    charged. The third needs a cross-unpacker arbitration rule no source
+    gives, exactly as the joint 80 B/cycle ceiling does.
+
+    The second is sourced, and was still not charged (2026-08-11, ROADMAP item
+    3, which *did* wire the Scalar Unit's identically-shaped interlock through
+    ``TensixBackend.block_thread_issue``). Charging it turns three Wormhole
+    value guards red -- ``softplus`` / ``tilize`` / ``untilize`` all raise
+    ``SrcDvalidError`` -- and the cause is on the other side of the handshake:
+    tt-sim performs an unpack and flips its Src ``AllowedClient`` in the tick
+    the instruction retires, where hardware flips it at the *end* of a
+    pipelined transfer. The LLK datacopy loop leans on a one-cycle margin
+    between the unpack thread's ``UNPACR_NOP`` dvalid set and the math
+    thread's ``SETRWC`` release, and a correctly anchored two-cycle interlock
+    spends exactly that margin. So the blocker is a mechanism tt-sim does not
+    have, not a number nobody published, and it is recorded here rather than
+    shipped as a value regression.
+    """
+    with _unpacker(throttle=THROTTLE_X1, num_rows=4) as (backend, _memory):
+        unpacker = _issue_and_tick(backend)
+        assert unpacker.busy_until == 0 + 2 + 8  # address phase + 128 B / 16
+        assert backend.thread_issue_block == [0, 0, 0]
+
+
 def test_the_base_hook_declines_unpacr_so_the_handler_can_price_it():
     """``UNPACR`` is three instruction forms behind one opcode, and only the
     datum-moving one has published timing — so the flat pre-handler lookup is

@@ -749,6 +749,21 @@ units:
       is isa_doc, not derived, and throughput_ipc is the unit-level 1.
       No Blackhole ScalarUnit.md exists, which per the Blackhole tree's
       convention means the behaviour is shared.
+
+      BOTH HALVES OF THAT SENTENCE ARE NOW CONSUMED (2026-08-11, ROADMAP item
+      3). The unit half -- "No instructions from any other thread can pass
+      through their Wait Gate and enter the Scalar Unit" -- has always been the
+      ordinary issue refusal (``is_occupied``). The *thread* half -- "once a
+      thread has started executing a Scalar Unit instruction, it cannot start
+      executing its next instruction until the Scalar Unit instruction
+      completes, regardless of which unit that next instruction executes in" --
+      no per-unit refusal could express, because the thread's next instruction
+      is usually offered to a different unit; it is now charged by holding the
+      issuing thread at its Wait Gate for exactly the occupancy below
+      (``TensixBackend.block_thread_issue``, armed from backends/thcon.py).
+      NO NEW NUMBER: the deadline is the occupancy already in this table,
+      already charged at the low end of its bound, so the interlock inherits
+      that floor.
     throughput_ipc: 1
     instructions:
       DMANOP:
@@ -1264,6 +1279,25 @@ units:
           an UNPACR", i.e. on EITHER unpacker) is not modelled -- the charge
           holds the issuing unpacker only, an under-charge in the floor
           direction.
+
+          THE ISSUING-THREAD HALF IS SOURCED AND STILL NOT CHARGED, AND THE
+          BLOCKER IS A MECHANISM RATHER THAN A NUMBER (2026-08-11, ROADMAP
+          item 3). "For the duration of these cycles, the issuing thread
+          cannot start its next instruction" is the same shape as the Scalar
+          Unit's interlock, which that item DID wire
+          (``TensixBackend.block_thread_issue``), and it needs no new number:
+          the deadline would be the 2 above. Wiring it turns three Wormhole
+          value guards red -- softplus / tilize / untilize all raise
+          SrcDvalidError -- and the fault is on the other side of the Src
+          handshake, not in this charge: tt-sim performs an unpack and flips
+          its Src AllowedClient in the tick the instruction retires, where the
+          hardware flips it at the END of a pipelined transfer. The LLK
+          datacopy loop leans on a one-cycle margin between the unpack
+          thread's UNPACR_NOP dvalid set and the math thread's SETRWC release,
+          and a correctly anchored two-cycle interlock spends exactly that
+          margin. So this stays uncharged until the unpacker's dvalid flip is
+          timed against its own occupancy -- a change to the functional model,
+          not to this table. See docs/plans/cost-model.md.
       UNPACR_NOP:
         occupancy: 1
         provenance: isa_doc

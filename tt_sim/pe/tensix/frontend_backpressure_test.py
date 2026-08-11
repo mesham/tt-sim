@@ -307,6 +307,92 @@ def test_three_threads_sharing_a_one_ipc_unit_approach_three_x_each():
             )
 
 
+# ---------------------------------------------------------------------------
+# The documented whole-thread issue interlock (ROADMAP item 3).
+# ---------------------------------------------------------------------------
+
+
+def _first_accept_cycle(cost_model, unit_name, words, cycles=24):
+    """The cycle ``unit_name`` first holds work from thread 0.
+
+    Pushes ``words`` into thread 0's frontend up front, then ticks the whole
+    coprocessor. Both instructions are in the FIFO before any clock runs, so
+    what the answer measures is purely when the Wait Gate let the *second* one
+    through.
+    """
+    with _coprocessor(cost_model=cost_model) as cp:
+        frontend = cp.getThread(0)
+        for word in words:
+            assert _push(frontend, word) is not MemoryStall
+        unit = cp.getBackend().backend_units[unit_name]
+        clocks = cp.getClocks()
+        for cycle in range(cycles):
+            for clock in clocks:
+                clock.clock_tick(cycle)
+            if unit.hasInflightInstructionsFromThread(0):
+                return cycle, cp.getBackend()
+    return None, None
+
+
+def test_a_scalar_unit_op_holds_the_thread_out_of_every_other_unit_too():
+    """``ScalarUnit.md``: "once a thread has started executing a Scalar Unit
+    instruction, it cannot start executing its next instruction until the
+    Scalar Unit instruction completes, **regardless of which unit that next
+    instruction executes in**."
+
+    The unit half of that sentence was already modelled — an occupied ThCon
+    refuses everything, from every thread. The thread half was not, and could
+    not be: an ``SFPNOP`` behind an ``ADDDMAREG`` is offered to the SFPU, which
+    is idle and accepts. So it used to dispatch one cycle after the ThCon op,
+    where the documented interlock holds it for the whole of the ThCon op's
+    execution — 3 cycles for ``ADDDMAREG`` ("3 or 4", charged at its low end,
+    so the interlock is a floor exactly as the occupancy it is armed from is).
+    """
+    off, _ = _first_accept_cycle(False, "SFPU", (ADDDMAREG, SFPNOP))
+    on, backend = _first_accept_cycle(True, "SFPU", (ADDDMAREG, SFPNOP))
+    # The ThCon op is accepted in cycle 0 either way (the frontend stages tick
+    # in order within a cycle). Off: the SFPNOP follows it one cycle later.
+    assert off == 1
+    # On: not until 3 cycles after the ADDDMAREG was accepted.
+    assert on == 3
+    assert backend.thread_issue_block_unit[0] == "THCON"
+
+
+def test_the_thread_interlock_holds_only_the_issuing_thread():
+    """ "No instructions of any kind from **the issuing thread**". The other two
+    threads are held out of ThCon itself by the ordinary unit occupancy, and
+    out of nothing else."""
+    with _coprocessor(cost_model=True) as cp:
+        backend = cp.getBackend()
+        assert _push(cp.getThread(0), ADDDMAREG) is not MemoryStall
+        assert _push(cp.getThread(1), SFPNOP) is not MemoryStall
+        clocks = cp.getClocks()
+        sfpu_reached = False
+        for cycle in range(2):
+            for clock in clocks:
+                clock.clock_tick(cycle)
+            sfpu_reached |= backend.backend_units[
+                "SFPU"
+            ].hasInflightInstructionsFromThread(1)
+        assert backend.thread_issue_block[0] > 1
+        assert backend.thread_issue_block[1] == 0
+        # Thread 1's SFPNOP was never held: a different unit, a different
+        # thread, nothing in common with the ThCon instruction. (It reaches the
+        # SFPU in cycle 0 and retires in cycle 1, hence the running flag.)
+        assert sfpu_reached
+
+
+def test_off_means_no_thread_is_ever_held_at_the_gate():
+    """The invariance property, at the mechanism rather than at a total: with
+    the model off nothing arms an occupancy, so no deadline is ever set and the
+    gate's check is one list index that is always false."""
+    with _coprocessor(cost_model=False) as cp:
+        backend = cp.getBackend()
+        _run(cp, 60, {0: ADDDMAREG, 1: SFPNOP, 2: NOP})
+        assert backend.thread_issue_block == [0, 0, 0]
+        assert backend.thread_issue_block_unit == ["", "", ""]
+
+
 if __name__ == "__main__":  # pragma: no cover
     import pytest
 

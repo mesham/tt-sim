@@ -109,7 +109,33 @@ class ScalarUnit(TensixBackendUnit):
             else:
                 raise NotImplementedError()
         else:
+            # ``ScalarUnit.md``: "once a thread has started executing a Scalar
+            # Unit instruction, it cannot start executing its next instruction
+            # until the Scalar Unit instruction completes, regardless of which
+            # unit that next instruction executes in." The unit-level half of
+            # that sentence ("No instructions from any other thread can pass
+            # through their Wait Gate and enter the Scalar Unit") has always
+            # been modelled by ``is_occupied`` refusing the issue; this is the
+            # other half, which no per-unit refusal can express because the
+            # thread's next instruction is usually offered to a *different*
+            # unit. Read before the drain because the drain empties the queue;
+            # ThCon accepts at most one instruction per cycle, so peeking at
+            # the head is the whole batch. Costs one ``is not None`` test per
+            # tick with the cost model off, where no occupancy is ever armed.
+            issuing_thread = (
+                self.next_instruction[0][1]
+                if self.cost_model is not None and self.next_instruction
+                else None
+            )
             super().clock_tick(cycle_num)
+            if issuing_thread is not None and self.busy_until is not None:
+                # ``busy_until`` is the deadline ``occupy_for`` just armed from
+                # the *acceptance* cycle, so the block runs for exactly the
+                # occupancy the table charges -- at the low end of its bound,
+                # which makes the interlock a floor like every other charge.
+                self.backend.block_thread_issue(
+                    issuing_thread, self.busy_until, "THCON"
+                )
 
     def checkStalledCondition(self, stalled_condition):
         if get_nth_bit(self.stalled_condition, 1):
