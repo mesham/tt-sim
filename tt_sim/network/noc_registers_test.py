@@ -33,7 +33,7 @@ pytest.
 """
 
 from tt_sim.network.tt_noc import NUI
-from tt_sim.util.conversion import conv_to_uint32
+from tt_sim.util.conversion import conv_to_bytes, conv_to_uint32
 
 CMD_BUF_AVAIL_OFFSET = 0x64
 CMD_BUF_OVFL_OFFSET = 0x68
@@ -90,3 +90,52 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def test_every_writable_command_register_can_be_read_back():
+    """The read path used to decode nine of the eleven command registers per
+    initiator, silently omitting ``NOC_TARG_ADDR_HI`` (``0x8``) and
+    ``NOC_RET_ADDR_HI`` (``0x14``) while the write path decoded both. A kernel
+    could therefore write a register and get ``NotImplementedError`` reading it
+    straight back.
+
+    That is not a modelling gap -- the fields exist on the initiator and the
+    write path stores them -- it is a read/write asymmetry, and asymmetries of
+    this shape are invisible until something reads the odd one out. tt-metal's
+    device profiler reads ``0x14`` during start-up, which took the entire
+    profiler path down under tt-sim and left the evaluation's end-to-end cycle
+    table with no simulator column at all.
+
+    So the invariant is stated as a law rather than as two more cases: for
+    every command register this NUI accepts a write to, reading it back must
+    return what was written."""
+    for i, base in enumerate([0x0, 0x400, 0x800, 0xC00]):
+        for offset in (0x0, 0x4, 0x8, 0xC, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24):
+            nui = NUI(0, 1, 1, None)
+            marker = 0xC0DE0000 | (i << 8) | offset
+            nui.write(base + offset, conv_to_bytes(marker))
+            assert conv_to_uint32(nui.read(base + offset, 4)) == marker, (
+                f"initiator {i} register {hex(base + offset)} does not read back"
+            )
+
+
+def test_every_counter_name_has_a_slot():
+    """``NUICounters`` backed its 62-member enumeration with a 61-long list.
+
+    The last member, ``NIU_SLV_POSTED_WR_REQ_STARTED = 61``, therefore had no
+    slot, and the first *posted* (non-response-marked) NoC write delivered to
+    this NUI raised ``IndexError`` from deep inside ``clock_tick``. It stayed
+    latent because every workload in the tree either never issued one or never
+    reached that arm -- until tt-metal's device profiler, whose firmware does,
+    and which then died a second time on the way to the evaluation's cycle
+    table after the read-path asymmetry above was fixed.
+
+    A length and an enumeration drifting apart is not catchable by testing the
+    counters that happen to be exercised, so the invariant is stated over the
+    whole enumeration: every name must be incrementable.
+    """
+    counters = NUI.NUICounters()
+    assert len(counters.counters) == len(NUI.NUICounters.CounterNames)
+    for name in NUI.NUICounters.CounterNames:
+        counters.increment(name)
+        assert counters[name] == 1, f"counter {name.name} (= {int(name)}) has no slot"

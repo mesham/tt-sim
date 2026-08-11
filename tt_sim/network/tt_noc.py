@@ -1005,7 +1005,11 @@ class NUI(MemMapable, Clockable):
             NIU_SLV_POSTED_WR_REQ_STARTED = 61
 
         def __init__(self):
-            self.counters = [0] * 61
+            # One slot per CounterNames member: the enum runs 0..61, so 62 slots.
+            # A posted (non-response-marked) NoC write increments index 61, which
+            # a 61-long list cannot hold -- that path only fires once the device
+            # profiler's firmware is running, which is why it stayed latent.
+            self.counters = [0] * len(NUI.NUICounters.CounterNames)
 
         def __getitem__(self, idx):
             return self.counters[idx]
@@ -1986,10 +1990,20 @@ class NUI(MemMapable, Clockable):
             return conv_to_bytes(self.request_initiators[0].target_addr_low)
         elif addr == 0x4:
             return conv_to_bytes(self.request_initiators[0].target_addr_mid)
+        # NOC_TARG_ADDR_HI / NOC_RET_ADDR_HI. The write path has always decoded
+        # these; the read path did not, so a register the kernel had itself
+        # written back raised NotImplementedError. tt-metal's device profiler
+        # reads 0x14 while starting up, which is what took the whole profiler
+        # path down under tt-sim and left the paper's end-to-end cycle table
+        # with no simulator column.
+        elif addr == 0x8:
+            return conv_to_bytes(self.request_initiators[0].target_addr_hi)
         elif addr == 0xC:
             return conv_to_bytes(self.request_initiators[0].ret_addr_low)
         elif addr == 0x10:
             return conv_to_bytes(self.request_initiators[0].ret_addr_mid)
+        elif addr == 0x14:
+            return conv_to_bytes(self.request_initiators[0].ret_addr_hi)
         elif addr == 0x18:
             return conv_to_bytes(self.request_initiators[0].packet_tag)
         elif addr == 0x1C:
@@ -2004,10 +2018,14 @@ class NUI(MemMapable, Clockable):
             return conv_to_bytes(self.request_initiators[1].target_addr_low)
         elif addr == 0x404:
             return conv_to_bytes(self.request_initiators[1].target_addr_mid)
+        elif addr == 0x408:
+            return conv_to_bytes(self.request_initiators[1].target_addr_hi)
         elif addr == 0x40C:
             return conv_to_bytes(self.request_initiators[1].ret_addr_low)
         elif addr == 0x410:
             return conv_to_bytes(self.request_initiators[1].ret_addr_mid)
+        elif addr == 0x414:
+            return conv_to_bytes(self.request_initiators[1].ret_addr_hi)
         elif addr == 0x418:
             return conv_to_bytes(self.request_initiators[1].packet_tag)
         elif addr == 0x41C:
@@ -2022,10 +2040,14 @@ class NUI(MemMapable, Clockable):
             return conv_to_bytes(self.request_initiators[2].target_addr_low)
         elif addr == 0x804:
             return conv_to_bytes(self.request_initiators[2].target_addr_mid)
+        elif addr == 0x808:
+            return conv_to_bytes(self.request_initiators[2].target_addr_hi)
         elif addr == 0x80C:
             return conv_to_bytes(self.request_initiators[2].ret_addr_low)
         elif addr == 0x810:
             return conv_to_bytes(self.request_initiators[2].ret_addr_mid)
+        elif addr == 0x814:
+            return conv_to_bytes(self.request_initiators[2].ret_addr_hi)
         elif addr == 0x818:
             return conv_to_bytes(self.request_initiators[2].packet_tag)
         elif addr == 0x81C:
@@ -2040,10 +2062,14 @@ class NUI(MemMapable, Clockable):
             return conv_to_bytes(self.request_initiators[3].target_addr_low)
         elif addr == 0xC04:
             return conv_to_bytes(self.request_initiators[3].target_addr_mid)
+        elif addr == 0xC08:
+            return conv_to_bytes(self.request_initiators[3].target_addr_hi)
         elif addr == 0xC0C:
             return conv_to_bytes(self.request_initiators[3].ret_addr_low)
         elif addr == 0xC10:
             return conv_to_bytes(self.request_initiators[3].ret_addr_mid)
+        elif addr == 0xC14:
+            return conv_to_bytes(self.request_initiators[3].ret_addr_hi)
         elif addr == 0xC18:
             return conv_to_bytes(self.request_initiators[3].packet_tag)
         elif addr == 0xC1C:
