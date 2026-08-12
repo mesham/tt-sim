@@ -48,9 +48,13 @@ RUN_TIMEOUT = int(os.environ.get("TT_SIM_EXAMPLE_TIMEOUT", "260"))
 # Coords are PHYSICAL NoC coords (see docs/running-tt-metal-on-the-simulator.md);
 # logical (col,row) -> physical (col+1,row+1). Every example runs on the
 # default single tile "1-1" except ``nine`` and ``pipestall``, which bridge a CB
-# across two tiles (logical (0,0)+(1,0) -> physical 1-1 and 2-1). The exact
-# coords must be materialised, so we pass TT_SIM_TENSIX_COORDS rather than a
-# bare count.
+# across two tiles (logical (0,0)+(1,0) -> physical 1-1 and 2-1).
+#
+# The coords are a *pin*, not a requirement: tt-sim materialises the workers a
+# program uses whether or not they are named. They are given here so the ladder
+# keeps covering the pinned path (which the replay guards and the cost-model
+# gate depend on), and ``None`` in that field means "pin nothing", which is what
+# the ``nine-on-demand`` case exists to exercise.
 #
 # The label is normally the directory name; it differs only where one example is
 # run in more than one configuration, which so far is just ``pipestall``.
@@ -65,6 +69,10 @@ EXAMPLES = [
     ("six", "six", "1-1", {}),
     ("eight", "eight", "1-1", {}),
     ("nine", "nine", "1-1,2-1", {}),
+    # The same two-tile example with *nothing* pinned: the second worker has to
+    # be materialised on demand, which is what a user with no environment set
+    # gets. Arch-agnostic precisely because it names no coordinate.
+    ("nine-on-demand", "nine", None, {}),
     ("pipestall", "pipestall", "1-1,2-1", {}),
     # Regression: a *multi-page* output CB with the producer running exactly one
     # chunk ahead of the consumer. This configuration returned chunk 1 as 64
@@ -257,10 +265,15 @@ def _run_env(home, coords, extra=None):
     env["TT_METAL_RUNTIME_ROOT"] = str(home)
     env["TT_METAL_HOME"] = str(home)
     env["LD_LIBRARY_PATH"] = f"{_build_dir(home)}/lib:" + env.get("LD_LIBRARY_PATH", "")
-    # Materialise exactly the physical tiles this example launches on. The two
-    # knobs are mutually exclusive, so drop any inherited count.
+    # Pin exactly the physical tiles this example launches on. The two knobs are
+    # mutually exclusive, so drop any inherited count. ``coords=None`` pins
+    # nothing, leaving tt-sim to materialise workers on demand — the default a
+    # user gets, and worth exercising live rather than only in unit tests.
     env.pop("TT_SIM_TENSIX_CORES", None)
-    env["TT_SIM_TENSIX_COORDS"] = coords
+    if coords is None:
+        env.pop("TT_SIM_TENSIX_COORDS", None)
+    else:
+        env["TT_SIM_TENSIX_COORDS"] = coords
     env.setdefault("TT_METAL_SLOW_DISPATCH_MODE", "1")
     # Marker run.sh stamps into the server's command line so cleanup can find
     # exactly the servers this runner caused to start.

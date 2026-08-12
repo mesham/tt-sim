@@ -16,7 +16,7 @@ COORD_MAP = {(1, 1): (18, 18), (2, 1): (19, 18), (3, 1): (20, 18)}
 POOL = [(1, 1)]
 
 
-def _guarded(host_stopper=None):
+def _guarded(host_stopper=None, lazy=False):
     """A guarded fabric whose host-stopper never finds a host, unless told to.
 
     The default stands in for "no tt-metal host on the other end" — which is
@@ -29,6 +29,7 @@ def _guarded(host_stopper=None):
         POOL,
         COORD_MAP,
         host_stopper=host_stopper or (lambda *a, **k: False),
+        lazy=lazy,
     )
     return fabric
 
@@ -101,4 +102,38 @@ def test_a_kernel_launch_on_a_materialised_worker_is_fine(capsys):
     ).kernel_launch_callback((1, 1))
 
     assert capsys.readouterr().err == ""
+    assert calls == []
+
+
+def test_lazy_materialisation_retires_the_unmaterialised_worker_error(capsys):
+    """With workers built on demand there is no such thing as a worker the
+    program has outgrown, so the guard has nothing to say about one."""
+    calls = []
+    fabric = _guarded(host_stopper=lambda *a, **k: calls.append(a) or False, lazy=True)
+
+    fabric.kernel_launch_callback((3, 1))
+
+    assert capsys.readouterr().err == ""
+    assert calls == []
+
+
+def test_a_kernel_launch_on_a_non_worker_is_reported_but_not_fatal(capsys):
+    """The safety net that survives in both modes.
+
+    Nothing can materialise a coord that is not a functional worker, so the
+    launch is announced — but it is *not* worth stopping the run over: a
+    NullCore reads back ``RUN_MSG_DONE`` immediately so the host cannot hang on
+    it, and the detection is a 4-byte-write heuristic that a false positive
+    would turn into a false kill.
+    """
+    calls = []
+    fabric = _guarded(host_stopper=lambda *a, **k: calls.append(a) or False)
+
+    fabric.kernel_launch_callback((0, 11))
+    fabric.kernel_launch_callback((0, 11))
+
+    err = capsys.readouterr().err
+    assert err.count("ERROR") == 1  # once per coord, not once per write
+    assert "0-11" in err
+    assert "not a functional worker" in err
     assert calls == []

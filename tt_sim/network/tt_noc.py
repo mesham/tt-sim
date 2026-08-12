@@ -1117,6 +1117,14 @@ class NUI(MemMapable, Clockable):
         ]
         self.nui_counters = NUI.NUICounters()
         self.noc_directory = None
+        #: ``(noc_number, coord) -> None`` hook consulted **only** when a
+        #: request's destination coord is absent from :attr:`noc_directory`.
+        #: The wire bridge installs one so a worker a peer addresses before the
+        #: host has launched on it is materialised there and then, instead of
+        #: the packet being null-routed into oblivion. ``None`` (the default,
+        #: and every non-bridge caller) keeps the historical behaviour and
+        #: costs the resolve path nothing: it is reached only on a miss.
+        self.directory_miss_hook = None
         self.attached_memory = attached_memory
         #: ``{trid: {seq: state}}`` — what this NIU saved when it issued each
         #: request that is still awaiting a response. See
@@ -1855,15 +1863,30 @@ class NUI(MemMapable, Clockable):
         space. Unknown coords get a :class:`NullEndpoint` so the requester
         still completes. Responses do not come through here — see
         :meth:`send_response`.
+
+        A miss first offers the coord to :attr:`directory_miss_hook`, if one is
+        installed. That is what closes the *early-packet race*: a worker that
+        left reset a hundred cycles before its peers can address one of them
+        before the host has launched a kernel there, and null-routing that
+        packet is a silently wrong answer rather than a hang. The hook may
+        materialise the tile — which registers it in this very directory — so
+        the lookup is retried before any null route is installed, and the
+        packet proceeds to a real L1. Only a coord nothing can materialise
+        (off-grid, or a tile kind the simulator does not model) reaches the
+        NullEndpoint, and that answer is then cached as before.
         """
         dest = self.noc_directory.get(coord)
         if dest is None:
-            dest = NullEndpoint(coord)
-            self.noc_directory[coord] = dest
-            if self.snoop:
-                print(
-                    f"[NoC{self.noc_number} {self.id_pair}]: null-route installed for unknown destination {coord}"
-                )
+            if self.directory_miss_hook is not None:
+                self.directory_miss_hook(self.noc_number, coord)
+                dest = self.noc_directory.get(coord)
+            if dest is None:
+                dest = NullEndpoint(coord)
+                self.noc_directory[coord] = dest
+                if self.snoop:
+                    print(
+                        f"[NoC{self.noc_number} {self.id_pair}]: null-route installed for unknown destination {coord}"
+                    )
         return dest
 
     def generate_NIU_and_NoC_config(self):

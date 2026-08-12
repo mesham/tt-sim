@@ -30,6 +30,13 @@ class Fabric:
         # Wired by ``__main__.py`` to error out: a launch on an un-materialised
         # worker means the program needs more cores than tt-sim was started with.
         self.kernel_launch_callback: Callable[[tuple[int, int]], None] | None = None
+        # Optional ``coord -> core | None`` consulted before the NullCore
+        # fallback. ``LazyTensixPool`` installs one that answers with a
+        # ``DeferredTensixCore`` for functional worker coords, so a worker the
+        # simulator has not built yet still journals what the host says to it.
+        # Anything the factory declines (and every caller that installs none)
+        # falls through to NullCore exactly as before.
+        self.core_factory: Callable[[tuple[int, int]], object | None] | None = None
 
     def register(self, coord, core):
         self.cores[coord] = core
@@ -37,11 +44,14 @@ class Fabric:
     def _core(self, coord):
         core = self.cores.get(coord)
         if core is None:
-            core = NullCore(
-                coord,
-                on_user_data_write=self.unmapped_callback,
-                on_kernel_launch=self.kernel_launch_callback,
-            )
+            if self.core_factory is not None:
+                core = self.core_factory(coord)
+            if core is None:
+                core = NullCore(
+                    coord,
+                    on_user_data_write=self.unmapped_callback,
+                    on_kernel_launch=self.kernel_launch_callback,
+                )
             self.cores[coord] = core
         return core
 
@@ -59,7 +69,13 @@ class Fabric:
 
 
 def install_worker_guards(
-    fabric, tensix_pool, tensix_coord_map, *, wire_addr=None, host_stopper=stop_host
+    fabric,
+    tensix_pool,
+    tensix_coord_map,
+    *,
+    wire_addr=None,
+    host_stopper=stop_host,
+    lazy=False,
 ):
     """Wire the two "worker isn't there" diagnostics onto ``fabric``.
 
@@ -91,8 +107,21 @@ def install_worker_guards(
     ``wire_addr`` is the address the server dialled, used to identify the host;
     it defaults to ``$NNG_SOCKET_ADDR``. ``host_stopper`` is injectable so tests
     can drive both outcomes.
+
+    **``lazy=True``** says a :class:`~tt_sim.bridge.materialise.LazyTensixPool`
+    is installed, so every functional worker can be built on demand and neither
+    guard has anything to say about one: the warning and the hard error both
+    described a *pinned* pool that the program had outgrown, which is a state
+    that no longer exists. What survives in both modes is the third case — a
+    launch aimed at a coord that is not a functional worker at all (off-grid,
+    or a tile kind this architecture does not model, such as a Blackhole eth
+    core). That one is reported and *not* fatal: a launch there cannot hang the
+    host (the NullCore reads back ``RUN_MSG_DONE`` at once), and the detection
+    is a 4-byte-write heuristic, so stopping the run on it would trade a
+    diagnostic for a false kill.
     """
     pool = set(tensix_pool)
+    reported_non_workers = set()
 
     def warn_unmapped(coord):
         if coord in tensix_coord_map and coord not in pool:
@@ -107,7 +136,23 @@ def install_worker_guards(
             )
 
     def error_on_unmaterialised_launch(coord):
-        if coord not in tensix_coord_map or coord in pool:
+        if coord not in tensix_coord_map:
+            # Not a functional worker on this architecture — nothing could
+            # have materialised it, in either mode. Say so once and carry on.
+            if coord in reported_non_workers:
+                return
+            reported_non_workers.add(coord)
+            print(
+                f"[server] ERROR: kernel launch (go=GO) sent to "
+                f"{coord[0]}-{coord[1]}, which is not a functional worker in "
+                f"soc_descriptor.yaml — tt-sim has no tile to run it on and "
+                f"the traffic is being zero-filled. Results from that core "
+                f"are meaningless.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        if coord in pool or lazy:
             return
         configured = ",".join(f"{x}-{y}" for x, y in sorted(pool))
         where = f"{coord[0]}-{coord[1]}"

@@ -48,6 +48,14 @@ class TT_Device(Device):
     tensix_tile_class = None
     dram_tile_class = None
 
+    #: ``(noc_number, coord) -> None``, handed to every NUI so a NoC request
+    #: addressed to a tile that does not exist yet gets one chance to bring it
+    #: into being. Installed with :meth:`set_directory_miss_hook`; ``None``
+    #: everywhere except under the wire bridge's on-demand materialisation of
+    #: workers, and consulted only on a directory *miss*, so the resolve path
+    #: pays nothing for it.
+    _directory_miss_hook = None
+
     def _begin_construction(self, profile, diagnostics, tensix_coords=None):
         """Pre-tile setup shared by every architecture's ``__init__``.
 
@@ -271,6 +279,8 @@ class TT_Device(Device):
                 self.noc_1_directory[self._noc1_mirror(alias)] = nui1
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
+        nui0.directory_miss_hook = self._directory_miss_hook
+        nui1.directory_miss_hook = self._directory_miss_hook
         nui0.noc_link_registry = self.noc_link_registries[0]
         nui1.noc_link_registry = self.noc_link_registries[1]
         # Tensix tiles host the bulk of per-cycle work (5 baby RV cores +
@@ -283,17 +293,39 @@ class TT_Device(Device):
         self.clocks[0].add_tile_clock(tile_clock, heavy=tile.is_tensix)
         self.resets[0].add_resetables(tile.get_resets())
 
-    def _noc1_mirror(self, canonical):
+    def noc1_mirror(self, canonical):
         """Mirror a canonical (NoC 0 physical) coord to NoC 1's coord space.
 
         NoC 1's origin is the bottom-right tile of the grid, so the same
         physical tile lives at ``(GRID_X-1-x, GRID_Y-1-y)`` on NoC 1. The grid
-        dims come from the architecture profile (10 × 12 for Wormhole).
+        dims come from the architecture profile (10 × 12 for Wormhole). The
+        mapping is its own inverse, which is what lets a NoC 1 directory miss
+        be tried both ways round (see the wire bridge's worker materialiser).
         """
         return (
             self.profile.noc_grid_x - 1 - canonical[0],
             self.profile.noc_grid_y - 1 - canonical[1],
         )
+
+    #: Historical private name, kept because the mirror rule is quoted by coord
+    #: in several docstrings and tests.
+    _noc1_mirror = noc1_mirror
+
+    def set_directory_miss_hook(self, hook):
+        """Install the callback a NoC request consults when its destination
+        coord is not in the directory.
+
+        Handed to every NUI that already exists and to every tile registered
+        afterwards. The wire bridge uses it to materialise a functional worker
+        the moment a *peer* addresses it, which is the half of on-demand
+        materialisation the host's go=GO cannot cover: a worker released from
+        reset earlier can send to a tile the host has not launched on yet, and
+        dropping that packet is a wrong answer rather than a hang.
+        """
+        self._directory_miss_hook = hook
+        for tile in self.tile_directory.values():
+            tile.get_noc_nui(0).directory_miss_hook = hook
+            tile.get_noc_nui(1).directory_miss_hook = hook
 
     def register_tensix_tile(self, tile):
         """Register a TensixTile constructed after device __init__.

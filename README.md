@@ -59,7 +59,7 @@ cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
 
 A set of ready-to-run example programs, plus a build-and-run test suite, lives under
 [`examples`](examples). For the full walkthrough — building the
-examples, the multi-tile `TT_SIM_TENSIX_COORDS` knob, diagnostics, structured tracing and
+examples, the `TT_SIM_TENSIX_COORDS` grid-pinning knob, diagnostics, structured tracing and
 the deadlock watchdog — see **[`driver/wormhole/README.md`](driver/wormhole/README.md)**.
 
 ## Repository overview

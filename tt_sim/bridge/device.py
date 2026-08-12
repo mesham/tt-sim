@@ -188,6 +188,10 @@ class Device:
         self.tt_device.assert_soft_reset(unified)
 
     def deassert_reset(self, unified):
+        self.deassert_reset_without_pump(unified)
+        self._maybe_pump()
+
+    def deassert_reset_without_pump(self, unified):
         # A wire DEASSERT brings the master BRISC plus every subordinate the
         # launch message enabled out of soft reset. BRISC is always released:
         # it is the dispatch master and also runs during the grid-wide init
@@ -211,7 +215,43 @@ class Device:
         # more than one worker is materialised.
         self.tt_device.reset_tile(unified)
         self._brisc_running[unified] = True
-        self._maybe_pump()
+
+    #: Go-message polling budget when catching a late-materialised worker up on
+    #: an init handshake it slept through: cycles per chunk, and the cap. The
+    #: cap is a safety valve, not a deadline — if the firmware has not answered
+    #: by then the run is already broken and the watchdog will say so.
+    _SETTLE_CHUNK = 100
+    _SETTLE_CAP = 200_000
+
+    def settle_go_message(self, unified, addr):
+        """Run cycles until the go-message at ``addr`` reads ``RUN_MSG_DONE``.
+
+        This is the host's own ``wait_until_cores_done`` loop, performed on the
+        host's behalf for a worker that did not exist when the host ran it. The
+        host was answered ``DONE`` out of the deferred core's zero-fill and has
+        long moved on; what still has to happen is the firmware *executing*
+        that run-state, because the launch that follows depends on it.
+
+        Returns the number of cycles spent, ``None`` if it never settled.
+        """
+        spent = 0
+        while self.tt_device.read(unified, addr, 4)[3] != 0x00:
+            if spent >= Device._SETTLE_CAP:
+                return None
+            self.tt_device.run(Device._SETTLE_CHUNK)
+            spent += Device._SETTLE_CHUNK
+        return spent
+
+    def write_without_pump(self, unified, addr, data):
+        """A host write applied to the device without running any cycles.
+
+        Only the replay of a deferred worker's journal uses this (and its
+        reset sibling): that replay can be triggered from *inside*
+        ``tt_device.run`` — a peer's NoC packet resolving to a worker that
+        does not exist yet — and pumping there would re-enter the clock while
+        a tile is mid-cycle.
+        """
+        self.tt_device.write(unified, addr, data)
 
     def _maybe_pump(self):
         if any(self._brisc_running.values()):

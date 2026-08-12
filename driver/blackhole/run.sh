@@ -7,12 +7,13 @@
 #   TT_SIM_LOG_PROTOCOL=1     print every wire message to stderr
 #   TT_SIM_CYCLES_PER_POLL=N  cycles to run after each message (default 100)
 #   TT_SIM_MOCK_TENSIX=1      skip building Wormhole; every core is NullCore
-#   TT_SIM_TENSIX_COORDS=1-1,2-1  comma-separated physical worker coords to
-#                                 pre-construct as TensixCores (default 1-1).
-#                                 Unlisted worker coords stay as NullCore.
-#   TT_SIM_TENSIX_CORES=N         materialise N workers at default coords
-#                                 (column-major from 1-1) instead of naming
-#                                 them. Mutually exclusive with _COORDS.
+#   TT_SIM_TENSIX_COORDS=1-2,2-2  PIN the worker set to exactly these physical
+#                                 coords. Unset, tt-sim builds 1-2 up front and
+#                                 materialises any other worker the program
+#                                 launches on (or a peer addresses) on demand.
+#   TT_SIM_TENSIX_CORES=N         pin N workers at default coords (column-major
+#                                 over tt-metal's compute grid) instead of
+#                                 naming them. Mutually exclusive with _COORDS.
 #   TT_SIM_RUN_TAG=<tag>      stamp <tag> into the server's command line, so the
 #                             test script that set it can clean up exactly the
 #                             servers it caused to start (driver/sim_procs.sh).

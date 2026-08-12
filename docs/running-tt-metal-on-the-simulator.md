@@ -76,42 +76,71 @@ workers like `(0, 5)`).
 
 ### 1.3 Multiple Tensix tiles
 
-By **default only one worker tile, physical `(1, 1)`, is materialized** — every
-other worker coordinate is a `NullCore` (zeroes reads, swallows writes). This
-keeps the per-cycle pump cheap. Single-core programs work out of the box;
-**multi-core programs must list every worker coord they use**:
+**Nothing to set.** tt-sim materialises exactly the workers a program uses, as
+it discovers them, so single-core and 72-core programs both just run:
+
+```bash
+./metal_example_add_2_integers_in_compute   # 1 worker,  ~7 s
+./metal_example_vecadd_multi_core           # 72 workers, ~74 s
+./metal_example_matmul_multi_core           # 72 workers, ~390 s, PCC 0.9999
+```
+
+The server's `ready` line says `(on demand)`, and its shutdown line reports what
+the program actually needed:
+
+```
+[server] tt-sim Wormhole ready (tensix=[(1, 1)] (on demand), … compute_grid=8x9, …)
+[server] shutdown after 5547 messages, 72 tensix materialised (71 on demand)
+```
+
+How it decides, in `tt_sim/bridge/materialise.py`: a worker coordinate starts as
+a journalling stand-in that is wire-identical to the old `NullCore` (writes
+swallowed, reads zero — which is what lets the grid-wide `go=INIT` handshake
+complete), and a real tile is built at the first of three signals — a host write
+to a core already released from reset (i.e. its kernel binaries), a `go=GO`, or
+**a NoC request from a peer**. The third is the one that has to exist: a worker
+launched early runs its kernel thousands of cycles before the last worker is
+mentioned, so it can address a peer that does not exist yet, and dropping that
+packet would be a silently wrong answer rather than a hang.
+
+**Why not simply materialise the whole grid?** Because a worker a program never
+launches on is not free — tt-metal's init handshake releases BRISC on *every*
+declared worker, so it runs base firmware all run. Measured, A/B/A:
+`add_2_integers_in_compute` is **7.0 s** on demand, **28.5 s** with
+`TT_SIM_TENSIX_CORES=72`, **7.3 s** on demand again.
+
+#### Pinning the set by hand
+
+Both env vars still work, and both now mean *exactly these workers and no
+others* — nothing is materialised on demand when either is set. Use them for
+reproducibility (the replay guards and the cost-model gate do) or to
+deliberately starve a program of cores:
 
 ```bash
 export TT_SIM_TENSIX_COORDS=1-1,1-2      # comma-separated PHYSICAL x-y coords
+export TT_SIM_TENSIX_CORES=2             # ...or a bare count: 2 workers, 1-1 1-2
 ```
 
-**Or specify a bare count** and let the simulator pick sensible default coords:
-
-```bash
-export TT_SIM_TENSIX_CORES=2             # materialise 2 workers at 1-1, 1-2
-```
-
-`TT_SIM_TENSIX_CORES=N` materialises **the N workers tt-metal will actually
-launch on**: its compute grid, filled column-major, which is what
-`split_work_to_cores` → `num_cores_to_corerangeset` does. The column is as tall
-as *that* grid, so the answer moves with §1.2 — with no override the 6th core is
-`1-7` (a 9-tall column, skipping the ethernet row), under
-`…OVERRIDE_TODEPRECATE=3,4` it is `2-1` (a 5-tall one). tt-sim reads the
-override out of the environment for you, so a plain count is correct in both
-regimes; the resolved grid is printed in the server's `ready` line. If a program
-places cores some other way you still get the exact go=GO error (below) naming
-what to add; switch to explicit `TT_SIM_TENSIX_COORDS` then. The two vars are
-**mutually exclusive** — set one, not both.
+`TT_SIM_TENSIX_CORES=N` pins **the N workers tt-metal will actually launch on**:
+its compute grid, filled column-major, which is what `split_work_to_cores` →
+`num_cores_to_corerangeset` does. The column is as tall as *that* grid, so the
+answer moves with §1.2 — with no override the 6th core is `1-7` (a 9-tall
+column, skipping the ethernet row), under `…OVERRIDE_TODEPRECATE=3,4` it is
+`2-1` (a 5-tall one). tt-sim reads the override out of the environment for you,
+so a plain count is correct in both regimes; the resolved grid is printed in the
+server's `ready` line. If a program places cores some other way you get the exact
+go=GO error (below) naming what to add. The two vars are **mutually exclusive** —
+set one, not both.
 
 > **Interaction with §1.2.** A `*_multi_core` program distributes its work
-> across tt-metal's *compute grid*. With no override that grid is 8×9, so
-> correct results need **72** worker tiles materialized (`TT_SIM_TENSIX_CORES=72`,
-> ~90 s for `vecadd_multi_core`). Exporting
-> `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4` shrinks the compute grid to the
-> 4×5 block, so you only need those **20** tiles. Either way, cores you don't
-> materialize return zeros. **Beware:** some examples (e.g. `vecadd_multi_core`,
-> `vecadd_sharding`) print per-element mismatches but still `exit 0`, so exit
-> code alone is not a correctness signal for them — grep the log for `Mismatch`.
+> across tt-metal's *compute grid*, so a pinned run has to cover it: with no
+> override that grid is 8×9 and correct results need **72** workers
+> (`TT_SIM_TENSIX_CORES=72`). `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4`
+> shrinks it to the 4×5 block, so **20** suffice. On demand this is simply not
+> a decision you have to make. **Beware either way:** some examples (e.g.
+> `vecadd_multi_core`, `vecadd_sharding`) print per-element mismatches but still
+> `exit 0`, so exit code alone is not a correctness signal for them — grep the
+> log for `Mismatch`.
 
 - Coords are **physical NoC** coords, not logical, and the mapping is an
   **index into the sorted worker axes, not `+1`**: logical `(i, j)` is physical
@@ -127,14 +156,15 @@ what to add; switch to explicit `TT_SIM_TENSIX_COORDS` then. The two vars are
   ```
   The full declared grid additionally has `x∈{6,7,8,9}` and `y∈{7,8,9,10,11}`.
 - Invalid coords fail fast at server start. If a program addresses a worker you
-  did **not** list, the server prints
+  did **not** list (pinned mode only — on demand there is no such thing), the
+  server prints
   `WARNING: wire traffic to functional worker X-Y … not in TT_SIM_TENSIX_COORDS`
   and that traffic is silently NullCore-swallowed — a common cause of "result is
   zeros / low PCC".
-- **A kernel *launch* on an unlisted worker is a hard error, not a warning.**
-  The grid-wide init handshake (`go=INIT`) touches every worker and is harmless,
-  but a `go=GO` only ever targets cores a program actually runs on. When one
-  reaches an un-materialized worker the server prints
+- **A kernel *launch* on an unlisted worker is a hard error, not a warning —
+  in pinned mode.** The grid-wide init handshake (`go=INIT`) touches every
+  worker and is harmless, but a `go=GO` only ever targets cores a program
+  actually runs on. When one reaches an un-materialized worker the server prints
   `ERROR: kernel launch (go=GO) sent to functional worker X-Y … which tt-sim did
   not materialise …` (naming the exact coord to add). This is the unambiguous
   "start tt-sim with more cores" signal: add the named `X-Y` to
@@ -150,9 +180,16 @@ what to add; switch to explicit `TT_SIM_TENSIX_COORDS` then. The two vars are
   identified the server says so and *keeps serving*, so the program reaches its
   own (meaningless) end rather than never ending. Set `TT_SIM_NO_HOST_STOP=1` to
   suppress the stop and get the old interrupt-by-hand behaviour.
+- **A `go=GO` aimed at something that is not a functional worker at all**
+  (off-grid, a DRAM endpoint, an eth core on an architecture whose eth tiles
+  are unmodelled) is reported in both modes — nothing could ever materialise it
+  — but is *not* fatal: a NullCore reads back `RUN_MSG_DONE` immediately so the
+  host cannot hang on it, and the detection is a 4-byte-write heuristic that a
+  false positive would turn into a false kill.
 - Cost: each materialized Tensix tile is heavy (5 RISC-V cores + coprocessor,
-  pumped every cycle via the threaded clock). More tiles = slower wall-clock.
-  Reach for the minimal set a program actually uses.
+  pumped every cycle). Wall clock is close to flat in the count of workers a
+  program *uses* (§1.3.2), but workers it never launches on are pure loss —
+  which is what on-demand materialisation exists to avoid.
 
 #### 1.3.1 Sizing the grid override: the L1 bank count must be a power of 2
 
@@ -245,9 +282,25 @@ workers 11.3 s, `pad_multi_core` 4 workers 26.8 s. On Blackhole,
 materialised, **28.9 s with 72** (and 7.6 s again on the repeat, so that is not
 drift). Every declared worker is released from soft reset by the grid-wide init
 handshake and runs firmware whether or not a kernel lands on it. That 3.8× is
-the reason the default is still **one** worker: the whole example ladder, every
-replay guard and the cost-model gate are single-core, and they would all pay it.
-Ask for the workers your program uses — no more, and no fewer.
+why raising the default was never the answer — the whole example ladder, every
+replay guard and the cost-model gate are single-core, and they would all have
+paid it.
+
+**Superseded by on-demand materialisation (§1.3).** The table above is what a
+*hand-pinned* grid costs, and the numbers it should be read against are what the
+same programs now cost with **no grid environment variable set at all**, on the
+same machine:
+
+| program | pinned (survey) | on demand | workers built |
+| --- | --- | --- | --- |
+| `add_2_integers_in_compute` | 7.6 s @ 1, 28.9 s @ 72 | **7.0 / 7.3 s** | 1 |
+| `vecadd_multi_core` | 81.5 s @ 72, 89.4 s @ 80 | **73.9 s** | 72 |
+| `matmul_multi_core` | 492.3 s @ 72, PCC 0.99992 | **388.4 s**, PCC 0.99991 | 72 |
+
+The on-demand runs are *faster* than the pinned ones that computed the same
+answer, because the workers appear as the program reaches them rather than all
+being live from device init. Ask for nothing; you get the workers your program
+uses, no more and no fewer.
 
 Timings are single runs on a machine with other work on it — read them as
 shape, not as a benchmark.

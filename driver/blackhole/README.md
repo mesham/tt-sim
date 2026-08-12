@@ -40,9 +40,10 @@ The full build + run flow (CMake, the run environment, the whole-suite runner
 `tests/run_examples.sh`, and the offline replay guards) is documented in
 **[examples/README.md](../../examples/README.md)** — the same doc both arches share.
 The only Blackhole difference is the worker coordinate convention: logical `(0,0)`
-maps to physical `(1,2)` (vs `(1,1)` on Wormhole), so single-tile examples use
-`TT_SIM_TENSIX_COORDS=1-2` and `nine` uses `1-2,2-2`. `TT_SIM_TENSIX_CORES` and the
-`TT_SIM_DIAG_*` diagnostics work exactly as for Wormhole (handled by the shared bridge).
+maps to physical `(1,2)` (vs `(1,1)` on Wormhole), so a *pinned* single-tile run uses
+`TT_SIM_TENSIX_COORDS=1-2` and `nine` uses `1-2,2-2`. Unpinned, workers are materialised
+on demand and neither is needed. `TT_SIM_TENSIX_CORES` and the `TT_SIM_DIAG_*`
+diagnostics work exactly as for Wormhole (handled by the shared bridge).
 
 ## Scope / status
 

@@ -63,7 +63,7 @@ over a socket. The variables that matter:
 | `TT_METAL_RUNTIME_ROOT` | tt-metal checkout. Used by CMake to build the example and by the host binary at runtime to locate its kernels/firmware. (`TT_METAL_HOME`, the older name, is accepted as a fallback.) |
 | `TT_METAL_SLOW_DISPATCH_MODE=1` | Forces `EnqueueProgram` to fall back to `detail::LaunchProgram` — the only launch path the simulator models. |
 | `LD_LIBRARY_PATH` | Must include `<tt-metal>/<build>/lib` so the host binary finds `libtt_metal.so` etc. |
-| `TT_SIM_TENSIX_COORDS` | Physical worker tiles to materialise, e.g. `1-1` or `1-1,2-1`. Needed for multi-tile programs (see below). |
+| `TT_SIM_TENSIX_COORDS` | **Optional.** Pins the worker tiles to exactly these, e.g. `1-1` or `1-1,2-1`. Unset, tt-sim materialises whatever the program turns out to use. |
 
 The project venv sets `TT_METAL_RUNTIME_ROOT`, `TT_METAL_SIMULATOR`,
 `TT_METAL_SLOW_DISPATCH_MODE=1` and `LD_LIBRARY_PATH` for you. Without it, export them
@@ -99,12 +99,11 @@ cmake --build build -j
 
 Run the binary **from its `src/` directory** — the host program refers to its kernels
 by the relative path `kernels/...`, which tt-metal resolves against the current
-directory. Multi-tile programs need the exact worker tiles they launch on materialised in
-the simulator; export `TT_SIM_TENSIX_COORDS=<physical coords>` before running — see the
-runbook above. Of the bundled examples only `nine` needs this: it launches on logical
-`(0,0)`+`(1,0)`, i.e. physical `1-1` and `2-1`, so run it with
-`TT_SIM_TENSIX_COORDS=1-1,2-1` (a bare `TT_SIM_TENSIX_CORES=2` materialises `1-1,1-2`
-instead, so `nine`'s launch on `2-1` would hit an unmaterialised tile and hang).
+directory. Multi-tile programs need no configuration: tt-sim materialises the worker
+tiles a program launches on (and any a peer sends NoC traffic to) as it discovers them —
+see the runbook above. `TT_SIM_TENSIX_COORDS=<physical coords>` still *pins* the set
+exactly, which is what the replay guards want and what you want if you are deliberately
+starving a program of cores.
 
 ## Running the examples as a test suite
 
@@ -152,9 +151,11 @@ which holds the binary names, worker coordinates and success lines.
 
 The sources and a one-line description of each live in
 [examples/README.md](../../examples/README.md#the-examples). Of the bundled set only
-`nine` launches on two tiles — on Wormhole run it with `TT_SIM_TENSIX_COORDS=1-1,2-1`
-(a bare `TT_SIM_TENSIX_CORES=2` materialises `1-1,1-2` instead, so `nine`'s launch on
-`2-1` hits an unmaterialised tile; the server names it and stops the run).
+`nine` launches on two tiles, and it needs nothing said about it — the second tile
+appears when the program launches on it. If you do pin the set by hand, `nine` wants
+`TT_SIM_TENSIX_COORDS=1-1,2-1`; a bare `TT_SIM_TENSIX_CORES=2` pins `1-1,1-2` instead,
+so `nine`'s launch on `2-1` hits an unmaterialised tile and the server names it and
+stops the run.
 
 All eleven examples currently pass. The Tensix coprocessor in the simulator is still
 incomplete, though, so a future example may exercise a gap the simulator hasn't modelled;

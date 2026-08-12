@@ -58,7 +58,12 @@ directory** (the host program refers to its kernels by the relative path
 | `TT_METAL_RUNTIME_ROOT` | tt-metal checkout (CMake build + runtime kernel/firmware lookup). `TT_METAL_HOME` is accepted as a fallback. |
 | `TT_METAL_SLOW_DISPATCH_MODE=1` | Forces `EnqueueProgram` to fall back to `detail::LaunchProgram` — the only launch path the simulator models. |
 | `LD_LIBRARY_PATH` | Must include `<tt-metal>/<build>/lib` so the binary finds `libtt_metal.so` etc. |
-| `TT_SIM_TENSIX_COORDS` | Physical worker tile(s) to materialise (see coords below). |
+| `TT_SIM_TENSIX_COORDS` | **Optional.** Pins the worker tile(s) to exactly these (see coords below). Unset, tt-sim materialises whatever the program uses. |
+
+**You do not have to set the coordinates.** tt-sim builds a worker tile when the
+program launches on it, or when a peer sends it NoC traffic — so every example
+below, one-tile and two-tile alike, runs with nothing exported. The table is
+what to pin if you want the set fixed (the replay guards and trace captures do).
 
 **Worker coordinates differ per arch.** A program's logical core `(col,row)` maps
 to a physical NoC coord; that mapping is `+ (1,1)` on Wormhole and `+ (1,2)` on

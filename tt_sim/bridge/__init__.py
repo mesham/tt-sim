@@ -11,13 +11,20 @@ Modules:
 - ``transport`` — the nng pair1 socket + dispatch loop.
 - ``fabric`` — routes a (coord, addr) op to the right ``cores`` wrapper.
 - ``grid`` — tt-metal's compute grid and the order it fills workers in.
-- ``cores`` — DRAM / eth / Tensix / null endpoints over the device.
+- ``cores`` — DRAM / eth / Tensix / deferred / null endpoints over the device.
+- ``materialise`` — building exactly the workers a program launches on.
 - ``trace`` — record/replay of wire conversations.
 - ``device`` — the cycle-pumping ``Device`` wrapper + diagnostics-from-env.
 - ``hostlink`` — ending a host the simulator can no longer answer.
 """
 
-from tt_sim.bridge.cores import DramCore, EthCore, NullCore, TensixCore
+from tt_sim.bridge.cores import (
+    DeferredTensixCore,
+    DramCore,
+    EthCore,
+    NullCore,
+    TensixCore,
+)
 from tt_sim.bridge.device import (
     Device,
     diagnostics_from_env,
@@ -26,14 +33,17 @@ from tt_sim.bridge.device import (
 from tt_sim.bridge.fabric import Fabric, install_worker_guards
 from tt_sim.bridge.grid import compute_grid, fill_order
 from tt_sim.bridge.hostlink import find_wire_peer, host_not_stranded, stop_host
+from tt_sim.bridge.materialise import LazyTensixPool
 from tt_sim.bridge.trace import TraceWriter, parse_trace_line
 from tt_sim.bridge.transport import Transport
 
 __all__ = [
+    "DeferredTensixCore",
     "Device",
     "DramCore",
     "EthCore",
     "Fabric",
+    "LazyTensixPool",
     "NullCore",
     "TensixCore",
     "TraceWriter",

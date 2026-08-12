@@ -13,21 +13,28 @@ from tt_sim.bridge import Fabric, TraceWriter, Transport, host_not_stranded
 
 
 def _parse_tensix_pool(env):
-    """Return the physical worker coords the bridge should pre-construct.
+    """Return ``(coords, pinned)``: the workers to pre-build, and whether the
+    user pinned that set.
 
-    Two ways to specify the pool, in precedence order:
+    With **neither** env var set the answer is ``([(1, 1)], False)``: the
+    historical single-tile default is still built up front — so the single-tile
+    path is unchanged down to the cycle — but ``pinned=False`` lets the server
+    install a :class:`~tt_sim.bridge.LazyTensixPool` that materialises any
+    other worker the program turns out to need. No coordinates to work out, and
+    no tax for workers a program never launches on.
+
+    Two ways to pin the set explicitly, in precedence order:
 
     - ``TT_SIM_TENSIX_COORDS``: comma-separated ``x-y`` physical NoC coords,
-      e.g. ``"1-1,2-1"`` — exact control over which workers exist.
-    - ``TT_SIM_TENSIX_CORES``: a bare count ``N`` — materialise the N workers
-      tt-metal will actually launch on (``coords.default_tensix_coords``:
-      column-major over its compute grid), so you can drive by core *count*
-      without naming coords.
+      e.g. ``"1-1,2-1"`` — exactly these workers exist, and no others ever will.
+    - ``TT_SIM_TENSIX_CORES``: a bare count ``N`` — the N workers tt-metal will
+      actually launch on (``coords.default_tensix_coords``: column-major over
+      its compute grid), so you can drive by core *count* without naming coords.
 
-    Setting both is an error (ambiguous). Neither defaults to ``[(1, 1)]`` — the
-    single-tile coord every wormhole example targets. Coords are validated
-    against the SoC-descriptor-derived ``TENSIX_COORD_MAP`` so typos surface
-    immediately rather than as silent NullCore zero-fills at runtime.
+    Both pin, because the replay guards and the cost-model gate want a fixed,
+    reproducible grid. Setting both is an error (ambiguous). Coords are
+    validated against the SoC-descriptor-derived ``TENSIX_COORD_MAP`` so typos
+    surface immediately rather than as silent zero-fills at runtime.
     """
     from .coords import TENSIX_COORD_MAP, default_tensix_coords
 
@@ -47,11 +54,14 @@ def _parse_tensix_pool(env):
                 f"TT_SIM_TENSIX_CORES must be an integer, got {cores_raw!r}"
             ) from None
         try:
-            return default_tensix_coords(n)
+            return default_tensix_coords(n), True
         except ValueError as e:
             raise SystemExit(f"TT_SIM_TENSIX_CORES: {e}") from None
 
-    raw = coords_raw if coords_raw is not None else "1-1"
+    if coords_raw is None:
+        return [(1, 1)], False
+
+    raw = coords_raw
     pool = []
     for chunk in raw.split(","):
         chunk = chunk.strip()
@@ -67,7 +77,7 @@ def _parse_tensix_pool(env):
         pool.append(physical)
     if not pool:
         raise SystemExit("TT_SIM_TENSIX_COORDS is set but empty")
-    return pool
+    return pool, True
 
 
 def main(argv=None):
@@ -123,11 +133,13 @@ def main(argv=None):
 
     fabric = Fabric()
     device = None
+    lazy_pool = None
     if not args.mock_tensix:
         # Late import so --mock-tensix avoids the (slow) Wormhole construction.
         from tt_sim.bridge import (
             DramCore,
             EthCore,
+            LazyTensixPool,
             TensixCore,
             diagnostics_from_env,
             enabled_diagnostic_names,
@@ -137,7 +149,7 @@ def main(argv=None):
         from .coords import DRAM_COORD_MAP, ETH_COORD_MAP, TENSIX_COORD_MAP
         from .wh_device import make_device
 
-        tensix_pool = _parse_tensix_pool(os.environ)
+        tensix_pool, pinned = _parse_tensix_pool(os.environ)
         diagnostics = diagnostics_from_env()
         device = make_device(
             cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics
@@ -146,22 +158,35 @@ def main(argv=None):
             fabric.register(translated, DramCore(device, unified))
         for translated, unified in ETH_COORD_MAP.items():
             fabric.register(translated, EthCore(device, unified))
-        # Eagerly materialise the worker tiles the user asked for. Every
-        # other worker coord falls through to NullCore (matching the
-        # zero-stub behaviour tt-metal's grid-wide init traffic tolerates),
-        # which is critical for keeping the cycle pump cheap — see the
-        # ROADMAP §A "Multi-Tensix threading" perf note.
-        for physical in tensix_pool:
-            unified = TENSIX_COORD_MAP[physical]
-            device.ensure_tensix_tile(physical)
-            fabric.register(physical, TensixCore(device, unified))
+        if pinned:
+            # The user named the set; build exactly it and nothing else. Every
+            # other worker coord falls through to NullCore, as it always has.
+            for physical in tensix_pool:
+                unified = TENSIX_COORD_MAP[physical]
+                device.ensure_tensix_tile(physical)
+                fabric.register(physical, TensixCore(device, unified))
+        else:
+            # Nothing pinned: build the default worker up front and let the
+            # program ask for the rest. See ``tt_sim.bridge.materialise`` — a
+            # worker appears when the host writes to it after releasing it,
+            # when a kernel launches on it, or when a peer sends it NoC
+            # traffic, whichever comes first.
+            lazy_pool = LazyTensixPool(
+                fabric, device, TENSIX_COORD_MAP, eager=tensix_pool
+            )
 
         # Surface the most common "silent zero-fill" config bug: host traffic
         # (or worse, a kernel launch) addressing a functional_worker that
         # wasn't pre-built via TT_SIM_TENSIX_COORDS. Shared with the Blackhole
         # server so both architectures shout about it — see
         # ``tt_sim.bridge.install_worker_guards``.
-        install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP, wire_addr=addr)
+        install_worker_guards(
+            fabric,
+            tensix_pool,
+            TENSIX_COORD_MAP,
+            wire_addr=addr,
+            lazy=not pinned,
+        )
 
         enabled = enabled_diagnostic_names(diagnostics)
         from tt_sim.bridge import compute_grid
@@ -169,9 +194,10 @@ def main(argv=None):
         from .coords import DEFAULT_COMPUTE_GRID
 
         grid = compute_grid(DEFAULT_COMPUTE_GRID)
+        how = "pinned" if pinned else "on demand"
         print(
             f"[server] tt-sim Wormhole ready "
-            f"(tensix={tensix_pool}, dram={list(DRAM_COORD_MAP)}, "
+            f"(tensix={tensix_pool} ({how}), dram={list(DRAM_COORD_MAP)}, "
             f"compute_grid={grid[0]}x{grid[1]}, "
             f"cycles_per_poll={args.cycles_per_poll})",
             file=sys.stderr,
@@ -213,8 +239,14 @@ def main(argv=None):
         if device is not None:
             device.tt_device.shutdown()
 
+    extra = ""
+    if lazy_pool is not None:
+        extra = (
+            f", {len(lazy_pool.materialised)} tensix materialised "
+            f"({len(lazy_pool.on_demand)} on demand)"
+        )
     print(
-        f"[server] shutdown after {transport.msg_count} messages",
+        f"[server] shutdown after {transport.msg_count} messages{extra}",
         file=sys.stderr,
         flush=True,
     )
