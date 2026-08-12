@@ -143,7 +143,34 @@ struct Point {
     uint32_t distinct_banks = 0;
     uint32_t distinct_dram_cores = 0;
     double agg_bytes_per_cycle = 0.0;
+    // Every repeat's aggregate, kept for the sustained-rate table alone. The
+    // fields above stay exactly what they were -- the LAST repeat's -- because
+    // the verdict below is graded on them and a run recorded before this table
+    // existed must keep reading the same way.
+    std::vector<double> agg_samples;
 };
+
+// The MIDDLE repeat, not the mean and not the best. A repeat that hit an
+// unrelated stall should move a sustained rate by nothing, and with the usual
+// three repeats the median is one of the measurements rather than an average
+// containing an outlier. (At an even count it is the mean of the middle two,
+// which is the standard definition and is why `--repeats 3` is the default.)
+double median_of(std::vector<double> v) {
+    if (v.empty()) {
+        return 0.0;
+    }
+    std::sort(v.begin(), v.end());
+    const size_t mid = v.size() / 2;
+    return (v.size() % 2 == 1) ? v[mid] : 0.5 * (v[mid - 1] + v[mid]);
+}
+
+// `wh_dram#performance`, reads, static VC: 1, 12 and 48 Tensix tiles each
+// reading 1 MiB from ONE DRAM channel simultaneously. WORMHOLE ONLY -- no
+// Blackhole DRAM tile page is published at all, so there is no table to
+// compare a Blackhole run against and inventing one from this would be
+// laundering one part's published number into another part's gap.
+const uint32_t VENDOR_READERS[3] = {1, 12, 48};
+const double VENDOR_GB_PER_S[3] = {22.2, 22.3, 22.3};
 
 std::vector<uint32_t> parse_list(const std::string& s) {
     std::vector<uint32_t> out;
@@ -189,6 +216,7 @@ int main(int argc, char** argv) {
     uint32_t tx_bytes = 4096;
     uint32_t repeats = 3;
     uint32_t max_readers = 0;  // 0 = whatever the grid gives, capped below
+    bool sustained_preset = false;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         auto next = [&]() { return std::string(argv[++i]); };
@@ -206,6 +234,14 @@ int main(int argc, char** argv) {
             readers_arg = next();
         } else if (a == "--arms" && i + 1 < argc) {
             arms_arg = next();
+        } else if (a == "--sustained") {
+            // The vendor's own experiment, as one flag, so that the run that
+            // is meant to be comparable to a published table cannot be got
+            // subtly wrong at the card. It sets only the reader counts: 1 MiB
+            // per reader, 4096 B transactions and three repeats are ALREADY
+            // the defaults, and this preset deliberately does not restate them
+            // -- two places to change one parameter is how the two drift.
+            sustained_preset = true;
         } else if (a == "-h" || a == "--help") {
             printf(
                 "dramratebench [options]\n"
@@ -215,7 +251,8 @@ int main(int argc, char** argv) {
                 "  --repeats R        how many times to run the whole plan (default 3)\n"
                 "  --max-readers N    cap the sweep (default: the whole worker grid)\n"
                 "  --readers a,b,c    the reader counts to sweep (default 1,2,4,8,12,16,24,32,48)\n"
-                "  --arms LIST        substring filter over onechan,fanchan,samecore\n");
+                "  --arms LIST        substring filter over onechan,fanchan,samecore\n"
+                "  --sustained        the vendor's own reader counts, 1,12,48 (wh_dram#performance)\n");
             return 0;
         } else {
             fprintf(stderr, "dramratebench: unknown argument '%s'\n", a.c_str());
@@ -309,9 +346,10 @@ int main(int argc, char** argv) {
     if (max_readers == 0 || max_readers > grid_readers) {
         max_readers = grid_readers;
     }
-    std::vector<uint32_t> sweep =
-        readers_arg.empty() ? std::vector<uint32_t>{1, 2, 4, 8, 12, 16, 24, 32, 48}
-                            : parse_list(readers_arg);
+    std::vector<uint32_t> default_sweep =
+        sustained_preset ? std::vector<uint32_t>{1, 12, 48}
+                         : std::vector<uint32_t>{1, 2, 4, 8, 12, 16, 24, 32, 48};
+    std::vector<uint32_t> sweep = readers_arg.empty() ? default_sweep : parse_list(readers_arg);
     {
         std::vector<uint32_t> keep;
         for (uint32_t n : sweep) {
@@ -595,6 +633,7 @@ int main(int argc, char** argv) {
             p.max_spins = max_spins;
             p.tags_ok = tags_ok;
             p.agg_bytes_per_cycle = agg;
+            p.agg_samples.push_back(agg);
             fprintf(out, "%s,%u,%zu,%u,%u,%u,%u,%llu,%u,%u,%.4f,%.3f,%.4f,%u,%u,%u,%u,%u\n",
                     p.arm.c_str(), rep, pi, p.num_readers, p.num_tx, p.tx_bytes, bytes_per_reader,
                     (unsigned long long)total_bytes, max_cycles, min_cycles, agg,
@@ -644,6 +683,66 @@ int main(int argc, char** argv) {
     printf("dramratebench: %u point(s); %u of %u multi-reader point(s) had a reader wait at the\n"
            "  barrier; %u point(s) had a reader that did not verify its DRAM tag\n",
            points, overlapped, multi, bad_tags);
+
+    // --- the sustained rate, per reader count -------------------------------
+    // THE LEVEL, which the scaling verdict below cannot see. A run whose one
+    // channel plateaus at 24 B/cycle and a run whose one channel plateaus at
+    // 40 give the SAME ratio, and only one of them agrees with the model:
+    // `dram.channel_serialisation.bytes_per_cycle` is 24 on Wormhole, so a
+    // saturated one-channel aggregate cannot exceed it however many readers
+    // push. Printed as data, before any verdict, and printed even when a gate
+    // has failed -- a reader who can see the numbers can see what failed.
+    printf("\ndramratebench: SUSTAINED RATE -- N readers, %u B each, ONE channel\n", bytes_per_reader);
+    printf("  readers   aggregate B/cycle   per reader   aggregate GB/s   fanchan B/cycle\n");
+    for (uint32_t n : sweep) {
+        const Point* o = best("onechan", n);
+        if (o == nullptr) {
+            continue;
+        }
+        const Point* f = best("fanchan", n);
+        const double agg = median_of(o->agg_samples);
+        printf("  %7u   %17.3f   %10.3f   ", n, agg, agg / (double)n);
+        if (clock_mhz > 0) {
+            printf("%12.2f   ", agg * (double)clock_mhz / 1000.0);
+        } else {
+            printf("%12s   ", "-");
+        }
+        if (f != nullptr) {
+            printf("%14.3f\n", median_of(f->agg_samples));
+        } else {
+            printf("%14s\n", "-");
+        }
+    }
+    if (clock_mhz <= 0) {
+        printf("  (this device reports no clock, so no GB/s column is shown: a GB/s converted\n"
+               "   at a frequency the device did not report is not a reading. Use B/cycle.)\n");
+    }
+    if (arch == "wormhole" && clock_mhz > 0) {
+        printf("  Against wh_dram#performance (reads, static VC, 1 MiB per tile, ONE channel):\n");
+        printf("    readers   published GB/s   measured GB/s   deviation\n");
+        for (size_t v = 0; v < 3; v++) {
+            const Point* o = best("onechan", VENDOR_READERS[v]);
+            if (o == nullptr) {
+                printf("    %7u   %14.1f   %13s   %9s  (not swept)\n", VENDOR_READERS[v],
+                       VENDOR_GB_PER_S[v], "-", "-");
+                continue;
+            }
+            const double got = median_of(o->agg_samples) * (double)clock_mhz / 1000.0;
+            printf("    %7u   %14.1f   %13.2f   %+8.1f%%\n", VENDOR_READERS[v], VENDOR_GB_PER_S[v],
+                   got, 100.0 * (got - VENDOR_GB_PER_S[v]) / VENDOR_GB_PER_S[v]);
+        }
+    } else if (arch == "wormhole") {
+        printf("  wh_dram#performance publishes 22.2 / 22.3 / 22.3 GB/s at 1 / 12 / 48 tiles, and\n"
+               "  this run cannot be compared to it: the device reported no clock, so only\n"
+               "  B/cycle is a reading here. 24 B/cycle is the channel rate the table converts\n"
+               "  from at 1 GHz, and 22.2 is 92%% of it -- the page's own achievable fraction.\n");
+    } else {
+        printf("  No published table applies: wh_dram#performance is a WORMHOLE page, and this\n"
+               "  part is %s. Blackhole publishes no DRAM tile page at all -- no per-channel\n"
+               "  rate, no address map -- so there is nothing here to compare against and\n"
+               "  nothing measured here can supply it.\n",
+               arch.c_str());
+    }
     if (points == 0) {
         printf("  VERDICT: DEGENERATE -- nothing was measured.\n");
     } else if (bad_tags != 0) {

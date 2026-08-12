@@ -1,0 +1,94 @@
+# dramratebench SUSTAINED-RATE PREDICTION  recorded=2026-08-12
+#
+# THIS FILE IS NOT A MEASUREMENT, and no row in it is one. It is what tt-sim
+# said, on 2026-08-12, before any card ran the sustained-rate sweep at these
+# parameters -- written down here so that it cannot be revised after one does.
+# A probe whose expectations are recorded after seeing silicon proves nothing,
+# and every cell below is pinned in tt_sim/perf/dram_rate_sweep_test.py, so an
+# edit that quietly moves one to meet a measurement fails a test rather than
+# passing unnoticed.
+#
+# THE EXPERIMENT
+# --------------
+# N Tensix tiles each read 1 MiB from ONE DRAM channel simultaneously, N swept
+# -- the experiment wh_dram#performance reports as 22.2 / 22.3 / 22.3 GB/s at
+# 1 / 12 / 48 tiles. Collected with:
+#
+#   TT_SIM_COST_MODEL=1 TT_SIM_TENSIX_COORDS=<12 tiles> \
+#     ./perfbench/run.sh dramratebench -- \
+#       --bytes 1048576 --tx-bytes 4096 --repeats 1 --readers 1,2,4,8,12 \
+#       --max-readers 12
+#
+# One repeat: tt-sim is deterministic, so repeats cost minutes and add nothing.
+# Twelve tiles is the widest the simulator can reach in reasonable time at these
+# parameters -- 48 readers on one channel is over two million simulated cycles
+# with 48 tiles stepping in lockstep -- so the 48-reader rows are the model's
+# own asymptote and say `plateau-extrapolated` rather than pretending to be
+# simulated points. The fanchan CONTROL is predicted only where it was run.
+#
+# WORMHOLE IS A PREDICTION. No Wormhole part has ever run this probe; the lab
+# has a Blackhole card and a Wormhole session is booked work rather than done
+# work. What it predicts:
+#
+#   * FLAT. The aggregate grows x1.010 from 1 to 48 readers, against the
+#     vendor's own x1.0045. That flatness is the endpoint-occupancy term, and
+#     rung 2 structurally cannot reach it: every retained DRAM row is
+#     num_transactions = 1, and a lone request never finds the channel busy.
+#   * AT THE CHANNEL, not the link. 23.75 -> 23.99 B/cycle approaches
+#     dram.channel_serialisation.bytes_per_cycle = 24 from below, and is
+#     nowhere near the NoC link's 32.
+#   * AND ABOUT 7% HIGH: +7.0% to +7.6% against 22.2 / 22.3 / 22.3. The gap is
+#     one-directional and its size is published in advance -- the same ISA doc
+#     page states achievable_fraction 0.92, and 24 x 0.92 = 22.1, which is the
+#     table. unit_costs.yaml deliberately refuses to fold that fraction into
+#     the charge ("an efficiency fudge of exactly the kind these tables
+#     refuse"), so the model is expected to over-predict by exactly it.
+#
+# Three ways it can be wrong, each meaning something different: the aggregate
+# GROWS with readers (endpoint occupancy refuted); it plateaus near 32 (the
+# link, not the channel -- right shape, wrong resource); it plateaus far below
+# 22 (something upstream binds first, and the run sized the reader).
+#
+# BLACKHOLE IS A RETRODICTION, and it is already contradicted. That part ran
+# this sweep on 2026-08-09 -- tt_sim/perf/datasets/dramratebench-blackhole-2026-08-09.csv
+# -- and measured a plateau of 47.1 B/cycle. tt-sim says 64.0 --
+# 36% high -- and the plateau it produces is the DRAM tile's inbound NoC LINK
+# (64 B/cycle exactly), because Blackhole's endpoint queue is switched off for
+# want of a published per-channel rate. It is recorded because of what it
+# shows: a flat one-channel arm and a scaling control produce the verdict
+# ENDPOINT BOUND on a part with no modelled endpoint, so the ratio cannot tell
+# a link from a channel and the LEVEL is what does.
+#
+# NOTHING HERE IS PROVENANCE, in either direction. A number this probe returns
+# is a measurement on one part and enters unit_costs.yaml as corroboration
+# only; a number tt-sim returns is a model output and enters nothing at all.
+# Blackhole's dram.bandwidth stays unknown for want of a published page rather
+# than for want of a number, and neither this file nor a card can supply a
+# document.
+#
+# agg_gb_per_s is agg_bytes_per_cycle at the arch's published clock -- 1000 MHz
+# Wormhole, 1350 MHz Blackhole -- and is a conversion, not a second reading.
+# tt-sim itself reports no clock and writes 0 in that column.
+arch,cost_model,arm,num_readers,bytes_per_reader,tx_bytes,agg_bytes_per_cycle,agg_gb_per_s,basis
+wormhole,on,onechan,1,1048576,4096,23.7492,23.75,tt-sim
+wormhole,on,onechan,2,1048576,4096,23.8595,23.86,tt-sim
+wormhole,on,onechan,4,1048576,4096,23.9182,23.92,tt-sim
+wormhole,on,onechan,8,1048576,4096,23.9461,23.95,tt-sim
+wormhole,on,onechan,12,1048576,4096,23.9583,23.96,tt-sim
+wormhole,on,onechan,48,1048576,4096,23.9900,23.99,plateau-extrapolated
+wormhole,on,fanchan,1,1048576,4096,23.7492,23.75,tt-sim
+wormhole,on,fanchan,2,1048576,4096,31.8097,31.81,tt-sim
+wormhole,on,fanchan,4,1048576,4096,63.6040,63.60,tt-sim
+wormhole,on,fanchan,8,1048576,4096,123.9159,123.92,tt-sim
+wormhole,on,fanchan,12,1048576,4096,95.8888,95.89,tt-sim
+blackhole,on,onechan,1,1048576,4096,62.1894,83.96,tt-sim
+blackhole,on,onechan,2,1048576,4096,63.1121,85.20,tt-sim
+blackhole,on,onechan,4,1048576,4096,63.6301,85.90,tt-sim
+blackhole,on,onechan,8,1048576,4096,63.8923,86.25,tt-sim
+blackhole,on,onechan,12,1048576,4096,64.0114,86.42,tt-sim
+blackhole,on,onechan,48,1048576,4096,64.0000,86.40,plateau-extrapolated
+blackhole,on,fanchan,1,1048576,4096,62.1894,83.96,tt-sim
+blackhole,on,fanchan,2,1048576,4096,123.3837,166.57,tt-sim
+blackhole,on,fanchan,4,1048576,4096,246.7673,333.14,tt-sim
+blackhole,on,fanchan,8,1048576,4096,252.9356,341.46,tt-sim
+blackhole,on,fanchan,12,1048576,4096,254.6890,343.83,tt-sim

@@ -8,6 +8,10 @@
 #
 #   export TT_METAL_HOME=/path/to/your/built/tt-metal
 #   perfbench/dramratebench/run_card.sh [-- prog args...]
+#   perfbench/dramratebench/run_card.sh -- --sustained   # the vendor's 1/12/48
+#
+# The prediction this run is to be read against was recorded BEFORE it, in
+# prediction-sustained.csv next to this script. Read it first.
 #
 # SPDX-License-Identifier: Apache-2.0
 
@@ -31,7 +35,7 @@ for arg in "$@"; do
   if [ "$seen_sep" = 1 ]; then ARGS+=("$arg"); continue; fi
   case "$arg" in
     --) seen_sep=1 ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) ARGS+=("$arg") ;;
   esac
 done
@@ -64,4 +68,9 @@ echo "    when the fanchan control moved."
 echo "  * tags_ok equals num_readers in every row, or the readers were not"
 echo "    talking to the bank the plan names"
 echo "  * max_barrier_spins is non-zero somewhere, or the bursts never overlapped"
+echo
+echo "The SUSTAINED RATE table above the verdict is the level, and the prediction"
+echo "it is to be read against was recorded before this run:"
+echo "  $HERE/prediction-sustained.csv"
+echo "At home: python3 -m tt_sim.perf.dram_rate_sweep --measured <the CSV>"
 exit "$rc"
