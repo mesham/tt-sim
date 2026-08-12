@@ -980,6 +980,20 @@ units:
       hardware would have stalled. Wormhole therefore keeps whole-unit
       occupancy, which is inert there in any case: every entry in its table is
       one cycle, so nothing ever holds the unit.
+
+      THIS IS THE ONE UNIT WHOSE ``latency`` COLUMN IS ALSO CONSUMED, since
+      2026-08-12, and the reason is that here the two columns differ: WRCFG is
+      latency 2 at IPC 1, so the unit accepts the next instruction a cycle
+      before the previous one has left. Occupancy answers "when may the next
+      one enter"; latency answers "when has this one left", and STALLWAIT's
+      C12 -- "Any thread has an instruction in any stage of the Configuration
+      Unit pipeline" -- is the second question. ``UnitCostModel.latency``
+      resolves it through the same BOUND_POLICY as occupancy, so RDCFG's
+      ">= 2" is charged at its low end (2); for a residency the low end is the
+      *under*-reporting end, which is the safe one, because a residency held
+      longer than the hardware's invents a stall at the Wait Gate. Nothing
+      about the latency column delays a config *write*: the handlers still run
+      in the tick they always did. See ``config.py``'s ``_arm_residency``.
     instructions:
       SETC16:
         latency: 1

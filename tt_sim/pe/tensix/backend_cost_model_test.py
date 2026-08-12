@@ -89,12 +89,23 @@ class _ForcedOccupancy:
     make a test reach a code path.
     """
 
-    def __init__(self, charges, groups=None):
+    def __init__(self, charges, groups=None, latencies=None):
         self.charges = charges
         self.groups = groups or {}
+        self.latencies = latencies or {}
 
     def occupancy(self, instruction_name):
         return self.charges.get(instruction_name, 1)
+
+    def latency(self, instruction_name):
+        """Residency, defaulting to one cycle — i.e. to no residency at all.
+
+        A separate dict from ``charges`` on purpose: the config unit's whole
+        point is that its Latency and IPC columns are different numbers, so a
+        stand-in that derived one from the other would hide the distinction the
+        tests using it are about.
+        """
+        return self.latencies.get(instruction_name, 1)
 
     def is_exact(self, instruction_name):
         return True
@@ -657,13 +668,277 @@ def test_the_sync_unit_charges_one_cycle_throughout():
             assert sync.instruction_occupancy(name, 0) == 1, name
 
 
+# ---------------------------------------------------------------------------
+# 6. The config unit's *other* column: residency, and STALLWAIT's C12.
+# ---------------------------------------------------------------------------
+#
+# Everything above is about what an instruction *costs* — how soon the unit will
+# take the next one. This section is about how long it is still *in* the unit,
+# which on this unit is a different number:
+#
+#   ConfigurationUnit.md (BlackholeA0) tabulates SETC16 at latency 1 / IPC 3,
+#   STREAMWRCFG at latency >= 5 / IPC 1, WRCFG at latency 2 / IPC 1,
+#   CFGSHIFTMASK at latency 2 / IPC 1/2, RMWCIB at latency 1 / IPC 1, and RDCFG
+#   at latency >= 2 / IPC 1. Wormhole's page prints the same latencies against
+#   prose throughputs.
+#
+# So WRCFG is latency 2 at one instruction per cycle: the unit accepts the next
+# instruction a cycle *before* the previous one has left. Nothing read the
+# Latency column until now, and the consequence was that
+#
+#   STALLWAIT.md (BlackholeA0), condition C12: "Any thread has an instruction in
+#   any stage of the Configuration Unit pipeline."
+#
+# was satisfied the moment the issue queue drained — and, worse, that whether it
+# saw anything at all came down to whether the *issuing* thread's Wait Gate
+# happened to tick before the *waiting* thread's within the cycle.
+# ``test_off_means_c12_was_decided_by_wait_gate_tick_order`` measures exactly
+# that, and it is the argument for modelling the residency as a deadline.
+#
+# Bounds are charged at their low end (``BOUND_POLICY``), so RDCFG's ">= 2
+# cycles" arms 2. For a residency the low end is the *under*-reporting end and
+# that is the safe one: a residency held longer than the hardware's makes a
+# STALLWAIT on C12 wait for a stall that does not exist, and inventing
+# back-pressure is the one direction the bounds policy forbids.
+
+#: ``WRCFG CFG[12] = GPR[5]`` — latency 2, occupancy 1, i.e. the shape that
+#: makes residency a separate question. ``CfgReg`` at bit 0, ``GprAddress`` at
+#: 16; opcode 176.
+WRCFG_CFG12_FROM_G5 = (176 << 24) | (5 << 16) | 12
+
+#: ``STALLWAIT`` on condition **C12** (bit 12 — ``p_stall::CFGEXU`` in
+#: tt-metal's Blackhole LLK header), blocking the Vector Unit (block bit B8,
+#: ``stall_res`` at bit 15). Opcode 0xA2. Paired with an ``SFPNOP``, which B8
+#: catches and which does nothing else, so the cycle the waiting thread's Wait
+#: Gate FIFO drains is exactly the cycle C12 was met plus ``STALLWAIT.md``'s own
+#: "one cycle lag between the condition(s) being met and the block mask being
+#: removed".
+STALLWAIT_C12_BLOCK_SFPU = (0xA2 << 24) | (0x100 << 15) | 0x1000
+
+
+@contextmanager
+def _coprocessor(blackhole=True, cost_model=True):
+    """A whole Tensix coprocessor — Wait Gates included — model on or off."""
+    previous = os.environ.get("TT_SIM_COST_MODEL")
+    if cost_model:
+        os.environ["TT_SIM_COST_MODEL"] = "1"
+    else:
+        os.environ.pop("TT_SIM_COST_MODEL", None)
+    profile = BLACKHOLE_PROFILE if blackhole else WORMHOLE_PROFILE
+    try:
+        yield TensixCoProcessor(
+            None,
+            profile.tensix_cfg_state_size,
+            profile.tensix_thd_state_size,
+            blackhole,
+        )
+    finally:
+        TensixConfigurationConstants.use_blackhole(False)
+        if previous is None:
+            os.environ.pop("TT_SIM_COST_MODEL", None)
+        else:
+            os.environ["TT_SIM_COST_MODEL"] = previous
+
+
+def _c12_drain_cycle(
+    coprocessor, config_burst, cycles=80, reverse_units=False, reverse_gates=False
+):
+    """Cycle at which the *waiting* thread's Wait Gate FIFO empties, or ``None``.
+
+    Thread 0 issues ``config_burst`` back-to-back ``WRCFG``s; thread 1 issues a
+    ``STALLWAIT`` on C12 and then the ``SFPNOP`` that wait blocks. That is the
+    smallest program in which C12 means anything, because the condition names
+    *any* thread's instruction — so the waiter has to be a different thread from
+    the issuer, which is what makes C12 unlike every other condition in the
+    table.
+
+    ``reverse_units`` reverses the order the backend units tick within a cycle
+    and ``reverse_gates`` the order the three Wait Gates do. Neither ordering is
+    a fact about the hardware; both are artefacts of the list ``getClocks``
+    returns.
+    """
+    backend = coprocessor.getBackend()
+    issuer, waiter = coprocessor.getThread(0), coprocessor.getThread(1)
+    for _ in range(config_burst):
+        issuer.push_wait_gate_instruction(WRCFG_CFG12_FROM_G5)
+    waiter.push_wait_gate_instruction(STALLWAIT_C12_BLOCK_SFPU)
+    waiter.push_wait_gate_instruction(SFPNOP)
+
+    units = backend.getClocks()
+    clocks = list(reversed(units)) if reverse_units else list(units)
+    threads = list(coprocessor.threads)
+    if reverse_gates:
+        threads = list(reversed(threads))
+    for thread in threads:
+        clocks = clocks + thread.getClocks()
+
+    for cycle in range(cycles):
+        for clock in clocks:
+            clock.clock_tick(cycle)
+        if not waiter.wait_gate_instruction_fifo:
+            return cycle
+    return None
+
+
+def test_the_config_residency_is_the_latency_column_not_the_occupancy_column():
+    """Both columns are in the table, and for this unit they differ.
+
+    Reading ``busy_until`` as residency would report 1 cycle for ``WRCFG`` and
+    ``RDCFG``, which is the throughput answer and not the pipeline one. This is
+    the assertion that keeps the two apart — and it is read off the unit's own
+    cost model, so it is the table talking, not a constant repeated here.
+    """
+    for blackhole in (False, True):
+        with _coprocessor(blackhole=blackhole) as coprocessor:
+            model = coprocessor.getBackend().backend_units["CFG"].cost_model
+            assert (model.latency("WRCFG"), model.occupancy("WRCFG")) == (2, 1)
+            assert (model.latency("RDCFG"), model.occupancy("RDCFG")) == (2, 1)
+            assert (model.latency("SETC16"), model.occupancy("SETC16")) == (1, 1)
+            for name in ("RMWCIB0", "RMWCIB1", "RMWCIB2", "RMWCIB3"):
+                assert (model.latency(name), model.occupancy(name)) == (1, 1), name
+            if blackhole:
+                # The two Blackhole-only rows. CFGSHIFTMASK is the one opcode
+                # whose columns agree ("requires two cycles in stage 0");
+                # STREAMWRCFG's ">= 5" is the pipeline depth, -4 through 0, at
+                # one instruction per cycle.
+                assert model.latency("CFGSHIFTMASK") == 2
+                assert model.occupancy("CFGSHIFTMASK") == 2
+                assert model.latency("STREAMWRCFG") == 5
+                assert model.occupancy("STREAMWRCFG") == 1
+
+
+def test_a_wrcfg_is_reported_in_the_pipeline_for_its_documented_latency():
+    """Accepted in cycle 0, retired in cycle 1, still in a stage until cycle 2.
+
+    The retire is unmoved — ``handle_wrcfg`` runs in the tick it always ran in,
+    so no config value lands anywhere new — and only the *report* extends. That
+    separation is deliberate: delaying the write itself is the ordering bug this
+    unit already found once, where an accepted config write was overtaken by its
+    own thread's later instructions.
+    """
+    with _coprocessor() as coprocessor:
+        config = coprocessor.getBackend().backend_units["CFG"]
+        assert config.issueInstruction(WRCFG_CFG12_FROM_G5, 0)
+        config.clock_tick(1)
+        assert not config.next_instruction, "the write must still retire here"
+        assert config.pipeline_exit_cycles == (2, 0, 0)
+        assert config.hasInflightInstructionsFromThread(0)
+        assert not config.is_clock_idle()
+        config.clock_tick(2)
+        assert not config.hasInflightInstructionsFromThread(0)
+        assert config.pipeline_exit_cycles == (0, 0, 0)
+
+
+def test_a_setc16_keeps_the_same_cycle_report_it_always_had():
+    """Latency 1 arms nothing, by construction rather than by special case.
+
+    The deadline lands on the retire tick itself, and the instruction was
+    already visible through the issue queue for the cycle between acceptance and
+    that tick — so one documented cycle is exactly what the unit reported before
+    any of this existed.
+    """
+    with _coprocessor() as coprocessor:
+        config = coprocessor.getBackend().backend_units["CFG"]
+        assert config.issueInstruction(setc16_math_offset(0x200), 0)
+        assert config.hasInflightInstructionsFromThread(0), "queued, not yet retired"
+        config.clock_tick(1)
+        assert config.pipeline_exit_cycles == (0, 0, 0)
+        assert not config.hasInflightInstructionsFromThread(0)
+
+
+def test_the_config_residency_is_the_issuing_threads_alone():
+    """C12 ORs over the three threads at the Wait Gate; the unit answers per
+    thread, and must not smear one thread's instruction over the others."""
+    with _coprocessor() as coprocessor:
+        config = coprocessor.getBackend().backend_units["CFG"]
+        assert config.issueInstruction(RDCFG_G5_FROM_CFG12, 2)
+        config.clock_tick(1)
+        assert config.pipeline_exit_cycles == (0, 0, 2)
+        assert config.hasInflightInstructionsFromThread(2)
+        assert not config.hasInflightInstructionsFromThread(0)
+        assert not config.hasInflightInstructionsFromThread(1)
+
+
+def test_off_means_the_config_unit_reports_only_its_issue_queue():
+    """The invariance half, at the unit: with no cost model ``_arm_residency``
+    never runs and the predicate is the base class's issue-queue scan, which is
+    what every replay guard was recorded against."""
+    with _coprocessor(cost_model=False) as coprocessor:
+        config = coprocessor.getBackend().backend_units["CFG"]
+        assert config.cost_model is None
+        assert config.issueInstruction(WRCFG_CFG12_FROM_G5, 0)
+        config.clock_tick(1)
+        assert config.pipeline_exit_cycles == (0, 0, 0)
+        assert not config.hasInflightInstructionsFromThread(0)
+
+
+def test_stallwait_on_c12_waits_for_another_threads_config_burst():
+    """C12 through the instruction that consumes it, now that it is reachable.
+
+    Six ``WRCFG``s are accepted one per cycle (0-5); the last is in a stage until
+    cycle 7, the Wait Gate sees C12 met there, and ``STALLWAIT.md``'s documented
+    one-cycle lag puts the ``SFPNOP`` at cycle 8.
+    """
+    with _coprocessor() as coprocessor:
+        assert _c12_drain_cycle(coprocessor, config_burst=6) == 8
+
+
+def test_the_c12_wait_is_a_deadline_and_not_a_tick_order():
+    """Perturbation: reverse the backend units, reverse the Wait Gates, or both.
+
+    The cycle a documented condition clears at must not depend on either
+    ordering. It does not — the answer is the burst length plus the trailing
+    pipeline cycle plus the documented lag, in all four orderings and at three
+    burst lengths.
+    """
+    for burst in (3, 6, 10):
+        for reverse_units in (False, True):
+            for reverse_gates in (False, True):
+                with _coprocessor() as coprocessor:
+                    drained = _c12_drain_cycle(
+                        coprocessor,
+                        config_burst=burst,
+                        reverse_units=reverse_units,
+                        reverse_gates=reverse_gates,
+                    )
+                assert drained == burst + 2, (burst, reverse_units, reverse_gates)
+
+
+def test_off_means_c12_was_decided_by_wait_gate_tick_order():
+    """What it was before, measured, because it is the argument for the change.
+
+    With no residency the only thing that can make C12 unmet is the issue queue,
+    which the unit drains at the top of its own tick. So the condition sees
+    anything only if the *issuing* thread's Wait Gate happened to run before the
+    *waiting* thread's in the same cycle. In the order ``getClocks`` returns it
+    does, and the wait looks nearly right; reverse the two gates and it collapses
+    to the same three cycles however many ``WRCFG``s are in flight — ten of them
+    as invisible as none.
+
+    Not "C12 waits too little", then, but "C12's answer is not a property of the
+    machine". This test is kept as the record of that, and it is also the
+    flag-off invariance check at the Wait Gate: with the model off, nothing here
+    moved.
+    """
+    for burst in (3, 6, 10):
+        with _coprocessor(cost_model=False) as coprocessor:
+            in_order = _c12_drain_cycle(coprocessor, config_burst=burst)
+        with _coprocessor(cost_model=False) as coprocessor:
+            gates_reversed = _c12_drain_cycle(
+                coprocessor, config_burst=burst, reverse_gates=True
+            )
+        assert in_order == burst + 1, burst
+        assert gates_reversed == 3, burst
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn()
     print(
         "backend_cost_model_test OK: five more units wired, SFPU at one cycle "
-        "per op, ThCon multi-cycle and back-pressuring, off by default"
+        "per op, ThCon multi-cycle and back-pressuring, the config unit's "
+        "residency and C12, off by default"
     )
 
 

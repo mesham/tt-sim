@@ -107,6 +107,7 @@ class UnitCostModel:
         self.unit_name = unit_costs.name
         self._costs = unit_costs
         self._occupancy = {}
+        self._latency = {}
         self._inexact = set()
         self._ipc_groups = {
             name: entry.ipc_group
@@ -117,6 +118,14 @@ class UnitCostModel:
             if entry.provenance not in SOURCED_PROVENANCE:
                 # ``unknown`` / ``estimated`` carry no numbers worth charging.
                 continue
+            # ``modelled_occupancy`` is the BOUND_POLICY resolver, named for
+            # its first caller; the Latency column needs the same policy
+            # applied to a different column, so it is reused rather than
+            # duplicated. See :meth:`latency` for why the two are separate
+            # numbers even though they are resolved the same way.
+            latency = modelled_occupancy(entry.latency)
+            if latency is not None:
+                self._latency[name] = latency
             cycles = modelled_occupancy(entry.occupancy)
             if cycles is None:
                 continue
@@ -165,6 +174,32 @@ class UnitCostModel:
     def occupancy(self, instruction_name):
         """Cycles ``instruction_name`` occupies the unit, or ``None``."""
         return self._occupancy.get(instruction_name)
+
+    def latency(self, instruction_name):
+        """Cycles from issue until ``instruction_name``'s result is observable.
+
+        The ISA docs' **Latency** column, resolved by :data:`BOUND_POLICY`
+        exactly as :meth:`occupancy` resolves the throughput column — so
+        ``≥ 2 cycles`` charges 2, the low end, and the model stays a floor.
+
+        A **different quantity** from :meth:`occupancy`, and deliberately a
+        separate accessor rather than a fallback for it. Occupancy is
+        throughput back-pressure on the *next* instruction; latency is how long
+        *this* one is still inside the unit. They differ wherever a unit is
+        pipelined — Wormhole's ``WRCFG`` is latency 2, occupancy 1 — and it is
+        latency, not occupancy, that answers a *residency* question: "does this
+        thread have an instruction in any stage of that unit's pipeline?", which
+        is how ``STALLWAIT`` states conditions C1-C4, C11 and C12. Reading
+        ``busy_until`` for that would be right only where the two coincide (the
+        unpacker, whose documented bottleneck *is* the hold it charges) and
+        wrong everywhere else.
+
+        ``None`` for an opcode whose entry publishes no latency, which keeps the
+        same "no entry means no opinion" rule :meth:`occupancy` has: a unit that
+        gets ``None`` must leave its existing behaviour alone rather than
+        invent a one-cycle default.
+        """
+        return self._latency.get(instruction_name)
 
     def is_exact(self, instruction_name):
         """False when the charged number came from a ``>=``, ``~`` or range."""

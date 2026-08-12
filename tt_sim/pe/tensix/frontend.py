@@ -588,6 +588,20 @@ class WaitGate(TensixFrontendUnit):
             case 11:  # C11: instruction in the Vector Unit (SFPU) pipeline
                 return not be.vector_unit.hasInflightInstructionsFromThread(thread)
             case 12:  # C12: instruction in the Config Unit pipeline (any thread)
+                # "*Any* thread", not the current one -- the only condition in
+                # either arch's table that is not scoped to the issuing thread,
+                # which its own note spells out: "This won't prevent other
+                # threads from issuing new Configuration Unit instructions
+                # though, and those new instructions will cause this thread to
+                # continue to wait."
+                #
+                # Reachable since 2026-08-12, and it took two fixes. The config
+                # unit reported every instruction as gone one cycle after
+                # acceptance whatever its documented latency, so this was always
+                # true (``TensixBackendConfigurationUnit.
+                # hasInflightInstructionsFromThread``); and bit 12 was trimmed
+                # off the Blackhole condition mask before it got here
+                # (``TensixSyncUnit._read_wait_res``).
                 return not any(
                     be.config_unit.hasInflightInstructionsFromThread(t)
                     for t in range(3)

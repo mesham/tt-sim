@@ -119,6 +119,18 @@ class _ForcedConfigOccupancy:
     def occupancy(self, instruction_name):
         return self.cycles if instruction_name == "RDCFG" else 1
 
+    def latency(self, instruction_name):
+        """The real Wormhole table's Latency column, which this leaves alone.
+
+        Residency and occupancy are different columns (the config unit reads
+        both), so forcing one must not silently move the other: this guard is
+        about a *throughput* hold reordering an accepted write, and reporting a
+        longer residency alongside it would confound the two. The numbers are
+        ``ConfigurationUnit.md``'s: 2 cycles for ``WRCFG`` and ``RDCFG``, 1 for
+        everything else this unit executes.
+        """
+        return 2 if instruction_name in ("WRCFG", "RDCFG") else 1
+
     def is_exact(self, instruction_name):
         return True
 

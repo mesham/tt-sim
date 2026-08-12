@@ -7353,6 +7353,154 @@ update read, and that update moved into the address phase in the section
 above. A latched copy of state the address phase has already consumed is an
 invitation to consume it twice.
 
+## The Configuration Unit's residency: the Latency column, read at last
+
+Landed 2026-08-12, the third fix in this family and the same shape as the two
+above — *the model retires too early* — but on the only unit where the two
+published columns genuinely disagree. **No number in either YAML changed, no
+computed value moved, and no simulated cycle moved either, with the model on or
+off.**
+
+> `ConfigurationUnit.md` (BlackholeA0), instruction table:
+> `SETC16` **latency 1 cycle, IPC 3**, group `ThreadConfig`; `STREAMWRCFG`
+> **≥ 5 cycles, IPC 1**; `WRCFG` **2 cycles, IPC 1**; `CFGSHIFTMASK`
+> **2 cycles, IPC ½**; `RMWCIB` **1 cycle, IPC 1**; `RDCFG` **≥ 2 cycles,
+> IPC 1** — the last five all in group `Config`. Wormhole's page prints the
+> same latencies against a prose Throughput column.
+
+So `WRCFG` is **latency 2 at one instruction per cycle**: the unit accepts the
+next instruction a cycle *before* the previous one has left. Until now tt-sim
+read only the IPC column, and the Latency column had no consumer anywhere in
+the tree. The consequence was at the Wait Gate:
+
+> `STALLWAIT.md` (BlackholeA0), condition **C12**: "Any thread has an
+> instruction in any stage of the Configuration Unit pipeline." Its note: "The
+> block mask should include bit B7 ... This won't prevent other threads from
+> issuing new Configuration Unit instructions though, and those new
+> instructions will cause this thread to continue to wait."
+
+`hasInflightInstructionsFromThread` answered from the issue queue, which this
+unit drains in the tick after acceptance, so every instruction was reported as
+gone after one cycle whatever its documented latency. `WaitGate.
+_check_blackhole_condition`'s C12 branch was live and unreachable.
+
+### It was worse than "always satisfied": it was tick-order
+
+The issue queue is non-empty only between the *issuing* thread's Wait Gate
+pushing into it and the unit's next tick draining it. Backend units tick before
+the gates, so whether C12 saw anything at all came down to whether the issuing
+thread's gate happened to run before the *waiting* thread's within the cycle —
+an artefact of the order `TensixBackend.getClocks` returns, not a property of
+the machine. Measured, on a two-thread program where thread 0 issues a burst of
+`WRCFG` and thread 1 waits on C12 (`backend_cost_model_test`,
+`_c12_drain_cycle`), the cycle the wait clears at:
+
+| `WRCFG` burst | before, gate order as-is | before, gates reversed | after, all four orderings |
+| --- | --- | --- | --- |
+| 3 | 4 | 3 | 5 |
+| 6 | 7 | 3 | 8 |
+| 10 | 11 | 3 | 12 |
+
+Reversed, **ten instructions in flight were as invisible as none**. After, the
+answer is the burst plus the trailing pipeline cycle plus `STALLWAIT.md`'s own
+"one cycle lag between the condition(s) being met and the block mask being
+removed", under both tick-order perturbations (backend units reversed, Wait
+Gates reversed) and at every burst length — because it is now a deadline the
+Latency column sets.
+
+### What is charged, and which end of each bound
+
+`UnitCostModel.latency` resolves the Latency column through the same
+`BOUND_POLICY` as `occupancy`, so `RDCFG`'s "≥ 2" arms **2** and
+`STREAMWRCFG`'s "≥ 5" arms **5**. Every bound in this unit is an `at_least`,
+and the low end of an `at_least` is the number the document prints — which for
+a *residency* is the under-reporting end, and that is the safe one: a residency
+held longer than the hardware's makes a `STALLWAIT` on C12 wait for a stall
+that does not exist, which is inventing back-pressure, the one direction the
+bounds policy forbids. (Had there been an `at_most` here the same reasoning
+would charge its low end too, i.e. under-report; there is none.)
+
+**A latency of 1 arms nothing at all**, by construction rather than by special
+case: the deadline lands on the retire tick itself, and the instruction was
+already visible through the issue queue for the cycle between acceptance and
+that tick. `SETC16` and `RMWCIB` therefore keep exactly the behaviour they
+always had, and only `WRCFG`, `RDCFG`, `CFGSHIFTMASK` and `STREAMWRCFG` extend
+it. The hold runs from *acceptance*, one cycle before the retire tick, the same
+anchor `TensixBackendUnit.clock_tick` uses for occupancy.
+
+**The writes are untouched.** `_arm_residency` changes only how long an
+instruction is *reported* as being in the unit; every handler still runs in the
+tick it always ran in. Delaying the config write itself is the ordering bug
+this unit already found once — an accepted `SETC16` overtaken by its own
+thread's later `MVMUL`s, and `matmul_block` printing 608.0 for 1120.0 — and
+this deliberately does not go near it.
+
+### The 13-bit `wait_res`, and a source conflict resolved against the vendor
+
+Residency alone would have left C12 unreachable from a real kernel, because
+`TensixSyncUnit._read_wait_res` trimmed Blackhole's condition mask to 12 bits
+and C12 is bit 12. That width came from ttsim's `data/bh/tensix_isa.json`
+(`STALLWAIT/args/wait_res: "11:0"`), and the published page disagrees. **The
+page wins, and the disagreement is recorded rather than papered over.** For 13
+bits: the BlackholeA0 `STALLWAIT.md` syntax line reads
+`TT_STALLWAIT(/* u9 */ BlockMask, /* u13 */ ConditionMask)`; its encoding
+diagram (`Diagrams/Out/Bits32_STALLWAIT_BH.svg`) gives ConditionMask bits
+**0–12**, BlockMask 15–23, opcode 24–31; its condition table has thirteen rows,
+C0 through C12; and tt-metal's own Blackhole LLK header
+(`tt_llk_blackhole/common/inc/ckernel_instr_params.h`) defines
+`p_stall::CFGEXU = 0x1000`, which a 12-bit field could not hold. For 12: one
+field in one vendor data file — whose own executor (`ttsim/src/tensix.cpp`,
+`TT_ARCH_VERSION == 1`) still hands `0x1000` to
+`TTSIM_VERIFY(!wait_res, UnimplementedFunctionality)`, i.e. is written as
+though bit 12 could arrive while its decoder makes that impossible. Four
+agreeing statements against one internally inconsistent one, and
+`PROVENANCE_RANK` already ranks `isa_doc` above `vendor_source` for exactly
+this case.
+
+Bits 14:13 stay excluded, so the leak the trim was written to stop is still
+stopped. And what the trim replaced was not a shorter wait but the *wrong* one:
+a `STALLWAIT` whose only condition was C12 had its mask emptied and fell
+through to `handle_stallwait`'s `0x7F` default, which on Blackhole selects
+C0–C6 — a different set of conditions, not a subset. If a card ever shows bit
+12 is inert, `TensixSyncUnit.WAIT_RES_BITS` is one entry; per ["why there is no
+`measured` provenance"](#why-there-is-no-measured-provenance) a measurement
+would not silently win against four citations.
+
+### Measured, at one-cycle resolution — and nothing moved
+
+Every replay guard in the tree (44), replayed socket-free and pumped to
+`RUN_MSG_DONE` one cycle at a time, on this tree and on a frozen copy without
+these changes. **Model off: all 44 byte-identical**, which also covers the
+`wait_res` widening, since that is not gated on the model — no in-tree kernel
+sets bit 12 (nothing in tt-metal 0.74 references `p_stall::CFGEXU`). **Model
+on: all 44 byte-identical too.** The gate is `RESULT: PASS`, and each of the
+three budget-dependent guards needs exactly the multiplier it needed on the
+frozen tree — `dramtop` 1×, `two` 2×, `offline` 4×.
+
+Zero movement is the honest result and **not** an absence of mechanism, so it
+was probed rather than assumed. Instrumented under the model across the 42
+guards a single un-laddered run can drive (`blackhole/offline` and
+`blackhole/two` need the gate's poll-budget ladder), the residency is armed
+**1,280 times** and live for **1,280 cycles**, in **33 of the 42** — most in
+`wormhole/examples` (185), `blackhole/six` (165) and `blackhole/untilize`
+(135). And **nothing looks**: of 4,739 calls to the predicate, 4 land while any
+thread is resident and **0** concern the resident thread, because
+`CoprocessorDoneCheck` is polled only a handful of times per guard; and C12 is
+evaluated **0 times anywhere**, because no in-tree kernel issues a `STALLWAIT`
+on it (nothing in tt-metal 0.74 emits `p_stall::CFGEXU`). So the residency is
+live, correct and currently unobserved by the tree's workloads — which is
+exactly why a card probe wanted it, and why the unit tests rather than the
+guards are what pin it.
+
+Tests: nine in `backend_cost_model_test.py` section 6 (the two columns read off
+the table and shown to differ; a `WRCFG` reported in the pipeline for its two
+cycles with the write still retiring where it did; `SETC16`'s latency 1 arming
+nothing; the residency scoped to the issuing thread; the model-off predicate;
+the C12 wait end to end; the same under all four tick orderings; and the
+model-off measurement of the tick-order dependence, kept as the record of what
+it was) and two in `blackhole_decode_test.py` (bit 12 in the field, bits 14:13
+still out).
+
 ## Using it, when the time comes
 
 ```python

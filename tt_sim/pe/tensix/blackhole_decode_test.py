@@ -6,7 +6,11 @@ positions, so any field Blackhole moved has to be re-read from the raw 32-bit
 word by the handler. These tests pin the raw-bit readers for STALLWAIT's
 ``wait_res`` and GAPOOL/GMPOOL's ``pool_addr_mode``, check the generic math
 ``addr_mode`` reader still behaves, and assert Wormhole decodes are untouched.
-Bit ranges are from ttsim's ``data/{bh,wh}/tensix_isa.json``.
+
+Bit ranges are from ttsim's ``data/{bh,wh}/tensix_isa.json`` **except**
+Blackhole's ``wait_res``, where that file and the published ISA page disagree
+and the page wins -- see ``test_stallwait_c12_survives_the_blackhole_trim`` and
+``TensixSyncUnit._read_wait_res``.
 """
 
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
@@ -42,12 +46,33 @@ def _stallwait_cond_mask(backend, instruction):
     return backend.getFrontendThread(0).wait_gate.latchedWaitInstruction.condition_mask
 
 
-def test_stallwait_wait_res_is_12_bits_on_blackhole():
-    # Blackhole's wait_res is raw 11:0 (Wormhole 14:0), so anything the shared
-    # (Wormhole-width) table pulls in from bits 14:12 must not reach the
+def test_stallwait_wait_res_is_13_bits_on_blackhole():
+    # Blackhole's wait_res is raw 12:0 (Wormhole 14:0), so anything the shared
+    # (Wormhole-width) table pulls in from bits 14:13 must not reach the
     # condition mask. 0x400 is p_stall::TRISC_CFG as the Blackhole LLK emits it.
     instruction = _stallwait(0x400 | (1 << 13))
     assert _stallwait_cond_mask(_backend(True), instruction) == 0x400
+
+
+def test_stallwait_c12_survives_the_blackhole_trim():
+    """Bit 12 is *in* the field, against ttsim's data file and with the page.
+
+    The disagreement, and why this side of it: ``STALLWAIT.md`` (BlackholeA0)
+    writes the syntax as ``TT_STALLWAIT(/* u9 */ BlockMask, /* u13 */
+    ConditionMask)``, its encoding diagram gives ConditionMask bits 0-12, and
+    its condition table runs C0 through C12 -- C12 being "Any thread has an
+    instruction in any stage of the Configuration Unit pipeline". tt-metal's own
+    Blackhole LLK header defines ``p_stall::CFGEXU = 0x1000`` for it. Against
+    that, ttsim's ``data/bh/tensix_isa.json`` says ``wait_res`` is ``11:0`` --
+    while ttsim's executor still tests the residual for ``0x1000``. See
+    ``TensixSyncUnit._read_wait_res``.
+
+    Trimming it did not make the wait shorter, it made it *different*: with the
+    mask emptied, ``handle_stallwait``'s ``0x7F`` fallback selected C0-C6, which
+    is another set of conditions entirely.
+    """
+    assert _stallwait_cond_mask(_backend(True), _stallwait(1 << 12)) == 0x1000
+    assert _stallwait_cond_mask(_backend(True), _stallwait(0x400 | (1 << 12))) == 0x1400
 
 
 def test_stallwait_wait_res_unchanged_on_wormhole():
@@ -59,9 +84,9 @@ def test_stallwait_wait_res_unchanged_on_wormhole():
 
 def test_stallwait_empty_mask_still_waits_on_everything():
     # An all-zero condition mask means "wait for all resources" (0x7F) on both
-    # architectures; on Blackhole that now includes a mask left empty by the
-    # 12-bit trim.
-    assert _stallwait_cond_mask(_backend(True), _stallwait(1 << 12)) == 0x7F
+    # architectures; on Blackhole that includes a mask left empty by the 13-bit
+    # trim, i.e. one whose only set bits were 14:13.
+    assert _stallwait_cond_mask(_backend(True), _stallwait(1 << 13)) == 0x7F
     assert _stallwait_cond_mask(_backend(False), _stallwait(0)) == 0x7F
 
 
