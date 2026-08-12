@@ -494,6 +494,23 @@ class VectorUnit(TensixBackendUnit):
         # only accept one instruction per cycle from the outside world", which
         # is exactly tt-sim's issue behaviour, so this charges nothing new.
         # See docs/plans/cost-model.md ("The first consumer").
+        #
+        # THE LATENCY COLUMN IS WHAT ``STALLWAIT``'s C14 NEEDS, and since
+        # 2026-08-12 it is read: "the current thread has an instruction in any
+        # stage of the Vector Unit (SFPU) pipeline" (Blackhole numbers the same
+        # condition C11) is a residency question, and the sentence above is
+        # precisely why occupancy cannot answer it -- 1-cycle occupancy with
+        # 2-cycle latency is a pipelined unit, so the instruction is still in a
+        # stage after the unit has taken the next one. The 2-cycle rows are the
+        # arithmetic and LUT ops (``SFPADD``, ``SFPADDI``, ``SFPMAD``,
+        # ``SFPMUL``, ``SFPMULI``, ``SFPLUT``, ``SFPLUTFP32``, ``SFPSWAP``,
+        # Blackhole's ``SFPMUL24``) plus ``SFPCONFIG``'s and one ``SFPSHFT2``
+        # form's "≤ 2 cycles", charged at the low end like every other bound;
+        # every other opcode is 1 cycle and so arms nothing at all.
+        # ``SFPLOADMACRO``'s latency is published as "Complex", which the table
+        # records as no latency, so it keeps the same-cycle report it had.
+        # tt-metal reaches C14 through ``p_stall::WAIT_SFPU``, issued by
+        # ``_llk_math_dest_section_done_`` and ``_llk_math_eltwise_sfpu_done_``.
         self.cost_model = unit_cost_model(
             "SFPU", "blackhole" if backend.blackhole else "wormhole"
         )

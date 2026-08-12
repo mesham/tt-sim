@@ -96,7 +96,7 @@ class UnPackerUnit(TensixBackendUnit):
         # Src hand-over has a state change of its own left to make -- neither is
         # idle even with an empty issue queue.
         return (
-            not self.next_instruction
+            super().is_clock_idle()
             and not self.blocked
             and self._deferred_dvalid is None
         )

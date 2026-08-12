@@ -99,6 +99,27 @@ class MatrixUnit(TensixBackendUnit):
         # first (and so far only) consumer of the cycle-cost tables. ``None``
         # unless TT_SIM_COST_MODEL is set, in which case every op retires in
         # the tick it was issued exactly as before.
+        #
+        # SINCE 2026-08-12 THE **LATENCY** COLUMN IS READ TOO, and on this unit
+        # the two columns are further apart than anywhere else in the tree:
+        # ``MatrixUnit.md``'s table gives ``MVMUL`` / ``DOTPV`` / ``GAPOOL`` /
+        # ``GMPOOL`` / ``ELWMUL`` / ``ELWADD`` / ``ELWSUB`` throughput 1 and
+        # **latency 5**, the four ``MOV*``-to-Dst/SrcA forms latency 4,
+        # ``MOVD2A`` and ``SHIFTXB`` latency 2, and everything else 1. Occupancy
+        # answers "when may the next instruction enter"; ``STALLWAIT``'s C7
+        # ("the current thread has an instruction in any stage of the Matrix
+        # Unit (FPU) pipeline"; Blackhole numbers the same condition C4) asks
+        # the other question, and until the latency was consumed every MVMUL
+        # was reported as out of the unit one cycle after acceptance -- four
+        # cycles early. tt-metal reaches C7 through ``p_stall::MATH``, which
+        # every compute kernel issues via ``_llk_math_dest_section_done_`` and
+        # every SFPU kernel via ``_llk_math_eltwise_sfpu_start_``.
+        # ``TensixBackendUnit._arm_residency`` holds the deadline; the handlers
+        # still run in the tick they always did.
+        #
+        # ``MOVD2B``, ``TRNSPSRCA`` and ``MOVDBGB2D`` are ``unknown`` in the
+        # table and so publish no latency -- no opinion, and the pre-existing
+        # same-cycle report stands for them.
         self.cost_model = unit_cost_model(
             "MATH", "blackhole" if backend.blackhole else "wormhole"
         )

@@ -61,14 +61,25 @@ def _matrix_unit():
 class _FixedCost:
     """A stand-in cost table that charges every op the same number of cycles."""
 
-    def __init__(self, cycles):
+    def __init__(self, cycles, latency=None):
         self.cycles = cycles
+        self._latency = latency
 
     def scales_with_fidelity(self, name):
         return False
 
     def occupancy(self, name):
         return self.cycles
+
+    def latency(self, name):
+        """``None`` by default: these tests are about *occupancy*.
+
+        The two columns are separate numbers (see ``UnitCostModel.latency``), so
+        a stand-in that answered the occupancy here would silently entangle the
+        back-pressure tests below with the residency the real table publishes.
+        The residency tests pass an explicit ``latency=``.
+        """
+        return self._latency
 
     #: The Matrix Unit publishes no "IPC group" column — its table has
     #: Throughput and Latency and nothing else — so its occupancy is a

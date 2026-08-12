@@ -44,6 +44,39 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
     #: and for the source conflict behind the difference.
     BLACKHOLE_WAIT_RES_BITS = 13
 
+    #: The condition mask a ``STALLWAIT`` with an *empty* one is given, per each
+    #: architecture's ``STALLWAIT.md`` functional model:
+    #:
+    #:   Wormhole  ``ConditionMask = ConditionMask ? ConditionMask : 0x7F;``
+    #:   Blackhole ``ConditionMask = ConditionMask ? ConditionMask : 0x0F;``
+    #:
+    #: The two spell the *same* intent -- "wait for every resource this thread
+    #: has outstanding" -- in each arch's own condition numbering, and they
+    #: differ only because Blackhole collapses Wormhole's four packer conditions
+    #: (C3-C6) into one (C3). Wormhole's 0x7F is C0-C6: ThCon requests, both
+    #: unpackers, all four packers. Blackhole's 0x0F is C0-C3: ThCon requests,
+    #: both unpackers, the packer.
+    #:
+    #: tt-sim used ``0x7F`` on both until 2026-08-12, which on Blackhole is not
+    #: a superset of the right answer but a *different* set: bits 4, 5 and 6
+    #: there are C4 (an instruction in any stage of the Matrix Unit pipeline),
+    #: C5 and C6 (``SrcA`` / ``SrcB`` not yet handed back to the unpackers). The
+    #: first two of those are extra waits the hardware would not take -- exactly
+    #: the invented back-pressure the cost model's floor policy forbids -- and
+    #: C5/C6 are the *opposite* of what a thread about to unpack wants.
+    #:
+    #: No in-tree workload reaches it: tt-metal's LLK always passes an explicit
+    #: mask (``p_stall::``-derived), and across every replay guard every
+    #: latched ``STALLWAIT`` condition mask is non-zero, so this moves no number
+    #: today. It is fixed because the next kernel that writes ``TTI_STALLWAIT(x,
+    #: 0)`` would have got a different wait, not a longer one.
+    WAIT_RES_DEFAULT = {False: 0x7F, True: 0x0F}
+
+    #: ``BlockMask = BlockMask ? BlockMask : (1u << 6);`` -- bit B6, "block
+    #: thread from starting new Matrix Unit (FPU) instructions". Identical in
+    #: both arches' functional models, so it needs no per-arch entry.
+    STALL_RES_DEFAULT = 1 << 6
+
     def __init__(self, backend):
         super().__init__(backend, TensixSyncUnit.OPCODE_TO_HANDLER, "Sync")
         # Phase 5 of docs/plans/event-driven-pump.md. ``None`` unless
@@ -141,7 +174,7 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
 
     def is_clock_idle(self):
         # A queued mutex waiter is retried every cycle by the override below.
-        return not self.next_instruction and not self.blocked_mutex
+        return super().is_clock_idle() and not self.blocked_mutex
 
     def clock_tick(self, cycle_num):
         super().clock_tick(cycle_num)
@@ -270,6 +303,10 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             instruction_info["raw_instruction"], self.BLACKHOLE_WAIT_RES_BITS, 0
         )
 
+    def _default_wait_res(self):
+        """This architecture's empty-condition-mask default. See the constant."""
+        return self.WAIT_RES_DEFAULT[bool(self.backend.blackhole)]
+
     def handle_stallwait(self, instruction_info, issue_thread, instr_args):
         cond_mask = self._read_wait_res(instruction_info, instr_args)
         block_mask = instr_args["stall_res"]
@@ -278,15 +315,15 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             issue_thread
         ).wait_gate.setLatchedWaitInstruction(
             "STALLWAIT",
-            cond_mask if cond_mask else 0x7F,
-            block_mask if block_mask else 1 << 6,
+            cond_mask if cond_mask else self._default_wait_res(),
+            block_mask if block_mask else self.STALL_RES_DEFAULT,
         )
 
     def handle_semwait(self, instruction_info, issue_thread, instr_args):
         sem_sel = instr_args["sem_sel"]
         cond_mask = instr_args["wait_sem_cond"]
         block_mask = instr_args["stall_res"]
-        block_mask = block_mask if block_mask else 1 << 6
+        block_mask = block_mask if block_mask else self.STALL_RES_DEFAULT
 
         if cond_mask:
             self.backend.getFrontendThread(
@@ -295,9 +332,19 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
                 "SEMWAIT", cond_mask, block_mask, sem_sel
             )
         else:
+            # ``SEMWAIT.md`` calls an empty condition mask ``UndefinedBehavior``
+            # on *both* arches -- there is no documented answer to copy, so this
+            # arm is tt-sim's choice and always was. It stands in the
+            # "STALLWAIT with the all-resources default" reading, which now
+            # means the reading in *this* arch's numbering rather than always
+            # Wormhole's; a Blackhole 0x7F selected the Matrix Unit pipeline and
+            # two inverted Src conditions, which is not a defensible answer to
+            # anything. No in-tree kernel takes this arm.
             self.backend.getFrontendThread(
                 issue_thread
-            ).wait_gate.setLatchedWaitInstruction("STALLWAIT", 0x7F, block_mask)
+            ).wait_gate.setLatchedWaitInstruction(
+                "STALLWAIT", self._default_wait_res(), block_mask
+            )
 
     def read(self, addr, size):
         # Accesses semaphore[i].value, where each

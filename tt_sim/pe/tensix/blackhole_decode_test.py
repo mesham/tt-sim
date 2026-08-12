@@ -68,8 +68,9 @@ def test_stallwait_c12_survives_the_blackhole_trim():
     ``TensixSyncUnit._read_wait_res``.
 
     Trimming it did not make the wait shorter, it made it *different*: with the
-    mask emptied, ``handle_stallwait``'s ``0x7F`` fallback selected C0-C6, which
-    is another set of conditions entirely.
+    mask emptied, ``handle_stallwait``'s empty-mask fallback selected the
+    all-resources set (C0-C3 today, C0-C6 while that fallback was still
+    Wormhole's ``0x7F``), which is another set of conditions entirely.
     """
     assert _stallwait_cond_mask(_backend(True), _stallwait(1 << 12)) == 0x1000
     assert _stallwait_cond_mask(_backend(True), _stallwait(0x400 | (1 << 12))) == 0x1400
@@ -82,11 +83,26 @@ def test_stallwait_wait_res_unchanged_on_wormhole():
     assert _stallwait_cond_mask(_backend(False), instruction) == 0x2400
 
 
-def test_stallwait_empty_mask_still_waits_on_everything():
-    # An all-zero condition mask means "wait for all resources" (0x7F) on both
-    # architectures; on Blackhole that includes a mask left empty by the 13-bit
-    # trim, i.e. one whose only set bits were 14:13.
-    assert _stallwait_cond_mask(_backend(True), _stallwait(1 << 13)) == 0x7F
+def test_stallwait_empty_mask_default_is_the_arch_s_own_all_resources():
+    """``0x0F`` on Blackhole, ``0x7F`` on Wormhole -- each page's own constant.
+
+    ``STALLWAIT.md``'s functional model reads ``ConditionMask = ConditionMask ?
+    ConditionMask : 0x7F`` on Wormhole and ``: 0x0F`` on Blackhole. They mean
+    the same thing -- every resource this thread has outstanding -- in each
+    arch's numbering: Wormhole's C0-C6 are ThCon, both unpackers and all four
+    packers, and Blackhole collapses the four packer conditions into one, so its
+    C0-C3 are the same set.
+
+    tt-sim used ``0x7F`` on both until 2026-08-12. On Blackhole that is not a
+    superset but a different set: bits 4-6 there are C4 (an instruction in any
+    stage of the Matrix Unit pipeline) and C5/C6 (``SrcA``/``SrcB`` not yet
+    handed back to the *unpackers*) -- an invented wait plus two inverted ones.
+
+    On Blackhole the empty mask includes one left empty by the 13-bit trim, i.e.
+    one whose only set bits were 14:13.
+    """
+    assert _stallwait_cond_mask(_backend(True), _stallwait(1 << 13)) == 0x0F
+    assert _stallwait_cond_mask(_backend(True), _stallwait(0)) == 0x0F
     assert _stallwait_cond_mask(_backend(False), _stallwait(0)) == 0x7F
 
 

@@ -59,13 +59,6 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         ]
         self.gprs = gprs
         self.prev_cycle_setc16_or_wrcfg = False
-        # Per-thread cycle at which that thread's most recent Configuration Unit
-        # instruction leaves the pipeline, or 0 for "nothing of this thread's is
-        # in a stage". Written only by ``_arm_residency``, which runs only with
-        # the cost model on -- so with ``TT_SIM_COST_MODEL`` unset this stays
-        # ``[0, 0, 0]`` for the life of the device and every predicate below
-        # answers exactly what it answered before. See ``_arm_residency``.
-        self._pipeline_exit = [0, 0, 0]
         # The config word holding Blackhole's DEST_ACCESS_CFG (ADDR32 220), or
         # None on Wormhole, where the register does not exist. Writes to it are
         # mirrored into the Dst register's row-remap gates; see
@@ -168,145 +161,29 @@ class TensixBackendConfigurationUnit(TensixBackendUnit, MemMapable):
         # left", and on this unit they are not the same number -- ``WRCFG`` is
         # latency 2, occupancy 1, so the unit takes the next instruction a cycle
         # before the previous one is out. Nothing consumed the latency column
-        # until now, so every instruction here was reported as having left the
+        # until then, so every instruction here was reported as having left the
         # unit in the tick after it was accepted, and ``STALLWAIT``'s C12 ("any
         # thread has an instruction in any stage of the Configuration Unit
-        # pipeline") could not be observed by another thread at all. See
-        # ``hasInflightInstructionsFromThread`` and ``_arm_residency``: the
-        # residency is reporting only, and the writes still commit exactly where
-        # they always did.
-
-    @property
-    def pipeline_exit_cycles(self):
-        """Per-thread cycle at which the pipeline empties, 0 for "not resident".
-
-        Exposed read-only for tests and diagnostics; the residency itself is
-        consumed through :meth:`hasInflightInstructionsFromThread`.
-        """
-        return tuple(self._pipeline_exit)
+        # pipeline") could not be observed by another thread at all. The
+        # mechanism was written here and now lives in
+        # ``TensixBackendUnit._arm_residency``, because the Matrix Unit's C7 and
+        # the SFPU's C14 ask the same question of the same column: the residency
+        # is reporting only, and the writes still commit exactly where they
+        # always did. This unit's own numbers are 1 cycle for ``SETC16`` and
+        # ``RMWCIB``, 2 for ``WRCFG`` and ``CFGSHIFTMASK``, >= 2 for ``RDCFG``,
+        # >= 5 for ``STREAMWRCFG``.
 
     def is_clock_idle(self):
         # The override also clears prev_cycle_setc16_or_wrcfg, which is
         # observable, so it must already be clear for the tick to be a no-op.
-        # A live residency is a state change still owed (the pipeline exit), and
-        # ``_expire_residency`` only runs from a tick, so the unit is not idle
-        # while one is outstanding -- the same reason the unpacker is not idle
-        # while it owes a deferred Src hand-over.
-        return (
-            not self.next_instruction
-            and not self.prev_cycle_setc16_or_wrcfg
-            and not (
-                self._pipeline_exit[0]
-                or self._pipeline_exit[1]
-                or self._pipeline_exit[2]
-            )
-        )
-
-    def hasInflightInstructionsFromThread(self, from_thread):
-        """True while this thread's instruction is still in a pipeline stage.
-
-        ``STALLWAIT.md`` (Blackhole) states condition **C12** as "Any thread has
-        an instruction in any stage of the Configuration Unit pipeline", and the
-        Configuration Unit page says how long a stage sequence lasts: it is the
-        **Latency** column, 1 cycle for ``SETC16`` and ``RMWCIB``, 2 for
-        ``WRCFG`` and ``CFGSHIFTMASK``, ≥ 2 for ``RDCFG``, ≥ 5 for
-        ``STREAMWRCFG``. The base implementation answers from the issue queue
-        alone, which this unit drains in the tick after acceptance -- so every
-        instruction here was reported as having left the unit after one cycle,
-        whatever its documented latency, and C12 could never be observed by
-        another thread's Wait Gate at all.
-
-        **Residency is not occupancy**, and this unit is the clearest case in
-        the tree: ``WRCFG`` is *latency 2, occupancy 1*, i.e. the unit accepts
-        the next instruction a cycle before this one has left. Reading
-        ``busy_until`` here would therefore be wrong in both directions, and the
-        unpacker's note on the same predicate says as much ("an instruction can
-        be in a stage of the pipeline long after the unit will accept the next
-        one ... Nothing here licenses reading another unit's ``busy_until`` as
-        residency; that would need each unit's own latency"). This is that
-        unit's own latency.
-        """
-        if self._pipeline_exit[from_thread]:
-            return True
-        return super().hasInflightInstructionsFromThread(from_thread)
+        # The queue and the residency are the base class's half.
+        return super().is_clock_idle() and not self.prev_cycle_setc16_or_wrcfg
 
     def clock_tick(self, cycle_num):
         self.prev_cycle_setc16_or_wrcfg = self.checkIfNextInstructionsContainOpcodes(
             "SETC16", "WRCFG"
         )
-        model = self.cost_model
-        # The batch has to be captured *before* the drain, because the drain
-        # empties it -- and residency is a property of what was accepted, not of
-        # what the handlers did.
-        batch = list(self.next_instruction) if model is not None else ()
-        if model is not None:
-            self._expire_residency(cycle_num)
         super().clock_tick(cycle_num)
-        if batch:
-            self._arm_residency(cycle_num, batch)
-
-    def _expire_residency(self, cycle_num):
-        """Drop every thread whose pipeline exit has arrived.
-
-        Run at the top of the tick, before anything is armed, so a deadline is
-        released in exactly the cycle it names -- which is what makes the window
-        a deadline rather than a tick-order artefact. Backend units tick before
-        the Wait Gates, so a gate evaluating C12 in cycle ``c`` sees the state
-        this call left, whichever thread's gate it is and in whatever order the
-        units ticked.
-        """
-        exits = self._pipeline_exit
-        for thread in range(3):
-            if exits[thread] and cycle_num >= exits[thread]:
-                exits[thread] = 0
-
-    def _arm_residency(self, cycle_num, batch):
-        """Hold each thread resident for its instruction's documented latency.
-
-        **From acceptance, not from this retire tick.** Everything in ``batch``
-        was accepted in the previous cycle -- backend units tick before the Wait
-        Gates, so a gate's issue lands in the unit's *next* tick -- and the
-        Latency column is measured from issue. This is the same anchor
-        ``TensixBackendUnit.clock_tick`` uses for occupancy, and for the same
-        reason: anchoring at ``cycle_num`` would charge every entry one cycle
-        more than the document prints.
-
-        **The side effects are untouched.** The handlers have already run, in
-        the tick they always ran in; this only decides how long the instruction
-        is *reported* as being in the unit. Delaying the config write itself is
-        a different change and a dangerous one -- nothing in tt-sim orders a
-        config write against the units that read it, so a late ``SETC16`` is
-        overtaken by its own thread's later instructions and the failure is a
-        wrong answer rather than a slow one. That is the bug recorded at length
-        in ``__init__`` above, and this deliberately does not go near it.
-
-        A latency of 1 arms nothing: the deadline lands on this very tick, and
-        the instruction was already visible through ``next_instruction`` for the
-        cycle between acceptance and now. So ``SETC16`` and ``RMWCIB`` keep the
-        exact behaviour they have always had, and only the pipelined opcodes --
-        ``WRCFG``, ``RDCFG``, ``CFGSHIFTMASK``, ``STREAMWRCFG`` -- extend it.
-
-        Bounds are charged at their low end by the model's ``BOUND_POLICY``, so
-        ``RDCFG``'s "≥ 2 cycles" arms 2. For a residency the low end is the
-        *under*-reporting end, which is the safe one: a residency
-        held too long makes a ``STALLWAIT`` on C12 wait for a stall the hardware
-        does not have, and inventing back-pressure is the single direction this
-        project's bounds policy forbids.
-        """
-        model = self.cost_model
-        accepted = cycle_num - 1
-        exits = self._pipeline_exit
-        for instruction, thread in batch:
-            instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
-            cycles = model.latency(instruction_info["name"])
-            if cycles is None:
-                # No published latency: no opinion, and the pre-existing
-                # same-cycle report stands. Nothing in this unit's table is in
-                # that position today.
-                continue
-            deadline = accepted + cycles
-            if deadline > cycle_num and deadline > exits[thread]:
-                exits[thread] = deadline
 
     def issueInstruction(self, instruction, from_thread):
         # An occupied IPC GROUP takes nothing, however many slots the per-opcode

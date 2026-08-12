@@ -113,6 +113,13 @@ class TensixBackendUnit(Clockable, ABC):
         # without timestamps.
         self._starved_threads = None
         self._grant_lru = [0, 1, 2]
+        # Per-thread cycle at which that thread's most recent instruction leaves
+        # this unit's pipeline, or 0 for "nothing of this thread's is in a
+        # stage". Written only by :meth:`_arm_residency`, which runs only with
+        # the cost model on -- so with ``TT_SIM_COST_MODEL`` unset this stays
+        # ``[0, 0, 0]`` for the life of the device and every predicate below
+        # answers exactly what it answered before.
+        self._pipeline_exit = [0, 0, 0]
 
     def _refuse(self, reason, blocked_on=""):
         """Record *why* this unit is refusing, then refuse.
@@ -199,7 +206,37 @@ class TensixBackendUnit(Clockable, ABC):
     def getDiagnosticSettings(self):
         return self.backend.getDiagnosticSettings()
 
+    @property
+    def pipeline_exit_cycles(self):
+        """Per-thread cycle at which the pipeline empties, 0 for "not resident".
+
+        Exposed read-only for tests and diagnostics; the residency itself is
+        consumed through :meth:`hasInflightInstructionsFromThread`.
+        """
+        return tuple(self._pipeline_exit)
+
     def hasInflightInstructionsFromThread(self, from_thread):
+        """True while this thread's instruction is still in a pipeline stage.
+
+        Several ``STALLWAIT`` conditions are stated as residency — "the current
+        thread has an instruction in any stage of the <unit>'s pipeline" — and
+        so is ``TTSync``'s ``CoprocessorDoneCheck`` ("while (Tensix coprocessor
+        has any in-flight instructions from thread i)"). How long a stage
+        sequence lasts is the **Latency** column of each unit's own page, which
+        :meth:`_arm_residency` charges; the issue-queue scan below is what the
+        answer reduces to for a unit whose table publishes no latency, and for
+        every unit when the cost model is off.
+
+        **Residency is not occupancy.** Occupancy is throughput back-pressure on
+        the *next* instruction; residency is how long *this* one is still inside
+        the unit, and they differ wherever a unit is pipelined -- the Matrix Unit
+        is IPC 1 / latency 5 for ``MVMUL``, the SFPU IPC 1 / latency 2 for
+        ``SFPMAD``, the Configuration Unit IPC 1 / latency 2 for ``WRCFG``.
+        Reading :attr:`busy_until` here would therefore be wrong in both
+        directions; see :meth:`tt_sim.perf.model.UnitCostModel.latency`.
+        """
+        if self._pipeline_exit[from_thread]:
+            return True
         if len(self.next_instruction) > 0:
             for _, thread_id in self.next_instruction:
                 if thread_id == from_thread:
@@ -207,15 +244,84 @@ class TensixBackendUnit(Clockable, ABC):
         return False
 
     def is_clock_idle(self):
-        """Idle with an empty issue queue.
+        """Idle with an empty issue queue and nothing left in a pipeline stage.
 
         Complete for every unit that does not override ``clock_tick``: the
         base implementation only drains ``next_instruction``, and a handler
         has no way to defer work to a later cycle except through its own
         ``clock_tick``. Units that *do* override it (config, sync, thcon,
-        mover, unpacker) extend this with the state their override reads.
+        mover, unpacker) extend this with the state their override reads, and
+        must chain to this rather than re-test ``next_instruction`` themselves.
+
+        A live residency is a state change still owed -- the pipeline exit, made
+        only from a tick by :meth:`_expire_residency` -- so the unit is not idle
+        while one is outstanding.
         """
-        return not self.next_instruction
+        return not self.next_instruction and not (
+            self._pipeline_exit[0] or self._pipeline_exit[1] or self._pipeline_exit[2]
+        )
+
+    def _expire_residency(self, cycle_num):
+        """Drop every thread whose pipeline exit has arrived.
+
+        Run at the top of the tick, before anything is armed, so a deadline is
+        released in exactly the cycle it names -- which is what makes the window
+        a deadline rather than a tick-order artefact. Backend units tick before
+        the Wait Gates, so a gate evaluating a residency condition in cycle
+        ``c`` sees the state this call left, whichever thread's gate it is and
+        in whatever order the units ticked.
+        """
+        exits = self._pipeline_exit
+        for thread in range(3):
+            if exits[thread] and cycle_num >= exits[thread]:
+                exits[thread] = 0
+
+    def _arm_residency(self, cycle_num, batch):
+        """Hold each thread resident for its instruction's documented latency.
+
+        **From acceptance, not from this retire tick.** Everything in ``batch``
+        was accepted in the previous cycle -- backend units tick before the Wait
+        Gates, so a gate's issue lands in the unit's *next* tick -- and the
+        Latency column is measured from issue. This is the same anchor
+        :meth:`clock_tick` uses for occupancy, and for the same reason:
+        anchoring at ``cycle_num`` would charge every entry one cycle more than
+        the document prints.
+
+        **The side effects are untouched.** The handlers have already run, in
+        the tick they always ran in; this only decides how long the instruction
+        is *reported* as being in the unit. Delaying the work itself is a
+        different change and a dangerous one -- see ``config.py``, where a
+        delayed config write was overtaken by its own thread's later
+        instructions and the failure was a wrong answer rather than a slow one.
+
+        A latency of 1 arms nothing: the deadline lands on this very tick, and
+        the instruction was already visible through ``next_instruction`` for the
+        cycle between acceptance and now. That is what keeps every one-cycle
+        opcode -- the whole Sync and Miscellaneous tables, ``SETC16``,
+        ``RMWCIB``, ``SETRWC``, most of the SFPU -- exactly as it was.
+
+        Bounds are charged at their low end by the model's ``BOUND_POLICY``, so
+        ``RDCFG``'s "≥ 2 cycles" and ``SFPCONFIG``'s "≤ 2 cycles" both arm 2.
+        For a residency the low end is the *under*-reporting end, which is the
+        safe one: a residency held longer than the hardware's makes a
+        ``STALLWAIT`` wait for a stall that does not exist, and inventing
+        back-pressure is the single direction this project's bounds policy
+        forbids.
+        """
+        model = self.cost_model
+        accepted = cycle_num - 1
+        exits = self._pipeline_exit
+        for instruction, thread in batch:
+            instruction_info = TensixInstructionDecoder.getInstructionInfo(instruction)
+            cycles = model.latency(instruction_info["name"])
+            if cycles is None:
+                # No published latency: no opinion, and the pre-existing
+                # same-cycle report stands. That is where every ThCon, packer,
+                # unpacker and mover opcode sits today.
+                continue
+            deadline = accepted + cycles
+            if deadline > cycle_num and deadline > exits[thread]:
+                exits[thread] = deadline
 
     def occupy_for(self, cycle_num, cycles, group=None):
         """Declare ``group`` busy for ``cycles`` cycles starting at ``cycle_num``.
@@ -447,6 +553,21 @@ class TensixBackendUnit(Clockable, ABC):
         """
         if self.busy_until is not None:
             self._release_expired(cycle_num)
+        # Residency, the *other* deadline this tick maintains, and a different
+        # column of the same table -- see ``hasInflightInstructionsFromThread``.
+        # Released before anything is armed so a deadline expires in exactly the
+        # cycle it names, and the batch is captured before the drain empties it,
+        # because residency is a property of what was accepted rather than of
+        # what the handlers did. Both are skipped entirely with the cost model
+        # off, which is what keeps ``_pipeline_exit`` all-zero by construction.
+        model = self.cost_model
+        residency_batch = ()
+        if model is not None:
+            exits = self._pipeline_exit
+            if exits[0] or exits[1] or exits[2]:
+                self._expire_residency(cycle_num)
+            if self.next_instruction:
+                residency_batch = list(self.next_instruction)
         # The longest occupancy charged across this cycle's batch, per IPC
         # group. Each group is held by whichever of its parallel paths is
         # slowest, so ``max`` within a group; a unit with no published groups
@@ -518,6 +639,8 @@ class TensixBackendUnit(Clockable, ABC):
                 # is over-charging, the direction the cost model's floor
                 # policy forbids.
                 self.occupy_for(cycle_num - 1, cycles, group)
+        if residency_batch:
+            self._arm_residency(cycle_num, residency_batch)
 
     def getThreadConfigValue(self, issue_thread, key):
         return self.backend.getThreadConfigValue(issue_thread, key)

@@ -36,6 +36,7 @@ from contextlib import contextmanager
 
 from tt_sim.arch import WORMHOLE_PROFILE
 from tt_sim.arch.blackhole import BLACKHOLE_PROFILE
+from tt_sim.pe.tensix.registers import SrcRegister
 from tt_sim.pe.tensix.tensix import TensixCoProcessor
 from tt_sim.pe.tensix.util import TensixConfigurationConstants
 
@@ -931,6 +932,335 @@ def test_off_means_c12_was_decided_by_wait_gate_tick_order():
         assert gates_reversed == 3, burst
 
 
+# ---------------------------------------------------------------------------
+# 7. The same question for the Matrix Unit (C7) and the SFPU (C14).
+# ---------------------------------------------------------------------------
+#
+# STALLWAIT.md (WormholeB0) states two more conditions the same way, and both
+# name a unit whose Latency column is longer than its throughput column:
+#
+#   C7  "The current thread has an instruction in any stage of the Matrix Unit
+#        (FPU) pipeline."
+#   C14 "The current thread has an instruction in any stage of the Vector Unit
+#        (SFPU) pipeline."
+#
+# (Blackhole numbers the same two conditions C4 and C11.) Unlike C12 these are
+# scoped to the *issuing* thread, so the smallest program that means anything is
+# one thread's burst followed by its own STALLWAIT.
+#
+# MatrixUnit.md's "Instruction latency and throughput" table:
+#
+#   MVMUL / DOTPV / GAPOOL / ELWMUL       IPC 1     latency 5
+#   GMPOOL / ELWADD / ELWSUB              IPC 1     latency 5
+#   SETRWC / INCRWC / CLEARDVALID /
+#     CLREXPHIST / GATESRCRST             IPC 1     latency 1
+#   SHIFTXA / ZEROACC / ZEROSRC /
+#     TRNSPSRCB                           IPC 1     latency 1
+#   SHIFTXB                               IPC 0.5   latency 2
+#   MOVD2A                                IPC 1     latency 2
+#   MOVA2D / MOVDBGA2D / MOVB2D / MOVB2A  IPC 1     latency 4
+#
+# VectorUnit.md's per-opcode tables give IPC 1 throughout and latency 2 for the
+# arithmetic and LUT rows (SFPADD, SFPADDI, SFPMAD, SFPMUL, SFPMULI, SFPLUT,
+# SFPLUTFP32, SFPSWAP; SFPCONFIG and one SFPSHFT2 form are "<= 2 cycles"),
+# latency 1 for everything else and "Complex" for SFPLOADMACRO.
+#
+# So the Matrix Unit is a *five*-deep pipeline running at one instruction per
+# cycle, which is the widest gap between the two columns anywhere in the tree,
+# and the SFPU's is two. tt-metal reaches both conditions constantly:
+# ``p_stall::MATH`` and ``p_stall::WAIT_SFPU`` are issued together by
+# ``_llk_math_dest_section_done_`` (every tile of every compute kernel) and
+# ``p_stall::MATH`` alone by ``_llk_math_eltwise_sfpu_start_``, which is how an
+# SFPU kernel waits for the FPU to drain before it starts.
+
+#: ``MOVB2A`` — SrcB to SrcA, latency 4 and occupancy 1, i.e. the shape that
+#: makes residency a separate question, and the *longest* published latency
+#: reachable through a Wait Gate without first arranging valid Src data (MVMUL
+#: and friends are held at the gate until their Src banks are dvalid; this one
+#: only needs the bank's ``AllowedClient``, which ``_residency_drain_cycle``
+#: hands over). Opcode 0x0B, all fields zero.
+MOVB2A = 0x0B << 24
+#: ``MOVD2A`` — Dst to SrcA, latency 2. Not gated on ``AllowedClient`` at all.
+MOVD2A = 0x08 << 24
+#: ``ZEROACC`` — latency 1, the control: an op whose residency must not extend.
+ZEROACC = 0x10 << 24
+#: ``MVMUL``, all fields zero. Latency 5, and the reason any of this matters.
+MVMUL = 0x26 << 24
+#: ``SFPADDI`` — latency 2, occupancy 1. ``SFPNOP`` (latency 1) is the control.
+SFPADDI = 0x75 << 24
+
+
+def _stallwait(condition_mask, block_mask):
+    """``STALLWAIT`` with an explicit condition and block mask. Opcode 0xA2."""
+    return (0xA2 << 24) | (block_mask << 15) | condition_mask
+
+
+def _residency_drain_cycle(
+    coprocessor,
+    unit,
+    op,
+    burst,
+    cycles=90,
+    reverse_units=False,
+    reverse_gates=False,
+):
+    """Cycle at which the thread's own Wait Gate FIFO empties, or ``None``.
+
+    Thread 0 issues ``burst`` back-to-back copies of ``op``, then a
+    ``STALLWAIT`` whose condition is that unit's residency bit and whose block
+    mask catches the single instruction after it. The blocked instruction is
+    chosen from the *other* unit so that the block mask cannot itself be what
+    holds it: the Matrix Unit's wait blocks an ``SFPNOP`` with B8, the SFPU's
+    blocks a ``ZEROACC`` with B6.
+
+    The condition bit is the architecture's, not a shared constant: Wormhole
+    numbers these C7 and C14, Blackhole C4 and C11.
+    """
+    backend = coprocessor.getBackend()
+    # Both Src banks handed to the Matrix Unit, which is where a kernel's
+    # unpack + ``SETDVALID`` leaves them and what ``MOVB2A`` waits for at the
+    # gate. Nothing here reads the data; the banks are zero either way.
+    for bank in (0, 1):
+        backend.getSrcA(bank).allowedClient = SrcRegister.SrcClient.MatrixUnit
+        backend.getSrcB(bank).allowedClient = SrcRegister.SrcClient.MatrixUnit
+    blackhole = backend.blackhole
+    if unit == "MATH":
+        condition = 0x10 if blackhole else 0x80
+        block, blocked = 0x100, SFPNOP
+    else:
+        condition = 0x800 if blackhole else 0x4000
+        block, blocked = 0x40, ZEROACC
+
+    thread = coprocessor.getThread(0)
+    for _ in range(burst):
+        thread.push_wait_gate_instruction(op)
+    thread.push_wait_gate_instruction(_stallwait(condition, block))
+    thread.push_wait_gate_instruction(blocked)
+
+    units = backend.getClocks()
+    clocks = list(reversed(units)) if reverse_units else list(units)
+    threads = list(coprocessor.threads)
+    if reverse_gates:
+        threads = list(reversed(threads))
+    for each in threads:
+        clocks = clocks + each.getClocks()
+
+    for cycle in range(cycles):
+        for clock in clocks:
+            clock.clock_tick(cycle)
+        if not thread.wait_gate_instruction_fifo:
+            return cycle
+    return None
+
+
+def test_the_matrix_and_sfpu_residencies_are_the_latency_column():
+    """The two columns, read off the units' own cost models.
+
+    This is the table talking rather than a constant repeated here, and it is
+    the assertion that keeps the columns apart: every one of these opcodes has
+    occupancy 1, so anything reading ``busy_until`` as residency would report
+    one cycle for all of them.
+    """
+    for blackhole in (False, True):
+        with _coprocessor(blackhole=blackhole) as coprocessor:
+            backend = coprocessor.getBackend()
+            math = backend.backend_units["MATH"].cost_model
+            sfpu = backend.backend_units["SFPU"].cost_model
+            for name in ("MVMUL", "DOTPV", "GAPOOL", "GMPOOL", "ELWADD", "ELWSUB"):
+                assert (math.latency(name), math.occupancy(name)) == (5, 1), name
+            for name in ("MOVA2D", "MOVB2D", "MOVB2A", "MOVDBGA2D"):
+                assert (math.latency(name), math.occupancy(name)) == (4, 1), name
+            assert (math.latency("MOVD2A"), math.occupancy("MOVD2A")) == (2, 1)
+            for name in ("SETRWC", "INCRWC", "ZEROACC", "ZEROSRC", "CLEARDVALID"):
+                assert (math.latency(name), math.occupancy(name)) == (1, 1), name
+            # ``unknown`` in the table: no latency, so no residency opinion.
+            assert math.latency("MOVD2B") is None
+            for name in ("SFPADD", "SFPADDI", "SFPMAD", "SFPMUL", "SFPLUT", "SFPSWAP"):
+                assert (sfpu.latency(name), sfpu.occupancy(name)) == (2, 1), name
+            for name in ("SFPNOP", "SFPMOV", "SFPLOAD", "SFPSTORE", "SFPIADD"):
+                assert (sfpu.latency(name), sfpu.occupancy(name)) == (1, 1), name
+            # "<= 2 cycles", charged at the low end like every other bound.
+            assert sfpu.latency("SFPCONFIG") == 2
+            # "Complex" — the one SFPU row with no number to charge.
+            assert sfpu.latency("SFPLOADMACRO") is None
+
+
+def test_an_mvmul_is_reported_in_the_pipeline_for_its_documented_latency():
+    """Five cycles from acceptance, at the unit, for the op that matters most.
+
+    Offered straight to the unit rather than through a Wait Gate, because
+    ``MVMUL`` is held at the gate until its Src banks are dvalid and this is
+    about the residency rather than about that interlock. The retire is
+    unmoved: the handler still runs in the tick it always ran in.
+    """
+    with _coprocessor() as coprocessor:
+        matrix = coprocessor.getBackend().backend_units["MATH"]
+        assert matrix.issueInstruction(MVMUL, 0)
+        matrix.clock_tick(1)
+        assert not matrix.next_instruction, "the MVMUL must still retire here"
+        # Accepted in cycle 0, so it leaves in cycle 0 + 5.
+        assert matrix.pipeline_exit_cycles == (5, 0, 0)
+        assert matrix.hasInflightInstructionsFromThread(0)
+        assert not matrix.is_clock_idle()
+        for cycle in (2, 3, 4):
+            matrix.clock_tick(cycle)
+            assert matrix.hasInflightInstructionsFromThread(0), cycle
+        matrix.clock_tick(5)
+        assert matrix.pipeline_exit_cycles == (0, 0, 0)
+        assert not matrix.hasInflightInstructionsFromThread(0)
+        assert matrix.is_clock_idle()
+
+
+def test_the_matrix_residency_is_the_issuing_threads_alone():
+    """C7 is "the *current* thread", unlike C12's "any thread"."""
+    with _coprocessor() as coprocessor:
+        matrix = coprocessor.getBackend().backend_units["MATH"]
+        assert matrix.issueInstruction(MVMUL, 1)
+        matrix.clock_tick(1)
+        assert matrix.pipeline_exit_cycles == (0, 5, 0)
+        assert matrix.hasInflightInstructionsFromThread(1)
+        assert not matrix.hasInflightInstructionsFromThread(0)
+        assert not matrix.hasInflightInstructionsFromThread(2)
+
+
+def test_a_one_cycle_matrix_op_keeps_the_report_it_always_had():
+    """Latency 1 arms nothing, by construction rather than by special case."""
+    with _coprocessor() as coprocessor:
+        matrix = coprocessor.getBackend().backend_units["MATH"]
+        assert matrix.issueInstruction(ZEROACC, 0)
+        assert matrix.hasInflightInstructionsFromThread(0), "queued, not yet retired"
+        matrix.clock_tick(1)
+        assert matrix.pipeline_exit_cycles == (0, 0, 0)
+        assert not matrix.hasInflightInstructionsFromThread(0)
+
+
+def test_an_sfpu_op_is_reported_in_the_pipeline_for_two_cycles():
+    """The SFPU half of the same mechanism, at the unit.
+
+    Held for the documented 2 cycles even though the Wait Gate below cannot see
+    it — the mechanism is the unit's, and what a *particular* consumer can
+    observe is a separate question. ``SFPNOP`` is the control at latency 1.
+    """
+    with _coprocessor() as coprocessor:
+        sfpu = coprocessor.getBackend().backend_units["SFPU"]
+        assert sfpu.issueInstruction(SFPADDI, 0)
+        sfpu.clock_tick(1)
+        assert sfpu.pipeline_exit_cycles == (2, 0, 0)
+        assert sfpu.hasInflightInstructionsFromThread(0)
+        sfpu.clock_tick(2)
+        assert sfpu.pipeline_exit_cycles == (0, 0, 0)
+        assert not sfpu.hasInflightInstructionsFromThread(0)
+    with _coprocessor() as coprocessor:
+        sfpu = coprocessor.getBackend().backend_units["SFPU"]
+        assert sfpu.issueInstruction(SFPNOP, 0)
+        sfpu.clock_tick(1)
+        assert sfpu.pipeline_exit_cycles == (0, 0, 0)
+
+
+def test_off_means_the_matrix_and_sfpu_units_report_only_their_issue_queues():
+    """The invariance half, at the units: no cost model, no residency."""
+    with _coprocessor(cost_model=False) as coprocessor:
+        backend = coprocessor.getBackend()
+        for key, op in (("MATH", MVMUL), ("SFPU", SFPADDI)):
+            unit = backend.backend_units[key]
+            assert unit.cost_model is None, key
+            assert unit.issueInstruction(op, 0), key
+            unit.clock_tick(1)
+            assert unit.pipeline_exit_cycles == (0, 0, 0), key
+            assert not unit.hasInflightInstructionsFromThread(0), key
+            assert unit.is_clock_idle(), key
+
+
+def test_stallwait_on_c7_waits_for_the_matrix_pipeline_to_empty():
+    """C7 through the instruction that consumes it.
+
+    A ``burst``-long run of ``MOVB2A`` is accepted one per cycle (0 through
+    ``burst - 1``); the last is in a stage until cycle ``burst + 3``, the Wait
+    Gate sees C7 met there, and ``STALLWAIT.md``'s documented one-cycle lag puts
+    the ``SFPNOP`` at ``burst + 4``.
+    """
+    for blackhole in (False, True):
+        with _coprocessor(blackhole=blackhole) as coprocessor:
+            assert _residency_drain_cycle(coprocessor, "MATH", MOVB2A, burst=6) == 10, (
+                blackhole
+            )
+
+
+def test_the_c7_wait_is_a_deadline_and_not_a_tick_order():
+    """Perturbation: reverse the backend units, reverse the Wait Gates, or both.
+
+    The cycle a documented condition clears at must not depend on either
+    ordering, and it must be a function of the *instruction*. Both hold: the
+    answer is ``burst + 4`` for a latency-4 op in all four orderings, on both
+    architectures, at four burst lengths — where the same sweep with the model
+    off gives ``burst + 3`` whatever the op is.
+    """
+    for blackhole in (False, True):
+        for burst in (1, 3, 6, 10):
+            for reverse_units in (False, True):
+                for reverse_gates in (False, True):
+                    with _coprocessor(blackhole=blackhole) as coprocessor:
+                        drained = _residency_drain_cycle(
+                            coprocessor,
+                            "MATH",
+                            MOVB2A,
+                            burst=burst,
+                            reverse_units=reverse_units,
+                            reverse_gates=reverse_gates,
+                        )
+                    assert drained == burst + 4, (
+                        blackhole,
+                        burst,
+                        reverse_units,
+                        reverse_gates,
+                    )
+
+
+def test_off_means_c7_could_not_tell_a_four_cycle_op_from_a_one_cycle_one():
+    """What it was before, measured, because it is the argument for the change.
+
+    With no residency the only thing that can make C7 unmet is the issue queue,
+    which the unit drains at the top of its own tick — so a ``ZEROACC`` (latency
+    1), a ``MOVD2A`` (2) and a ``MOVB2A`` (4) all clear the condition at exactly
+    the same cycle. Not "C7 waits too little", then, but "C7's answer is not a
+    property of the instruction".
+
+    This is also the flag-off invariance check at the Wait Gate: with the model
+    off, every one of these numbers is what it was before the residency existed.
+    """
+    for burst in (1, 3, 6, 10):
+        for op in (ZEROACC, MOVD2A, MOVB2A):
+            with _coprocessor(cost_model=False) as coprocessor:
+                drained = _residency_drain_cycle(coprocessor, "MATH", op, burst=burst)
+            assert drained == burst + 3, (burst, hex(op))
+
+
+def test_c14_is_inert_at_the_gate_because_the_sfpu_is_only_two_deep():
+    """The SFPU half, and the honest answer for it: no number moves.
+
+    The Wait Gate costs three cycles between the burst's last acceptance and the
+    blocked instruction — latching the ``STALLWAIT``, evaluating it, and
+    ``STALLWAIT.md``'s one-cycle lag — so a residency has to reach past cycle 3
+    to be visible here at all. The SFPU's deepest published latency is 2, so it
+    never does: a 2-cycle ``SFPADDI`` and a 1-cycle ``SFPNOP`` drain at the same
+    cycle, with the model on and with it off.
+
+    That is a property of the *table*, not of this test, and it is why C14 needs
+    no separate treatment: the mechanism is in place and correct at the unit
+    (``test_an_sfpu_op_is_reported_in_the_pipeline_for_two_cycles``), and a
+    future SFPU row deeper than 3 cycles would start to show here without
+    anything being rewritten.
+    """
+    for cost_model in (True, False):
+        for burst in (1, 3, 6, 10):
+            for op in (SFPNOP, SFPADDI):
+                with _coprocessor(cost_model=cost_model) as coprocessor:
+                    drained = _residency_drain_cycle(
+                        coprocessor, "SFPU", op, burst=burst
+                    )
+                assert drained == burst + 3, (cost_model, burst, hex(op))
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
@@ -938,7 +1268,8 @@ def main():
     print(
         "backend_cost_model_test OK: five more units wired, SFPU at one cycle "
         "per op, ThCon multi-cycle and back-pressuring, the config unit's "
-        "residency and C12, off by default"
+        "residency and C12, the Matrix Unit's and SFPU's and C7/C14, off by "
+        "default"
     )
 
 

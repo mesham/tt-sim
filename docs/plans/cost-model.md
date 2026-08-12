@@ -7501,6 +7501,172 @@ model-off measurement of the tick-order dependence, kept as the record of what
 it was) and two in `blackhole_decode_test.py` (bit 12 in the field, bits 14:13
 still out).
 
+## The Matrix Unit's C7 and the SFPU's C14: the same column, two more units
+
+Landed 2026-08-12, immediately after the Configuration Unit above and using the
+mechanism it introduced. `ROADMAP.md` §3 had recorded this as **inert** — "no
+in-tree entry charges those units occupancy above 1" — and that sentence is
+true about *occupancy* and irrelevant, because the question is about the other
+column. The check that was supposed to close the item reopened it.
+
+> `STALLWAIT.md` (WormholeB0), condition **C7**: "The current thread has an
+> instruction in any stage of the Matrix Unit (FPU) pipeline. If the Matrix
+> Unit (FPU) is being concurrently used by multiple threads, this _might_ wait
+> longer than strictly necessary." **C14** says the same of "the Vector Unit
+> (SFPU) pipeline". (Blackhole numbers the two C4 and C11.)
+
+> `MatrixUnit.md`, "Instruction latency and throughput":
+>
+> | Instruction(s) | Throughput (IPC) | Latency (cycles) |
+> | --- | --- | --- |
+> | `MVMUL`, `DOTPV`, `GAPOOL`, `ELWMUL` | 1 (†) | **5** |
+> | `GMPOOL`, `ELWADD`, `ELWSUB` | 1 | **5** |
+> | `SETRWC`, `INCRWC`, `CLEARDVALID`, `CLREXPHIST`, `GATESRCRST` | 1 | 1 |
+> | `SHIFTXA`, `ZEROACC`, `ZEROSRC`, `TRNSPSRCB` | 1 | 1 |
+> | `SHIFTXB` | 0.5 | 2 |
+> | `MOVD2A` | 1 | 2 (‡) |
+> | `MOVA2D`, `MOVDBGA2D`, `MOVB2D`, `MOVB2A` | 1 | **4** (‡) |
+
+`VectorUnit.md` publishes a Latency column per opcode across its nine sub-unit
+tables: **2 cycles** for `SFPADD`, `SFPADDI`, `SFPMAD`, `SFPMUL`, `SFPMULI`,
+`SFPLUT`, `SFPLUTFP32` and `SFPSWAP`, "≤ 2 cycles" for `SFPCONFIG` and one
+`SFPSHFT2` form, "Complex" for `SFPLOADMACRO`, and **1 cycle** for everything
+else.
+
+So the answer to "does anything exceed 1" is yes, by a wider margin than
+anywhere else in the tree: **the Matrix Unit is a five-deep pipeline running at
+one instruction per cycle**, and `tensix_instruction_costs.yaml` has carried
+those latencies, unread, since the tables were transcribed. Both units reported
+every instruction as gone one cycle after acceptance — four cycles early for an
+`MVMUL`.
+
+### The conditions are live in tt-metal, not hypothetical
+
+`p_stall::MATH` and `p_stall::WAIT_SFPU` (Wormhole `0x80` / `0x4000`, Blackhole
+`0x10` / `0x800`) are issued together by `cmath_common.h`'s
+`set_math_semaphores`, which `_llk_math_dest_section_done_` calls for **every
+tile of every compute kernel**; by `_configure_src_zero_flag_` and every
+`_llk_math_reconfig_data_format_*`; and `p_stall::MATH` alone by
+`_llk_math_eltwise_sfpu_start_`, which is how an SFPU kernel waits for the FPU
+to drain before it starts. `llk_math_reduce.h`'s `reduce_row_perform_transpose`
+issues both, one after the other. Probed across the replay guards, 33 of 42
+latch a `STALLWAIT` naming one of these conditions — `wormhole/examples` 165
+times, `blackhole/six` 34. `p_stall::ALL_THREAD_RES` also includes `MATH`, but
+is defined and never used in either LLK tree.
+
+### What the residency costs, and where it is observable
+
+The mechanism moved from `config.py` into `TensixBackendUnit`
+(`_arm_residency` / `_expire_residency` / `hasInflightInstructionsFromThread` /
+`is_clock_idle`), unchanged in shape: a per-thread deadline armed from
+**acceptance** — the same anchor occupancy uses — released at the top of the
+tick, consulted by the predicate, with **every handler still running in the
+tick it always ran in**. A latency of 1 arms nothing by construction, which is
+why the Sync and Miscellaneous tables, `SETRWC`, `ZEROACC` and thirty-odd SFPU
+opcodes are untouched, and why hoisting it changed nothing for the units whose
+tables publish no latency at all (ThCon, packers, unpackers, mover). `MOVD2B`,
+`TRNSPSRCA` and `MOVDBGB2D` are `unknown` in the MATH table and get no opinion
+either.
+
+Bounds again at the low end: `SFPCONFIG`'s "≤ 2 cycles" arms **2**. For a
+residency that is the *under*-reporting end — an `at_most` charged at its low
+end under-reports, and a residency held longer than the hardware's makes a
+`STALLWAIT` wait for a stall that does not exist, which is inventing
+back-pressure.
+
+**C14 turns out to be inert, and for a reason worth writing down.** The Wait
+Gate costs three cycles between a burst's last acceptance and the instruction
+its `STALLWAIT` blocks — latching, evaluating, and `STALLWAIT.md`'s own "one
+cycle lag between the condition(s) being met and the block mask being removed"
+— so a residency has to reach past cycle 3 to be visible there at all. The
+SFPU's deepest published latency is 2. Measured
+(`test_c14_is_inert_at_the_gate_because_the_sfpu_is_only_two_deep`), a 2-cycle
+`SFPADDI` and a 1-cycle `SFPNOP` drain at the same cycle, with the model on and
+with it off, at every burst length. That is a property of the *table*, not of
+the simulator: the mechanism is in place and correct at the unit, and a future
+SFPU row deeper than 3 cycles starts to show without anything being rewritten.
+The Matrix Unit's 4 and 5 do reach past it.
+
+### The perturbation, and what it was before
+
+Same two knobs as C12 — reverse the backend units' tick order, reverse the Wait
+Gates', or both. Because C7 is scoped to the *issuing* thread the gate order
+cannot matter, so the sharper question is whether the answer is a property of
+the **instruction**. Measured on a one-thread program that issues a burst and
+then `STALLWAIT`s on C7 (`backend_cost_model_test`, `_residency_drain_cycle`),
+the cycle the wait clears at:
+
+| burst 1 / 3 / 6 / 10 | `ZEROACC` (lat 1) | `MOVD2A` (lat 2) | `MOVB2A` (lat 4) |
+| --- | --- | --- | --- |
+| model **off** | 4 / 6 / 9 / 13 | 4 / 6 / 9 / 13 | 4 / 6 / 9 / 13 |
+| model **on** | 4 / 6 / 9 / 13 | 4 / 6 / 9 / 13 | **5 / 7 / 10 / 14** |
+
+Off, **a four-cycle instruction and a one-cycle instruction are
+indistinguishable** — C7's answer was not a property of the instruction at all,
+only of when the issue queue happened to drain. On, it is
+`burst + max(3, latency)`: the one- and two-cycle rows are hidden under the
+gate's own three cycles (correctly — the deadline is armed, it is simply not
+the binding constraint), and the four-cycle row is `burst + 4` in **all four
+tick orderings, on both architectures, at every burst length**, because it is a
+deadline the Latency column sets. `MVMUL`'s 5 is pinned at the unit instead
+(`test_an_mvmul_is_reported_in_the_pipeline_for_its_documented_latency`), since
+the Wait Gate holds an `MVMUL` until its Src banks are dvalid and that
+interlock is a different subject.
+
+### Measured on the guards: the wait is real, and no cycle count moved
+
+Both facts matter and they are not in tension. All 44 replay guards, replayed
+socket-free and pumped to `RUN_MSG_DONE`, on this tree and on a frozen copy at
+`90b1484` without these changes: **model on, all 44 identical; model off, all 44
+identical.** The gate is `RESULT: PASS`, with each budget-dependent guard
+needing exactly the multiplier it needed before — `dramtop` 1×, `two` 2×,
+`offline` 4×. `examples/one` built against tt-metal 0.74 and run through the
+wire bridge reports "Completed successfully on the device" with the model off
+and on.
+
+Unlike the Configuration Unit, though, **this one is observed by real
+workloads**. Instrumenting the Wait Gate to count how often a `STALLWAIT`
+naming the Matrix residency bit is *not* satisfied on a look:
+
+| guard | latched | before: blocked looks | after: blocked looks |
+| --- | --- | --- | --- |
+| `blackhole/reduce`, `reduceneg` | 16 | **0** | **14** |
+| `blackhole/twolaunch` | 20 | **0** | **4** |
+
+Before, every one of those waits was satisfied the first time it was looked at
+— the condition was decorative. After, it blocks. The guards' totals do not
+move because the host polls the go-message every 100 cycles and a handful of
+extra cycles is absorbed inside a poll window; that is a statement about the
+measurement's resolution, not about the mechanism. Across the 42 guards a
+single un-laddered run can drive, the Matrix residency arms **14,040 times**
+(`wormhole/examples` 4,192, `blackhole/six` 4,096, `blackhole/matmulblock`
+1,536) and the SFPU's **5,532** (`wormhole/sfpumath` 1,898,
+`blackhole/sfpumath` 1,574). `blackhole/six` is the instructive negative: 4,096
+arms, 34 C4 `STALLWAIT`s, and **none of them blocked** either before or after,
+because its matmul MOP leaves more than five cycles between the last `MVMUL`
+and the wait.
+
+### `STALLWAIT`'s empty-mask default was Wormhole's on both arches
+
+A separable fix found in the same page, and the one thing here that is not
+about latency at all. `STALLWAIT.md`'s functional model reads
+
+> Wormhole: `ConditionMask = ConditionMask ? ConditionMask : 0x7F;`
+> Blackhole: `ConditionMask = ConditionMask ? ConditionMask : 0x0F;`
+
+The two mean the *same* thing — every resource this thread has outstanding — in
+each arch's own numbering, and differ only because Blackhole collapses
+Wormhole's four packer conditions (C3–C6) into one (C3). `handle_stallwait`
+used `0x7F` on both. On Blackhole that is not a superset of the right answer
+but a **different set**: bits 4–6 there are C4 (an instruction in any stage of
+the Matrix Unit pipeline) and C5/C6 (`SrcA`/`SrcB` not yet handed back to the
+*unpackers*) — one invented wait plus two inverted ones. `WAIT_RES_DEFAULT` is
+now per-arch. No number moves: across every replay guard, every latched
+`STALLWAIT` condition mask is non-zero, because tt-metal's LLK always passes an
+explicit `p_stall::`-derived mask. `SEMWAIT`'s zero-condition arm is
+`UndefinedBehavior()` on both arches, so tt-sim's choice there is its own; it
+follows the same constant rather than always Wormhole's.
+
 ## Using it, when the time comes
 
 ```python

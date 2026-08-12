@@ -61,7 +61,7 @@ class MoverUnit(TensixBackendUnit):
         self.tdma_commands.append(command)
 
     def is_clock_idle(self):
-        return not self.next_instruction and not self.tdma_commands
+        return super().is_clock_idle() and not self.tdma_commands
 
     def transfer_cycles(self, mode, count):
         """Cycles the mover is busy with a ``count``-byte transfer, or ``None``."""

@@ -91,7 +91,7 @@ class ScalarUnit(TensixBackendUnit):
 
     def is_clock_idle(self):
         # A stalled ThCon re-evaluates its stall condition every cycle.
-        return not self.next_instruction and not self.stalled
+        return super().is_clock_idle() and not self.stalled
 
     def clock_tick(self, cycle_num):
         if self.stalled:
