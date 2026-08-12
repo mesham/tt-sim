@@ -202,14 +202,21 @@ def test_derived_entries_show_their_working():
 
 def test_vendor_derived_entries_are_exactly_the_ones_we_expect():
     """``vendor_source_derived`` is arithmetic on vendor numbers — below a
-    published figure, above a guess. It exists for exactly two entries — the
-    same subtraction once per arch — and adding a third must be as deliberate
-    as adding an ``estimated`` one, so the list is here rather than inferred.
-    Every one must also show its working, which
-    :func:`test_derived_entries_show_their_working` enforces."""
+    published figure, above a guess. It exists for exactly three entries: the
+    same subtraction once per arch, and Blackhole's DRAM channel rate, which is
+    one division on two cycle counts from the same vendor's measured dataset.
+    Adding a fourth must be as deliberate as adding an ``estimated`` one, so
+    the list is here rather than inferred. Every one must also show its
+    working, which :func:`test_derived_entries_show_their_working` enforces.
+
+    Note what the rank does *not* ask for, because a roadmap bullet once read
+    as though it did: a published *page*. Blackhole has no DRAM tile page and
+    two of these three are Blackhole DRAM entries. What it asks for is vendor
+    numbers and arithmetic written out."""
     expected = {
         "arch_overrides.wormhole.dram.access_latency",
         "arch_overrides.blackhole.dram.access_latency",
+        "arch_overrides.blackhole.dram.channel_serialisation",
     }
     found = set()
     for raw in _load_raw():
@@ -582,25 +589,42 @@ def test_the_dram_channel_rate_is_exactly_its_own_derivation():
     file, unconsumed, long before rung 2 measured a DRAM read plateauing at
     24.38 B/cycle.
 
-    The Blackhole half is the one worth having a test for. Its override says
-    ``unknown``, but the overrides *deep-merge*, so Wormhole's 24 is still
-    physically present under it — and a consumer that read the number without
-    checking the provenance beside it would launder one architecture's
-    published figure into another's gap. That is the exact failure the
-    convention exists to prevent, and it is invisible from the raw YAML."""
+    The Blackhole half is the one worth having a test for, and it did not stop
+    being one when that arch gained a rate of its own on 2026-08-12. The
+    overrides *deep-merge*, so Wormhole's 24 is still physically present under
+    Blackhole — and a consumer that read the number without checking what the
+    override itself carries would launder one architecture's published figure
+    into another's. That is the exact failure the convention exists to prevent,
+    it is invisible from the raw YAML, and it is now the *more* likely mistake
+    rather than the less: an override that reads ``unknown`` announces itself,
+    while one carrying a read rate looks complete until you ask it for a write
+    rate and get Wormhole's 24 back. The assertions below say the two arches'
+    numbers are each their own derivation and that neither can become the
+    other's."""
     _, units = _load_raw()
     gb_per_s = units["dram"]["bandwidth"]["per_channel_gb_per_s"]
     ghz = units["clock"]["wormhole"]["frequency_mhz"] / 1000
     assert units["dram"]["channel_serialisation"]["bytes_per_cycle"] == gb_per_s / ghz
-    # Blackhole: the override carries no number of its own...
+    # Blackhole: the override's read rate is its own arithmetic on two of
+    # tm_noc_latencies' measured cycle counts, and nothing else.
     override = units["arch_overrides"]["blackhole"]["dram"]["channel_serialisation"]
-    assert override["provenance"] == "unknown"
+    assert override["provenance"] == "vendor_source_derived"
+    assert override["source"] == "tm_noc_latencies"
+    rate = override["bytes_per_cycle_read"]
+    assert abs(rate - (8192 - 4096) / (665 - 578)) < 1e-3
+    # Rounded UP off that quotient, so the charge lands at its low end.
+    assert rate >= (8192 - 4096) / (665 - 578)
+    # It carries no flat figure and no write figure — the write direction is
+    # refused, not merely absent, and the derivation says why.
     assert "bytes_per_cycle" not in override
-    # ...but the merged view still shows Wormhole's, so provenance is the only
-    # thing standing between a consumer and the wrong architecture's number.
+    assert "bytes_per_cycle_write" not in override
+    # The merged view still shows Wormhole's 24 under the same key, so the
+    # consumer's rule — a directional key REPLACES the flat one — is the only
+    # thing standing between a Blackhole write and the wrong arch's number.
+    # ``dram_cost_model_test`` asserts the consumer end of that rule.
     merged = load_costs("blackhole").sections["dram"]["channel_serialisation"]
     assert merged["bytes_per_cycle"] == 24
-    assert merged["provenance"] == "unknown"
+    assert merged["bytes_per_cycle_read"] == rate
 
 
 def test_no_entry_is_an_uncalibrated_guess_without_saying_so():

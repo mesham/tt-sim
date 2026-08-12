@@ -151,9 +151,12 @@ class ArchProfile:
     #: cost model, which queues requests per physical channel: two independent
     #: controllers must not be modelled as one queue, because that would invent
     #: serialisation the hardware does not have. ``None`` (Blackhole, which has
-    #: no DRAM tile page in the ISA docs at all) means one queue per tile,
-    #: which is moot there -- Blackhole publishes no channel rate either, so
-    #: nothing is ever queued.
+    #: no DRAM tile page in the ISA docs at all) means one queue per tile.
+    #: That is the right shape rather than a fallback: the Blackhole part the
+    #: descriptors describe fronts one bank per physical DRAM core, so one
+    #: queue per tile is one queue per channel. It stopped being moot on
+    #: 2026-08-12, when that arch gained a derived read rate and its reads
+    #: began to queue.
     dram_gddr_channel_size: int | None = None
 
     @property

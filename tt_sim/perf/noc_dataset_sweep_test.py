@@ -198,9 +198,11 @@ def test_a_real_dram_round_trip_adds_the_service_window(arch, size):
     are ``grid_x + grid_y`` hops) plus the endpoint's own two terms, and
     nothing else: the flat service time, and the channel's *excess* over the
     NoC link for these bytes. If an arch sourced neither the difference would
-    be zero, which is what an unsourced arch is *meant* to look like — and
-    Blackhole, which publishes no per-channel bandwidth, really does contribute
-    only the first of the two at both sizes."""
+    be zero, which is what an unsourced arch is *meant* to look like. Both
+    shipped arches now source both terms for a READ, which is the direction
+    this test predicts — by two different routes (a published GB/s converted
+    on Wormhole, a secant on the measured dataset on Blackhole), and the
+    closed form has to compose the same either way."""
     with _cost_model_on():
         dram = sweep.predict_cycles(arch, sweep.MEMORY_DRAM_SHARDED, True, False, size)
         l1 = sweep.predict_cycles(arch, sweep.MEMORY_L1, True, False, size)

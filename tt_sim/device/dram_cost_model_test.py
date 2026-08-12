@@ -30,8 +30,16 @@ channel's bandwidth, which is a *rate* rather than a latency and which
 properties worth pinning there are the derivation (24 GB/s at 1 GHz is 24 B/cycle
 and nothing else), the shape (the **excess** over what the NoC link already
 charged, so two queues in series cost the slower and not the sum), and the
-refusal — Blackhole publishes no per-channel bandwidth, and the deep-merged
-overrides mean declining Wormhole's number takes an explicit provenance check.
+refusal — the deep-merged overrides mean declining another arch's number takes
+an explicit check rather than an absent key.
+
+Since 2026-08-12 that rate is **per direction**, because Blackhole joined it by
+a different route: no page and so no GB/s to convert, but one division on two
+of ``tm_noc_latencies``' measured cycle counts gives 47.0805 B/cycle for reads,
+which is `vendor_source_derived` — the rank asks for vendor arithmetic, not for
+a document. Its *write* direction is deliberately unsourced, so what this file
+pins there is a refusal that has to survive a deep merge: a Blackhole write
+must read ``None``, never Wormhole's 24.
 
 Since 2026-08-09 that same rate is spent a *second* way and the endpoint has a
 queue: the channel carries one transfer at a time, so a request arriving while
@@ -168,22 +176,47 @@ def test_the_channel_rate_is_the_published_bandwidth_at_the_published_clock():
     legitimately readable (``costs_test.test_the_dram_channel_rate_is_exactly_
     its_own_derivation``), so this side asserts only the charged number."""
     with _env("1"):
-        assert dram_cost_model("wormhole").channel_bytes_per_cycle == 24
+        model = dram_cost_model("wormhole")
+    # One published figure, stated by the page for reads and writes alike, so
+    # both directions read it.
+    assert model.channel_bytes_per_cycle() == 24
+    assert model.channel_bytes_per_cycle(is_write=True) == 24
 
 
-def test_blackhole_gets_no_channel_rate_because_none_is_published():
-    """BlackholeA0 has no DRAMTile directory in the ISA docs, so its
-    ``dram.bandwidth`` — and with it ``channel_serialisation`` — is
-    ``provenance: unknown``, and a Blackhole DRAM transfer pays the NoC link's
-    serialisation and no second one. The check that matters is that the *deep
-    merge* does not launder Wormhole's 24 into it: the number is physically
-    present under Blackhole's override (``costs_test`` asserts exactly that)
-    and the model must decline to read it."""
+def test_the_blackhole_channel_rate_is_derived_for_reads_and_refused_for_writes():
+    """BlackholeA0 has no DRAMTile directory in the ISA docs, so there is no
+    GB/s to convert — but ``vendor_source_derived`` asks for arithmetic on
+    vendor numbers, not for a page, so the read rate comes instead from one
+    division on two of ``tm_noc_latencies``' measured cycle counts (4096 bytes
+    of extra transfer costing 87 extra cycles). The write direction is refused:
+    its own secant lands within 2.5 % of the same arch's L1 rows, so it
+    resolves no endpoint limit, and charging it would deepen the row already
+    pinned in ``KNOWN_OVER_CHARGED``.
+
+    The check that matters is the same one it always was — that the *deep
+    merge* does not launder Wormhole's 24 in. The number is still physically
+    present under Blackhole's override (``costs_test`` asserts exactly that),
+    and the rule that keeps it out is that a directional key replaces the flat
+    one rather than falling back to it. So a Blackhole write must read
+    ``None``, not 24."""
     with _env("1"):
         model = dram_cost_model("blackhole")
-    assert model.channel_bytes_per_cycle is None
-    assert model.channel_serialisation_cycles(8192) is None
-    assert model.channel_excess_cycles(8192, 128) == 0
+    rate = model.channel_bytes_per_cycle()
+    assert 4096 / 87 <= rate < 4096 / 87 + 1e-3  # rounded up: the low end
+    # And the charge reproduces the two vendor points it came from: 4096 more
+    # bytes cost 87 more cycles, which is the derivation run backwards.
+    assert model.channel_serialisation_cycles(8192) == 174
+    assert (
+        model.channel_serialisation_cycles(8192)
+        - model.channel_serialisation_cycles(4096)
+        == 665 - 578
+    )
+    # The excess over a 64 B/cycle link, which is what actually gets charged.
+    assert model.channel_excess_cycles(8192, 128) == 174 - 128
+    # Writes: nothing, and emphatically not Wormhole's 24.
+    assert model.channel_bytes_per_cycle(is_write=True) is None
+    assert model.channel_serialisation_cycles(8192, is_write=True) is None
+    assert model.channel_excess_cycles(8192, 128, is_write=True) == 0
 
 
 def test_the_channel_is_charged_as_an_excess_over_the_link_not_as_a_second_bill():
@@ -224,15 +257,18 @@ def test_the_gaps_are_named_rather_than_implied():
     assert model.device_occupancy_modelled is False
 
 
-def test_occupancy_is_modelled_exactly_where_the_channel_rate_is_published():
-    """The flag is not a global switch, it is a per-arch consequence. Blackhole
-    publishes no per-channel DRAM bandwidth, so it gets no occupancy — the same
-    refusal ``channel_excess_cycles`` already makes, reported rather than left
-    for a reader to deduce from a zero."""
+def test_occupancy_is_modelled_exactly_where_the_channel_rate_is_sourced():
+    """The flag is not a global switch, it is a per-arch and now per-direction
+    consequence: both arches source a read rate, so both hold a read off, and
+    Blackhole sources no write rate, so a Blackhole write queues behind
+    nothing. ``device_occupancy_modelled`` stays False everywhere — the array
+    behind the bus is still not a queue on either arch."""
     with _env("1"):
-        assert dram_cost_model("wormhole").occupancy_modelled is True
-        assert dram_cost_model("blackhole").occupancy_modelled is False
-        assert dram_cost_model("blackhole").device_occupancy_modelled is False
+        for arch in ("wormhole", "blackhole"):
+            model = dram_cost_model(arch)
+            assert model.occupancy_modelled is True
+            assert model.device_occupancy_modelled is False
+        assert dram_cost_model("blackhole").channel_bytes_per_cycle(True) is None
 
 
 def test_the_channel_occupancy_is_the_serialisation_and_not_a_second_number():
@@ -244,7 +280,8 @@ def test_the_channel_occupancy_is_the_serialisation_and_not_a_second_number():
     with _env("1"):
         model = dram_cost_model("wormhole")
         channels = Wormhole().dram_tiles[0].channels
-    assert channels.bytes_per_cycle == model.channel_bytes_per_cycle
+    assert channels.bytes_per_cycle == model.channel_bytes_per_cycle()
+    assert channels.write_bytes_per_cycle == model.channel_bytes_per_cycle(True)
     for size in (32, 64, 256, 1024, 4096, 8192):
         assert channels.occupancy_cycles(size) == model.channel_serialisation_cycles(
             size
@@ -266,16 +303,23 @@ def test_an_idle_channel_charges_nothing_so_a_lone_request_cannot_move():
     assert channels.claims == 2
 
 
-def test_a_channel_with_no_published_rate_never_makes_anything_wait():
-    """Blackhole's shape, asserted on the mechanism rather than on the arch, so
-    it stays true for the next architecture whose bandwidth is unpublished."""
+def test_a_channel_with_no_sourced_rate_never_makes_anything_wait():
+    """Asserted on the mechanism rather than on an arch, so it stays true for
+    the next architecture — or the next direction — whose rate is unsourced.
+    Blackhole is now the *directional* case: its reads queue and its writes do
+    not, because its table derives one rate and refuses the other."""
     channels = DramChannels(None)
     assert channels.occupancy_cycles(8192) is None
     assert channels.claim(0, 8192) == 0
     assert channels.claim(0, 8192) == 0
     assert channels.claims == 0
     with _env("1"):
-        assert Blackhole().dram_tiles[0].channels.bytes_per_cycle is None
+        bh = Blackhole().dram_tiles[0].channels
+    assert bh.bytes_per_cycle is not None
+    assert bh.write_bytes_per_cycle is None
+    assert bh.occupancy_cycles(8192, is_write=True) is None
+    assert bh.claim(0, 8192, is_write=True) == 0
+    assert bh.claims == 0
 
 
 def test_the_two_nocs_share_one_set_of_channels_because_the_hardware_does():

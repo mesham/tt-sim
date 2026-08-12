@@ -45,10 +45,15 @@
 #     a different queue from the NoC link and a slower one (24 B/cycle against
 #     32 on Wormhole), so the endpoint charges the excess of the channel's
 #     time over the link's and the transfer ends up limited by the slower of
-#     the two. Wormhole only; Blackhole publishes no per-channel bandwidth and
-#     its override says ``unknown``. Everything else under ``dram`` -- the
-#     GB/s ``bandwidth`` block itself, ``chip_level_bandwidth`` and the
-#     end-to-end reference -- is still unconsumed.
+#     the two. Both arches now, since 2026-08-12, but by two different routes
+#     and not with the same shape: Wormhole's one figure is a unit conversion
+#     of a published GB/s and is charged in both directions, while Blackhole's
+#     is a two-point secant on tt-metal's measured NoC dataset, is charged for
+#     READS ONLY, and has no write figure at all -- see its override, which
+#     says why refusing the write direction is the finding rather than a gap.
+#     Everything else under ``dram`` -- the GB/s ``bandwidth`` block itself,
+#     ``chip_level_bandwidth`` and the end-to-end reference -- is still
+#     unconsumed.
 #
 # The ``mover`` section's ``transfer`` rates are consumed since 2026-08-06 by
 # ``MoverCostModel`` (tt_sim/perf/model.py): a Mover transfer holds the mover
@@ -65,11 +70,15 @@
 #           > estimated > unknown
 #
 # and an entry's provenance is the weakest provenance of any number in it.
-# ``vendor_source_derived`` is the newest rank and exists for exactly two
-# entries (``dram.access_latency``, once per arch): arithmetic on vendor
-# numbers, which is what ``isa_doc_derived`` is to ``isa_doc``, one tier down.
-# It requires a ``derivation`` for the same reason -- a derived number is only
-# reviewable if the arithmetic is written out.
+# ``vendor_source_derived`` is the newest rank and exists for exactly three
+# entries (``dram.access_latency``, once per arch, and Blackhole's
+# ``dram.channel_serialisation``): arithmetic on vendor numbers, which is what
+# ``isa_doc_derived`` is to ``isa_doc``, one tier down. It requires a
+# ``derivation`` for the same reason -- a derived number is only reviewable if
+# the arithmetic is written out. Note what the rank does NOT require: a
+# published *page*. Blackhole has no DRAM tile page and two of its DRAM terms
+# are derived anyway, from measured vendor tables, because what the rank asks
+# for is vendor numbers and written-out arithmetic.
 
 schema_version: 1
 
@@ -1170,27 +1179,137 @@ arch_overrides:
           24 DRAM tiles exposing 32 GiB of GDDR6 (BlackholeA0/README.md), and
           tt-metal quotes 512 GB/s chip-level -- see ``chip_level_bandwidth``,
           which is vendor_source and applies to both arches.
-      channel_serialisation:
-        provenance: unknown
-        note: >
-          Follows ``bandwidth`` straight down: with no published per-channel
-          GB/s for Blackhole there is nothing to convert, so a Blackhole DRAM
-          transfer pays the NoC link's serialisation and no second one. Note
-          that the arch overrides are *deep-merged*, so Wormhole's 24 is still
-          physically present under this key on Blackhole -- the consumer
-          checks this ``provenance`` before reading any number, which is the
-          same guard ``noc_dataset_sweep._sourced_bandwidths`` applies for the
-          same reason.
 
-          Not a gap that wants closing by scaling Wormhole's figure, either.
-          Rung 2's sweep puts Blackhole's measured DRAM at 47.1 B/cycle
-          reading and 59.4 writing, against a 64 B/cycle link -- 74% and 93%.
-          Wormhole's two directions agree with each other (24.38 / 24.53,
-          both 76-77% of its link) which is what a single channel rate looks
-          like; Blackhole's differ by 26%, which is not. So there is no one
-          number to infer here even informally, and inferring one would be an
-          ``estimated`` entry fitted to the same measurement it would then be
-          checked against.
+          THIS NO LONGER GATES ANYTHING, and the record of why it was thought
+          to is worth keeping. Until 2026-08-12 both the size term and the
+          endpoint-occupancy term were held off Blackhole on the ground that
+          ``channel_serialisation`` "follows ``bandwidth`` straight down" --
+          with no published GB/s there is nothing to convert. That is true of
+          *this* entry and was mistaken as a rule about the arch: a bytes-per-
+          cycle figure does not have to arrive by unit conversion from a GB/s,
+          and on Blackhole it arrives instead by arithmetic on two of
+          tt-metal's own measured cycle counts. See ``channel_serialisation``
+          below. What stays ``unknown`` here is what genuinely needs the
+          document: a per-*channel* rate in GB/s, how many channels a tile
+          fronts, and the achievable fraction. None of those three is a thing
+          the derivation below produces, and none of them is consumed.
+      channel_serialisation:
+        bytes_per_cycle_read: 47.0805
+        provenance: vendor_source_derived
+        source: tm_noc_latencies
+        derivation: >
+          bytes_per_cycle_read = (8192 - 4096) / (665 - 578)
+                               = 4096 / 87
+                               = 47.08046 bytes per cycle,
+
+          rounded to 47.0805 -- *up*, so the charge lands at its low end.
+
+          Both cycle counts are vendor measurements read straight off
+          ``tm_noc_latencies``: the DRAM_SHARDED, ONE_FROM_ONE, different-axis,
+          one-transaction-per-barrier Blackhole row, at its 4096 B and 8192 B
+          columns. Nothing else enters -- no modelled quantity, no fitted
+          coefficient, no silicon of this project's own. It is one subtraction
+          and one division, which is the same shape as ``access_latency``'s one
+          subtraction and lands at the same rank.
+
+          Why a difference of two sizes rather than a rate read off one. A
+          transfer's measured time is (everything constant) + (bytes / rate),
+          so differencing two sizes on the *same* row cancels the round trip,
+          the endpoint's flat service time, the issuing core's path and the
+          profiler's own instrumentation, exactly as ``access_latency``'s
+          subtraction cancels the round trip. What is left is the slowest
+          per-byte stage on the path. 8192 B is the largest measured DRAM
+          column -- ``dram_accessor_sweep`` never issues a larger one and
+          ``data_extractor.cpp`` pads the rest -- so these are the only two
+          points there are, and the two-point secant is the whole fit.
+
+          THE DERIVATION IS NOT NEW AND WAS NOT ADJUSTED TO REACH THIS NUMBER.
+          It is what ``tt_sim.perf.noc_dataset_sweep`` has printed under
+          "implied sustained bandwidth, from the large-transfer slope" since
+          2026-08-08, unchanged, for every series on both arches at once.
+
+          WHAT MAKES IT A RATE RATHER THAN A RESIDUAL: the same arithmetic on
+          the same file, run on the *Wormhole* rows, returns 24.38 B/cycle for
+          reads (4096 / (733 - 565)) and 24.53 for writes (4096 / (768 - 601))
+          -- against a per-channel figure of 24 that WormholeB0's DRAM tile
+          page publishes and that this file has carried at ``isa_doc`` since
+          long before the dataset was read. The derivation recovers a published
+          number it was never given, to +1.6% and +2.2%, on the one
+          architecture where a published number exists to recover. That is the
+          control, and it is what says the slope reads a *bottleneck rate*
+          rather than an accumulation: an additive two-stage model would need
+          Wormhole's channel to be 102 B/cycle to produce a 24.38 end-to-end
+          against a 32 B/cycle link, which is four times the published figure
+          and is refused by the same arithmetic that accepts the other reading.
+
+          The 47.08 is therefore the rate of the slowest stage a Blackhole DRAM
+          read crosses, and it is not the NoC link: the same file's L1 rows,
+          which cross the link and no DRAM, slope at 60.35 / 60.59 / 60.89 /
+          60.83 B/cycle on this arch. 47.08 sits 22% below all four. Something
+          at the DRAM endpoint is slower than the fabric, by a margin the
+          fabric's own rows bound.
+        note: >
+          CONSUMED for reads and NOT for writes, and the asymmetry is the
+          point rather than an omission -- see the write paragraph below.
+          Charged exactly as Wormhole's is: as the *excess* over the link's
+          own serialisation (``DramCostModel.channel_excess_cycles``), so a
+          transfer's size-dependent cost is ``ceil(N / 47.0805)`` once and not
+          added to the link's, and as the channel's *occupancy*
+          (``DramChannels``), so a request arriving while the channel is
+          streaming waits. One figure on two axes, as on Wormhole.
+
+          THE DEEP MERGE IS STILL THE HAZARD IT ALWAYS WAS. Wormhole's
+          ``bytes_per_cycle: 24`` remains physically present under this key on
+          Blackhole, and the consumer must not read it: a directional key here
+          *replaces* the merged flat one rather than falling back to it, so
+          Blackhole's read rate is its own and its write rate is nothing at
+          all. ``costs_test.test_the_dram_channel_rate_is_exactly_its_own_
+          derivation`` asserts both halves.
+
+          THE WRITE DIRECTION IS NOT CHARGED, and it is the one thing this
+          entry deliberately leaves on the floor. The same secant on the same
+          arch's DRAM write row gives 4096 / (523 - 454) = 59.36 B/cycle, and
+          two independent reasons say that figure is not a DRAM bound:
+
+            1. It is not separable from the fabric. This arch's four L1 slopes
+               are 60.35 / 60.59 / 60.89 / 60.83, and 59.36 is within 2.5% of
+               all of them -- so a Blackhole DRAM write runs at the rate an L1
+               write runs at, and the dataset resolves no endpoint-specific
+               limit for it. Wormhole separates cleanly (DRAM write 24.53
+               against L1 write 30.16, 19% apart), which is what a resolved
+               bound looks like and what the read direction looks like here.
+            2. It would deepen a named over-charge. ``access_latency`` is
+               derived from the read figures and is already too large for a
+               Blackhole write -- the one row in ``KNOWN_OVER_CHARGED``, whose
+               residuals run -37 to -52 across the eight sizes. Adding a write
+               channel term takes them to -45 to -54. Over-charging is the
+               direction every bound in this file is chosen to avoid, and a
+               term that makes a known over-charge worse is not a term.
+
+          So the 26% read/write gap is honoured by charging one direction and
+          refusing the other, never by averaging the two into a single channel
+          rate. What explains the gap is already recorded next door, in
+          ``access_latency``'s note: "a write is answered when it is accepted,
+          a read when the array has been read". A write's measured time does
+          not contain the array, so its slope cannot measure the array.
+
+          WHAT THIS COSTS IN INDEPENDENCE, stated because it is the real price.
+          Rung 2 validates the model against this dataset, and this entry now
+          comes *from* it, so the Blackhole DRAM read row's large-transfer
+          residual is no longer an independent check of the size term -- it is
+          the term's own source, and its flattening (5.63 cycles/KiB to 0.55)
+          is an identity rather than evidence. Two checks survive that and are
+          named so a reader does not have to find them: the Wormhole control in
+          the derivation above, which recovers an ``isa_doc`` number the
+          arithmetic was never shown, and the DRAM *small* sizes on this arch,
+          where no bandwidth term is in play and the residual is untouched.
+
+          NOT FOLDED IN, exactly as on Wormhole: the device's own re-issue
+          interval, bank conflicts, refresh windows, read/write turnaround.
+          And this is a rate at *one* DRAM endpoint as tt-metal addresses it,
+          not a per-GDDR6-channel figure -- ``bandwidth`` above stays
+          ``unknown`` because a GB/s, a channel count and an achievable
+          fraction are three things this arithmetic does not produce.
     riscv:
       # Every `corroboration` in this block is one silicon campaign:
       # perfbench/riscvbench on a Blackhole card, 2026-08-05, banked as

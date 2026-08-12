@@ -37,10 +37,10 @@ Three things this deliberately does not do
 
 * **It cannot make anything chargeable.** Every number here is a measurement
   on one part; it enters ``unit_costs.yaml`` as ``corroboration`` and never as
-  provenance. On Blackhole that is doubly true -- no DRAM tile page is
-  published for that part at all, so ``dram.bandwidth`` stays ``unknown``
-  there for want of a *document*, not for want of a number, and a measured
-  Blackhole plateau cannot fill the gap any more than Wormhole's 24 could.
+  provenance. That stayed true when Blackhole's channel rate became chargeable
+  on 2026-08-12: what made it chargeable was arithmetic on tt-metal's *own*
+  measured dataset, not this benchmark, and this benchmark's agreement with it
+  to ~0.05 % is corroboration of a derivation that never saw it.
 * **It never grades a flat curve on its own.** Flat is what a saturated
   channel looks like, and equally what a saturated link, a saturated issue
   rate, or N readers that never overlapped look like. The gates below run
@@ -376,11 +376,18 @@ def flatness(table):
 # a level can therefore say which one bound where a ratio cannot.
 #
 # Both figures come from the cost tables rather than from literals here, so
-# they carry the tables' own provenance discipline. That matters most on
-# Blackhole, where `channel` is None: the arch override says `unknown`, and
-# `DramCostModel` refuses to read Wormhole's 24 through it. A plateau on that
-# part can be attributed to the link or to nothing, never to a channel rate
-# this project does not have.
+# they carry the tables' own provenance discipline: `DramCostModel` refuses to
+# read Wormhole's 24 through Blackhole's deep-merged override, so a plateau is
+# never attributed to a rate the arch's own table does not carry. The channel
+# figure taken is the READ one, because this is a read benchmark and Blackhole
+# sources a rate for that direction only.
+#
+# One consequence of Blackhole gaining a read rate on 2026-08-12: this
+# attribution stopped being a two-way choice on that part. Before it, `channel`
+# was None there and a plateau could only read `link` or `neither` -- which is
+# how the card's 47.147 came back `neither`, correctly, against a model that
+# then held no such bound. It now reads `channel`, and the test that pinned
+# `neither` says which of the two facts changed.
 
 #: How close a plateau must sit to a ceiling to be attributed to it. Wormhole's
 #: two ceilings are 24 and 32, a third apart, so a tenth cannot reach from one
@@ -389,20 +396,25 @@ CEILING_BAND = 0.10
 
 
 def ceilings(arch):
-    """``(link_bytes_per_cycle, channel_bytes_per_cycle)`` for one arch.
+    """``(link_bytes_per_cycle, channel_read_bytes_per_cycle)`` for one arch.
 
     Built from the sections directly rather than through ``noc_cost_model`` /
     ``dram_cost_model``, which return ``None`` unless ``TT_SIM_COST_MODEL`` is
     set in the environment. That gate is right for the execution path and wrong
     here: what a table publishes does not depend on whether this process
     happens to be simulating with it.
+
+    The channel figure is the **read** rate because ``dramratebench`` reads;
+    Blackhole's table carries no write rate at all, so asking for the wrong
+    direction here would silently answer ``None``.
     """
     if arch not in ("wormhole", "blackhole"):
         return None, None
     sections = load_costs(arch).sections
-    return NocCostModel(sections, arch).bytes_per_cycle, DramCostModel(
-        sections, arch
-    ).channel_bytes_per_cycle
+    return (
+        NocCostModel(sections, arch).bytes_per_cycle,
+        DramCostModel(sections, arch).channel_bytes_per_cycle_read,
+    )
 
 
 def plateau_sits_at(plateau, arch, band=CEILING_BAND):
@@ -632,6 +644,13 @@ def report(path, prediction_path=None, use_prediction=True, out=print):
         out(
             "    per-channel rate to compare against and nothing measured here can supply one."
         )
+        out(
+            "    Its chargeable channel rate is a DERIVATION off tt-metal's measured NoC"
+        )
+        out(
+            "    dataset (dram.channel_serialisation, vendor_source_derived), not a page"
+        )
+        out("    and not this run -- see the plateau attribution above.")
     elif not vendor:
         out(
             f"  The vendor's {VENDOR_SOURCE} table (22.2 / 22.3 / 22.3 GB/s at 1 / 12 / 48 tiles)"
@@ -660,11 +679,12 @@ def report(path, prediction_path=None, use_prediction=True, out=print):
         out(
             "  VERDICT: READ -- every gate passed, so the levels above mean what they say."
         )
-    out("    CORROBORATION, NEVER PROVENANCE. Nothing here can make dram.bandwidth")
+    out("    CORROBORATION, NEVER PROVENANCE. Nothing here can make a cost-table")
+    out("    entry: Wormhole's channel rate is isa_doc_derived, Blackhole's is derived")
     out(
-        "    chargeable on either part: Wormhole's is already isa_doc, and Blackhole's is"
+        "    from tt-metal's own measured dataset, and neither derivation has ever seen"
     )
-    out("    unknown for want of a published page rather than for want of a number.")
+    out("    this run. Agreement is a check on them, never their source.")
     return result
 
 

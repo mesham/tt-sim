@@ -1239,6 +1239,26 @@ def _sourced_bandwidths(arch):
         and dram.get("provenance") in SOURCED_PROVENANCE
     ):
         out["dram.bandwidth.per_channel_gb_per_s"] = dram["per_channel_gb_per_s"]
+    # The DRAM figure the model actually spends, which on Blackhole is the only
+    # one there is: that arch has no per-channel GB/s but does have a derived
+    # bytes-per-cycle. Same provenance check, per direction, and a direction
+    # the table declines simply does not appear.
+    channel = (sections.get("dram") or {}).get("channel_serialisation") or {}
+    if channel.get("provenance") in SOURCED_PROVENANCE:
+        read = channel.get("bytes_per_cycle_read")
+        write = channel.get("bytes_per_cycle_write")
+        if read is None and write is None:
+            out["dram.channel_serialisation (B/cycle, both ways)"] = channel.get(
+                "bytes_per_cycle"
+            )
+        else:
+            # A directional key replaces the deep-merged flat one, exactly as
+            # ``DramCostModel`` reads it, so the other arch's figure cannot
+            # appear here either.
+            if read is not None:
+                out["dram.channel_serialisation (B/cycle, read)"] = read
+            if write is not None:
+                out["dram.channel_serialisation (B/cycle, write)"] = write
     return out or {"(none sourced for this architecture)": ""}
 
 

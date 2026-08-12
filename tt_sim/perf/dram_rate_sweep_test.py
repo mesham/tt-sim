@@ -249,13 +249,17 @@ def test_the_flat_band_admits_both_published_flat_curves():
 
 def test_the_two_ceilings_are_the_tables_own():
     """Read through the cost model, so they carry its provenance discipline
-    rather than being restated as literals here."""
+    rather than being restated as literals here — including the part that
+    matters most, that Blackhole's channel figure is its own derivation and
+    never Wormhole's deep-merged 24."""
     assert sweep.ceilings("wormhole") == (32, 24)
     link, channel = sweep.ceilings("blackhole")
     assert link == 64
-    assert channel is None, (
-        "Blackhole publishes no per-channel DRAM rate; none may be borrowed"
+    assert channel != 24, (
+        "Blackhole's channel rate is its own derivation; Wormhole's 24 is still "
+        "deep-merged under it and may never be borrowed"
     )
+    assert 4096 / 87 <= channel < 4096 / 87 + 1e-3
 
 
 def test_a_plateau_at_the_channel_rate_is_attributed_to_the_channel():
@@ -276,20 +280,30 @@ def test_the_bands_around_the_two_ceilings_cannot_overlap():
     assert (link - channel) / channel > 2 * sweep.CEILING_BAND
 
 
-def test_blackhole_has_no_channel_to_attribute_a_plateau_to():
-    """tt-sim's own Blackhole one-channel plateau sits at the NoC link's 64
-    B/cycle, because the endpoint queue is switched off on that part -- flat,
-    and flat for the wrong reason."""
+def test_a_blackhole_plateau_at_the_link_rate_is_still_the_link():
+    """The two Blackhole ceilings are 47.08 and 64, 36 % apart, so the band
+    cannot reach from one to the other any more than it can on Wormhole."""
     assert sweep.plateau_sits_at(63.9, "blackhole") == "link"
+    link, channel = sweep.ceilings("blackhole")
+    assert (link - channel) / channel > 2 * sweep.CEILING_BAND
 
 
-def test_the_tracked_card_plateau_sits_at_neither_ceiling():
-    """The Blackhole card's 47.1 B/cycle is not 64 and there is no published
-    channel rate for it to be. Saying "neither" is the honest reading: it
-    agrees with rung 2's independent 47.1 B/cycle sizing of Blackhole DRAM
-    reads, and that is a derivation this file must not upgrade into a ceiling.
-    """
-    assert sweep.plateau_sits_at(47.1180, "blackhole") == "neither"
+def test_the_tracked_card_plateau_now_sits_at_the_channel_ceiling():
+    """This test read ``neither`` until 2026-08-12, and exactly one of the two
+    facts behind that verdict changed.
+
+    The card's 47.147 B/cycle was never in doubt; what was missing was a
+    modelled bound for it to sit on. The tables now carry one -- 47.0805 for a
+    Blackhole DRAM read, derived from two of tt-metal's own measured cycle
+    counts and *not* from this card -- so the honest verdict flips to
+    ``channel``. Note which way the evidence runs: the derivation predates the
+    card run and never saw it, so the card corroborates the entry rather than
+    the entry being fitted to the card. The agreement is 47.147 against 47.08,
+    0.14 %."""
+    assert sweep.plateau_sits_at(47.1180, "blackhole") == "channel"
+    # And a card plateau at the link rate would still not be attributed here,
+    # so the verdict is discriminating rather than newly permissive.
+    assert sweep.plateau_sits_at(62.2, "blackhole") == "link"
 
 
 # ---------------------------------------------------------------------------

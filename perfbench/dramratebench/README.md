@@ -175,9 +175,22 @@ endpoint queue is switched off for want of a published per-channel rate. The
 card's 47.1 sits at neither ceiling the model holds, and agrees to about 0.05%
 with rung 2's wholly independent 47.1 B/cycle sizing of Blackhole DRAM reads.
 
-**None of that makes `dram.bandwidth` chargeable on Blackhole.** It is `unknown`
-there for want of a published page, not for want of a number, and a measured
-number cannot supply a document.
+**None of that made anything chargeable, and something became chargeable
+anyway.** The card cannot supply provenance and never did. But re-reading the
+sentence above showed the *block* had been misidentified: what tt-sim was
+missing on Blackhole was `dram.channel_serialisation`, a bytes-per-cycle figure,
+and a bytes-per-cycle figure does not have to arrive by unit conversion from a
+published GB/s. Since 2026-08-12 it arrives instead from arithmetic on two of
+tt-metal's own measured cycle counts — `vendor_source_derived`, 47.0805 B/cycle
+for reads, the same two-point secant that recovers Wormhole's published 24 from
+the same file. `dram.bandwidth` (the GB/s spec block) is still `unknown` and
+still needs a document; it simply never gated the term.
+
+So the standing of the numbers above has changed, and only in one direction:
+the card's 47.147 is **corroboration** of a derivation that predates it and
+never saw it, agreeing to 0.14 %. tt-sim's own plateau is no longer 64.0 — it
+is the derived channel rate, and `plateau_sits_at` now answers `channel` for
+this run where it answered `neither`.
 
 ### Reading a run
 
@@ -203,6 +216,12 @@ clean run must not be reported as though it could. What Blackhole *can* do is
 validate the **shape**: an aggregate that refuses to grow with readers while a
 fanned-out control grows freely is a bound at the shared endpoint, whatever the
 absolute number turns out to be.
+
+(What *did* make Blackhole's channel rate chargeable, on 2026-08-12, is not on
+this page and not on a card: it is a two-point secant on tt-metal's shipped
+`noc_latencies.yaml`, `vendor_source_derived`. The distinction is the whole
+point of this section — vendor arithmetic is provenance, a card run is not,
+and it stays that way however well the two agree.)
 
 **And "at the shared endpoint" is as far as the shape alone goes** — it is not
 the same claim as "at the GDDR6 channel". tt-sim produces exactly that shape on
@@ -253,9 +272,9 @@ fault:
 | run | reads | why |
 | --- | --- | --- |
 | Blackhole, one tile | `DEGENERATE` | one reader count, so the fan-out control has no pair to compare and nothing separates the endpoint from anything |
-| Blackhole, two tiles | `NO ENDPOINT BOUND` | the endpoint queue is inert *by construction* there: `ArchProfile.dram_gddr_channel_size` is `None`, Blackhole publishes no per-channel bandwidth, so `DramChannels.bytes_per_cycle` is `None` and every `claim()` is a no-op. Both arms scale ×2.00 exactly. There is nothing to contend for |
+| Blackhole, two tiles | `NO ENDPOINT BOUND` | recorded before 2026-08-12, when the endpoint queue was inert *by construction* on that part: `DramChannels.bytes_per_cycle` was `None` and every `claim()` a no-op, so both arms scaled ×2.00 exactly and there was nothing to contend for. That arch now carries a derived read rate, so this row is history rather than the current reading |
 | Wormhole, four tiles, `TT_SIM_COST_MODEL=1` | `ENDPOINT BOUND`, ratio 0.56 | the term is live there, and this is the run that shows the probe reaching it |
-| **Blackhole, twelve tiles, at the vendor's own parameters** | `ENDPOINT BOUND`, ratio 0.25 | **and the endpoint queue is still switched off.** See below — this is why the level matters |
+| **Blackhole, twelve tiles, at the vendor's own parameters** | `ENDPOINT BOUND`, ratio 0.25 | recorded when the endpoint queue was **still switched off** on that part — the flat arm was the 64 B/cycle link, which is why the level and not just the shape has to be read. Both halves are now live |
 
 The session's `--sim` path widens `TT_SIM_TENSIX_COORDS` to two tiles for this
 probe's own run — scoped to it, so no later probe is slowed — because the reader

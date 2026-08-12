@@ -1012,9 +1012,9 @@ def noc_cost_model(arch):
 # ``channel_serialisation`` is already in the table at ``isa_doc_derived`` and
 # already spent as a latency -- and it is a floor twice over: it is the shortest
 # any endpoint can possibly be busy (the bytes have to cross the bus), and it is
-# charged only where the rate is published, which is Wormhole and not Blackhole.
-# Before it, a tt-sim Wormhole DRAM channel sustained 32 B/cycle, the NoC link's
-# rate, against the 24 the ISA docs publish for the channel.
+# charged only where the rate is sourced. Before it, a tt-sim Wormhole DRAM
+# channel sustained 32 B/cycle, the NoC link's rate, against the 24 the ISA docs
+# publish for the channel.
 #
 # Size dependence is the *fifth* shape and arrives with the same class, as of
 # 2026-08-04. It used to be argued away: DRAM bandwidth is well sourced
@@ -1034,6 +1034,18 @@ def noc_cost_model(arch):
 # fraction of 32 -- it is ``dram.bandwidth.per_channel_gb_per_s`` to within
 # 2 %. Nothing was fitted: the number was already in the table at ``isa_doc``,
 # and all this consumes is a unit conversion into bytes per cycle.
+#
+# BLACKHOLE JOINED ON 2026-08-12, for reads only, and by a different route.
+# That arch publishes no DRAM tile page, so there is no GB/s to convert -- but
+# the rank the term needs is ``vendor_source_derived``, which asks for
+# arithmetic on vendor numbers and not for a page. The same two-point secant
+# that recovers Wormhole's published 24 (to +1.6 %) from the measured dataset,
+# unchanged, returns 47.0805 B/cycle on Blackhole's DRAM read row -- 22 % below
+# the same file's L1 rows, which cross the fabric and no DRAM, so the limit it
+# reads is at the endpoint. The WRITE direction is deliberately left unsourced:
+# its secant lands within 2.5 % of those same L1 rows, resolving no endpoint
+# limit, and charging it would deepen the one row already pinned in
+# ``KNOWN_OVER_CHARGED``. Hence the per-direction rates below.
 
 
 class DramCostModel:
@@ -1055,12 +1067,19 @@ class DramCostModel:
     measurements — weaker than a published number and stronger than a guess.
     :attr:`provenance` keeps it reachable so a report can say so.
 
-    Plus one term that is not a latency at all:
+    Plus one term that is not a latency at all, and is **per direction**:
 
-    * :attr:`channel_bytes_per_cycle` -- the GDDR6 channel's own rate, 24 on
-      Wormhole and ``None`` on Blackhole, which publishes no per-channel
-      bandwidth. Spent through :meth:`channel_excess_cycles`, never as an
-      absolute serialisation, because the NoC link has already charged its own.
+    * :attr:`channel_bytes_per_cycle_read` / :attr:`channel_bytes_per_cycle_write`
+      -- the channel's own rate, 24 both ways on Wormhole (a unit conversion of
+      a published per-channel GB/s) and 47.0805 for reads with **no write
+      figure** on Blackhole, whose table derives the read rate from tt-metal's
+      measured NoC dataset and declines the write direction. Spent through
+      :meth:`channel_excess_cycles`, never as an absolute serialisation,
+      because the NoC link has already charged its own.
+
+    A direction with no rate is charged nothing at all rather than borrowing
+    the other direction's, for the same reason an unsourced arch is charged
+    nothing rather than borrowing another arch's: an absent figure is absent.
     """
 
     def __init__(self, sections, arch):
@@ -1094,26 +1113,51 @@ class DramCostModel:
         #: Bytes the DRAM channel moves per cycle, or ``None``. Provenance is
         #: checked rather than assumed, and that check is load-bearing: the
         #: arch overrides deep-merge, so Wormhole's 24 is still *present* under
-        #: Blackhole's ``unknown`` override and reading it without looking
-        #: would launder one arch's published figure into another's gap.
+        #: an override that carries no flat figure of its own, and reading it
+        #: without looking would launder one arch's published figure into
+        #: another's gap.
+        #:
+        #: Two shapes are allowed, because the two arches source the number two
+        #: ways. ``bytes_per_cycle`` is one rate for both directions (Wormhole:
+        #: a unit conversion of a published per-channel GB/s, which the page
+        #: states for reads and writes alike). ``bytes_per_cycle_read`` /
+        #: ``bytes_per_cycle_write`` are per-direction, and the moment an
+        #: override carries either one it **replaces** the flat figure rather
+        #: than falling back to it -- which is what keeps Wormhole's 24 out of
+        #: Blackhole's write direction, where the table deliberately has
+        #: nothing.
         channel = dram.get("channel_serialisation") or {}
-        self.channel_bytes_per_cycle = (
-            channel.get("bytes_per_cycle")
-            if channel.get("provenance") in SOURCED_PROVENANCE
-            else None
-        )
+        sourced = channel.get("provenance") in SOURCED_PROVENANCE
+        both = channel.get("bytes_per_cycle") if sourced else None
+        read = channel.get("bytes_per_cycle_read") if sourced else None
+        write = channel.get("bytes_per_cycle_write") if sourced else None
+        directional = read is not None or write is not None
+        self.channel_bytes_per_cycle_read = read if directional else both
+        self.channel_bytes_per_cycle_write = write if directional else both
         #: Whether a second request is held off while the first is being
         #: serviced -- and it means the **channel data bus** only, because that
         #: is the only part of an endpoint's occupancy any source sizes. Where
         #: the channel rate is sourced this is the same
         #: :meth:`channel_serialisation_cycles` the latency term already
         #: spends, held as a resource rather than added as a delay; where it is
-        #: not (Blackhole, whose ``dram.bandwidth`` is ``unknown``) the
-        #: endpoint stays contention-free and this reads False. See
-        #: :attr:`device_occupancy_modelled` for the half that is still a gap.
-        self.occupancy_modelled = self.channel_bytes_per_cycle is not None
+        #: not (a Blackhole DRAM *write*, whose rate the table declines to
+        #: derive) that direction stays contention-free. True when *either*
+        #: direction has a rate. See :attr:`device_occupancy_modelled` for the
+        #: half that is still a gap.
+        self.occupancy_modelled = (
+            self.channel_bytes_per_cycle_read is not None
+            or self.channel_bytes_per_cycle_write is not None
+        )
 
-    def channel_serialisation_cycles(self, payload_bytes):
+    def channel_bytes_per_cycle(self, is_write=False):
+        """The channel's rate for this direction, or ``None`` if unsourced."""
+        return (
+            self.channel_bytes_per_cycle_write
+            if is_write
+            else self.channel_bytes_per_cycle_read
+        )
+
+    def channel_serialisation_cycles(self, payload_bytes, is_write=False):
         """Cycles the channel itself needs to move ``payload_bytes``, or ``None``.
 
         The raw ``ceil(N / rate)``, and it is spent twice on two different
@@ -1126,13 +1170,16 @@ class DramCostModel:
           transfer at a time, so a request arriving while it is busy waits.
           That charge is zero for an isolated request and bites only on a
           stream, which is why it moves a sustained rate and not a latency.
+
+        ``is_write`` picks the direction's rate, which on Blackhole is the
+        difference between a sourced figure and none at all.
         """
-        rate = self.channel_bytes_per_cycle
+        rate = self.channel_bytes_per_cycle(is_write)
         if not rate:
             return None
         return int(math.ceil(payload_bytes / rate))
 
-    def channel_excess_cycles(self, payload_bytes, link_cycles):
+    def channel_excess_cycles(self, payload_bytes, link_cycles, is_write=False):
         """How much slower the channel is than the link, for these bytes.
 
         The whole of the size term, and the reason it is a *difference*: the
@@ -1153,7 +1200,7 @@ class DramCostModel:
         modelled either, so there is nothing to be the excess *of* and the
         honest answer is to charge nothing.
         """
-        channel = self.channel_serialisation_cycles(payload_bytes)
+        channel = self.channel_serialisation_cycles(payload_bytes, is_write)
         if channel is None or link_cycles is None:
             return 0
         return max(0, channel - link_cycles)

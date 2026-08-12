@@ -8,6 +8,7 @@ the required ``profile`` argument, never a hard-coded default. The per-arch
 assemble these into a netlist. See ``docs/plans/blackhole-support.md``.
 """
 
+import math
 import threading
 
 from tt_sim.device.tt_device import (
@@ -27,6 +28,10 @@ from tt_sim.pe.tensix.tensix import TensixCoProcessor
 from tt_sim.perf.model import dram_cost_model
 from tt_sim.trace import Unit, get_registry
 from tt_sim.util.conversion import conv_to_bytes
+
+#: "No write rate was passed, so use the read one" — distinct from ``None``,
+#: which means "this direction is not modelled at all".
+_SAME_BOTH_WAYS = object()
 
 
 class DramChannels:
@@ -65,10 +70,15 @@ class DramChannels:
 
     Owned by the **tile**, not by an NIU, because a channel is one piece of
     hardware behind two NoC interfaces — the same ownership argument
-    ``NocLinkRegistry`` makes, one level down. ``bytes_per_cycle`` of ``None``
-    (the cost model off, or an architecture that publishes no per-channel
-    bandwidth — Blackhole, which has no DRAM tile page at all) makes every
-    claim a no-op, so the endpoint stays exactly as contention-free as it was.
+    ``NocLinkRegistry`` makes, one level down. A rate of ``None`` (the cost
+    model off, or a direction whose rate no source gives — a Blackhole DRAM
+    *write*) makes every claim in that direction a no-op, so the endpoint stays
+    exactly as contention-free as it was.
+
+    The rate is **per direction**, because the two arches source it two ways:
+    Wormhole converts one published per-channel GB/s, which its page states for
+    reads and writes alike, while Blackhole derives a read rate from tt-metal's
+    measured dataset and has no write figure at all.
 
     What this is *not*: the device's own re-issue interval. ``access_latency``
     is a latency, nothing publishes the pipelining behind it, and charging 99
@@ -84,6 +94,7 @@ class DramChannels:
 
     __slots__ = (
         "bytes_per_cycle",
+        "write_bytes_per_cycle",
         "channel_size",
         "_free_cycles",
         "_lock",
@@ -92,9 +103,25 @@ class DramChannels:
         "cycles_waited",
     )
 
-    def __init__(self, bytes_per_cycle=None, count=1, channel_size=None):
-        #: Bytes one channel moves per cycle, or ``None`` for "not modelled".
+    def __init__(
+        self,
+        bytes_per_cycle=None,
+        count=1,
+        channel_size=None,
+        write_bytes_per_cycle=_SAME_BOTH_WAYS,
+    ):
+        #: Bytes one channel moves per cycle *reading*, or ``None`` for "not
+        #: modelled". Also the default for writes, since a table that gives one
+        #: figure gives it for both directions.
         self.bytes_per_cycle = bytes_per_cycle
+        #: The same for writes. Defaults to the read rate, and is passed
+        #: explicitly — including as ``None`` — by a caller whose table
+        #: distinguishes the two.
+        self.write_bytes_per_cycle = (
+            bytes_per_cycle
+            if write_bytes_per_cycle is _SAME_BOTH_WAYS
+            else write_bytes_per_cycle
+        )
         #: Bytes of address space per physical channel, or ``None`` when the
         #: tile is modelled as one. Only meaningful with ``count > 1``.
         self.channel_size = channel_size
@@ -130,14 +157,17 @@ class DramChannels:
             return 0
         return min(address // size, len(self._free_cycles) - 1)
 
-    def occupancy_cycles(self, payload_bytes):
+    def occupancy_cycles(self, payload_bytes, is_write=False):
         """Cycles this transfer holds its channel, or ``None`` when unmodelled."""
-        rate = self.bytes_per_cycle
+        rate = self.write_bytes_per_cycle if is_write else self.bytes_per_cycle
         if not rate:
             return None
-        return -(-payload_bytes // rate)  # ceil, without the import
+        # ``int`` because a rate may be fractional (Blackhole's 47.0805 is a
+        # quotient, not a unit conversion), and a float occupancy would turn
+        # every downstream cycle number into a float.
+        return int(math.ceil(payload_bytes / rate))
 
-    def claim(self, start_cycle, payload_bytes, address=0):
+    def claim(self, start_cycle, payload_bytes, address=0, is_write=False):
         """Hold ``address``'s channel for ``payload_bytes`` from ``start_cycle``.
 
         Returns the cycles the request waited for that channel to come free —
@@ -155,8 +185,12 @@ class DramChannels:
         ordering looseness ``NocLinkRegistry`` documents and it conserves total
         occupancy either way: what can differ is which of two requests waits,
         never how long the channel is busy.
+
+        A direction with no sourced rate claims nothing — so on Blackhole a
+        write neither waits nor makes a later read wait, which under-charges
+        rather than inventing a queue out of a figure the tables refuse.
         """
-        occupancy = self.occupancy_cycles(payload_bytes)
+        occupancy = self.occupancy_cycles(payload_bytes, is_write)
         if not occupancy:
             return 0
         index = self.index_for(address)
@@ -205,6 +239,12 @@ class DRAMEndpointNUI(NUI):
     prediction moves — and the difference between a modelled channel sustaining
     the NoC link's 32 B/cycle and the 24 B/cycle its own page publishes.
 
+    Both rate terms are **per direction** since 2026-08-12, when Blackhole
+    gained a read rate derived from tt-metal's measured dataset and no write
+    rate at all. So a Blackhole DRAM write is charged neither an excess nor an
+    occupancy, and the direction is read off the request's own action —
+    an ATOMIC counting as a read, since it reads the array before modifying it.
+
     Modelled by holding the *request* rather than delaying the response, which
     is both the more faithful ordering — the data really is not read until the
     device has got to it, so a write becomes visible late and its ACK later
@@ -249,6 +289,18 @@ class DRAMEndpointNUI(NUI):
         #: queues have to be the tile's and not this object's.
         self.channels = channels
 
+    @staticmethod
+    def _is_write(data_request):
+        """Whether this request's bytes travel *into* the array.
+
+        An ATOMIC counts as a read: it reads the array before it modifies it,
+        so where the two rates differ it is the read one that binds. Nothing
+        turns on it in practice — an atomic's payload is a word, and a word
+        costs one cycle at every rate either arch sources — but picking the
+        slower of the two keeps the choice from being an accident.
+        """
+        return data_request.action is NUI.NoCDataRequest.DataRequestAction.WRITE
+
     def _channel_excess(self, data_request):
         """Cycles the channel is slower than the link, for this request's bytes.
 
@@ -257,9 +309,16 @@ class DRAMEndpointNUI(NUI):
         written) once whichever leg carries the payload. So a read's bytes are
         charged when its request lands and a write's when its data does, which
         is the same total either way and needs no second hook on the response.
+
+        The direction picks the rate, and on Blackhole it picks between a
+        sourced figure and none: that arch's table derives a DRAM *read* rate
+        and declines to derive a write one.
         """
         model = self.dram_cost
-        if model is None or model.channel_bytes_per_cycle is None:
+        if model is None:
+            return 0
+        is_write = self._is_write(data_request)
+        if model.channel_bytes_per_cycle(is_write) is None:
             return 0
         noc = self.noc_latency
         link = (
@@ -267,7 +326,9 @@ class DRAMEndpointNUI(NUI):
             if noc is None
             else noc.serialisation_cycles(data_request.data_length_bytes)
         )
-        return model.channel_excess_cycles(data_request.data_length_bytes, link)
+        return model.channel_excess_cycles(
+            data_request.data_length_bytes, link, is_write
+        )
 
     def _channel_wait(self, data_request, delay):
         """Cycles this request waits for its channel to finish the last one.
@@ -282,14 +343,21 @@ class DRAMEndpointNUI(NUI):
         :meth:`NUI.claim_injection_port` declines for the same reason.
         """
         channels = self.channels
-        if channels is None or channels.bytes_per_cycle is None:
+        if channels is None:
+            return 0
+        is_write = self._is_write(data_request)
+        rate = channels.write_bytes_per_cycle if is_write else channels.bytes_per_cycle
+        if rate is None:
             return 0
         now = self._current_cycle()
         if now is None:
             return 0
         arrival = now + (delay if delay is not None and delay > 1 else 1)
         return channels.claim(
-            arrival, data_request.data_length_bytes, data_request.tgt_address or 0
+            arrival,
+            data_request.data_length_bytes,
+            data_request.tgt_address or 0,
+            is_write,
         )
 
     def transmit(self, data_request, delay=None):
@@ -335,20 +403,24 @@ class DRAMTile(TTDeviceTile):
         # The DRAM device's own service time, or None with the cost model off
         # (and on any arch whose table sources no latency — both shipped ones
         # now do; see ``dram.access_latency``). The same model carries the
-        # channel rate the endpoint charges on top, which is Wormhole-only.
+        # channel rates the endpoint charges on top, which are per direction.
         latency = dram_cost_model(profile.name)
         service_cycles = None if latency is None else latency.service_cycles
 
         # The channels themselves, shared by both NIUs because each is one
         # piece of hardware behind two NoC interfaces, and kept apart from each
         # other because a Wormhole DRAM tile fronts two independent GDDR6
-        # controllers (profile.dram_gddr_channel_size). The rate is None with
-        # the model off and on Blackhole (no published per-channel bandwidth),
-        # and a channel with no rate never makes anything wait.
+        # controllers (profile.dram_gddr_channel_size). Both rates are None
+        # with the model off; with it on, the write rate is None on Blackhole,
+        # whose table derives a read rate and declines a write one. A channel
+        # with no rate for a direction never makes anything wait in it.
         self.channels = DramChannels(
-            None if latency is None else latency.channel_bytes_per_cycle,
+            None if latency is None else latency.channel_bytes_per_cycle_read,
             count=profile.dram_gddr_channels_per_tile,
             channel_size=profile.dram_gddr_channel_size,
+            write_bytes_per_cycle=(
+                None if latency is None else latency.channel_bytes_per_cycle_write
+            ),
         )
 
         # tile_kind="D" so NoC reads sourced from this tile pick the DRAM
