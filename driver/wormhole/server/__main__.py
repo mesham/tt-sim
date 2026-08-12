@@ -9,7 +9,7 @@ import contextlib
 import os
 import sys
 
-from tt_sim.bridge import Fabric, TraceWriter, Transport
+from tt_sim.bridge import Fabric, TraceWriter, Transport, host_not_stranded
 
 
 def _parse_tensix_pool(env):
@@ -160,7 +160,7 @@ def main(argv=None):
         # wasn't pre-built via TT_SIM_TENSIX_COORDS. Shared with the Blackhole
         # server so both architectures shout about it — see
         # ``tt_sim.bridge.install_worker_guards``.
-        install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP)
+        install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP, wire_addr=addr)
 
         enabled = enabled_diagnostic_names(diagnostics)
         print(
@@ -195,7 +195,10 @@ def main(argv=None):
                     flush=True,
                 )
 
-            transport.serve(fabric)
+            # A simulator-side exception here would otherwise leave the host
+            # blocked in recv for ever behind a traceback nobody sees.
+            with host_not_stranded(addr):
+                transport.serve(fabric)
     finally:
         # Join per-tile worker threads spawned by MultiTileClock so they
         # don't outlive the process on graceful exit or Ctrl-C. Safe even

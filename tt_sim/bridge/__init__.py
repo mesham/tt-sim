@@ -13,6 +13,7 @@ Modules:
 - ``cores`` — DRAM / eth / Tensix / null endpoints over the device.
 - ``trace`` — record/replay of wire conversations.
 - ``device`` — the cycle-pumping ``Device`` wrapper + diagnostics-from-env.
+- ``hostlink`` — ending a host the simulator can no longer answer.
 """
 
 from tt_sim.bridge.cores import DramCore, EthCore, NullCore, TensixCore
@@ -22,6 +23,7 @@ from tt_sim.bridge.device import (
     enabled_diagnostic_names,
 )
 from tt_sim.bridge.fabric import Fabric, install_worker_guards
+from tt_sim.bridge.hostlink import find_wire_peer, host_not_stranded, stop_host
 from tt_sim.bridge.trace import TraceWriter, parse_trace_line
 from tt_sim.bridge.transport import Transport
 
@@ -36,6 +38,9 @@ __all__ = [
     "Transport",
     "diagnostics_from_env",
     "enabled_diagnostic_names",
+    "find_wire_peer",
+    "host_not_stranded",
     "install_worker_guards",
     "parse_trace_line",
+    "stop_host",
 ]

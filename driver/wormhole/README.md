@@ -154,13 +154,14 @@ The sources and a one-line description of each live in
 [examples/README.md](../../examples/README.md#the-examples). Of the bundled set only
 `nine` launches on two tiles — on Wormhole run it with `TT_SIM_TENSIX_COORDS=1-1,2-1`
 (a bare `TT_SIM_TENSIX_CORES=2` materialises `1-1,1-2` instead, so `nine`'s launch on
-`2-1` would hit an unmaterialised tile and hang).
+`2-1` hits an unmaterialised tile; the server names it and stops the run).
 
 All eleven examples currently pass. The Tensix coprocessor in the simulator is still
 incomplete, though, so a future example may exercise a gap the simulator hasn't modelled;
-when a compute gap crashes the simulator server the host then hangs, so a hang is usually
-an unmodelled-op symptom rather than slowness. The `examples_test.py` output tells you
-which examples pass on your build.
+a compute gap crashes the simulator server, which then stops the host too rather than
+leaving it blocked in `recv` (`tt_sim/bridge/hostlink.py`), so an unmodelled op shows up
+as a prompt signal-15 exit with the simulator's traceback beside it, not as a hang. The
+`examples_test.py` output tells you which examples pass on your build.
 
 > A former `seven` (a Python-only two-tile smoke test) has moved to
 > [`server/multi_tensix_test.py`](server/multi_tensix_test.py); the real two-tile

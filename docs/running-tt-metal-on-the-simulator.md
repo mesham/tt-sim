@@ -111,12 +111,20 @@ to explicit `TT_SIM_TENSIX_COORDS` for off-origin placements. The two vars are
   but a `go=GO` only ever targets cores a program actually runs on. When one
   reaches an un-materialized worker the server prints
   `ERROR: kernel launch (go=GO) sent to functional worker X-Y … which tt-sim did
-  not materialise …` (naming the exact coord to add) and exits. This is the
-  unambiguous "start tt-sim with more cores" signal: add the named `X-Y` to
-  `TT_SIM_TENSIX_COORDS`. Note the host (tt-metal) has no "simulator died" path,
-  so it will still hang on its next poll — but the ERROR line prints the instant
-  the launch is attempted, so the reason is on screen; interrupt and re-run with
-  the coord added.
+  not materialise …` (naming the exact coord to add). This is the unambiguous
+  "start tt-sim with more cores" signal: add the named `X-Y` to
+  `TT_SIM_TENSIX_COORDS` and re-run.
+  **The run ends there — the server stops the host as well as itself.** tt-metal
+  has no "simulator died" path (UMD blocks in `recv_from_device` with no
+  timeout), so a server that merely exited used to leave the host waiting for
+  ever; that hang *was* this diagnostic, and it cost two debugging sessions. The
+  server now identifies the host as the process holding the listening socket at
+  `$NNG_SOCKET_ADDR` and `SIGTERM`s it, printing
+  `stopping the tt-metal host (pid N): it is waiting for …`. The host exits with
+  signal 15 within a couple of seconds instead of hanging. If the host cannot be
+  identified the server says so and *keeps serving*, so the program reaches its
+  own (meaningless) end rather than never ending. Set `TT_SIM_NO_HOST_STOP=1` to
+  suppress the stop and get the old interrupt-by-hand behaviour.
 - Cost: each materialized Tensix tile is heavy (5 RISC-V cores + coprocessor,
   pumped every cycle via the threaded clock). More tiles = slower wall-clock.
   Reach for the minimal set a program actually uses.
@@ -206,7 +214,7 @@ Decide pass/fail from **exit code + stdout**, in this order:
 | exit `0` **and** a success line | **PASS** |
 | exit `124` | **TIMEOUT** — hung, or just too slow (see below) |
 | exit `134` / non-zero with `TT_FATAL` / `mismatch` / `PCC not high enough` | **FAIL** (correctness) |
-| stdout contains `can not handle instruction 'X'` | **FAIL** — unimplemented Tensix/SFPU op; the sim server raised and died, so the host then hangs → also shows as timeout |
+| stdout contains `can not handle instruction 'X'` | **FAIL** — unimplemented Tensix/SFPU op; the sim server raises and dies. It now takes the host down with it (`stopping the tt-metal host …`), so this shows as a prompt signal-15 exit rather than a timeout |
 
 Success lines vary by example; match any of:
 `Success`, `Test Passed`, `matches expected value`,

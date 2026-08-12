@@ -22,6 +22,7 @@ from tt_sim.bridge import (
     Transport,
     diagnostics_from_env,
     enabled_diagnostic_names,
+    host_not_stranded,
     install_worker_guards,
 )
 
@@ -99,7 +100,7 @@ def main(argv=None):
         # Same "worker isn't materialised" guards the Wormhole server installs:
         # without them traffic to (or a kernel launch on) a worker outside
         # TT_SIM_TENSIX_COORDS is silently NullCore-swallowed.
-        install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP)
+        install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP, wire_addr=addr)
         enabled = enabled_diagnostic_names(diagnostics)
         print(
             f"[server] tt-sim Blackhole ready (tensix={tensix_pool}, "
@@ -124,7 +125,10 @@ def main(argv=None):
         with contextlib.ExitStack() as stack:
             if args.record:
                 transport.trace_writer = stack.enter_context(TraceWriter(args.record))
-            transport.serve(fabric)
+            # A simulator-side exception here would otherwise leave the host
+            # blocked in recv for ever behind a traceback nobody sees.
+            with host_not_stranded(addr):
+                transport.serve(fabric)
     finally:
         if device is not None:
             device.tt_device.shutdown()
