@@ -33,6 +33,19 @@
 //     evidence in kernels/compute/matmul_fidelity.cpp -- so a null difference
 //     means the loop was not math-bound, which is a result and not a fault.
 //
+//   * `--vis-reps N` adds the one reading in this program that is NOT a slope,
+//     and it is not one because there is nothing to fit: RDCFG's documented
+//     ">= 2" is a LATENCY TO A GPR with the occupancy at 1 (ConfigurationUnit.md
+//     tabulates both), the issuing thread is not blocked, and the hardware does
+//     not interlock the read-after-write -- "Software must ensure that the
+//     instruction(s) immediately after `RDCFG` are not trying to consume the
+//     GPR". So a consumer placed too close reads the STALE value rather than
+//     waiting, and the quantity is the smallest producer-to-consumer SEPARATION
+//     at which the fresh value appears. Two card runs (2026-08-09 and
+//     2026-08-12) established by measurement that no stall can reach it; slots
+//     20-25 are kept as those two documented negatives. Carries no timer, so
+//     there is no overhead for an intercept to absorb, and no CSV row.
+//
 // THE VERDICT IS PER PHASE. Phase A and phase B fail independently, print
 // independent `TTBENCH_VALID_A:`/`TTBENCH_VALID_B:` lines, and set independent
 // bits in the exit status (1 = A, 2 = B). A phase B that measures nothing must
@@ -49,6 +62,7 @@
 // human-readable summary. Nothing here fits or reports a cost model number; the
 // comparison against the tables is tt_sim/perf/tensix_bench_sweep.py.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -115,6 +129,38 @@ const Probe PROBES[TTBENCH_NUM_PROBES] = {
     // measuring a different quantity.
     {"RDCFG_STALL", "CFG-LAT"},     // 20  RDCFG      + STALLWAIT(THREAD, TRISC_CFG)
     {"SETDMA_STALL", "THCON-LAT"},  // 21  SETDMAREG  + the identical STALLWAIT
+    // The corrected construction, appended for the same reason. Slots 20 and 21
+    // stall on TRISC_CFG, which is condition C10 on Blackhole and C13 on
+    // Wormhole and is about the RISCV core's outstanding memory requests, not
+    // about the Configuration Unit's pipeline -- a card measured their
+    // difference at 0.0000 cycles/pair on 2026-08-09 while the stall itself
+    // provably cost cycles. These four stall on Blackhole's C12
+    // (`p_stall::CFGEXU`), the one documented condition on either architecture
+    // that observes the unit RDCFG runs on. See "THE LATENCY DIFFERENCE, DONE
+    // PROPERLY" in kernels/compute/raw_probes.cpp.
+    {"RDCFG_CFGSTALL", "CFG-LAT"},     // 22  RDCFG     + STALLWAIT(THREAD, CFGEXU)
+    {"RMWCIB_CFGSTALL", "CFG-LAT"},    // 23  RMWCIB0   + the identical STALLWAIT
+    {"SETDMA_CFGSTALL", "THCON-LAT"},  // 24  SETDMAREG + the identical STALLWAIT
+    // Bare, and named as the cost tables name it, so the ordinary summary row
+    // and the rung-3 sweep pick it up as an occupancy series like any other.
+    {"RMWCIB0", "CFG"},                // 25  RMWCIB0 bare
+    // Appended after a Blackhole card measured slots 22-25 at 2.9682 cycles per
+    // pair in all three arms -- identical to four decimal places -- on
+    // 2026-08-12. Slots 22-25 keep their numbers and their meaning; they are the
+    // evidence that a busy-condition cannot see this quantity, which is a result
+    // and not dead weight.
+    //
+    // 26/27 are the same instruction pair differing only in which GPR the
+    // consumer reads, so their difference is a read-after-write and nothing
+    // else. `CFG-DEP` rather than `CFG`, for the same reason slots 20-24 are
+    // labelled `-LAT`: the reported figure is cycles per PAIR and must never be
+    // read off as an occupancy.
+    {"RDCFG_DEP", "CFG-DEP"},          // 26  RDCFG -> GPR60 ; ADDDMAREG reads GPR60
+    {"RDCFG_INDEP", "CFG-DEP"},        // 27  RDCFG -> GPR60 ; ADDDMAREG reads GPR59
+    // 28/29 have THREAD-DEPENDENT bodies and are graded across variants, not
+    // within one. See TTBENCH_P_C12_XT in bench_layout.h.
+    {"C12_XTHREAD", "CFG-C12"},        // 28  thr1: STALLWAIT(C12)+NOP; others: RMWCIB0+NOP
+    {"C12_XTHREAD_NULL", "CFG-C12"},   // 29  thr1: NOP+NOP;             others: RMWCIB0+NOP
 };
 
 // Probes that need the SrcA/SrcB data-valid bits set. Reported so the operator
@@ -271,6 +317,10 @@ int main(int argc, char** argv) {
     // "The UNPACR_NOP setup hangs at t2 on silicon" in the README). Selecting
     // the variants makes the measurement reachable without touching the hang.
     std::string variant_filter = "t1,t2,t3";
+    // Repetitions of the RDCFG visibility sweep. Off by default: it is not a
+    // slope, it writes no CSV row, and every existing recipe should keep
+    // producing exactly the bytes it produced before this flag existed.
+    uint32_t vis_reps = 0;
 
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -306,13 +356,15 @@ int main(int argc, char** argv) {
             fidelity_filter = next();
         } else if (a == "--variants") {
             variant_filter = next();
+        } else if (a == "--vis-reps") {
+            vis_reps = std::stoul(next());
         } else if (a == "--out") {
             out_path = next();
         } else if (a == "-h" || a == "--help") {
             printf(
                 "usage: tensixbench [--blocks N] [--iters N] [--probes 0xMASK]\n"
                 "                   [--no-dvalid-probes] [--phase a|b|ab] [--variants LIST]\n"
-                "                   [--fidelities LIST] [--out FILE]\n"
+                "                   [--fidelities LIST] [--vis-reps N] [--out FILE]\n"
                 "                   [--dvalid-once | --dvalid-per-thread |\n"
                 "                    --dvalid-unpacr-nop [--src-format NAME]]\n"
                 "\n"
@@ -359,6 +411,13 @@ int main(int argc, char** argv) {
                 "                        phase B (default all three). For the simulator,\n"
                 "                        where one fidelity is minutes; on hardware leave\n"
                 "                        it alone -- the DIFFERENCE needs at least two.\n"
+                "  --vis-reps N          repetitions of the RDCFG VISIBILITY sweep, the\n"
+                "                        probe that reads the documented '>= 2' as a\n"
+                "                        producer-to-consumer DISTANCE rather than as a\n"
+                "                        duration (default 0 = off). Runs on the t1 launch\n"
+                "                        only, issues no STALLWAIT, writes no cycle count\n"
+                "                        and appears in no CSV row -- see TTBENCH_VIS_* in\n"
+                "                        kernels/compute/bench_layout.h. 64 is plenty.\n"
                 "  --out FILE            CSV path (default tensixbench-<arch>.csv)\n",
                 TTBENCH_UNROLL,
                 TTBENCH_NUM_PROBES,
@@ -413,6 +472,37 @@ int main(int argc, char** argv) {
         }
         out_path = "tensixbench-" + arch + suffix + ".csv";
     }
+
+    // The four config-latency slots need Blackhole's STALLWAIT condition C12,
+    // `p_stall::CFGEXU`. Wormhole's condition mask has no bit for the
+    // Configuration Unit -- its C0-C14 are the ThCon memory request, the two
+    // unpackers, the four packers, the FPU, the four Src-bank clients, the
+    // mover, the RISCV memory request and the SFPU (WormholeB0 STALLWAIT.md) --
+    // and its `p_stall` has no CFGEXU to emit, so the kernel compiles those
+    // slots to a skip there. Clearing them from the mask HERE is what keeps that
+    // honest: a skipped slot writes four zero cycle counts, which is a flat
+    // series that would fail the monotonicity check and condemn all of phase A.
+    //
+    // This is not a hole in the coverage. `WormholeB0/.../RDCFG.md` says "The
+    // issuing thread is blocked for the entire duration", so on Wormhole the
+    // documented ">= 2" is an OCCUPANCY and slot 14 already reaches it; it is
+    // Blackhole, where "The issuing thread is not blocked", that needs a stall
+    // to see it at all.
+    const bool cfglat_supported = (arch == "blackhole");
+    const bool cfglat_asked = (probe_mask & TTBENCH_CFGLAT_PROBE_MASK) != 0;
+    if (!cfglat_supported && cfglat_asked) {
+        printf(
+            "note: dropping probes 22-25 and 28-29 (the C12 slots) on %s.\n"
+            "  They stall on STALLWAIT condition C12, \"Any thread has an instruction in\n"
+            "  any stage of the Configuration Unit pipeline\", which only BlackholeA0\n"
+            "  defines. Wormhole's fifteen condition bits name no unit RDCFG runs on --\n"
+            "  and do not need to: WormholeB0/RDCFG.md blocks the issuing thread for the\n"
+            "  whole instruction, so there the documented \">= 2\" is an occupancy and\n"
+            "  probe 14 already measures it.\n",
+            arch.c_str());
+        probe_mask &= ~TTBENCH_CFGLAT_PROBE_MASK;
+    }
+
     constexpr CoreCoord core = {0, 0};
 
     // Reserve L1 through the allocator rather than picking an address, so this
@@ -430,6 +520,9 @@ int main(int argc, char** argv) {
     const uint32_t barrier_addr = barrier_scratch->address();
 
     std::vector<Row> rows;
+    // The RDCFG visibility region, harvested from whichever launch wrote it.
+    // Empty means the sweep was not asked for or did not run.
+    std::vector<uint32_t> vis;
     // The verdict is PER PHASE. A phase A run can be perfect and a phase B run
     // useless in the same process -- that is exactly what the first Blackhole
     // run was -- and a single global verdict threw away nineteen good series
@@ -533,7 +626,8 @@ int main(int argc, char** argv) {
                  probe_mask,
                  ts.mask,
                  dvalid_mode,
-                 src_format ? src_format->code : 0u});
+                 src_format ? src_format->code : 0u,
+                 vis_reps});
 
             std::vector<uint32_t> zeros(16, 0);
             detail::WriteToDeviceL1(device, core, barrier_addr, zeros);
@@ -553,6 +647,14 @@ int main(int argc, char** argv) {
                     TTBENCH_MAGIC);
                 CloseDevice(device);
                 return 1;
+            }
+            // The visibility region, if this launch produced one. Kept rather
+            // than re-read because only the t1 launch writes it and later
+            // launches leave the region cleared.
+            if (words[TTBENCH_VIS_BASE + TTBENCH_VIS_W_STAMP] == TTBENCH_VIS_STAMP) {
+                vis.assign(
+                    words.begin() + TTBENCH_VIS_BASE,
+                    words.begin() + TTBENCH_VIS_BASE + TTBENCH_VIS_WORDS);
             }
             const int active = popcount(ts.mask);
             for (int t = 0; t < TTBENCH_MAX_THREADS; t++) {
@@ -831,90 +933,470 @@ int main(int argc, char** argv) {
     }
 
     // -----------------------------------------------------------------------
-    // The latency difference, read out. Slots 20 and 21 are a PAIR and the only
-    // thing either says is their difference; printing them as two more rows of
-    // the table above and leaving the subtraction to the reader is how a
-    // per-pair figure gets quoted as a per-instruction occupancy.
+    // The latency difference, read out. Every slot involved is (op + the
+    // identical STALLWAIT), unrolled 64 times, so a slope is per BLOCK of 64
+    // PAIRS and a per-pair figure is (slope - loop_slope) / TTBENCH_UNROLL.
+    // Printing these as two more rows of the summary table above and leaving the
+    // subtraction to the reader is how a per-pair figure gets quoted as a
+    // per-instruction occupancy, so they are read out here instead.
     //
-    // Both bodies are (op + the identical STALLWAIT), unrolled 64 times, so
-    // each slope is per BLOCK of 64 pairs and the per-pair difference is
-    // (slope20 - slope21) / TTBENCH_UNROLL. The loop control cancels between
-    // them without being subtracted, since it is the same loop in both.
+    // Everything the grader needs is also emitted as `TTBENCH_CFGLAT_*:` tag
+    // lines. Those exist because the previous version of this section was graded
+    // by scraping a five-field table out of the prose, and a table that gains a
+    // column silently changes what the grader reads.
     // -----------------------------------------------------------------------
-    {
-        bool any = false;
-        for (const auto& r : rows) {
-            if (r.phase == "A" && r.probe == PROBES[TTBENCH_P_RDCFG_STALL].name) {
-                any = true;
+    auto loop_base = [&](const std::string& variant, int thread) {
+        const std::string k = variant + "/" + std::to_string(thread);
+        for (const auto& e : loop_slope) {
+            if (e.first == k) {
+                return e.second;
             }
         }
-        if (any) {
+        return 0.0;
+    };
+    // Cycles per PAIR for a two-instruction slot, loop overhead removed, so the
+    // printed absolutes can be read against the cycle-by-cycle prediction in
+    // raw_probes.cpp and not just their difference. Returns false when the slot
+    // was masked off or produced no fit.
+    auto per_pair = [&](const std::string& variant, int thread, int slot, double* out) {
+        auto [f, n] = fit_for("A", variant, PROBES[slot].name, thread);
+        if (n == 0) {
+            return false;
+        }
+        *out = (f.slope - loop_base(variant, thread)) / (double)TTBENCH_UNROLL;
+        return true;
+    };
+    // The (variant, thread) keys this run actually produced for a given slot,
+    // taken from the rows themselves rather than from a thread-set table that is
+    // scoped to the launch loop -- so a `--variants` subset or a masked probe
+    // yields fewer lines instead of empty ones.
+    auto keys_for = [&](int slot) {
+        std::vector<std::pair<std::string, int>> keys;
+        for (const auto& r : rows) {
+            if (r.phase != "A" || r.probe != PROBES[slot].name) {
+                continue;
+            }
+            const auto key = std::make_pair(r.variant, r.thread);
+            if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+                keys.push_back(key);
+            }
+        }
+        return keys;
+    };
+
+    // -----------------------------------------------------------------------
+    // THE MEASUREMENT. Slots 22/23/24, stalling on Blackhole's condition C12 --
+    // "Any thread has an instruction in any stage of the Configuration Unit
+    // pipeline" -- which is the only documented condition on either
+    // architecture that observes the unit `RDCFG` executes on.
+    //
+    // GRADED AT t1 ONLY, and this is not a convenience. C12 says ANY thread, and
+    // STALLWAIT.md's own note for it says "This won't prevent other threads from
+    // issuing new Configuration Unit instructions though, and those new
+    // instructions will cause this thread to continue to wait." At t2/t3 every
+    // active thread runs the identical burst, so each thread's stall observes
+    // the others' RDCFGs and the difference stops being a statement about one
+    // instruction. The other variants are printed and explicitly not graded.
+    // -----------------------------------------------------------------------
+    {
+        const auto keys = keys_for(TTBENCH_P_RDCFG_CFGSTALL);
+        if (!keys.empty()) {
             printf("\n%s\n", std::string(78, '-').c_str());
-            printf("phase A: RDCFG latency, as (RDCFG + STALLWAIT) - (SETDMAREG + the same STALLWAIT)\n");
+            printf("phase A: RDCFG latency by STALLWAIT on the Configuration Unit (C12/CFGEXU)\n");
+            printf("%s\n", std::string(78, '-').c_str());
+            printf(
+                "  BlackholeA0 STALLWAIT.md, condition C12: \"Any thread has an instruction in\n"
+                "  any stage of the Configuration Unit pipeline\", with block bit B7 (inside\n"
+                "  STALL_THREAD) \"Block thread from starting new Configuration Unit\n"
+                "  instructions\". BlackholeA0 RDCFG.md: \"After issuing one or more `RDCFG`\n"
+                "  instructions, software is encouraged to use `STALLWAIT` to wait for the\n"
+                "  Configuration Unit to no longer be busy.\"\n"
+                "  Predicted from ConfigurationUnit.md's stage table: RDCFG holds stage 0 then\n"
+                "  stage +1, RMWCIB holds stage 0 alone, so the difference is >= 1 cycle/pair.\n\n");
+            printf(
+                "  %-7s %-4s %11s %11s %11s %11s %11s\n",
+                "variant", "thr", "rdcfg", "rmwcib", "setdma", "d(rmwcib)", "d(setdma)");
+            bool have_t1 = false;
+            double t1_rdcfg = 0, t1_rmw = 0, t1_setdma = 0;
+            for (const auto& key : keys) {
+                double a = 0, b = 0, c = 0;
+                if (!per_pair(key.first, key.second, TTBENCH_P_RDCFG_CFGSTALL, &a) ||
+                    !per_pair(key.first, key.second, TTBENCH_P_RMWCIB_CFGSTALL, &b) ||
+                    !per_pair(key.first, key.second, TTBENCH_P_SETDMA_CFGSTALL, &c)) {
+                    continue;
+                }
+                printf(
+                    "  %-7s %-4d %11.3f %11.3f %11.3f %+11.3f %+11.3f%s\n",
+                    key.first.c_str(), key.second, a, b, c, a - b, a - c,
+                    key.first == "t1" ? "" : "   (not graded)");
+                if (key.first == "t1" && !have_t1) {
+                    have_t1 = true;
+                    t1_rdcfg = a;
+                    t1_rmw = b;
+                    t1_setdma = c;
+                }
+            }
+            if (!have_t1) {
+                printf(
+                    "\n  NO t1 SERIES. The difference is a single-thread quantity -- C12 is\n"
+                    "  \"ANY thread\", so at t2/t3 each thread's stall observes the other\n"
+                    "  threads' RDCFGs. Re-run with --variants t1.\n");
+            } else {
+                // The two bare occupancies the difference rests on. If RDCFG and
+                // RMWCIB0 do not cost the same to ISSUE, part of (22 - 23) is
+                // occupancy and none of it can be called latency.
+                double occ_rdcfg = 0, occ_rmw = 0, occ_setdma = 0;
+                const bool have_occ =
+                    per_pair("t1", 1, 14, &occ_rdcfg) && per_pair("t1", 1, TTBENCH_P_RMWCIB, &occ_rmw) &&
+                    per_pair("t1", 1, 9, &occ_setdma);
+                printf("\n");
+                if (have_occ) {
+                    printf(
+                        "  bare occupancies (must agree, or the difference is occupancy):\n"
+                        "    RDCFG %.3f   RMWCIB0 %.3f   SETDMAREG %.3f\n\n",
+                        occ_rdcfg, occ_rmw, occ_setdma);
+                    printf("TTBENCH_CFGLAT_OCC: %.4f %.4f %.4f\n", occ_rdcfg, occ_rmw, occ_setdma);
+                    // The movement control: adding the STALLWAIT to SETDMAREG
+                    // must cost something, or the stall never engaged and the
+                    // difference is two identical things subtracted.
+                    printf("TTBENCH_CFGLAT_STALLCOST: %.4f\n", t1_setdma - occ_setdma);
+                }
+                printf("TTBENCH_CFGLAT_COND: C12 CFGEXU 0x1000\n");
+                printf("TTBENCH_CFGLAT_PAIRS: %.4f %.4f %.4f\n", t1_rdcfg, t1_rmw, t1_setdma);
+                printf("TTBENCH_CFGLAT_DIFF: %.4f %.4f\n", t1_rdcfg - t1_rmw, t1_rdcfg - t1_setdma);
+                // HALF A CYCLE PER PAIR is the floor, and it is not a tuned
+                // number: ConfigurationUnit.md predicts >= 1 cycle of difference
+                // (RDCFG's ">= 2" against RMWCIB's 1), and half a cycle cannot
+                // tell that from none. Below it the reading is the null,
+                // whatever its sign.
+                if (t1_rdcfg - t1_rmw > 0.5) {
+                    printf(
+                        "\n  Difference %.3f cycles per pair against the in-unit baseline, clear of\n"
+                        "  the 0.5 floor. That is a LOWER BOUND on how long the Configuration Unit\n"
+                        "  stays busy with RDCFG after the issue slot -- CORROBORATION for the ISA\n"
+                        "  doc's `>= 2`, never provenance, and never an occupancy: probe 14\n"
+                        "  measures that separately and the two describe different quantities.\n",
+                        t1_rdcfg - t1_rmw);
+                } else if (t1_rdcfg - t1_setdma > 0.5) {
+                    printf(
+                        "\n  RDCFG is INDISTINGUISHABLE FROM RMWCIB0 (%.3f cycles/pair apart) while\n"
+                        "  both stand %.3f clear of the off-unit baseline. Read that as the config\n"
+                        "  unit's post-issue busy window being the same for a 1-cycle op as for\n"
+                        "  RDCFG: the difference measures the unit's handshake, not RDCFG's own\n"
+                        "  residency, and the doc's `>= 2` stays unchecked.\n",
+                        t1_rdcfg - t1_rmw, t1_rdcfg - t1_setdma);
+                } else {
+                    printf(
+                        "\n  DIFFERENCE %.3f, BELOW THE 0.5 CYCLE/PAIR FLOOR against both baselines.\n"
+                        "  ConfigurationUnit.md predicts >= 1, so this is the NULL and not a small\n"
+                        "  value. EXPECTED against tt-sim, which reads Blackhole's STALLWAIT\n"
+                        "  condition mask as 12 bits (raw 11:0, tt_sim/pe/tensix/backends/sync.py\n"
+                        "  `_read_wait_res`) where the ISA doc gives 13, so C12 never survives the\n"
+                        "  decode and the wait degrades to the 0x7F `all resources` fallback. On a\n"
+                        "  card it means the construction did not reach the quantity.\n",
+                        t1_rdcfg - t1_rmw);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // THE FALSIFICATION CONTROL. Slots 20 and 21 are the same two ops behind the
+    // same STALL_THREAD block mask, waiting on `p_stall::TRISC_CFG` instead --
+    // C10 on Blackhole, C13 on Wormhole, and on both it is "The RISCV T core ...
+    // has a memory read-request or write-request against Tensix GPRs or Tensix
+    // configuration or TDMA-RISC that has been emitted from the RISCV core but
+    // not yet processed". No Tensix instruction is in that condition's scope, so
+    // this difference is PREDICTED to be zero, and a Blackhole card measured it
+    // at 0.0000 cycles/pair on 2026-08-09.
+    //
+    // It is here so the C12 reading above cannot be a harness artefact: if
+    // BOTH differences move, the condition bit is not what separated them.
+    // -----------------------------------------------------------------------
+    {
+        const auto keys = keys_for(TTBENCH_P_RDCFG_STALL);
+        if (!keys.empty()) {
+            printf("\n%s\n", std::string(78, '-').c_str());
+            printf("phase A: the wrong-condition control (slots 20/21, TRISC_CFG)\n");
             printf("%s\n", std::string(78, '-').c_str());
             printf("  %-7s %-4s %12s %12s %12s\n", "variant", "thr", "rdcfg/pair", "base/pair", "difference");
-            double best = 0;
+            double worst = 0;
             int pairs = 0;
-            // The (variant, thread) keys this run actually produced, taken from
-            // the rows themselves rather than from a thread-set table that is
-            // scoped to the launch loop -- so a `--variants` subset or a masked
-            // probe simply yields fewer lines instead of empty ones.
-            std::vector<std::pair<std::string, int>> keys;
-            for (const auto& r : rows) {
-                if (r.phase != "A" || r.probe != PROBES[TTBENCH_P_RDCFG_STALL].name) {
-                    continue;
-                }
-                const auto key = std::make_pair(r.variant, r.thread);
-                if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
-                    keys.push_back(key);
-                }
-            }
             for (const auto& key : keys) {
-                auto [fa, na] = fit_for("A", key.first, PROBES[TTBENCH_P_RDCFG_STALL].name, key.second);
-                auto [fb, nb] = fit_for("A", key.first, PROBES[TTBENCH_P_SETDMA_STALL].name, key.second);
-                if (na == 0 || nb == 0) {
+                double a = 0, b = 0;
+                if (!per_pair(key.first, key.second, TTBENCH_P_RDCFG_STALL, &a) ||
+                    !per_pair(key.first, key.second, TTBENCH_P_SETDMA_STALL, &b)) {
                     continue;
                 }
-                const double a = fa.slope / (double)TTBENCH_UNROLL;
-                const double b = fb.slope / (double)TTBENCH_UNROLL;
                 printf("  %-7s %-4d %12.3f %12.3f %+12.3f\n", key.first.c_str(), key.second, a, b, a - b);
                 pairs++;
-                if (a - b > best) {
-                    best = a - b;
+                if (a - b > worst) {
+                    worst = a - b;
                 }
             }
-            // HALF A CYCLE PER PAIR is the floor a claim about RDCFG has to
-            // clear, and it is not a tuned number: the quantity under test is a
-            // latency the ISA doc gives as ">= 2", and a difference under half a
-            // cycle cannot tell a 2-cycle latency from none. Below it the
-            // reading is the null, whatever its sign. Against tt-sim this is the
-            // branch that fires -- the simulator's Wait Gate answers an unmapped
-            // STALLWAIT condition with "satisfied" and maps TRISC_CFG on neither
-            // architecture, so both slots pay for the stall INSTRUCTION while
-            // neither stall ever observes the config unit, and the residue is
-            // fit noise rather than a small latency.
             if (pairs == 0) {
                 printf("  neither slot produced a fit; nothing to difference\n");
-            } else if (best <= 0.5) {
-                printf(
-                    "\n  DIFFERENCE %.3f, BELOW THE 0.5 CYCLE/PAIR FLOOR. The quantity under\n"
-                    "  test is a latency the ISA doc gives as `>= 2`, and half a cycle cannot\n"
-                    "  tell that from nothing, so this is the NULL and not a small value.\n"
-                    "  EXPECTED against tt-sim, whose Wait Gate answers an unmapped STALLWAIT\n"
-                    "  condition with `satisfied` and maps TRISC_CFG on neither architecture:\n"
-                    "  both slots pay for the stall INSTRUCTION while neither stall observes\n"
-                    "  the config unit. On a card it means this construction did not reach the\n"
-                    "  quantity, and the doc's `>= 2` stays as unchecked as it was.\n",
-                    best);
             } else {
+                printf("\nTTBENCH_CFGLAT_WRONGBIT: %.4f\n", worst);
                 printf(
-                    "\n  Largest difference %.3f cycles per pair, clear of the 0.5 floor. That\n"
-                    "  is a LOWER BOUND on RDCFG's latency beyond its issue slot, minus\n"
-                    "  SETDMAREG's one documented cycle of occupancy. It is CORROBORATION\n"
-                    "  for the ISA doc's `>= 2` and\n"
-                    "  never provenance, and it is NOT an occupancy: slot 14 measures that,\n"
-                    "  separately, and the two numbers describe different quantities.\n",
-                    best);
+                    "  TRISC_CFG is about the RISCV core's outstanding memory requests, not\n"
+                    "  about the Configuration Unit's pipeline, so ~0 here is the CORRECT\n"
+                    "  reading and is what makes the C12 difference above attributable to the\n"
+                    "  condition bit. A control that moved would mean it is not.\n");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // THE DEPENDENCE PAIR, read out. Slots 26 and 27, and the reading is
+    // `26 - 27`: two arms of the same two opcodes differing only in which GPR
+    // the consumer reads.
+    //
+    // ITS PREDICTION IS ZERO and the prediction comes from the ISA
+    // documentation, so a zero is not a failed measurement -- it is the
+    // measurement. `BlackholeA0/.../RDCFG.md` puts the producer-to-consumer
+    // separation on SOFTWARE ("Software must ensure that the instruction(s)
+    // immediately after `RDCFG` are not trying to consume the GPR written by the
+    // `RDCFG` instruction"), which is the documented absence of an interlock,
+    // and without an interlock a read-after-write costs no cycles at all: the
+    // consumer simply reads the old value. That is what the visibility region
+    // below measures instead.
+    //
+    // A NON-ZERO WOULD BE THE BETTER OUTCOME, which is why the arm exists. If
+    // Blackhole does interlock, `26 - 27` is RDCFG's latency in cycles directly,
+    // with nothing to subtract but itself.
+    //
+    // THE CONTROL, and it is the one that can fail in both directions: the pair
+    // must cost what its two instructions cost apart, probe 14 + probe 10, both
+    // measured in this same run. Under it means at least one arm is not issuing
+    // what it claims and a null difference means nothing; matching means both
+    // instructions ran and a null difference is a fact about the hardware.
+    // -----------------------------------------------------------------------
+    {
+        const auto keys = keys_for(TTBENCH_P_RDCFG_DEP);
+        if (!keys.empty()) {
+            printf("\n%s\n", std::string(78, '-').c_str());
+            printf("phase A: RDCFG -> GPR -> consumer, dependent against independent (26/27)\n");
+            printf("%s\n", std::string(78, '-').c_str());
+            printf(
+                "  Both arms are TTI_RDCFG(60,0) followed by TTI_ADDDMAREG(1,63,0,X).\n"
+                "  X = 60 in slot 26 (the RDCFG destination) and X = 59 in slot 27.\n"
+                "  BlackholeA0 RDCFG.md makes the separation software's job, so the\n"
+                "  documented prediction is that this difference is ZERO and the latency\n"
+                "  is not a duration at all. See the visibility section below.\n\n");
+            printf("  %-7s %-4s %12s %12s %12s\n", "variant", "thr", "dep/pair", "indep/pair", "difference");
+            bool have_t1 = false;
+            double d_t1 = 0, dep_t1 = 0;
+            for (const auto& key : keys) {
+                double a = 0, b = 0;
+                if (!per_pair(key.first, key.second, TTBENCH_P_RDCFG_DEP, &a) ||
+                    !per_pair(key.first, key.second, TTBENCH_P_RDCFG_INDEP, &b)) {
+                    continue;
+                }
+                printf(
+                    "  %-7s %-4d %12.3f %12.3f %+12.3f%s\n",
+                    key.first.c_str(),
+                    key.second,
+                    a,
+                    b,
+                    a - b,
+                    key.first == "t1" ? "" : "   (not graded)");
+                if (key.first == "t1" && !have_t1) {
+                    have_t1 = true;
+                    d_t1 = a - b;
+                    dep_t1 = a;
+                }
+            }
+            if (!have_t1) {
+                printf("\n  no t1 fit; the dependence difference is not reported\n");
+            } else {
+                double occ_rdcfg = 0, occ_add = 0;
+                const bool have_parts = per_pair("t1", 1, 14, &occ_rdcfg) && per_pair("t1", 1, 10, &occ_add);
+                printf("\nTTBENCH_DEP_DIFF: %.4f\n", d_t1);
+                if (have_parts) {
+                    printf("TTBENCH_DEP_PARTS: %.4f %.4f %.4f\n", dep_t1, occ_rdcfg, occ_add);
+                    printf(
+                        "  the dependent pair costs %.3f cycles against %.3f + %.3f = %.3f for\n"
+                        "  the two instructions measured bare (probes 14 and 10). A pair that\n"
+                        "  came in UNDER the sum would mean an arm is not issuing both\n"
+                        "  instructions, and then a zero difference would say nothing.\n",
+                        dep_t1,
+                        occ_rdcfg,
+                        occ_add,
+                        occ_rdcfg + occ_add);
+                } else {
+                    printf(
+                        "  probes 14 and 10 were not both in this run, so the pair cost cannot\n"
+                        "  be checked against its parts. Add 0x4200 to --probes.\n");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // THE VISIBILITY REGION, read out. This is where RDCFG's ">= 2" is reached.
+    //
+    // It carries no cycle count, so nothing here is a slope and nothing here has
+    // a launch or timer overhead for an intercept to absorb: the sweep is over
+    // producer-to-consumer SEPARATION and the reading is the smallest separation
+    // at which every repetition observes the value RDCFG wrote. See TTBENCH_VIS_*
+    // in kernels/compute/bench_layout.h for the construction and
+    // "THE VISIBILITY CONSTRUCTION" in kernels/compute/raw_probes.cpp for why
+    // the sequence has to be literal `.ttinsn` immediates.
+    // -----------------------------------------------------------------------
+    if (!vis.empty()) {
+        printf("\n%s\n", std::string(78, '-').c_str());
+        printf("phase A: RDCFG's latency as a producer-to-consumer DISTANCE\n");
+        printf("%s\n", std::string(78, '-').c_str());
+        const uint32_t reps = vis[TTBENCH_VIS_W_REPS];
+        const uint32_t fresh_ref = vis[TTBENCH_VIS_W_FAR_S1];
+        const uint32_t far_s2 = vis[TTBENCH_VIS_W_FAR_S2];
+        const uint32_t nord_s1 = vis[TTBENCH_VIS_W_NORD_S1];
+        const uint32_t nord_s2 = vis[TTBENCH_VIS_W_NORD_S2];
+        printf(
+            "  seeds 0x%08X / 0x%08X, never-ran marker 0x%08X, config index %d,\n"
+            "  %u repetitions per separation.\n\n",
+            TTBENCH_VIS_S1,
+            TTBENCH_VIS_S2,
+            TTBENCH_VIS_MARK,
+            TTBENCH_VIS_CFGIDX,
+            reps);
+
+        // The controls, and BOTH DIRECTIONS have to be exercised for the sweep
+        // to mean anything. The no-RDCFG arms can only pass by returning two
+        // DIFFERENT values (their own seeds), so a readout stuck on a constant
+        // fails them; the far arms can only pass by returning ONE value twice,
+        // and one that is neither seed, so a readout that merely echoes the seed
+        // fails them. Neither check has a way to pass vacuously.
+        const bool stale_representable = (nord_s1 == TTBENCH_VIS_S1) && (nord_s2 == TTBENCH_VIS_S2);
+        const bool fresh_representable = (fresh_ref == far_s2) && (fresh_ref != TTBENCH_VIS_S1) &&
+                                         (fresh_ref != TTBENCH_VIS_S2) && (fresh_ref != TTBENCH_VIS_MARK);
+        printf(
+            "  control: no RDCFG at all  -> 0x%08X, 0x%08X (want 0x%08X, 0x%08X)  %s\n",
+            nord_s1,
+            nord_s2,
+            TTBENCH_VIS_S1,
+            TTBENCH_VIS_S2,
+            stale_representable ? "ok" : "FAILED");
+        printf(
+            "  control: RDCFG at d=%-2d    -> 0x%08X, 0x%08X (want them equal, and\n"
+            "                               neither seed nor marker)                %s\n",
+            TTBENCH_VIS_FAR,
+            fresh_ref,
+            far_s2,
+            fresh_representable ? "ok" : "FAILED");
+        printf(
+            "  consumer never ran: %u repetitions;  unexplained: %u\n\n",
+            vis[TTBENCH_VIS_W_MARK],
+            vis[TTBENCH_VIS_W_OTHER]);
+
+        printf("  %-4s %10s %10s %10s\n", "d", "fresh", "stale", "other");
+        int d_min = 0;
+        for (int d = 1; d <= TTBENCH_VIS_MAXD; d++) {
+            const uint32_t f = vis[TTBENCH_VIS_W_FRESH + d - 1];
+            const uint32_t s = vis[TTBENCH_VIS_W_STALE + d - 1];
+            printf("  %-4d %10u %10u %10u\n", d, f, s, reps - f - s);
+            if (d_min == 0 && reps > 0 && f == reps) {
+                d_min = d;
+            }
+        }
+        const bool controls_ok = stale_representable && fresh_representable && reps > 0 &&
+                                 vis[TTBENCH_VIS_W_MARK] == 0 && vis[TTBENCH_VIS_W_OTHER] == 0;
+        printf("\nTTBENCH_VIS_CONTROLS: %s %s %u %u\n",
+               stale_representable ? "stale-ok" : "stale-FAILED",
+               fresh_representable ? "fresh-ok" : "fresh-FAILED",
+               vis[TTBENCH_VIS_W_MARK],
+               vis[TTBENCH_VIS_W_OTHER]);
+        printf("TTBENCH_VIS_DMIN: %d %u\n", controls_ok ? d_min : 0, reps);
+        printf(
+            "TTBENCH_VIS_COUNTS: %u %u %u %u\n",
+            vis[TTBENCH_VIS_W_FRESH + 0],
+            vis[TTBENCH_VIS_W_FRESH + 1],
+            vis[TTBENCH_VIS_W_FRESH + 2],
+            vis[TTBENCH_VIS_W_FRESH + 3]);
+        printf(
+            "  d_min is the smallest separation at which EVERY repetition saw the value\n"
+            "  RDCFG wrote. Because the consumer may read its operand some cycles into\n"
+            "  its own execution, d_min is a LOWER BOUND on the latency -- which is the\n"
+            "  direction the charging policy takes bounds in. d_min = 2 corroborates\n"
+            "  ConfigurationUnit.md's '>= 2 cycles' exactly; d_min = 1 would leave the\n"
+            "  '>= 2' unreached rather than refute it, since a consumer that reads late\n"
+            "  is a complete alternative explanation. A MIXTURE at any d (fresh and\n"
+            "  stale both non-zero) means the RISC-V front end did not deliver the\n"
+            "  sequence at one instruction per cycle and the separation is not what it\n"
+            "  says; that is why every repetition is counted rather than one taken.\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // THE C12 LIVENESS CONTROL, read out. Slots 28 and 29, and the reading is
+    //     d(v) = pair(28, v) - pair(29, v)   on thread 1
+    //     the verdict is on d(t3) - d(t1)  (or d(t2) - d(t1))
+    //
+    // This is the only thing in the benchmark that can separate "RDCFG's latency
+    // is real and no busy-condition could ever have seen it" from "C12 does not
+    // behave as documented on this part". Both explain slots 22-25 reading
+    // 0.0000 on a card and the visibility region cannot choose between them,
+    // because it never consults a condition bit.
+    //
+    // It needs at least two variants in the same run to say anything -- t1 for
+    // the floor and t2 or t3 for the hammered case -- so `--variants t1,t3`.
+    // With only t1 it prints the floor and declines to grade.
+    // -----------------------------------------------------------------------
+    {
+        const auto keys = keys_for(TTBENCH_P_C12_XT);
+        if (!keys.empty()) {
+            printf("\n%s\n", std::string(78, '-').c_str());
+            printf("phase A: is C12 live? the cross-thread control (slots 28/29)\n");
+            printf("%s\n", std::string(78, '-').c_str());
+            printf(
+                "  thread 1 runs STALLWAIT(STALL_THREAD, CFGEXU)+NOP in slot 28 and NOP+NOP\n"
+                "  in slot 29; threads 0 and 2 run RMWCIB0+NOP in BOTH, so at t2/t3 they\n"
+                "  hold the Configuration Unit from outside thread 1's issue path. C12 is\n"
+                "  \"Any thread has an instruction in any stage of the Configuration Unit\n"
+                "  pipeline\", so a live C12 must make thread 1's stall grow with the\n"
+                "  number of hammering threads. Slot 29 carries the cross-thread issue\n"
+                "  interference that grows anyway, and subtracts it.\n\n");
+            printf("  %-7s %-4s %12s %12s %12s\n", "variant", "thr", "stall/pair", "null/pair", "d = difference");
+            bool have_t1 = false;
+            double d_t1 = 0, d_multi = 0;
+            std::string multi_variant;
+            for (const auto& key : keys) {
+                if (key.second != 1) {
+                    continue;  // only the stalling thread is the measurement
+                }
+                double a = 0, b = 0;
+                if (!per_pair(key.first, key.second, TTBENCH_P_C12_XT, &a) ||
+                    !per_pair(key.first, key.second, TTBENCH_P_C12_XT_NULL, &b)) {
+                    continue;
+                }
+                printf("  %-7s %-4d %12.3f %12.3f %+12.3f\n", key.first.c_str(), key.second, a, b, a - b);
+                if (key.first == "t1") {
+                    have_t1 = true;
+                    d_t1 = a - b;
+                } else if (a - b > d_multi || multi_variant.empty()) {
+                    d_multi = a - b;
+                    multi_variant = key.first;
+                }
+            }
+            if (!have_t1 || multi_variant.empty()) {
+                printf(
+                    "\n  needs t1 AND one of t2/t3 in the same run to grade; got %s.\n"
+                    "  Run with --variants t1,t3.\n",
+                    !have_t1 ? "no t1" : "t1 only");
+            } else {
+                printf("\nTTBENCH_C12_LIVE: %.4f %.4f %s\n", d_t1, d_multi, multi_variant.c_str());
+                printf(
+                    "  d(t1) = %.3f is the stall's own floor with nobody else in the unit.\n"
+                    "  d(%s) = %.3f is the same stall while %s hammering thread(s) keep the\n"
+                    "  unit busy. A large positive difference says C12 IS live, and then\n"
+                    "  slots 22-25 reading zero means RDCFG's post-issue residency is no\n"
+                    "  wider than the stall's own documented one-cycle lag. A zero says C12\n"
+                    "  is inert on this part, and then slots 22-25 say nothing about RDCFG\n"
+                    "  at all. Both are reachable; neither is the default.\n",
+                    d_t1,
+                    multi_variant.c_str(),
+                    d_multi,
+                    multi_variant == "t3" ? "two" : "one");
             }
         }
     }

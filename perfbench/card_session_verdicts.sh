@@ -250,88 +250,173 @@ tensix_verdict() { # out-file, label
 
 # ------------------------------------------------- tensixbench, RDCFG latency
 #
-# The reading is a DIFFERENCE -- (RDCFG + STALLWAIT) minus (SETDMAREG + the
-# identical STALLWAIT) -- so its null is zero rather than one, and "the
-# difference is non-zero" would be the measurement grading itself. The control
-# is a different pair entirely:
+# WHAT CHANGED, 2026-08-12, THE SECOND TIME. The C12 construction ran on a
+# Blackhole card and did not reach the quantity either:
 #
-#     slot 21 (SETDMAREG + STALLWAIT) must cost MORE than slot 9 (SETDMAREG
-#     bare).
+#     TTBENCH_CFGLAT_COND:  C12 CFGEXU 0x1000        the intended condition
+#     TTBENCH_CFGLAT_OCC:   0.9978 0.9979 0.9979     the three ops bare
+#     TTBENCH_CFGLAT_PAIRS: 2.9682 2.9682 2.9683     all three with the stall
+#     TTBENCH_CFGLAT_DIFF:  0.0000 -0.0001
 #
-# If it does not, the STALLWAIT never engaged, the stall is vacuous in both
-# paired slots, and (20 - 21) is a difference of two identical things. That is
-# exactly what happens against tt-sim, whose Wait Gate answers an unmapped
-# STALLWAIT condition with "satisfied" and which maps the TRISC_CFG bit on
-# neither architecture -- so the simulator reads DEGENERATE here by
-# construction, and correctly.
+# Every arm identical to four decimal places, whether what preceded the stall
+# was a Configuration Unit instruction or an op that never enters the unit.
 #
-# There is a second check that is a validity gate rather than a control: slots 9
-# and 14 measure the two paired ops' OCCUPANCIES bare, and both are documented
-# and previously measured at 1.000. If they disagree in this run, part of the
-# difference is occupancy and none of it can be called latency.
-_ttb_col() { # out-file, probe-name, column-index-within-the-7-field-row
-  awk -v want="$2" -v c="$3" 'NF==7 && $1==want && $6+0==$6 { print $c; exit }' "$1"
+# THE DOCUMENTS EXPLAIN IT, and they explain it in the instruction's own
+# Performance section. `BlackholeA0/.../ConfigurationUnit.md` tabulates `RDCFG`
+# under a column headed **Latency** at ">= 2 cycles" with **IPC** 1, and
+# `RDCFG.md` says "Assuming no contention, it is fully pipelined, so an `RDCFG`
+# instruction can be started every cycle. The issuing thread is not blocked, so
+# it can potentially start its next instructions (of any kind) during `RDCFG`'s
+# subsequent cycles." The ">= 2" is a LATENCY TO THE DESTINATION GPR; the
+# occupancy is one cycle, which is exactly the 0.998 the card measured bare. A
+# busy-condition sees occupancy, so it was never going to see this.
+#
+# WHERE THE READING MOVED TO. `RDCFG.md`'s "Instruction scheduling" section:
+# "Software must ensure that the instruction(s) immediately after `RDCFG` are
+# not trying to consume the GPR written by the `RDCFG` instruction." An
+# obligation on software is the documented absence of an interlock -- a consumer
+# placed too close does not wait, it reads the STALE value -- so the latency is
+# observable as a DISTANCE and not as a duration. The benchmark now measures the
+# smallest producer-to-consumer separation at which the new value is seen, over
+# repetitions, with a two-sided control matrix, and reports it as
+# `TTBENCH_VIS_DMIN`. That is what this grades.
+#
+# THE OLD CONSTRUCTIONS ARE KEPT AND ARE STILL CHECKED. Slots 20/21 (the
+# TRISC_CFG pair) and 22-25 (the C12 pair) are documented negatives; slots 26/27
+# are the timing form of the dependence, which the documents predict reads zero
+# and which would BE the measurement if it did not. None of them is the reading
+# any more, so none of them can condemn the run on its own.
+#
+# WHAT IT NEEDS TO BE TRUE before it will report a distance:
+#
+#   1. the run reached its own per-phase gate;
+#   2. the STALE control moved -- the two no-RDCFG arms, seeded differently,
+#      must read back their OWN seeds. They can only pass by returning two
+#      DIFFERENT values, so a readout stuck on a constant fails;
+#   3. the FRESH control moved -- the two far-separation arms, seeded
+#      differently, must read back the SAME value, and it must be neither seed
+#      nor the never-ran marker. They can only pass by the readout moving OFF
+#      the seed, so a readout that echoes its input fails;
+#   4. no repetition landed on the never-ran marker or on an unexplained value,
+#      and no separation produced a MIXTURE of fresh and stale -- a mixture
+#      means the RISC-V front end did not deliver the sequence at one
+#      instruction per cycle and the separation is not what it says.
+#
+# Field `n` of a `TTBENCH_CFGLAT_<tag>: v1 v2 ...` line, or empty. Tag lines are
+# matched anchored and whole, so no prose line can be read as one.
+_ttb_tag() { # out-file, tag, field-index (1-based, after the colon)
+  awk -v t="TTBENCH_CFGLAT_$2:" -v n="$3" '$1 == t { print $(n + 1); exit }' "$1" 2>/dev/null
 }
 
-# Largest value in the `difference` column of the latency table. That table is
-# five fields wide where the main summary is seven, and it only ever appears
-# after its own banner, so both are matched exactly and neither can be read as
-# the other.
-_ttb_latency_max() { # out-file
-  awk '
-    /^phase A: RDCFG latency/ { in_tab = 1; next }
-    in_tab && NF == 5 && $5 + 0 == $5 { if (best == "" || $5 + 0 > best) best = $5 + 0 }
-    in_tab && /^-----/ { next }
-    END { printf "%.4f", best + 0 }' "$1"
+# The same, for any `TTBENCH_<name>:` tag line. Same anchoring, same reason.
+_ttb_any() { # out-file, full tag name (without TTBENCH_ or the colon), field
+  awk -v t="TTBENCH_$2:" -v n="$3" '$1 == t { print $(n + 1); exit }' "$1" 2>/dev/null
 }
 
-tensix_rdcfg_verdict() { # out-file
-  local out="$1" bad occ_rdcfg occ_setdma stall_pair bare_setdma diff
+tensix_rdcfg_verdict() { # out-file [, c12-out-file]
+  local out="$1" c12out="${2:-}" bad c12_bad
+  local ctl_stale ctl_fresh n_mark n_other d_min reps dep note c12_t1 c12_n c12_v
   [ -s "$out" ] || { echo "FAILED|no tensix-rdcfg.out"; return; }
   if ! grep -q '^TTBENCH_VALID' "$out" 2>/dev/null; then
     echo "UNCLEAR|no TTBENCH_VALID lines; the run did not reach its own gate"
     return
   fi
-  if ! grep -q '^phase A: RDCFG latency' "$out" 2>/dev/null; then
-    echo "UNCLEAR|the run produced no latency-difference table, so the two paired slots did not both fit. This binary may predate them"
+  # The benchmark says so itself when it drops the C12 slots, so this reads the
+  # run's own statement rather than re-deriving the architecture.
+  if grep -q '^note: dropping probes 22-25' "$out" 2>/dev/null; then
+    echo "SKIPPED|the Configuration Unit condition (STALLWAIT C12 / CFGEXU) exists only on Blackhole; Wormhole's fifteen condition bits name no unit RDCFG runs on. Nothing is missing: WormholeB0/RDCFG.md blocks the issuing thread for the whole instruction, so there the documented '>= 2' is an OCCUPANCY and probe 14 measures it directly"
+    return
+  fi
+  d_min="$(_ttb_any "$out" VIS_DMIN 1)"
+  reps="$(_ttb_any "$out" VIS_DMIN 2)"
+  if [ -z "$d_min" ] || [ -z "$reps" ]; then
+    echo "UNCLEAR|no TTBENCH_VIS_DMIN line, so this binary predates the visibility probe and is still grading the C12 pair, which a card measured at 0.0000 on 2026-08-12 for a documented reason. Rebuild and run with --probes 0x3FF04601 --variants t1 --vis-reps 64"
     return
   fi
   bad="$(_tensix_failed_phases "$out")"
   if [ -n "$bad" ]; then
-    echo "SUSPECT|phase(s) $bad failed their linearity/monotonicity checks, so no slope in this run is trustworthy -- including the two the difference is taken between"
+    echo "SUSPECT|phase(s) $bad failed their linearity/monotonicity checks, so no slope in this run is trustworthy -- and the visibility distance shares its launch with them"
     return
   fi
-  # Column 6 of the seven-field summary row is cyc/instr.
-  occ_rdcfg="$(_ttb_col "$out" RDCFG 6)"
-  occ_setdma="$(_ttb_col "$out" SETDMAREG 6)"
-  bare_setdma="$occ_setdma"
-  stall_pair="$(_ttb_col "$out" SETDMA_STALL 6)"
-  if [ -z "$occ_rdcfg" ] || [ -z "$occ_setdma" ] || [ -z "$stall_pair" ]; then
-    echo "UNCLEAR|the run is missing one of RDCFG, SETDMAREG or SETDMA_STALL from its summary; the controls cannot be applied. Run with --probes 0x304201"
+  if [ "$reps" = 0 ]; then
+    echo "UNCLEAR|the visibility sweep reports zero repetitions, so it did not run. Add --vis-reps 64"
     return
   fi
-  if ! awk -v a="$occ_rdcfg" -v b="$occ_setdma" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= 0.05) }'; then
-    echo "SUSPECT|RDCFG and SETDMAREG do not cost the same bare ($occ_rdcfg against $occ_setdma cyc/instr), so part of the paired difference is OCCUPANCY and none of it can be read as latency. The baseline op is the wrong one on this part"
+
+  # 2 and 3: the two controls, each of which can only pass by MOVING.
+  ctl_stale="$(_ttb_any "$out" VIS_CONTROLS 1)"
+  ctl_fresh="$(_ttb_any "$out" VIS_CONTROLS 2)"
+  n_mark="$(_ttb_any "$out" VIS_CONTROLS 3)"
+  n_other="$(_ttb_any "$out" VIS_CONTROLS 4)"
+  if [ "$ctl_stale" != stale-ok ]; then
+    echo "SUSPECT|the STALE control failed: the two no-RDCFG arms did not read back their own seeds, so the readout does not track what was written into the GPR and a 'stale' observation is not representable. Every count in the sweep is then uninterpretable"
     return
   fi
-  # THE CONTROL. Adding the STALLWAIT to SETDMAREG must cost something.
-  if ! awk -v s="$stall_pair" -v b="$bare_setdma" 'BEGIN { exit !(s > b + 0.05) }'; then
-    echo "DEGENERATE|the STALLWAIT is free: SETDMAREG + STALLWAIT costs $stall_pair against $bare_setdma bare, so the stall never engaged and the paired difference is two identical things subtracted. EXPECTED against tt-sim, whose Wait Gate answers an unmapped condition with 'satisfied' and maps the TRISC_CFG bit on neither arch. On a card this means the stall condition is the wrong one and the reading must be retaken"
+  if [ "$ctl_fresh" != fresh-ok ]; then
+    echo "SUSPECT|the FRESH control failed: the two far-separation arms did not agree on one value distinct from both seeds and the marker, so either RDCFG's result never reached the GPR or the readout is echoing its input. A 'fresh' observation is not representable and the distance means nothing"
     return
   fi
-  # HALF A CYCLE PER PAIR, and not a tuned number: the quantity under test is a
-  # latency the ISA doc gives as ">= 2", and a difference under half a cycle
-  # cannot tell a 2-cycle latency from none. Below the floor the reading is the
-  # null whatever its sign -- and the null is exactly what the STALLWAIT costing
-  # its instruction WITHOUT its condition engaging produces, which is what
-  # tt-sim does. Calling a sub-floor residue "an evidenced negative" would be
-  # the measurement grading itself with fit noise.
-  diff="$(_ttb_latency_max "$out")"
-  if awk -v d="$diff" 'BEGIN { exit !(d <= 0.5) }'; then
-    echo "DEGENERATE|the stall INSTRUCTION costs something (SETDMAREG+STALLWAIT $stall_pair against $bare_setdma bare) but the paired difference is only $diff cycles per pair, under the half-cycle floor a claim about a latency documented '>= 2' has to clear. The stall never observed the config unit. EXPECTED against tt-sim, whose Wait Gate answers an unmapped STALLWAIT condition with 'satisfied' and maps TRISC_CFG on neither arch; on a card it means this construction did not reach the quantity and the doc's '>= 2' stays unchecked"
+  if [ "${n_mark:-0}" != 0 ] || [ "${n_other:-0}" != 0 ]; then
+    echo "SUSPECT|$n_mark repetitions never ran their consumer and $n_other read a value that is neither seed, nor RDCFG's result, nor the marker. The sequence is not doing what it says and no threshold can be read off it"
     return
   fi
-  echo "MEANINGFUL|RDCFG latency difference $diff cycles per pair, clear of the half-cycle floor, against a stall proven live by SETDMAREG+STALLWAIT costing $stall_pair over $bare_setdma bare and the two bare occupancies agreeing at $occ_rdcfg. A LOWER BOUND on RDCFG's latency beyond its issue slot, and CORROBORATION for the doc's '>= 2' -- never provenance, and never an occupancy: slot 14 measures that separately"
+  # 4: a mixture at any separation means the separation is not what it says.
+  # A flag rather than an early `exit 0`: awk runs END after `exit`, so an END
+  # that sets the status would have overridden it and this check could never
+  # have fired.
+  if awk -v r="$reps" '
+      $1 == "TTBENCH_VIS_COUNTS:" {
+        for (i = 2; i <= NF; i++) { if ($i > 0 && $i < r) { mixed = 1 } }
+      }
+      END { exit !mixed }' "$out" 2>/dev/null; then
+    echo "SUSPECT|at least one separation produced a MIXTURE of fresh and stale observations over $reps repetitions, which means the RISC-V front end did not deliver the sequence at one instruction per cycle. The separation in issue slots is then not the separation in cycles and no distance can be read"
+    return
+  fi
+
+  # The C12 liveness control, from its own run. Not a gate -- it says nothing
+  # about the distance -- but it is what decides which of the two readings of
+  # the 0.0000 above is true, so it is carried into every verdict below.
+  note=""
+  if [ -n "$c12out" ] && [ -s "$c12out" ]; then
+    c12_t1="$(_ttb_any "$c12out" C12_LIVE 1)"
+    c12_n="$(_ttb_any "$c12out" C12_LIVE 2)"
+    c12_v="$(_ttb_any "$c12out" C12_LIVE 3)"
+    c12_bad="$(_tensix_failed_phases "$c12out")"
+    if [ -n "$c12_bad" ]; then
+      # Its own run, its own gate. The C12 control needs a t3 launch and t3
+      # series are contended by construction, so it is the one most likely to
+      # come back nonlinear -- and a difference of two untrustworthy slopes is
+      # not evidence for either explanation.
+      note=" The C12 liveness control's own run failed phase(s) $c12_bad, so its two slopes are not trustworthy and which explanation of slots 22-25 holds is still open. Re-run it at a larger --blocks."
+    elif [ -n "$c12_t1" ] && [ -n "$c12_n" ]; then
+      if awk -v a="$c12_t1" -v b="$c12_n" 'BEGIN { exit !(b - a > 0.5) }'; then
+        note=" The C12 liveness control MOVED (stall floor $c12_t1 cycles/pair at t1 against $c12_n at $c12_v, where two other threads hold the Configuration Unit), so C12 IS live and slots 22-25 reading 0.0000 means RDCFG's post-issue residency is no wider than the stall's own documented one-cycle lag -- structurally invisible to any busy-condition, not absent."
+      else
+        note=" The C12 liveness control did NOT move ($c12_t1 cycles/pair at t1 against $c12_n at $c12_v, where two other threads hold the Configuration Unit at one instruction per cycle), so C12 did not observe them either and slots 22-25 say nothing about RDCFG at all. EXPECTED against tt-sim for TWO independent reasons, and the second is the one that bites: its STALLWAIT decode trims the condition mask to 12 bits where the ISA page gives 13, AND its Configuration Unit retires inside the cycle that issued, so C12 is empty whenever another thread's Wait Gate looks -- widening the mask alone leaves this flat. On a card it is a finding about the part."
+      fi
+    else
+      note=" The C12 liveness control produced no reading, so which of the two explanations of slots 22-25 holds is still open; run tensixbench --probes 0x30000001 --variants t1,t3."
+    fi
+  fi
+
+  # THE TIMING FORM, checked before the distance because if it moved it IS the
+  # measurement and a better one: a difference in cycles between a dependent and
+  # an independent consumer of the same GPR is the latency directly.
+  dep="$(_ttb_any "$out" DEP_DIFF 1)"
+  if [ -n "$dep" ] && awk -v d="$dep" 'BEGIN { exit !(d > 0.5) }'; then
+    echo "MEANINGFUL|a consumer of RDCFG's destination GPR costs $dep cycles/pair more than the same consumer reading an independent GPR, so this part DOES interlock the read-after-write and that difference is RDCFG's latency in cycles directly. It contradicts BlackholeA0 RDCFG.md, which makes the separation software's job, so the doc's '>= 2' and this reading should be reconciled before either is charged. CORROBORATION only -- silicon is never provenance.$note"
+    return
+  fi
+
+  if [ "$d_min" = 0 ]; then
+    echo "DEGENERATE|no separation up to the largest swept made RDCFG's result visible to the consumer in all $reps repetitions, while the far-separation control shows it does become visible eventually. The threshold is outside the swept range and the sweep has to be widened before a distance can be quoted"
+    return
+  fi
+  if [ "$d_min" -ge 2 ] 2>/dev/null; then
+    echo "MEANINGFUL|RDCFG's result is invisible to a consumer $((d_min - 1)) issue slot(s) after it and visible at $d_min, over $reps repetitions with no mixture, against a stale control that read back two different seeds and a fresh control that read back one value that was neither. A LOWER BOUND of $d_min cycles on RDCFG's latency to the destination GPR -- the consumer may read its operand late, which can only make the true latency larger -- and CORROBORATION for ConfigurationUnit.md's '>= 2 cycles'. Never provenance, and never an occupancy: probe 14 measures that separately at ~1.$note"
+    return
+  fi
+  echo "DEGENERATE|RDCFG's result is already visible to the consumer in the very next issue slot in all $reps repetitions, so the smallest separation this construction can resolve is 1 and the documented '>= 2' stays UNREACHED. It is not refuted: a consumer that reads its operand a cycle into its own execution is a complete alternative explanation, and the timing form (slots 26/27) reads ${dep:-n/a} as the documents predict. EXPECTED against tt-sim, whose Configuration Unit writes the GPR in the issue cycle; on a card it means a sharper consumer is needed -- WRCFG reads its GPR in the cycle it enters the pipeline, but it writes backend configuration and this benchmark does not mutate device state.$note"
 }
 
 # ---------------------------------------------------- dramratebench (both)

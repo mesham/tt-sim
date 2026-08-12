@@ -254,65 +254,162 @@ r="$(rv_gset_verdict "$TMP/gset.out" "$TMP/gset1.csv" "$TMP/gset2.csv" "$TMP/gse
 check "rv-gset catches a duplicate that is not adjacent" DEGENERATE "$r"
 
 echo
-echo "== tensix-rdcfg: the difference is graded by a control that is not itself"
+echo "== tensix-rdcfg: the distance is graded by controls that are not themselves"
 
-# The summary table this parses is seven fields wide; the latency table is five.
-# Both are written by the same run, so a check that matched loosely would read
-# one as the other.
-_mk_rdcfg() { # file, setdma_bare, setdma_stall, rdcfg_bare, difference
+# Every check below is exercised in BOTH directions -- once with a fixture that
+# passes it and once with a fixture that trips it -- because this suite has
+# already lost a card run to a validity check that could never succeed.
+#
+# The fixtures are the `TTBENCH_*:` tag lines the benchmark prints, not a
+# scraped table: the previous grader read a five-field table out of the prose
+# beside a seven-field summary, and a table that gains a column silently changes
+# what it reads.
+#
+# WHAT IS GRADED NOW. A Blackhole card ran the C12 construction on 2026-08-12
+# and measured all three arms at 2.9682 cycles/pair -- identical to four decimal
+# places -- because BlackholeA0 ConfigurationUnit.md tabulates RDCFG's ">= 2"
+# under a column headed **Latency** with IPC 1, so a busy-condition was never
+# going to see it. The reading is now the smallest producer-to-consumer
+# separation at which the value RDCFG wrote becomes visible.
+_mk_rdcfg() { # file, dmin, reps, stale-ctl, fresh-ctl, n_mark, n_other, counts, dep
   { echo "probe          variant unit   thr    cyc/block  cyc/instr      R^2"
-    echo "loop_overhead  t1      -      0        64.00      0.000   1.0000"
-    echo "SETDMAREG      t1      THCON  0       $2.00      $2   1.0000"
-    echo "RDCFG          t1      CFG    0       $4.00      $4   1.0000"
-    echo "SETDMA_STALL   t1  THCON-LAT  0       $3.00      $3   1.0000"
-    echo "RDCFG_STALL    t1    CFG-LAT  0       $3.00      $3   1.0000"
-    echo "phase A: RDCFG latency, as (RDCFG + STALLWAIT) - (SETDMAREG + the same STALLWAIT)"
-    echo "  variant thr   rdcfg/pair    base/pair   difference"
-    echo "  t1      0          9.000        7.000       $5"
+    echo "loop_overhead  t1      -      1        64.00      0.000   1.0000"
+    echo "TTBENCH_CFGLAT_OCC: 0.998 0.998 0.998"
+    echo "TTBENCH_CFGLAT_STALLCOST: 1.970"
+    echo "TTBENCH_CFGLAT_COND: C12 CFGEXU 0x1000"
+    echo "TTBENCH_CFGLAT_DIFF: 0.000 0.000"
+    echo "TTBENCH_DEP_DIFF: ${9:-0.0000}"
+    echo "TTBENCH_DEP_PARTS: 2.0000 1.0000 1.0000"
+    echo "TTBENCH_VIS_CONTROLS: $4 $5 $6 $7"
+    echo "TTBENCH_VIS_DMIN: $2 $3"
+    echo "TTBENCH_VIS_COUNTS: $8"
     echo "TTBENCH_VALID_A: yes"
   } > "$1"
 }
+# The C12 liveness control, which lives in its own run because it needs a t3
+# launch and t3 series are contended by construction.
+_mk_c12() { # file, d(t1), d(t3)
+  { echo "TTBENCH_C12_LIVE: $2 $3 t3"; echo "TTBENCH_VALID_A: yes"; } > "$1"
+}
 
-# tt-sim: the stall is vacuous, so SETDMAREG+STALLWAIT costs the same as
-# SETDMAREG bare. The difference could be anything and would still mean nothing.
-_mk_rdcfg "$TMP/rdcfg_vacuous.out" 1.000 1.000 1.000 +2.000
-r="$(tensix_rdcfg_verdict "$TMP/rdcfg_vacuous.out")"
-check "tensix-rdcfg when the STALLWAIT is free" DEGENERATE "$r"
-check_says "tensix-rdcfg names the vacuous stall" "STALLWAIT is free" "$r"
-
-# The baseline op does not cost what the measured op costs bare, so part of the
-# difference is occupancy. Not a latency, whatever its size.
-_mk_rdcfg "$TMP/rdcfg_confounded.out" 1.000 7.000 3.500 +2.000
-r="$(tensix_rdcfg_verdict "$TMP/rdcfg_confounded.out")"
-check "tensix-rdcfg when the two bare occupancies differ" SUSPECT "$r"
-check_says "tensix-rdcfg says the difference is not latency" "OCCUPANCY" "$r"
-
-# A live stall and a real difference clear of the half-cycle floor: the reading
-# the probe exists for.
-_mk_rdcfg "$TMP/rdcfg_ok.out" 1.000 7.000 1.000 +2.000
+# THE READING THE PROBE EXISTS FOR. Both controls moved, no marker and no
+# unexplained observation, no mixture, and the value RDCFG wrote is invisible at
+# separation 1 and visible at 2 in every repetition. That is exactly what
+# ConfigurationUnit.md's ">= 2 cycles" predicts.
+_mk_rdcfg "$TMP/rdcfg_ok.out" 2 64 stale-ok fresh-ok 0 0 "0 64 64 64"
 r="$(tensix_rdcfg_verdict "$TMP/rdcfg_ok.out")"
-check "tensix-rdcfg on a live stall with a difference" MEANINGFUL "$r"
+check "tensix-rdcfg when the value appears at separation 2" MEANINGFUL "$r"
 check_says "tensix-rdcfg refuses to call it provenance" "CORROBORATION" "$r"
+check_says "tensix-rdcfg reports it as a lower bound" "LOWER BOUND" "$r"
 
-# A live stall and a SUB-FLOOR difference. 0.381 is what tt-sim actually reads:
-# the STALLWAIT instruction costs cycles there, but its condition is answered
-# "satisfied" (TRISC_CFG is mapped on neither arch), so the residue is fit noise.
-# Half a cycle per pair cannot tell a latency documented ">= 2" from none, so
-# this is the NULL. Quoting 0.381 as a lower bound would be the measurement
-# grading itself.
-_mk_rdcfg "$TMP/rdcfg_subfloor.out" 1.000 4.020 1.000 +0.381
-r="$(tensix_rdcfg_verdict "$TMP/rdcfg_subfloor.out")"
-check "tensix-rdcfg on the sub-floor difference tt-sim reads" DEGENERATE "$r"
-check_says "tensix-rdcfg names the floor" "half-cycle floor" "$r"
-_mk_rdcfg "$TMP/rdcfg_zero.out" 1.000 7.000 1.000 +0.000
-r="$(tensix_rdcfg_verdict "$TMP/rdcfg_zero.out")"
-check "tensix-rdcfg on a live stall with a zero difference" DEGENERATE "$r"
+# THE SAME RUN, with the C12 liveness control beside it in both of its states.
+# Neither changes the distance; both change what the 0.0000 of slots 22-25 MEANS,
+# and that is the whole reason the control exists.
+_mk_c12 "$TMP/c12_live.out" 1.970 41.200
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_ok.out" "$TMP/c12_live.out")"
+check "tensix-rdcfg with a C12 control that moved" MEANINGFUL "$r"
+check_says "tensix-rdcfg says the busy-condition was blind, not absent" "structurally invisible" "$r"
+_mk_c12 "$TMP/c12_dead.out" 1.970 1.968
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_ok.out" "$TMP/c12_dead.out")"
+check "tensix-rdcfg with a C12 control that did not move" MEANINGFUL "$r"
+check_says "tensix-rdcfg says C12 observed nothing" "say nothing about RDCFG at all" "$r"
+# The C12 control has its own run and its own gate, because it needs a t3
+# launch and t3 series are contended by construction. Two untrustworthy slopes
+# differenced are not evidence for either explanation -- and this fires on real
+# output: the tt-sim validation run at --blocks 1 came back nonlinear at t3.
+{ _mk_c12 "$TMP/c12_ungated.out" 1.970 41.200
+  sed -i 's/TTBENCH_VALID_A: yes/TTBENCH_VALID_A: no (2 checks failed)/' "$TMP/c12_ungated.out"; }
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_ok.out" "$TMP/c12_ungated.out")"
+check "tensix-rdcfg when the C12 run failed its own gate" MEANINGFUL "$r"
+check_says "tensix-rdcfg refuses the C12 reading" "still open" "$r"
 
-# The gate condemns the whole phase, so no slope in the run is usable.
-{ _mk_rdcfg "$TMP/rdcfg_bad.out" 1.000 7.000 1.000 +2.000
+# CONTROL 2 tripped: the two no-RDCFG arms did not read back their own seeds, so
+# a STALE observation is not representable and no count means anything. The
+# distance is left at the MEANINGFUL value so the check cannot be passing for
+# the wrong reason.
+_mk_rdcfg "$TMP/rdcfg_nostale.out" 2 64 stale-FAILED fresh-ok 0 0 "0 64 64 64"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_nostale.out")"
+check "tensix-rdcfg when a stale reading is not representable" SUSPECT "$r"
+check_says "tensix-rdcfg names the stale control" "STALE control failed" "$r"
+
+# CONTROL 3 tripped: the two far arms did not agree on one value distinct from
+# both seeds, so a FRESH observation is not representable either.
+_mk_rdcfg "$TMP/rdcfg_nofresh.out" 2 64 stale-ok fresh-FAILED 0 0 "0 64 64 64"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_nofresh.out")"
+check "tensix-rdcfg when a fresh reading is not representable" SUSPECT "$r"
+check_says "tensix-rdcfg names the fresh control" "FRESH control failed" "$r"
+
+# CONTROL 4a tripped: some repetition's consumer never ran, so the sequence is
+# not doing what it says.
+_mk_rdcfg "$TMP/rdcfg_mark.out" 2 64 stale-ok fresh-ok 3 0 "0 64 64 64"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_mark.out")"
+check "tensix-rdcfg when the consumer did not always run" SUSPECT "$r"
+_mk_rdcfg "$TMP/rdcfg_other.out" 2 64 stale-ok fresh-ok 0 2 "0 64 64 64"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_other.out")"
+check "tensix-rdcfg on an unexplained observation" SUSPECT "$r"
+
+# CONTROL 4b tripped: a MIXTURE at one separation. The RISC-V front end did not
+# deliver the sequence at one instruction per cycle, so the separation in issue
+# slots is not the separation in cycles and the threshold is not a latency.
+_mk_rdcfg "$TMP/rdcfg_mixed.out" 3 64 stale-ok fresh-ok 0 0 "0 37 64 64"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_mixed.out")"
+check "tensix-rdcfg on a mixture at one separation" SUSPECT "$r"
+check_says "tensix-rdcfg names the delivery rate" "one instruction per cycle" "$r"
+
+# THE NULL, and it is a distinct outcome rather than a smaller MEANINGFUL: the
+# value is already visible in the very next issue slot, so this construction
+# cannot resolve anything below 1 and the documented ">= 2" is unreached. It is
+# not refuted, and the verdict has to say so.
+_mk_rdcfg "$TMP/rdcfg_one.out" 1 64 stale-ok fresh-ok 0 0 "64 64 64 64"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_one.out")"
+check "tensix-rdcfg when the value is visible immediately" DEGENERATE "$r"
+check_says "tensix-rdcfg says the quantity is unreached, not refuted" "UNREACHED" "$r"
+
+# The threshold is outside the swept range: never fresh at any separation, while
+# the far-separation control shows it does become visible eventually.
+_mk_rdcfg "$TMP/rdcfg_never.out" 0 64 stale-ok fresh-ok 0 0 "0 0 0 0"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_never.out")"
+check "tensix-rdcfg when no swept separation is enough" DEGENERATE "$r"
+
+# THE TIMING FORM MOVED, which would make it the measurement and a better one --
+# a dependent consumer costing more than an independent one IS the latency in
+# cycles. It contradicts the documented absence of an interlock, so the verdict
+# has to say that too rather than quietly preferring the number.
+_mk_rdcfg "$TMP/rdcfg_interlock.out" 2 64 stale-ok fresh-ok 0 0 "0 64 64 64" 2.0100
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_interlock.out")"
+check "tensix-rdcfg when the dependence pair moves" MEANINGFUL "$r"
+check_says "tensix-rdcfg flags the contradiction with the doc" "contradicts" "$r"
+
+# CONTROL 1: the gate condemns the whole phase, so no slope in the run is usable
+# -- and the visibility sweep shares its launch with them.
+{ _mk_rdcfg "$TMP/rdcfg_bad.out" 2 64 stale-ok fresh-ok 0 0 "0 64 64 64"
   sed -i 's/TTBENCH_VALID_A: yes/TTBENCH_VALID_A: no (2 checks failed)/' "$TMP/rdcfg_bad.out"; }
 r="$(tensix_rdcfg_verdict "$TMP/rdcfg_bad.out")"
 check "tensix-rdcfg when phase A failed its gate" SUSPECT "$r"
+
+# The sweep was not asked for: zero repetitions is "did not run", not "ran and
+# found nothing".
+_mk_rdcfg "$TMP/rdcfg_noreps.out" 0 0 stale-ok fresh-ok 0 0 "0 0 0 0"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_noreps.out")"
+check "tensix-rdcfg when the sweep did not run" UNCLEAR "$r"
+
+# A binary that predates the visibility probe prints no VIS tag. It must not be
+# graded by the C12 pair it does print -- that pair measured 0.0000 on a card
+# for a reason the ISA documentation gives in the instruction's own Performance
+# section.
+{ _mk_rdcfg "$TMP/rdcfg_old.out" 2 64 stale-ok fresh-ok 0 0 "0 64 64 64"
+  sed -i '/^TTBENCH_VIS_DMIN:/d' "$TMP/rdcfg_old.out"; }
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_old.out")"
+check "tensix-rdcfg on a binary predating the visibility probe" UNCLEAR "$r"
+
+# Wormhole: the benchmark drops the C12 slots and says so, because Wormhole's
+# fifteen condition bits name no unit RDCFG runs on. Nothing is missing there --
+# WormholeB0/RDCFG.md blocks the issuing thread, so the ">= 2" is an occupancy.
+{ echo "note: dropping probes 22-25 and 28-29 (the C12 slots) on wormhole."
+  echo "TTBENCH_VALID_A: yes"; } > "$TMP/rdcfg_wh.out"
+r="$(tensix_rdcfg_verdict "$TMP/rdcfg_wh.out")"
+check "tensix-rdcfg on wormhole, where the condition does not exist" SKIPPED "$r"
+check_says "tensix-rdcfg says probe 14 already has it there" "OCCUPANCY" "$r"
 
 echo
 echo "== dram: a flat measurement is only a result when the CONTROL moved"

@@ -365,31 +365,191 @@ on hardware, that is the most interesting possible result and we want to hear
 about it immediately.
 
 `RDCFG` is the one to be careful with, and slot 14 is not the probe that answers
-it. The ISA doc's `>= 2` for `RDCFG` is a **latency**; every probe in phase A
-measures **occupancy**, and a pipelined unit releases its issuer immediately, so
-slot 14 reading exactly 1.000 on silicon is not a contradiction — the two are
-statements about different quantities, and charging the doc's 2 as an occupancy
-is what made tt-sim's `matmulblock` guard compute the wrong answer. The latency
-is reached by **slots 20 and 21** instead, as a difference:
+it **on Blackhole**. The ISA doc's `>= 2` for `RDCFG` is a **latency**; every
+probe in phase A measures **occupancy**, and `BlackholeA0/.../RDCFG.md` says
+"The issuing thread is not blocked, so it can potentially start its next
+instructions (of any kind) during `RDCFG`'s subsequent cycles" — so slot 14
+reading exactly 1.000 on Blackhole silicon is not a contradiction, and charging
+the doc's 2 as an occupancy is what made tt-sim's `matmulblock` guard compute
+the wrong answer.
+
+**On Wormhole it is the other way round.** `WormholeB0/.../RDCFG.md` says "The
+issuing thread is blocked for the entire duration", so there the `>= 2` *is* an
+occupancy and slot 14 reaches it with no extra machinery. There is no Wormhole
+`tensixbench` dataset yet; taking one closes this on that part.
+
+### Reaching `RDCFG`'s `>= 2`: what it is, and what it is not
 
 ```
-./build/tensixbench --phase a --blocks 32 --iters 64 --variants t1 --probes 0x304201
+# the measurement
+./build/tensixbench --phase a --blocks 32 --iters 64 --variants t1 \
+                    --probes 0x3FF04601 --vis-reps 64
+# the C12 liveness control, in its own run (it needs a t3 launch)
+./build/tensixbench --phase a --blocks 32 --iters 64 --variants t1,t3 \
+                    --probes 0x30000001
 ```
 
-That mask is slots 0, 9, 14, 20 and 21 — the loop control, the two paired ops
-bare, and the two paired slots. It is run on its own because phase A's validity
-gate is per-PHASE: one nonlinear new slot would flip `TTBENCH_VALID_A` for all
-twenty-two series at once. Both new bodies are an op plus an identical
-`TTI_STALLWAIT(STALL_THREAD, TRISC_CFG)`, so their `cyc/instr` column is cycles
-per **pair** — the `unit` column says `CFG-LAT` / `THCON-LAT` rather than `CFG` /
-`THCON` so it cannot be read as an occupancy — and the reading is the difference
-of the two and nothing else. The program prints it, with a floor: a difference
-under **0.5 cycles per pair** cannot tell a latency documented `>= 2` from none,
-so below that it reports the null rather than a small value.
+**`>= 2` IS A LATENCY, AND THE DOCUMENTS SAY SO TWICE.**
+`BlackholeA0/.../ConfigurationUnit.md` tabulates the Configuration Unit's
+instructions under columns headed **Latency** and **IPC**, and gives `RDCFG`
+"≥ 2 cycles" at **IPC 1**. `RDCFG.md` says it in prose:
+
+> This instruction requires at least two cycles to execute, and then additional
+> cycles if there is contention for GPR writes. Assuming no contention, it is
+> fully pipelined, so an `RDCFG` instruction can be started every cycle. The
+> issuing thread is not blocked, so it can potentially start its next
+> instructions (of any kind) during `RDCFG`'s subsequent cycles.
+
+So the quantity is a **latency to the destination GPR**, the throughput is one
+per cycle, and a Blackhole card measured exactly that: **0.998 cycles/instr**
+bare (slot 14). Nothing about the `>= 2` is visible in issue cost.
+
+**AND IT IS NOT VISIBLE TO A BUSY-CONDITION EITHER.** Slots 22–25 stall on C12,
+*"Any thread has an instruction in any stage of the Configuration Unit
+pipeline"*, which is the only condition on either architecture that names the
+unit — and a card ran them on 2026-08-12:
+
+```
+TTBENCH_CFGLAT_COND:  C12 CFGEXU 0x1000
+TTBENCH_CFGLAT_OCC:   0.9978 0.9979 0.9979
+TTBENCH_CFGLAT_PAIRS: 2.9682 2.9682 2.9683
+TTBENCH_CFGLAT_DIFF:  0.0000 -0.0001
+```
+
+All three arms identical to four decimal places. `RDCFG` leaves at most one
+cycle of post-issue residency (stage +1, the GPR write), and `STALLWAIT`'s own
+floor is at least that wide — *"There is a one cycle lag between the
+condition(s) being met and the block mask being removed"* — so the quantity
+completes inside the measuring apparatus.
+
+**WHERE IT IS VISIBLE.** `RDCFG.md`'s "Instruction scheduling" section:
+
+> Software must ensure that the instruction(s) immediately after `RDCFG` are not
+> trying to consume the GPR written by the `RDCFG` instruction. In *most* cases,
+> this applies to the one instruction after `RDCFG`, but it can apply to more
+> than one instruction if there is contention for the GPR write.
+
+An obligation on **software** is the documented absence of an interlock: a
+consumer placed too close does not wait, it reads the **stale** value. The
+latency is therefore a **distance**, not a duration, and that is what the
+benchmark measures.
+
+#### The visibility sweep (`--vis-reps N`)
+
+Not a probe slot and not a slope — it carries no cycle count, so there is no
+launch or timer overhead for an intercept to absorb. For each separation
+`d = 1..4`, `N` times:
+
+```
+regfile[60] = seed              a RISC-V write, read back to order it
+regfile[63] = 0xDEADBEEF
+tensix_sync()
+TTI_RDCFG(60, 0)
+TTI_NOP  x (d - 1)              one `.ttinsn`, one issue slot, one cycle each
+TTI_ADDDMAREG(1, 63, 0, 60)     the consumer: GPR63 = GPR60 + 0
+tensix_sync()
+observe regfile[63]
+```
+
+and the observation is one of exactly four things: the seed (**stale**), the
+value `RDCFG` read (**fresh**), `0xDEADBEEF` (the consumer never ran), or
+something unexplained. The reading, `TTBENCH_VIS_DMIN`, is the smallest `d` at
+which **every** repetition is fresh.
+
+It is a **lower bound**: if `ADDDMAREG` reads its operand some cycles into its
+own execution, the true latency is larger. That is the direction the charging
+policy takes bounds in, and `d_min = 2` corroborates the documented `>= 2`
+exactly while `d_min = 1` leaves it *unreached* rather than refuted.
+
+The sequence must be literal `.ttinsn` immediates — the runtime `TT_*` forms
+compute their instruction word first and would insert RISC-V cycles into the gap
+being measured — so `d` is a template parameter and the fillers are emitted by
+recursion.
+
+**The controls, and every one of them can only pass by MOVING:**
+
+| control | passes only if | what it rules out |
+| --- | --- | --- |
+| no `RDCFG`, two different seeds | it reads back **two different** values, its own seeds | a readout stuck on a constant; a seed that never landed. Proves a *stale* observation is representable |
+| `RDCFG` at `d = 8`, two different seeds | it reads back **one** value twice, and it is neither seed nor the marker | a readout that echoes its input; a result that never reaches the GPR. Proves a *fresh* observation is representable |
+| the marker count | zero | a consumer that never ran |
+| per-`d` counts | 0 or `N`, never in between | a mixture, which means the RISC-V front end did not deliver the sequence at one instruction per cycle and the separation is not what it says |
+
+**It is free of the C12 problem.** It issues no `STALLWAIT` and consults no
+condition bit, so it is untouched by tt-sim reading Blackhole's condition mask as
+12 bits where the ISA page gives 13. It also runs on either architecture.
+
+#### The dependence pair, slots 26/27
+
+The house method — `riscvbench` measures "dependent multiply" at 1.985 cycles
+this way — transplanted to Tensix GPRs. Both arms are the same two opcodes and
+differ in one operand field:
+
+| slot | body | reads |
+| --- | --- | --- |
+| 26 | `TTI_RDCFG(60,0)` ; `TTI_ADDDMAREG(1,63,0,60)` | the `RDCFG` destination |
+| 27 | `TTI_RDCFG(60,0)` ; `TTI_ADDDMAREG(1,63,0,59)` | a GPR `RDCFG` never wrote |
+
+so issue cost, unit occupancy and loop overhead all cancel and what is left is
+the read-after-write. **The prediction is zero**, from "Software must ensure",
+and the arm exists because it is falsifiable: if Blackhole *does* interlock,
+`26 − 27` is the latency in cycles directly and is the better measurement. Its
+own control is that the pair must cost probe 14 + probe 10, both measured in the
+same run — under that sum, an arm is not issuing what it claims and a null
+difference would mean nothing.
+
+#### The C12 liveness control, slots 28/29
+
+Two explanations survive the 0.0000 above, and the visibility sweep cannot
+choose between them because it never consults a condition bit:
+
+1. C12 works, and `RDCFG`'s one cycle of stage-+1 residency is no wider than the
+   stall's own documented lag — structurally invisible, not absent;
+2. C12 does not behave as documented on this part.
+
+Only a C12 signal much **wider** than one cycle separates them, and there is one
+way the documents support. C12 is *"ANY thread"*, and its note says *"This won't
+prevent other threads from issuing new Configuration Unit instructions though,
+and those new instructions will cause this thread to continue to wait."* So the
+busy-ness has to come from another thread, where it is not coupled to the
+waiting thread's own issue slots. These are the only thread-dependent bodies in
+the benchmark:
+
+| slot | thread 1 (graded) | threads 0 and 2 |
+| --- | --- | --- |
+| 28 | `STALLWAIT(STALL_THREAD, CFGEXU)` ; `NOP` | `RMWCIB0(0,0,0)` ; `NOP` |
+| 29 | `NOP` ; `NOP` | `RMWCIB0(0,0,0)` ; `NOP` |
+
+`d(v) = pair(28, v) − pair(29, v)`, and the reading is `d(t3) − d(t1)`. Slot 29
+carries the cross-thread issue interference that grows with the thread count
+anyway, and subtracts it. A large positive difference says C12 is live and
+reading 1 holds; a zero says C12 is inert and slots 22–25 say nothing about
+`RDCFG` at all. Both are reachable.
+
+It runs **separately** because it needs a t3 launch, t3 series are contended by
+construction, and phase A's validity gate is per-PHASE: one nonlinear contended
+series would flip `TTBENCH_VALID_A` for the visibility measurement too. It
+cannot hang — the hammering threads issue a bounded burst and then wait at the
+barrier, after which the unit drains.
+
+#### The two documented negatives, slots 20–25
+
+Kept, never renumbered, and still printed:
+
+| slots | condition | reading | why kept |
+| --- | --- | --- | --- |
+| 20/21 | `TRISC_CFG` (C10 on Blackhole) | 0.0000 on a card, 2026-08-09 | that bit is about the RISCV core's outstanding *memory requests*, not the unit's pipeline. The falsification control for 22–25 |
+| 22/23/24/25 | `CFGEXU` (C12) | 0.0000 on a card, 2026-08-12 | the right condition, and the evidence that a busy-condition cannot see a latency |
+
+Slot 24 − slot 9 is still the movement control for the stall itself (`~1.97
+cycles/pair` on a card), and slot 25 next to slot 14 still shows the two config
+ops cost the same to issue. Both config ops stay state-free: `RDCFG` only reads,
+and `RMWCIB0` with `Mask = 0` is the identity by its own functional model
+(`*CfgAddress = (NewValue & Mask) | (OldValue & ~Mask)`).
 
 To reproduce a run comparable with the tracked datasets in
 `tt_sim/perf/datasets/`, pass `--probes 0xFFFFF`: those were collected before
-slots 20 and 21 existed, and the two default ON.
+slots 20–29 existed, and all ten default ON.
 
 ---
 
