@@ -18,7 +18,10 @@ misspelling removes an instruction from the gate silently. One had:
 ``TRNSPSRCB`` was spelled ``TRANSPSRCB``, so a transpose never waited for SrcB
 where ttsim's ``TENSIX_EXECUTE_TRNSPSRCB`` stalls until the FPU owns the bank.
 :func:`test_every_gated_opcode_exists_in_the_instruction_table` is the check
-that would have caught it.
+that would have caught it. The list also had the opposite error -- an
+instruction gated that the documents say is not, ``MOVDBGA2D``, whose whole
+purpose is to read ``SrcA`` *without* waiting; :func:`test_movdbga2d_is_not_gated`
+pins that, so both directions of edit to the list are now deliberate.
 
 **Releasing.** Handing a bank back that the FPU does not own is
 ``NonContractualBehavior`` -- ttsim's ``math_clear_src_valid`` and
@@ -137,6 +140,32 @@ def test_fpu_instruction_waits_for_the_bank_it_consumes(opcode, which):
     thread.push_wait_gate_instruction(word)
     _run(cp, 20)
     assert not thread.wait_gate_instruction_fifo
+
+
+def test_movdbga2d_is_not_gated():
+    """``MOVDBGA2D`` is the one SrcA-reading move that must *not* wait.
+
+    It was in ``MATH_ALLOWED_CLIENT_INSTRUCTIONS[0]`` -- an over-charge, and
+    over-charging is the direction the cost model's floor policy forbids.
+    ``MOVDBGA2D.md``: "This instruction is identical to `MOVA2D`, except that
+    it doesn't _automatically_ wait for `SrcA[MatrixUnit.SrcABank].AllowedClient
+    == MatrixUnit`", and its functional model says to read ``MOVA2D``'s
+    "ignoring the paragraph about the Wait Gate" -- the paragraph being the
+    ``while (SrcA[...].AllowedClient != MatrixUnit) { wait; }`` loop
+    :meth:`WaitGate.checkIfFPUInstructionShouldStall` implements. That is the
+    instruction's entire reason to exist: it is the debug read that can look at
+    a bank the unpackers still own.
+
+    Asserted against the list rather than by issuing one, because
+    ``matrix.py`` has no ``MOVDBGA2D`` handler -- an issued one raises
+    ``NotImplementedError``, so the gate is the only place its behaviour is
+    observable today. The companion assertion that ``MOVA2D`` *is* gated is
+    what stops this being satisfiable by emptying the list.
+    """
+    srca_gated, srcb_gated = WaitGate.MATH_ALLOWED_CLIENT_INSTRUCTIONS
+    assert "MOVDBGA2D" not in srca_gated
+    assert "MOVDBGA2D" not in srcb_gated
+    assert "MOVA2D" in srca_gated
 
 
 def test_setrwc_does_not_wait_at_the_gate():

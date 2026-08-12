@@ -1280,24 +1280,27 @@ units:
           holds the issuing unpacker only, an under-charge in the floor
           direction.
 
-          THE ISSUING-THREAD HALF IS SOURCED AND STILL NOT CHARGED, AND THE
-          BLOCKER IS A MECHANISM RATHER THAN A NUMBER (2026-08-11, ROADMAP
+          THE ISSUING-THREAD HALF IS ALSO CONSUMED, SINCE 2026-08-11 (ROADMAP
           item 3). "For the duration of these cycles, the issuing thread
           cannot start its next instruction" is the same shape as the Scalar
-          Unit's interlock, which that item DID wire
-          (``TensixBackend.block_thread_issue``), and it needs no new number:
-          the deadline would be the 2 above. Wiring it turns three Wormhole
-          value guards red -- softplus / tilize / untilize all raise
-          SrcDvalidError -- and the fault is on the other side of the Src
-          handshake, not in this charge: tt-sim performs an unpack and flips
-          its Src AllowedClient in the tick the instruction retires, where the
-          hardware flips it at the END of a pipelined transfer. The LLK
-          datacopy loop leans on a one-cycle margin between the unpack
-          thread's UNPACR_NOP dvalid set and the math thread's SETRWC release,
-          and a correctly anchored two-cycle interlock spends exactly that
-          margin. So this stays uncharged until the unpacker's dvalid flip is
-          timed against its own occupancy -- a change to the functional model,
-          not to this table. See docs/plans/cost-model.md.
+          Unit's interlock, and it needs no new number: the deadline is the 2
+          above, anchored at the acceptance cycle and armed through
+          ``TensixBackend.block_thread_issue`` from backends/unpacker.py. It
+          is scoped to the address phase alone -- "for the duration of *these*
+          cycles" -- so the data phase, which "proceeds in a pipelined
+          fashion", holds the unit but not the thread.
+
+          Wiring it first turned three Wormhole value guards red (softplus /
+          tilize / untilize, all SrcDvalidError), and the fault was on the
+          other side of the Src handshake rather than in this charge: tt-sim
+          flipped a Src bank's AllowedClient in the tick the UNPACR retired,
+          where both this page's functional model (the assignment is after the
+          main unpack loop) and the SetDatValid field description ("once data
+          has been written") put it at the END of the transfer. The unpacker
+          now hands the bank over at ``address phase + data phase``, i.e. at
+          the same deadline this occupancy sets, which is what gives the LLK's
+          unpack/math ping-pong a data phase of margin instead of one cycle.
+          See docs/plans/cost-model.md.
       UNPACR_NOP:
         occupancy: 1
         provenance: isa_doc

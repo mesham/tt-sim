@@ -49,6 +49,26 @@ class UnPackerUnit(TensixBackendUnit):
         # phase of transfer-bytes / throttle-rate, both knowable only after
         # the instruction's config has been decoded. See ``handle_regular``.
         self._pending_occupancy = 0
+        # The thread whose ``UNPACR`` owes the documented address-phase issue
+        # interlock, armed by ``clock_tick`` from the same anchor the occupancy
+        # uses. ``None`` unless one is owed, which with no cost model is never.
+        self._pending_thread_block = None
+        # Who owns ``_pending_occupancy`` / the hold it becomes: the thread that
+        # issued the ``UNPACR`` still in the unpacker's pipeline. Read only by
+        # :meth:`hasInflightInstructionsFromThread`, and only meaningful while
+        # ``is_occupied()`` -- once the hold expires the last writer is stale
+        # and the predicate stops consulting it.
+        self._pending_occupancy_thread = None
+        self._occupied_thread = None
+        # The Src bank hand-over an ``UNPACR`` with ``FlipSrc`` owes the matrix
+        # unit, and the cycle it becomes visible. See ``flip_src_banks`` and
+        # ``_hand_over_src_bank``: the transfer is pipelined, so the hand-over
+        # lands at the *end* of it rather than in the tick the instruction
+        # retired. ``(src, out_data_format, issue_thread, src_row_base)`` while
+        # owed, ``None`` otherwise; the deadline is ``None`` until the arming
+        # site knows which cycle the transfer runs to.
+        self._deferred_dvalid = None
+        self._deferred_dvalid_cycle = None
         super().__init__(backend, UnPackerUnit.OPCODE_TO_HANDLER, "Unpacker")
         # Phase 5 of docs/plans/event-driven-pump.md, wired 2026-08-06 as the
         # seventh unit (the last-but-one; TDMA stays out deliberately).
@@ -72,19 +92,53 @@ class UnPackerUnit(TensixBackendUnit):
 
     def is_clock_idle(self):
         # A blocked unpacker re-runs its latched instruction every cycle until
-        # the Src bank it is waiting on frees up.
-        return not self.next_instruction and not self.blocked
+        # the Src bank it is waiting on frees up, and an unpacker still owing a
+        # Src hand-over has a state change of its own left to make -- neither is
+        # idle even with an empty issue queue.
+        return (
+            not self.next_instruction
+            and not self.blocked
+            and self._deferred_dvalid is None
+        )
 
     def hasInflightInstructionsFromThread(self, from_thread):
-        """A blocked unpacker is holding an instruction that has NOT retired.
+        """A blocked *or still transferring* unpacker has not retired anything.
 
-        All three blocking sites here wait for a Src bank's ``AllowedClient`` to
-        come back to the unpackers, and re-run the latched instruction every
-        cycle until it does. The base implementation only looks at
-        ``next_instruction``, which the issue queue has already drained by the
-        time the handler blocks, so a blocked unpacker used to report the thread
-        as *done* -- and a unit that can never make progress became invisible to
-        both consumers of this predicate: the PC-buffer drain
+        Two states here are "an instruction is in this unpacker's pipeline"
+        that the base implementation's issue-queue scan cannot see.
+
+        **Still transferring.** ``STALLWAIT.md`` defines conditions C1 and C2 as
+        "The current thread has an instruction in any stage of Unpacker 0's [/
+        Unpacker 1's] pipeline", and ``UNPACR_Regular.md``'s Performance section
+        says where those stages are: an ``UNPACR`` "spends at least two cycles
+        calculating the initial input address ... Once these cycles are
+        complete, execution proceeds in a pipelined fashion, with the primary
+        bottleneck being the fetching of bytes from L1". So the L1 fetch is a
+        stage of the pipeline, and the condition is *not* met while it runs --
+        the address phase and the data phase are both "in the pipeline", and
+        together they are exactly the occupancy this unit charges itself in
+        ``_arm_pending_occupancy``. Reporting only the issue queue let C1/C2
+        clear while the transfer was still moving datums, which is the same
+        window ``_hand_over_src_bank`` exists to protect: a ``STALLWAIT`` is
+        how a thread with no semaphore waits for its own unpack to land.
+
+        Scoped to this unit deliberately. Occupancy is throughput
+        back-pressure, and for a pipelined unit that is not the same as
+        residency -- an instruction can be in a stage of the pipeline long
+        after the unit will accept the next one. The unpacker is the case
+        where the two coincide, because the doc's bottleneck *is* the transfer
+        and tt-sim charges the whole address+data phase as one hold, so
+        "occupied by this thread" and "this thread's instruction is in a stage"
+        are the same statement. Nothing here licenses reading another unit's
+        ``busy_until`` as residency; that would need each unit's own latency.
+
+        **Blocked.** All three blocking sites here wait for a Src bank's
+        ``AllowedClient`` to come back to the unpackers, and re-run the latched
+        instruction every cycle until it does. The base implementation only
+        looks at ``next_instruction``, which the issue queue has already drained
+        by the time the handler blocks, so a blocked unpacker used to report the
+        thread as *done* -- and a unit that can never make progress became
+        invisible to both consumers of this predicate: the PC-buffer drain
         (``TTSync``/``CoprocessorDoneCheck``, i.e. what a kernel's end-of-thread
         sync reads) and the deadlock watchdog.
 
@@ -97,6 +151,8 @@ class UnPackerUnit(TensixBackendUnit):
         board reset clears it. tt-sim reached the identical blocked state and
         ran to completion anyway. See ROADMAP.md, "Unpacker dvalid deadlock".
         """
+        if self._occupied_thread == from_thread and self.is_occupied():
+            return True
         if (
             self.blocked
             and self.repeat_instruction is not None
@@ -140,6 +196,12 @@ class UnPackerUnit(TensixBackendUnit):
         return super().instruction_occupancy(instruction_name, issue_thread)
 
     def clock_tick(self, cycle_num):
+        # A hand-over owed by an earlier UNPACR comes first: it belongs to a
+        # transfer that finished before anything this tick does, and the unit
+        # cannot have accepted new work while it was outstanding (the same
+        # occupancy that sets the deadline refuses the issue).
+        if self._deferred_dvalid is not None:
+            self._hand_over_src_bank(cycle_num)
         if self.blocked:
             if self.busy_until is not None:
                 # The base drain releases expired holds at the top of its own
@@ -159,18 +221,78 @@ class UnPackerUnit(TensixBackendUnit):
             # cycles in between were the unit *waiting* on a Src bank, not
             # busy, so nothing was charged for them and nothing is
             # double-counted now.
-            self._arm_pending_occupancy(cycle_num)
+            self._arm_pending_occupancy(cycle_num, cycle_num)
         else:
             super().clock_tick(cycle_num)
             # Anchored at the acceptance cycle (one before this retire tick),
             # exactly as the base batch arming anchors its charges.
-            self._arm_pending_occupancy(cycle_num - 1)
+            self._arm_pending_occupancy(cycle_num - 1, cycle_num)
 
-    def _arm_pending_occupancy(self, anchor_cycle):
+    def _arm_pending_occupancy(self, anchor_cycle, cycle_num):
         cycles = self._pending_occupancy
+        thread = self._pending_thread_block
+        if thread is not None:
+            self._pending_thread_block = None
+            self.backend.block_thread_issue(
+                thread, anchor_cycle + self._address_phase_cycles(), "UNPACK"
+            )
         if cycles:
             self._pending_occupancy = 0
             self.occupy_for(anchor_cycle, cycles)
+            # Whose instruction the hold represents, for the "in any stage of
+            # this unpacker's pipeline" answer. Written only when a hold is
+            # actually armed, so it stays ``None`` for the whole of a run with
+            # the cost model off and the predicate never reaches
+            # ``is_occupied()``.
+            self._occupied_thread = self._pending_occupancy_thread
+        if self._deferred_dvalid is not None and self._deferred_dvalid_cycle is None:
+            # End of the transfer: the same deadline the occupancy just armed.
+            # Set once, when the hand-over is first owed -- this method runs
+            # again on every later tick, and recomputing the deadline from a
+            # by-then-empty ``_pending_occupancy`` would collapse it onto the
+            # next cycle. With no cost model ``cycles`` is 0, the deadline is
+            # the anchor, and the hand-over below happens in this very tick --
+            # exactly what the unpacker did before any of this existed.
+            self._deferred_dvalid_cycle = anchor_cycle + cycles
+            self._hand_over_src_bank(cycle_num)
+
+    def _hand_over_src_bank(self, cycle_num):
+        """Give the pending Src bank to the matrix unit, once the transfer ends.
+
+        The ISA docs place the hand-over after the datum loop, not beside the
+        instruction's issue: ``UNPACR_Regular.md``'s functional model runs its
+        whole "Main unpack loop" and only then assigns ``(WhichUnpacker ? SrcB :
+        SrcA)[...].AllowedClient = SrcClient::MatrixUnit``, and its Performance
+        section says the instruction spends its address phase and then
+        "execution proceeds in a pipelined fashion, with the primary bottleneck
+        being the fetching of bytes from L1". So the bank becomes the matrix
+        unit's when the last datum has been fetched, which is
+        ``address phase + data phase`` cycles after the ``UNPACR`` was accepted
+        -- precisely the occupancy the unit charges itself.
+
+        tt-sim moves every datum in the retire tick, which is unobservable
+        (nothing may read the bank until it changes hands) -- but flipping
+        ``AllowedClient`` there too let the matrix unit start consuming the
+        bank up to a whole data phase early. That is not a small error in one
+        number: it is what a producer/consumer handshake is *made of*, and it
+        left the LLK's unpack/math ping-pong resting on one-cycle margins that
+        any timing change spends.
+        """
+        if (
+            self._deferred_dvalid_cycle is None
+            or cycle_num < self._deferred_dvalid_cycle
+        ):
+            return
+        src, out_data_format, issue_thread, src_row_base = self._deferred_dvalid
+        self._deferred_dvalid = None
+        self._deferred_dvalid_cycle = None
+        src.setAllowedClient(SrcRegister.SrcClient.MatrixUnit)
+        # Latch the format the bank was written in, for the matrix unit's
+        # implied-format read (see ``latch_src_data_format``).
+        if out_data_format is not None:
+            src.setDataFormat(out_data_format)
+        self.srcBank ^= 1
+        self.srcRow[issue_thread] = src_row_base
 
     def _address_phase_cycles(self):
         """The UNPACR entry's own occupancy: the >= 2-cycle address phase.
@@ -1302,13 +1424,19 @@ class UnPackerUnit(TensixBackendUnit):
                 src = self.backend.getSrcA(self.srcBank)
             else:
                 src = self.backend.getSrcB(self.srcBank)
-            src.setAllowedClient(SrcRegister.SrcClient.MatrixUnit)
-            # Latch the format the bank was written in, for the matrix unit's
-            # implied-format read (see ``latch_src_data_format``).
-            if outDataFormat is not None:
-                src.setDataFormat(outDataFormat)
-            self.srcBank ^= 1
-            self.srcRow[issue_thread] = srcRowBase
+            # Owed, not done: the hand-over lands at the end of the pipelined
+            # transfer, which ``_hand_over_src_bank`` resolves once the caller
+            # knows the cycle the data phase runs to. The bank pointer and the
+            # row base go with it, because the functional model moves all three
+            # together -- ``AllowedClient = MatrixUnit; SrcBank ^= 1;
+            # SrcRow[CurrentThread] = SrcRowBase`` is one block at the end of
+            # UNPACR_Regular.md's pseudocode -- and because they are what
+            # ``STALLWAIT``'s C8/C9 ("SrcA/SrcB available for unpacker writes")
+            # read to decide which bank they are asking about. Splitting them
+            # would leave the unpack thread asking about the *next* bank while
+            # the previous one had not yet changed hands.
+            self._deferred_dvalid = (src, outDataFormat, issue_thread, srcRowBase)
+            self._deferred_dvalid_cycle = None
         else:
             self.srcRow[issue_thread] += 16 + srcRowBase
 
@@ -1439,6 +1567,8 @@ class UnPackerUnit(TensixBackendUnit):
                 # blocked re-runs charge nothing, because a blocked unit is
                 # waiting, not busy.
                 self._pending_occupancy = self._address_phase_cycles()
+                self._pending_thread_block = issue_thread
+                self._pending_occupancy_thread = issue_thread
             return
 
         self.blocked = False
@@ -1453,6 +1583,9 @@ class UnPackerUnit(TensixBackendUnit):
             # resumed unpack paid it at issue.
             address = self._address_phase_cycles() if fresh else 0
             self._pending_occupancy = address + (state["data_phase_cycles"] or 0)
+            self._pending_occupancy_thread = issue_thread
+            if fresh and address:
+                self._pending_thread_block = issue_thread
         self.perform_unpack_state(issue_thread, state)
 
     def read_unpack_state(self, issue_thread, instr_args):
@@ -1574,19 +1707,39 @@ class UnPackerUnit(TensixBackendUnit):
                 default_throttle_overridden=default_overridden,
             )
 
+        # "Update counters in preparation for next instruction" -- the last
+        # block of UNPACR_Regular.md's functional model, less the Src hand-over
+        # (which ``flip_src_banks`` still does at the end of the transfer).
+        # These belong to the *address phase*, with the input address generator
+        # that consumes them and with the configuration read above, for the
+        # reason the docstring of ``handle_regular`` gives for latching that
+        # configuration: the issuing thread carries on while the unpack is in
+        # flight and reprograms this very state for the next instruction. The
+        # ADCs are the write side of exactly that hazard --
+        # ``_llk_unpack_reduce_`` opens each call with a ``SETADCZW`` that
+        # resets the Z counter, and an UNPACR still waiting on a Src bank when
+        # that lands used to apply its ``Ch0.Z += Ch0ZInc`` *afterwards*, so
+        # the next reduction read every face one row late. The counters are
+        # also what the doc says the update is for ("in preparation for next
+        # instruction"), and the next instruction cannot start before this
+        # unpacker's address phase is over, so nothing inside the unit can tell
+        # the difference.
+        self.increment_counter(
+            stateID, issue_thread, whichContext, multiContextMode, useContextCounter
+        )
+        self.update_ADC(issue_thread, whichADC, ch0YInc, ch0ZInc, ch1YInc, ch1ZInc)
+
+        # Exactly what ``perform_unpack_state`` (the data phase) still needs,
+        # and nothing else. The context/ADC selectors and the four address
+        # increments used to be carried here too, for the counter update that
+        # now runs above in the address phase; nothing read them afterwards, and
+        # a latched copy of state the address phase has already consumed is an
+        # invitation to consume it a second time.
         return {
             "stateID": stateID,
             "data_phase_cycles": data_phase_cycles,
-            "whichContext": whichContext,
-            "whichADC": whichADC,
-            "multiContextMode": multiContextMode,
-            "useContextCounter": useContextCounter,
             "allDatumsAreZero": allDatumsAreZero,
             "flipSrc": flipSrc,
-            "ch0YInc": ch0YInc,
-            "ch0ZInc": ch0ZInc,
-            "ch1YInc": ch1YInc,
-            "ch1ZInc": ch1ZInc,
             "inAddr_Datums": inAddr_Datums,
             "datumSizeBytes": datumSizeBytes,
             "inputNumDatums": inputNumDatums,
@@ -1618,24 +1771,8 @@ class UnPackerUnit(TensixBackendUnit):
             state["unpackRowWidth"],
         )
 
-        # Increment the counter if applicable
-        self.increment_counter(
-            state["stateID"],
-            issue_thread,
-            state["whichContext"],
-            state["multiContextMode"],
-            state["useContextCounter"],
-        )
-
-        # Update ADCs
-        self.update_ADC(
-            issue_thread,
-            state["whichADC"],
-            state["ch0YInc"],
-            state["ch0ZInc"],
-            state["ch1YInc"],
-            state["ch1ZInc"],
-        )
+        # The context counter and the ADCs were advanced in the address phase,
+        # by ``read_unpack_state``; see the comment there.
 
         # Flip src banks
         self.flip_src_banks(state["flipSrc"], issue_thread, state["outDataFormat"])

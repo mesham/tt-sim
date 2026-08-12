@@ -599,7 +599,7 @@ mechanism is worse than no reason at all.
 | `issue_yield_fairness` | a unit | Slot yielded to a thread granted less recently. |
 | `flush_pending` | `THCON` | Scalar unit mid-`FLUSHDMA`, waiting for DMA units to drain. |
 | `atomic_pending` | `THCON` | Scalar unit retrying an `ATCAS`. |
-| `thread_issue_block` | `THCON` | A documented whole-thread interlock: the Scalar Unit is mid-instruction for this thread, so nothing from that thread passes the gate, whichever unit it is bound for. Cost-model only. |
+| `thread_issue_block` | `THCON`, `UNPACK` | A documented whole-thread interlock: the Scalar Unit is mid-instruction for this thread, or an unpacker is mid address-phase for it, so nothing from that thread passes the gate, whichever unit it is bound for. Cost-model only. |
 
 `thread_issue_block` is the one reason that is about the **thread**
 rather than about the unit the held instruction wanted. `unit_busy`

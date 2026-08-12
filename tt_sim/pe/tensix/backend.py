@@ -99,15 +99,14 @@ class TensixBackend:
         # The wait gate therefore pays one list index and one integer
         # comparison per tick in the default configuration.
         #
-        # One unit arms it today, from ``TensixCoprocessor/ScalarUnit.md``:
-        # "once a thread has started executing a Scalar Unit instruction, it
-        # cannot start executing its next instruction until the Scalar Unit
-        # instruction completes, regardless of which unit that next instruction
-        # executes in." The unpackers publish an identically-shaped interlock
-        # for an ``UNPACR``'s address phase and are deliberately NOT wired to
-        # this: see the ``UNPACR`` entry's note in the Tensix cost table for
-        # the mechanism that blocks it (tt-sim flips Src ``AllowedClient`` at
-        # retire, hardware at the end of the transfer).
+        # Two units arm it. ``TensixCoprocessor/ScalarUnit.md``: "once a thread
+        # has started executing a Scalar Unit instruction, it cannot start
+        # executing its next instruction until the Scalar Unit instruction
+        # completes, regardless of which unit that next instruction executes
+        # in." And ``UNPACR_Regular.md``, of the address phase: "For the
+        # duration of these cycles, the issuing thread cannot start its next
+        # instruction" -- scoped to the address phase, since what follows it
+        # "proceeds in a pipelined fashion".
         #
         # ``thread_issue_block_unit`` carries the ``ex_resource`` name of
         # whichever unit imposed the live deadline, so the StallEvent the gate

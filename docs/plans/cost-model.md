@@ -6964,16 +6964,20 @@ Two *tools* were wrong and are fixed; no measured or charged number was.
   both were artefacts of the wrap bug and the file reads clean.
 - `docs/plans/cost-model.md` — this section.
 
-## The whole-thread issue interlock: one sentence wired, one blocked by a mechanism
+## The whole-thread issue interlock, and the Src hand-over it was blocked on
 
 Landed 2026-08-11 — ROADMAP item 3's "documented per-op issue cadence". Two
 units publish an interlock that is about the **thread**, not about the unit,
 and neither could be expressed by the machinery that existed: `is_occupied`
 refuses the unit an instruction was *offered to*, and the instruction a
 held thread wants to issue next is usually offered somewhere else entirely.
-**One of the two is now charged. The other is sourced, needs no new number,
-and is still not charged — because wiring it turns three value guards red for
-a reason that is on the other side of the handshake.**
+**Both are now charged.** The second could not be until a *functional* bug was
+fixed first — tt-sim handed a Src bank to the Matrix Unit in the tick the
+`UNPACR` retired, where the documents put the hand-over at the end of the
+transfer — and fixing that turned out to expose a second latent race in the
+unpacker's counter update. Both fixes are below; neither changes a number in
+either YAML, and neither changes anything at all with `TT_SIM_COST_MODEL`
+unset.
 
 > `TensixCoprocessor/ScalarUnit.md`: "No instructions of any kind from the
 > issuing thread can pass through its Wait Gate. In other words, once a thread
@@ -6983,7 +6987,8 @@ a reason that is on the other side of the handshake.**
 
 `TensixBackend.thread_issue_block` is one deadline per Tensix thread; the Wait
 Gate refuses to pass anything from that thread until the cycle it names, and
-publishes a `thread_issue_block` `StallEvent` naming `THCON` while it does.
+publishes a `thread_issue_block` `StallEvent` naming the unit that imposed it
+— `THCON` here, `UNPACK` for the interlock below — while it does.
 **No cost-table entry was added and no number in either YAML changed.** The
 deadline *is* the occupancy the table already charges, armed from the same
 acceptance-anchored cycle, so it inherits the low-end-of-the-bound floor the
@@ -6991,21 +6996,32 @@ occupancy was charged at: `ADDDMAREG` is "3 or 4" charged at 3, so a thread
 that issues one may not start anything anywhere for 3 cycles, and `ATCAS`'s
 ">= 15" holds it for 15.
 
-### The unpacker's identical sentence, and why it is not wired
+### The unpacker's identical sentence
 
 > `TensixCoprocessor/UNPACR_Regular.md`: "An `UNPACR` instruction spends at
 > least two cycles calculating the initial input address ... For the duration
 > of these cycles, **the issuing thread cannot start its next instruction**,
 > nor can any other thread start an `UNPACR` instruction."
 
-Same shape, same mechanism, and the deadline would be the 2 the table already
-charges as the address phase. It was implemented, and the cost-model gate
-failed: **`wormhole/softplus`, `wormhole/tilize` and `wormhole/untilize` all
-raise `SrcDvalidError`** ("`SETRWC` from thread 1 cleared dvalid on SrcB bank
-0, but that bank's `AllowedClient` is `Unpackers`"). Everything else — all 30
-Blackhole guards, the Wormhole matmuls, `six`, the poll-budget proofs — passed.
+Same shape, same mechanism, and the deadline is the 2 the table already charges
+as the address phase — armed from `backends/unpacker.py` at the acceptance
+cycle, exactly where the occupancy is anchored. It is scoped to the address
+phase alone ("for the duration of *these* cycles"): what follows "proceeds in
+a pipelined fashion", and holds the unit but not the thread.
 
-The traced cause, at one-cycle resolution, is not the charge:
+The **cross-unpacker half** of the same sentence ("nor can any other thread
+start an `UNPACR`") is unchanged and unmodelled for the older reason: it needs
+an arbitration rule between two unpackers that no source gives, exactly as the
+joint 80 B/cycle ceiling does. Two halves of one sentence charged, one not.
+
+### What blocked it: the Src hand-over happened a data phase too early
+
+Wiring the interlock first turned three Wormhole value guards red —
+**`softplus`, `tilize` and `untilize` all raising `SrcDvalidError`**
+("`SETRWC` from thread 1 cleared dvalid on SrcB bank 0, but that bank's
+`AllowedClient` is `Unpackers`"). Everything else — all 30 Blackhole guards,
+the Wormhole matmuls, `six` — passed. The traced cause, at one-cycle
+resolution, was not the charge:
 
 ```
   passing        failing (with the interlock)
@@ -7019,52 +7035,145 @@ The traced cause, at one-cycle resolution, is not the charge:
 The LLK datacopy loop runs `UNPACR; UNPACR_NOP; UNPACR_NOP` on the unpack
 thread against `MOVA2D; MOVA2D; SETRWC` on the math thread, with no semaphore
 between them: the only ordering is that `MOVA2D` waits at the gate for SrcA,
-after which the two threads race three instructions against two. That leaves
+after which the two threads race three instructions against two. That left
 **exactly one cycle** between the `UNPACR_NOP` that hands SrcB to the FPU and
 the `SETRWC` that hands it back — and `SETRWC` does *not* wait at the gate
 (its page has no Wait Gate paragraph; it assigns `AllowedClient` outright).
-A correctly anchored two-cycle interlock spends that one cycle, and the
-backend tick order (`matrix_unit` first, `unpacker_units` last) resolves the
-resulting tie in the release's favour.
+A two-cycle interlock spends that one cycle, and the backend tick order
+(`matrix_unit` first, `unpacker_units` last) then resolves the tie in the
+release's favour.
 
-**What the margin really rests on is a mechanism tt-sim does not have.**
-tt-sim performs an unpack and flips its Src `AllowedClient` in the tick the
-instruction retires; the hardware flips it at the *end* of a pipelined
-transfer, tens of cycles later, which is what actually keeps the math thread
-behind the unpack thread on silicon. Charging one side of that asymmetry and
-not the other is what breaks the loop. So the honest disposition is: the term
-is **sourced and deferred on a named blocker** — time the unpacker's dvalid
-flip against its own occupancy — rather than deferred for want of a number.
-It is recorded in the `UNPACR` entry's `note` and pinned by
-`test_the_address_phase_holds_the_unit_and_deliberately_not_the_thread`.
+**A one-cycle margin was never what the hardware has, and the documents say
+where the margin comes from.** Three places, all agreeing:
 
-The **cross-unpacker half** of the same sentence ("nor can any other thread
-start an `UNPACR`") is unchanged and unmodelled for the older reason: it needs
-an arbitration rule between two unpackers that no source gives, exactly as the
-joint 80 B/cycle ceiling does. Two gaps in one sentence, two different causes.
+> `UNPACR_Regular.md`, functional model: the whole "Main unpack loop" runs, and
+> only *after* it — in the block headed "Update counters in preparation for
+> next instruction" — does `(WhichUnpacker ? SrcB : SrcA)[CurrentUnpacker
+> .SrcBank].AllowedClient = SrcClient::MatrixUnit`.
+
+> `tensix_instructions.yaml`, the `SetDatValid` field of `UNPACR`: "Unpacker
+> will set data valid bit for the registers it is unpacking into **once data
+> has been written**."
+
+> `UNPACR_Regular.md`, Performance: "Once these cycles are complete, execution
+> proceeds in a pipelined fashion, with the primary bottleneck being the
+> fetching of bytes from L1."
+
+tt-sim moved every datum in the retire tick — which is unobservable, since
+nothing may read the bank until it changes hands — but flipped `AllowedClient`
+there too, letting the Matrix Unit start consuming a bank up to a whole data
+phase before the transfer that fills it has finished. `UnPackerUnit` now owes
+the hand-over (`_deferred_dvalid`) and settles it in `_hand_over_src_bank` at
+`address phase + data phase` after acceptance — **the same deadline the unit's
+own occupancy already sets**, so no new number and nothing new to source. The
+bank pointer and row base go with it, because the functional model moves all
+three together and because `STALLWAIT`'s C8/C9 read them to decide which bank
+they are asking about.
+
+With `TT_SIM_COST_MODEL` unset both phases are zero, the deadline is the
+acceptance cycle, and the hand-over happens in the retire tick exactly as
+before — which is why the flag-off numbers below do not move.
+
+*Measured.* The minimum gap, over a whole run, between a SrcB bank being
+acquired and the `SETRWC` that releases it — i.e. how much slack the loop has
+before an acquire and a release collide in one cycle and the tick order
+decides:
+
+| guard | before | after |
+| --- | --- | --- |
+| `wormhole/softplus` | 1 | **9** |
+| `wormhole/tilize` | 1 | **5** |
+| `wormhole/untilize` | 1 | **2** |
+
+It went from "the tick order decides" to "the data phase decides". And the
+perturbation that used to break it now does not: injecting a one-cycle-in-five
+stall into the math thread's Wait Gate takes `wormhole/reduce` from a wrong
+value on the pristine tree to a pass on this one.
+
+### And what that exposed: a stalled `UNPACR` undoing a later `SETADCZW`
+
+Fixing the hand-over pushed the Matrix Unit later, which lengthened one
+unpacker stall, which made `wormhole/reduce` and `wormhole/reduceneg` compute
+a wrong value — `dst[2048] = 0xffff`, the GMPOOL minus-infinity sentinel. That
+was **not** caused by the hand-over; it is a pre-existing race the timing
+change happened to reach. The same one-cycle-in-five math-thread jitter
+reproduces it on the untouched tree.
+
+The mechanism, again at one-cycle resolution:
+
+```
+ pristine                            with the hand-over fixed
+ c6272 LATCH  unp0 in=0x1a240 Z=3    c6272 LATCH  unp0 in=0x1a240 Z=3
+ c6279 UPDATE_ADC       -> Z=4       c6280 SETADCXX t0
+ c6280 SETADCXX t0                   c6285 SETADCZW t0      -> Z=0   (next op)
+ c6285 SETADCZW t0      -> Z=0       c6286 UPDATE_ADC       -> Z=1   (too late)
+ c6305 LATCH  unp0 in=0x19c40 Z=0    c6314 LATCH  unp0 in=0x19e40 Z=1
+```
+
+`_llk_unpack_reduce_` opens each call with a `SETADCZW` that zeroes the Z
+counter. tt-sim applied an `UNPACR`'s `Ch0.Z += Ch0ZInc` when the *transfer*
+completed, so an `UNPACR` still waiting on a Src bank when that reset landed
+put the counter back — and the next reduction read every face one tile-row up
+L1. `handle_regular` already latches the *configuration* at decode for the
+mirror-image reason on the read side ("the issuing thread carries on while the
+unpack is in flight ... reading the configuration afresh when a stalled unpack
+finally runs would pick up the next matmul's context and base address"); the
+counter update is the write side of the identical hazard, and it now happens
+in the address phase with the input address generator that consumes it. The
+doc's own heading is the argument — "in preparation for **next instruction**"
+— and the next instruction cannot start before this unpacker's address phase
+is over, so nothing inside the unit can tell the difference. The Src
+hand-over stays where it is: it is the one member of that block the sources
+time against the data, not against the next instruction.
 
 ### Measured, at one-cycle resolution
 
-Seven Wormhole guards, replayed socket-free and pumped to `RUN_MSG_DONE` one
-cycle at a time, each run on this tree and on a pristine copy of `702c156`:
+Ten Wormhole guards, replayed socket-free and pumped to `RUN_MSG_DONE` one
+cycle at a time, each run on this tree and on the tree without the three
+changes:
 
 | guard | model off, before | model off, after | model on, before | model on, after |
 | --- | --- | --- | --- | --- |
-| `wormhole/offline` (`one`) | 793 | **793** | 2,578 | **2,578** |
-| `sfpumath` | 7,006 | **7,006** | 8,293 | **8,293** |
-| `matmulblock` | 2,141 | **2,141** | 7,577 | **7,577** |
-| `softplus` | 6,245 | **6,245** | 8,355 | **8,355** |
-| `reduce` | 809 | **809** | 3,404 | **3,404** |
-| `transpose` | 624 | **624** | 2,720 | **2,720** |
-| `matmulidx` | 817 | **817** | 3,604 | **3,614** |
+| `reduce` | 7,109 | **7,109** | 9,704 | 9,714 (+10) |
+| `reduceneg` | 7,109 | **7,109** | 9,704 | 9,714 (+10) |
+| `transpose` | 6,724 | **6,724** | 8,820 | 8,850 (+30) |
+| `softplus` | 17,845 | **17,845** | 19,955 | 19,965 (+10) |
+| `matmulblock` | 9,741 | **9,741** | 15,177 | 15,207 (+30) |
+| `matmulidx` | 7,117 | **7,117** | 9,914 | 9,944 (+30) |
+| `sfpumath` | 19,306 | **19,306** | 20,593 | 20,638 (+45) |
+| `tilize` | 7,008 | **7,008** | 9,398 | 9,408 (+10) |
+| `untilize` | 57,694 | **57,694** | 59,086 | 59,186 (+100) |
+| `noc_tile_transfer` | 6,384 | **6,384** | 7,711 | 7,711 (+0) |
 
-Model off: byte-identical on all seven, because nothing arms an occupancy with
-`TT_SIM_COST_MODEL` unset, so no deadline is ever set and the gate's new check
-is one list index that is always false. Model on: **exactly one total moves,
-`matmulidx` by +10 cycles**, and the interlock fires on all of them —
-`matmulblock` charges it 71 times for 97 gate-stall cycles, `reduce` 18 for
-20, `sfpumath` 13 for 10, `softplus` 10 for 6 — the first `thread_issue_block`
-rows a bottleneck report has ever printed.
+Eight Blackhole guards, same method:
+
+| guard | model off, before | model off, after | model on, before | model on, after |
+| --- | --- | --- | --- | --- |
+| `reduce` | 8,876 | **8,876** | 11,608 | 11,608 (+0) |
+| `transpose` | 8,670 | **8,670** | 10,558 | 10,567 (+9) |
+| `tilize` | 69,961 | **69,961** | 72,146 | 72,146 (+0) |
+| `untilize` | 11,306 | **11,306** | 12,437 | 12,509 (+72) |
+| `softplus` | 17,359 | **17,359** | 18,454 | 18,454 (+0) |
+| `optest` | 10,529 | **10,529** | 13,217 | 13,217 (+0) |
+| `twolaunch` | 13,064 | **13,064** | 13,493 | 13,515 (+22) |
+| `eight` | 8,677 | **8,677** | 10,231 | 10,231 (+0) |
+
+Model off: byte-identical on all ten. Nothing arms an occupancy with
+`TT_SIM_COST_MODEL` unset, so the interlock deadline is never set, the
+hand-over deadline is the acceptance cycle, and the only unconditional change
+— moving the counter update into the address phase — is unobservable there
+because the address phase and the transfer are the same tick unless the unpack
+blocks (and a blocked unpack's *own* next instruction cannot start either way).
+
+Model on: **+0 to +100 cycles, every one of them slower**, which is the only
+direction these changes can move a total. Two effects add: the address-phase
+interlock stops a thread issuing for two cycles after each `UNPACR`, and the
+Matrix Unit now waits for the transfer it consumes rather than for the tick
+the instruction retired. `wormhole/noc_tile_transfer` moves by nothing at all
+— it has no Tensix compute — and `wormhole/untilize`, which unpacks the most,
+moves the most. Blackhole moves less because its unpacks run at the default
+x4-"2x"/x8 rates, so the data phase it now waits for is a quarter to an eighth
+the length: five of the eight totals do not move at all.
 
 That totals barely move is the expected shape and not a disappointment: a
 launch's completion is gated on the backend draining, and on these guards the
@@ -7117,20 +7226,132 @@ not offered to at all, which nothing else in the model can do.
 ### What changed in the repository
 
 - `tt_sim/pe/tensix/backend.py` — `thread_issue_block` / `block_thread_issue`,
-  with the sentence quoted at the state it justifies.
+  with both sentences quoted at the state they justify.
 - `tt_sim/pe/tensix/frontend.py` — the Wait Gate's check, first among the
   gate's refusal branches because the interlock outranks them all.
-- `tt_sim/pe/tensix/backends/thcon.py` — the arming site, anchored where the
-  occupancy is anchored.
+- `tt_sim/pe/tensix/backends/thcon.py` — the Scalar Unit's arming site.
+- `tt_sim/pe/tensix/backends/unpacker.py` — the unpacker's arming site; the
+  deferred Src hand-over (`_deferred_dvalid` / `_hand_over_src_bank`); and the
+  counter update moved into `read_unpack_state`.
 - `tt_sim/trace/events.py`, `docs/trace-schema.md` — the
   `thread_issue_block` stall reason.
-- `tt_sim/pe/tensix/tensix_instruction_costs.yaml` — two `note:` fields, one
-  recording what is now consumed and one recording the deferral and its named
-  blocker. **No number changed.**
+- `tt_sim/pe/tensix/tensix_instruction_costs.yaml` — two `note:` fields
+  recording what is now consumed. **No number changed.**
 - Tests: three in `frontend_backpressure_test.py` (the interlock reaches a
   different unit, holds only the issuing thread, and is absent with the model
-  off) and a renamed one in `unpacker_cost_model_test.py` pinning that the
-  address phase holds the *unit* and deliberately not the thread.
+  off) and six in `unpacker_cost_model_test.py` — the address phase holds the
+  unit *and* the thread, the thread block is not extended by the data phase,
+  no thread is held with the model off, the hand-over lands at the end of the
+  transfer (and in the retire tick with the model off), a stalled unpack does
+  not undo a later ADC reset, and an unpack/math ping-pong whose hand-over
+  cycles are unchanged by sliding the threads against each other or by
+  reversing the backend unit tick order.
+
+## `STALLWAIT` C1/C2: a transfer that was not reported as in flight
+
+Landed 2026-08-11, immediately after the section above and for the same
+window. **No number in either YAML changed, and nothing changes at all with
+`TT_SIM_COST_MODEL` unset.**
+
+The hand-over above fixed *when the Src bank changes hands*. It left the other
+half of the same window wrong: **whether the thread that issued the `UNPACR`
+is told its unpack is still running.**
+
+> `STALLWAIT.md`, condition mask: **C1** "The current thread has an instruction
+> in any stage of Unpacker 0's pipeline." **C2** the same sentence for
+> "Unpacker 1's".
+
+> `UNPACR_Regular.md`, Performance: "An `UNPACR` instruction spends at least
+> two cycles calculating the initial input address ... Once these cycles are
+> complete, execution proceeds **in a pipelined fashion**, with the primary
+> bottleneck being the fetching of bytes from L1."
+
+The L1 fetch is a stage of that pipeline, so C1/C2 are unmet for the whole of
+the address phase *and* the data phase — which together are exactly the
+occupancy `UnPackerUnit` already charges itself. `hasInflightInstructionsFromThread`
+consulted only the issue queue and the `blocked` flag, both of which are done
+with the instruction the moment it retires, so a `STALLWAIT` on C1 cleared
+while the transfer was still moving datums. `wormhole/reduce` is the in-tree
+program that leans hardest on this: its unpack/math pairing has no semaphore
+and `STALLWAIT` is the only ordering it has.
+
+The predicate now also answers "yes" while the unit is occupied *by that
+thread* (`_occupied_thread`, written only where a hold is armed). **The scope
+is this unit and no other, deliberately**: occupancy is throughput
+back-pressure, and for a pipelined unit that is not residency — an instruction
+can sit in a stage long after the unit will accept the next one. The unpacker
+is the case where the two coincide, because the doc's bottleneck *is* the
+transfer and tt-sim charges address+data as one hold. Reading another unit's
+`busy_until` as residency would need that unit's own latency and is not done.
+
+### And the same table's C2 asked the wrong unpacker
+
+`check_for_semwait_condition_match` (the Wormhole branch) answered both C1 and
+C2 from `unpacker_units[0]`. The Blackhole branch beside it has always had it
+right, which is what makes it a transcription slip. It is live: probed under
+the model, `wormhole/matmulblock` evaluates C2 106 times and the two unpackers
+disagree at that moment 208 times across C1+C2. Fixing it can only make a
+thread wait longer, never less.
+
+### `MOVDBGA2D` was gated at the Wait Gate where its page says not to be
+
+> `MOVDBGA2D.md`: "This instruction is identical to `MOVA2D`, except that it
+> doesn't _automatically_ wait for `SrcA[MatrixUnit.SrcABank].AllowedClient ==
+> MatrixUnit`" — and its functional model: "See `MOVA2D`'s functional model,
+> **ignoring the paragraph about the Wait Gate**."
+
+That paragraph is the `while (SrcA[...].AllowedClient != MatrixUnit) { wait; }`
+loop `WaitGate.MATH_ALLOWED_CLIENT_INSTRUCTIONS[0]` implements, and
+`MOVDBGA2D` was in the list. Not being gated is the instruction's entire
+purpose. It is unreachable today — `matrix.py` has no handler, so an issued one
+raises — so it moves no number; it is fixed anyway because it is an
+**over-charge**, and over-charging is the one direction the bounds policy
+forbids. `test_movdbga2d_is_not_gated` pins the removal with the citation, so
+the list is now deliberate in both directions.
+
+### Measured, at one-cycle resolution
+
+Every replay guard in the tree, replayed socket-free and pumped to
+`RUN_MSG_DONE` one cycle at a time, on this tree and on a frozen copy of the
+tree without these changes. **Model off: every guard byte-identical**, on both
+architectures — nothing arms an occupancy with `TT_SIM_COST_MODEL` unset, so
+`_occupied_thread` is never written and the predicate never reaches
+`is_occupied()`. Model on, the guards that moved (all others identical):
+
+| guard | before | after | of which C2 |
+| --- | --- | --- | --- |
+| `blackhole/five` | 13,088 | 13,121 (+33) | — |
+| `blackhole/five_fp` | 13,088 | 13,132 (+44) | — |
+| `blackhole/four_fp` | 11,606 | 11,617 (+11) | — |
+| `blackhole/loopback` | 11,246 | 11,290 (+44) | — |
+| `blackhole/optest` | 13,217 | 13,228 (+11) | — |
+| `blackhole/where` | 11,379 | 11,397 (+18) | — |
+| `wormhole/examples:four-fp` | 9,197 | 9,241 (+44) | +22 |
+| `wormhole/examples:five` | 10,699 | 10,806 (+107) | +0 |
+| `wormhole/examples:five-fp` | 10,940 | 11,014 (+74) | +0 |
+| `wormhole/examples:loopback` | 8,969 | 8,991 (+22) | +0 |
+
+**+11 to +107 cycles, every one of them slower**, which is the only direction
+a condition that used to clear early can move a total. The C2 column is a
+third measurement, on a copy of this tree with that one line reverted:
+Blackhole cannot be affected by it at all (it takes the other branch), and
+across Wormhole it accounts for 22 cycles on one example and nothing anywhere
+else. `wormhole/reduce` — the guard flagged as most at risk, because its
+unpack/math pairing has no semaphore and leans on `STALLWAIT` alone — does not
+move at all, and neither does any of the other twelve Wormhole guards.
+
+Tests: five in `unpacker_cost_model_test.py` (the predicate during the
+transfer; a `STALLWAIT` on C1 held for the whole of it; the same, unchanged,
+under the two perturbations `_ping_pong` uses — sliding the thread by up to
+five cycles and reversing the backend unit tick order; the retire-tick
+behaviour with the model off; and C1/C2 naming unpacker 0 and 1 on both
+architectures) and one in `waitgate_allowed_client_test.py`.
+
+Also removed, with no behavioural change: eight keys in `read_unpack_state`'s
+returned dict (`whichADC`, `ch0ZInc` and friends) that only the ADC counter
+update read, and that update moved into the address phase in the section
+above. A latched copy of state the address phase has already consumed is an
+invitation to consume it twice.
 
 ## Using it, when the time comes
 

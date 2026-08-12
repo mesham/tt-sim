@@ -142,12 +142,14 @@ STALL_REASONS = frozenset(
         #: A documented interlock is holding *everything* this thread has,
         #: whichever unit the held instruction is bound for -- as opposed to
         #: ``unit_busy``, which only refuses the unit the instruction was
-        #: offered to. One unit publishes one today: the Scalar Unit, for the
-        #: whole of an instruction's execution ("it cannot start executing its
-        #: next instruction ... regardless of which unit that next instruction
-        #: executes in"), so ``blocked_on`` is ``THCON``. Cost-model state: the
-        #: deadline is armed from a modelled occupancy, so this never fires
-        #: with ``TT_SIM_COST_MODEL`` unset.
+        #: offered to. Two units publish one: the Scalar Unit, for the whole of
+        #: an instruction's execution ("it cannot start executing its next
+        #: instruction ... regardless of which unit that next instruction
+        #: executes in"), and an unpacker, for an ``UNPACR``'s address phase
+        #: ("For the duration of these cycles, the issuing thread cannot start
+        #: its next instruction") -- so ``blocked_on`` is ``THCON`` or
+        #: ``UNPACK``. Cost-model state: the deadline is armed from a modelled
+        #: occupancy, so this never fires with ``TT_SIM_COST_MODEL`` unset.
         "thread_issue_block",
     }
 )

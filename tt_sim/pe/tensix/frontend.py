@@ -176,6 +176,19 @@ class WaitGate(TensixFrontendUnit):
     # SrcB, where ttsim's ``TENSIX_EXECUTE_TRNSPSRCB`` stalls until the FPU owns
     # the bank. ``waitgate_allowed_client_test.py`` now pins the whole list
     # against the instruction table.
+    #
+    # ``MOVDBGA2D`` is deliberately *absent* from the SrcA group, and the
+    # absence is the documented behaviour rather than an oversight:
+    # ``MOVDBGA2D.md`` opens "This instruction is identical to ``MOVA2D``,
+    # except that it doesn't _automatically_ wait for
+    # ``SrcA[MatrixUnit.SrcABank].AllowedClient == MatrixUnit``", and its
+    # functional model says "See ``MOVA2D``'s functional model, ignoring the
+    # paragraph about the Wait Gate" -- that paragraph being the
+    # ``while (SrcA[...].AllowedClient != MatrixUnit) wait;`` loop this list
+    # implements. Gating it charged a stall the hardware does not take, which
+    # is the one direction the floor policy forbids. Unreachable today
+    # (``matrix.py`` has no handler, so issuing one raises), so this moves no
+    # number; ``test_movdbga2d_is_not_gated`` pins it either way.
     MATH_ALLOWED_CLIENT_INSTRUCTIONS = [
         (
             "MVMUL",
@@ -186,7 +199,6 @@ class WaitGate(TensixFrontendUnit):
             "ELWADD",
             "ELWSUB",
             "MOVA2D",
-            "MOVDBGA2D",
             "SHIFTXA",
         ),
         (
@@ -466,8 +478,14 @@ class WaitGate(TensixFrontendUnit):
                     0
                 ].hasInflightInstructionsFromThread(self.frontend.thread_id)
             case 2:
+                # Unpacker *1*. ``STALLWAIT.md``: C1 is "an instruction in any
+                # stage of Unpacker 0's pipeline", C2 the same for "Unpacker
+                # 1's". This asked unpacker 0 twice, so a thread waiting on C2
+                # was told about the wrong unit -- and the Blackhole twin below
+                # has always had it right, which is what makes it a
+                # transcription slip rather than a modelling choice.
                 return not self.backend.unpacker_units[
-                    0
+                    1
                 ].hasInflightInstructionsFromThread(self.frontend.thread_id)
             case 3 | 4 | 5 | 6:
                 return not self.backend.packer_unit.hasInflightInstructionsFromThread(
@@ -622,15 +640,16 @@ class WaitGate(TensixFrontendUnit):
                     )
                     thread_id = self.frontend.thread_id
                     if self.backend.thread_issue_block[thread_id] > cycle_num:
-                        # A documented whole-thread interlock is live -- today
-                        # only the Scalar Unit's, which holds the thread for
-                        # the whole of its instruction's execution. *Nothing*
-                        # from this thread may pass the gate while it is,
-                        # whichever unit it is bound for, which is what
-                        # separates this from the per-unit issue refusal below
-                        # and why it is checked first. See
-                        # ``TensixBackend.block_thread_issue`` for the sentence
-                        # it comes from.
+                        # A documented whole-thread interlock is live: the
+                        # Scalar Unit's, which holds the thread for the whole
+                        # of its instruction's execution, or an unpacker's, for
+                        # an ``UNPACR``'s address phase. *Nothing* from this
+                        # thread may pass the gate while it is, whichever unit
+                        # it is bound for, which is what separates this from
+                        # the per-unit issue refusal below and why it is
+                        # checked first. See
+                        # ``TensixBackend.block_thread_issue`` for the
+                        # sentences it comes from.
                         self._note_stall(
                             cycle_num,
                             "thread_issue_block",
