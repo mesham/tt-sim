@@ -74,7 +74,7 @@ PROBES=(
   "cmdbuf|blackhole|0|CMD_BUF_AVAIL at rest -- the depth the ISA docs withhold"
   "tensix|both|6|a second tensixbench sample; every rung-3 result rests on one"
   "tensix-warm|both|4|drop tensixbench's cold n=32 burst (--blocks 64)"
-  "tensix-rdcfg|both|2|RDCFG LATENCY by (op+STALLWAIT) - (1cyc+STALLWAIT)"
+  "tensix-rdcfg|both|4|RDCFG LATENCY as a producer-to-consumer DISTANCE, plus the C12 liveness control"
   "dram|both|7|N tiles reading ONE DRAM channel: the endpoint-occupancy shape"
   "rv|both|8|riscvbench primary + a repeat cross-check at the SAME parameters"
   "rv-gset|both|3|phase-G footprint ramp, --gset 1..4 (4608/5632 B are new)"
@@ -458,20 +458,43 @@ probe_tensix_rdcfg() {
   # the doc's 2 as an occupancy is what made tt-sim's matmulblock guard compute
   # the wrong answer.
   #
-  # 0x304201 = slots 0, 9, 14, 20, 21: the empty-loop control, the two paired
-  # ops BARE (so the difference can be shown to be latency and not occupancy),
-  # and the two paired slots. Run in isolation because phase A's validity gate
-  # is per-PHASE: a nonlinear new slot inside the `tensix` probe would flip
-  # TTBENCH_VALID_A for all nineteen good series at once.
+  # 0x3FF04601 = slots 0, 9, 10, 14, 20-29: the empty-loop control, the paired
+  # ops BARE (so a difference can be shown to be latency and not occupancy),
+  # slots 20/21 and 22-25 kept as the two documented negatives, the dependence
+  # pair 26/27 and the C12 liveness control 28/29. Run in isolation because
+  # phase A's validity gate is per-PHASE: a nonlinear new slot inside the
+  # `tensix` probe would flip TTBENCH_VALID_A for all nineteen good series at
+  # once.
+  #
+  # `--vis-reps` turns on the visibility sweep -- RDCFG's documented ">= 2" read
+  # as a producer-to-consumer DISTANCE, which is the one construction the ISA
+  # documentation supports for it. It runs on the t1 launch only, writes no CSV
+  # row and issues no STALLWAIT.
   build_once "$TB" tensixbench || { verdict tensix-rdcfg FAILED "build failed"; return; }
   local csv="$OUT/tensix-rdcfg.$ARCH.csv" args
-  if [ "$DO_SIM" = 1 ]; then args="--phase a --blocks 1 --variants t1 --probes 0x304201"
-  else args="--phase a --blocks 32 --iters 64 --variants t1 --probes 0x304201"; fi
+  if [ "$DO_SIM" = 1 ]; then args="--phase a --blocks 1 --variants t1 --probes 0x3FF04601 --vis-reps 4"
+  else args="--phase a --blocks 32 --iters 64 --variants t1 --probes 0x3FF04601 --vis-reps 64"; fi
   # shellcheck disable=SC2086
   ( cd "$TB" && ./build/tensixbench $args --out "$csv" ) >"$OUT/tensix-rdcfg.out" 2>&1
   cat "$OUT/tensix-rdcfg.out" >> "$LOG"
   [ -s "$csv" ] || { verdict tensix-rdcfg FAILED "no CSV; send tensix-rdcfg.out"; return; }
-  graded tensix-rdcfg tensix_rdcfg_verdict "$OUT/tensix-rdcfg.out"
+
+  # THE C12 LIVENESS CONTROL, in its OWN run, and that is not tidiness. It is
+  # graded across variants -- t1 for the stall's floor, t3 for the same stall
+  # while two other threads hold the Configuration Unit -- so it needs a t3
+  # launch, and t3 series are contended by construction. Phase A's validity gate
+  # is per-PHASE, so one nonlinear contended series in the run above would flip
+  # TTBENCH_VALID_A for the visibility measurement and every other slot with it.
+  # Slots 0, 28 and 29 only: the empty-loop control the slope needs, and the
+  # pair.
+  local c12csv="$OUT/tensix-rdcfg-c12.$ARCH.csv" c12args
+  if [ "$DO_SIM" = 1 ]; then c12args="--phase a --blocks 1 --variants t1,t3 --probes 0x30000001"
+  else c12args="--phase a --blocks 32 --iters 64 --variants t1,t3 --probes 0x30000001"; fi
+  # shellcheck disable=SC2086
+  ( cd "$TB" && ./build/tensixbench $c12args --out "$c12csv" ) >"$OUT/tensix-rdcfg-c12.out" 2>&1
+  cat "$OUT/tensix-rdcfg-c12.out" >> "$LOG"
+
+  graded tensix-rdcfg tensix_rdcfg_verdict "$OUT/tensix-rdcfg.out" "$OUT/tensix-rdcfg-c12.out"
 }
 
 probe_dram() {
@@ -522,6 +545,16 @@ probe_dram() {
   [ -s "$csv" ] || { verdict dram FAILED "no CSV (rc=$r); send dram.out"; return; }
   say "   $(grep -m1 'fanchan aggregate' "$OUT/dram.out" 2>/dev/null || echo 'no fanchan control line')"
   say "   $(grep -m1 'onechan aggregate' "$OUT/dram.out" 2>/dev/null || echo 'no onechan line')"
+  # The sustained-rate table is the LEVEL, and the scaling verdict cannot see
+  # it: a one-channel arm plateauing at 24 B/cycle and one plateauing at 40
+  # give the same ratio. It is also the only reading comparable to the vendor's
+  # published 22.2 / 22.3 / 22.3 GB/s at 1 / 12 / 48 tiles, so it belongs in
+  # the session log rather than only in dram.out. The prediction it is to be
+  # read against was committed BEFORE this run:
+  # perfbench/dramratebench/prediction-sustained.csv.
+  while IFS= read -r line; do
+    say "   $line"
+  done < <(awk '/SUSTAINED RATE/ { p = 1 } /VERDICT:/ { p = 0 } p' "$OUT/dram.out" 2>/dev/null)
   graded dram dram_verdict "$OUT/dram.out" "$csv"
   say "   note: this is CORROBORATION of a SHAPE and never provenance. Blackhole"
   say "         has no published DRAM tile page at all -- no per-channel rate, no"

@@ -58,10 +58,11 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
    analyses are done** (2026-08-10): the congestion pair reproduces,
    the (11,2) epoch is closed, the fetch ramp is a graded 1/F rise to
    a ceiling, and phase Q's failure was a grader mislabel. What is
-   left needs hardware or new code: **one card experiment** (the
-   dvalid mode-vs-card-state run that re-opens the Matrix Unit), **one
-   probe redesign** (`RDCFG` — the built construction never reaches
-   the config unit), and the **Wormhole follow-on**.
+   left needs **hardware**: the dvalid mode-vs-card-state run that
+   re-opens the Matrix Unit, a Blackhole run of the redesigned `RDCFG`
+   probe, and the **Wormhole follow-on** — which now also carries the
+   DRAM sustained-rate sweep, whose prediction is committed. Both
+   probe redesigns landed 2026-08-12; neither has been to a card.
 3. **Tensix issue latency & wait-gates** — the ThCon whole-thread hold
    landed 2026-08-11 with no number changed, and srcA/srcB gating was
    already modelled (see §3). What is left is **three gaps with two
@@ -361,8 +362,36 @@ that session settled, and what it left.
   gap. Rung 2 already *sizes* Blackhole at 47.1 B/cycle reading and
   59.4 writing; the 26 % asymmetry is why a scaled Wormhole number is
   wrong, and it would remain wrong with a measured one.
-  **No probe exists yet** — code to write before a card visit, not
-  card time.
+  **RAN ON A BLACKHOLE CARD 2026-08-12, and the level disagrees with
+  the model by 26–35 %.** The shape holds — fan-out control ×4.85
+  against one-channel ×1.018, every gate passed — but the plateau is
+  **47.147 B/cycle and sits at *neither* modelled ceiling**: not the
+  64 B/cycle NoC link tt-sim flattens on, not the DRAM channel, which
+  Blackhole does not publish. tt-sim predicted 62.2–64.0 across the
+  sweep. The measured 47.1 agrees with **rung 2's independent sizing
+  to ~0.05 %**, so two unrelated methods now size a bound the cost
+  tables do not hold. This is currently the best-evidenced gap in the
+  model, and it is **not closable by measurement** — no published page
+  means no provenance. Artefacts:
+  `perfbench/card-sessions/2026-08-12/`. Unexplained: 2 readers reads
+  40.96 B/cycle, *below* 1 reader's 46.31, before recovering.
+  Wormhole remains untested; that part is still the outstanding item.
+
+  **The probe is built and the prediction is committed** (2026-08-12):
+  `perfbench/dramratebench/prediction-sustained.csv`, pinned cell by
+  cell, has Wormhole flat at 23.75 → 23.99 B/cycle — the right shape,
+  **+7 % over the published 22.2 / 22.3 / 22.3**, which is the
+  documented `achievable_fraction: 0.92` the cost table deliberately
+  refuses to fold in (24 × 0.92 = 22.1). What remains is **a Wormhole
+  part**, not code.
+  One correction this forced: **shape alone cannot separate the
+  endpoint from the DRAM tile's inbound link**, because a scaling
+  ratio is invariant to the level and the two resources run at
+  different rates. tt-sim reports `ENDPOINT BOUND` on Blackhole at the
+  vendor's own parameters with **no endpoint modelled at all** — the
+  flat arm is on the 64 B/cycle link. Read the plateau's height, not
+  just its flatness; this entry measures *a bound at the shared
+  endpoint*, and only the level says which one.
 
 - **Phase A cannot currently measure the Matrix Unit reproducibly.**
   16 of 19 probes and all of phase B corroborate the X1 dataset
@@ -438,10 +467,64 @@ that session settled, and what it left.
   quantity.** The control moved (`SETDMAREG`+`STALLWAIT` 2.968 against
   0.998 bare, so the stall instruction costs something) but the paired
   difference is **0.0000 cycles/pair**, under the half-cycle floor.
-  `STALL_THREAD`/`TRISC_CFG` never observes the config unit, so
-  `RDCFG`'s documented `>= 2` latency **stays unchecked**. This is a
-  probe-design negative, not a card fault; a different stall condition
-  is needed.
+  **Diagnosed and redesigned 2026-08-12.** `p_stall::TRISC_CFG` is
+  condition C10/C13 — *the RISCV T core's* outstanding memory requests
+  against GPRs, config or TDMA-RISC, not a Tensix instruction in the
+  Configuration Unit's pipeline. The name is the trap: it was a
+  correct measurement of the wrong quantity. The condition that does
+  observe it is **C12 / `p_stall::CFGEXU`, Blackhole only** ("any
+  thread has an instruction in any stage of the Configuration Unit
+  pipeline"), which `RDCFG.md` explicitly recommends. Slots 22–25 take
+  the difference against an in-unit `RMWCIB0` baseline; 20/21 stay as
+  the falsification control. **Wormhole needs no probe** — there
+  `RDCFG` blocks its issuing thread for the whole duration, so the
+  `>= 2` is an occupancy and probe 14 already reaches it; only a
+  dataset is missing.
+  **The C12 construction ran on a card 2026-08-12 and did not reach
+  the quantity either.** All three arms cost identically to four
+  decimal places — 2.9682 whether the preceding instruction was
+  `RDCFG`, an in-unit `RMWCIB0` or an off-unit `SETDMAREG` — with the
+  intended condition confirmed used (`COND: C12 CFGEXU 0x1000`) and
+  every bare occupancy at 0.998.
+  **Settled from the docs 2026-08-12: no stall can reach it.**
+  `ConfigurationUnit.md` tabulates the `>= 2` under a column headed
+  **Latency** at **IPC 1**, so the 0.998 occupancy is the documented
+  throughput, not a contradiction — it is a GPR-write latency, and a
+  busy condition observes occupancy. Nor does the `riscvbench`
+  dependent-operand method transplant: `RDCFG.md` says *"software must
+  ensure that the instruction(s) immediately after `RDCFG` are not
+  trying to consume the GPR written by"* it, and an obligation on
+  software is the documented **absence of an interlock** — a close
+  consumer reads a stale value rather than waiting.
+  So it is measured as a **distance, not a duration**: sweep the
+  producer-to-consumer separation and take the smallest at which the
+  value is fresh every time (`--vis-reps`, `TTBENCH_VIS_DMIN`). That
+  is a **lower** bound, the direction the charging policy takes bounds
+  in; `d_min = 2` corroborates the `>= 2`, `d_min = 1` leaves it
+  unreached rather than refuted. Slots 22–25 stay as the documented
+  negative, and slots 28/29 are a **C12 liveness control** using the
+  cross-thread path (C12 is "ANY thread"), which is the only
+  doc-supported way to hold it longer than `STALLWAIT`'s own one-cycle
+  lag. **Wormhole needs none of this** — there `RDCFG` blocks its
+  issuing thread, so the `>= 2` is an occupancy and probe 14 reaches
+  it.
+
+  **Open simulator question this surfaced:** `_read_wait_res`
+  (`tt_sim/pe/tensix/backends/sync.py`) decodes Blackhole `wait_res`
+  as 12 bits where the ISA page gives `u13` and tabulates C0–C12, so
+  `CFGEXU` is trimmed off and the wait degrades to the `0x7F`
+  fallback. `WaitGate._check_blackhole_condition` implements C12 —
+  live but unreachable. The 12-bit width came from ttsim's
+  `data/bh/tensix_isa.json`, so **vendor source and published page
+  disagree** and tt-sim followed the vendor; two tests pin the current
+  behaviour and a fix would move computed values.
+  **That is not the whole of it, and on its own it is not the part
+  that matters.** Widening the mask to 13 bits changes nothing,
+  because tt-sim's Configuration Unit retires inside the cycle that
+  issued, so `hasInflightInstructionsFromThread` is empty whenever
+  another thread's Wait Gate looks. **Two independent gaps** — the
+  decode width and the unit's zero residency — and the residency one
+  is what makes C12 unobservable in the simulator.
 - **phase G at 4608/5632 B** — ran; four gsets written, all rows
   differing. With gset 0 that is **five measured footprints — 4608,
   5120, 5632, 6144, 7168 B** — around a ramp whose onset was bracketed

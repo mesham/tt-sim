@@ -33,7 +33,7 @@ nothing back-pressures the core that issued it. `riscvbench` measures that core.
 | --- | --- | --- | --- | --- | --- |
 | **Run it on hardware** | `tensixbench/run_card.sh` — or [its README](tensixbench/README.md) | `riscvbench/run_card.sh` — or [its README](riscvbench/README.md) | `nocbench/run_card.sh` — or [its README](nocbench/README.md) | `nocreadbench/run_card.sh` — or [its README](nocreadbench/README.md) | `dramratebench/run_card.sh` — or [its README](dramratebench/README.md) |
 | **Why it is shaped this way** | [`../docs/plans/tensix-cost-benchmark.md`](../docs/plans/tensix-cost-benchmark.md) | [`../docs/plans/riscv-front-end-benchmark.md`](../docs/plans/riscv-front-end-benchmark.md) | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "Rung 2" and its addendum | [`../docs/plans/cost-model.md`](../docs/plans/cost-model.md), "The read floor" | `dram.channel_serialisation` in [`../tt_sim/perf/unit_costs.yaml`](../tt_sim/perf/unit_costs.yaml), and `DramChannels` in `tt_sim/device/tiles.py` |
-| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.noc_congestion_sweep --measured <csv>` | by hand, against the README's prediction table | by hand: the program prints the two arms' scaling next to each other |
+| **Analyse the results** | `python3 -m tt_sim.perf.tensix_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.riscv_bench_sweep --measured <csv>` | `python3 -m tt_sim.perf.noc_congestion_sweep --measured <csv>` | by hand, against the README's prediction table | `python3 -m tt_sim.perf.dram_rate_sweep --measured <csv>` |
 
 `nocreadbench` is the newest and the only one whose *most important* reading
 needs no arithmetic at all: `NIU_MST_REQS_OUTSTANDING_ID(0)` is a counter of the
@@ -102,7 +102,7 @@ measured responded. The rule is now stated once, in one place, and tested:
 before a session:
 
 ```bash
-perfbench/card_session_verdicts_test.sh     # 61 checks, no card needed
+perfbench/card_session_verdicts_test.sh     # 69 checks, no card needed
 ```
 
 **About 105 minutes cold**, of which ~70 is building the five programs; about 40
@@ -134,7 +134,7 @@ only one — but it also saves rsyncing several MB of object files each time.
 Two steps are *analysis*, not collection, and they do need `tt_sim/`:
 
 - the **`nocbench` planner**, which decides the congestion experiment; and
-- the three **report generators** (`*_bench_sweep`, `noc_congestion_sweep`).
+- the four **report generators** (`*_bench_sweep`, `noc_congestion_sweep`, `dram_rate_sweep`).
 
 If `tt_sim/` is not importable the session says so, runs the five benches
 anyway, collects every CSV, and skips only the planner-dependent `noc` and
@@ -236,8 +236,8 @@ observed result of `--sim --arch blackhole` at smoke sizes with the cost model
 | `rv`, `rv-pairs` | `DEGENERATE` — riscvbench's own live-instrument check fires: `mul_dep`, `div` and `store_spread` all read ~1.0 | meaningful |
 | `rv-qdrain` | `COLLECTED` — it is the knee hunt; nothing in-session grades it | `COLLECTED` |
 | `rv-gset` | `SKIPPED` — minutes per gset against the simulator | `COLLECTED` |
-| `tensix-rdcfg` | `DEGENERATE` — tt-sim's Wait Gate answers an unmapped `STALLWAIT` condition with "satisfied", and neither arch maps `TRISC_CFG`, so the stall is vacuous and the difference is two identical things subtracted | `MEANINGFUL`, or an evidenced negative |
-| `dram` | `MEANINGFUL`, reporting **NO ENDPOINT BOUND** — and that is correct there. The probe widens `TT_SIM_TENSIX_COORDS` to two tiles for its own run, so the sweep and the barrier really do execute (`max_barrier_spins` 22, both tags verified), and both arms then scale ×2.00 exactly. On **Blackhole** the endpoint queue is switched off by construction: no DRAM tile page is published for that part, so `dram_gddr_channel_size` is `None`, `DramChannels.bytes_per_cycle` is `None`, and every `claim()` is a no-op. Perfect linear scaling is what an unmodelled endpoint gives. With one tile it reads `DEGENERATE` instead, for want of a second point. **On Wormhole with `TT_SIM_COST_MODEL=1` it reads `ENDPOINT BOUND`** — see below | the whole question |
+| `tensix-rdcfg` | `DEGENERATE` — measured, 2026-08-12, and for a reason internal to the simulator. The visibility sweep's controls both pass (a stale reading and a fresh reading are each representable) and it reports `TTBENCH_VIS_DMIN: 1`: tt-sim's Configuration Unit writes the destination GPR in the issue cycle, so it models no `RDCFG` latency at all and the documented `>= 2` cannot be reached there. The C12 liveness control does not move either — and **not** only because of the 12-bit mask: widening `_read_wait_res` to 13 bits changes nothing, because tt-sim's config unit retires inside the cycle that issued, so `hasInflightInstructionsFromThread` is empty whenever another thread's Wait Gate looks. Giving the unit a genuine one-cycle post-retire residency makes the control move (`TTBENCH_C12_LIVE: 2.03 4.60 t3`), which is how the control was shown to fire in both directions. On Wormhole the C12 slots report `SKIPPED` — the condition does not exist there | `MEANINGFUL`, or an evidenced negative |
+| `dram` | `MEANINGFUL`, reporting **NO ENDPOINT BOUND** — and that is correct there. The probe widens `TT_SIM_TENSIX_COORDS` to two tiles for its own run, so the sweep and the barrier really do execute (`max_barrier_spins` 22, both tags verified), and both arms then scale ×2.00 exactly. On **Blackhole** the endpoint queue is switched off by construction: no DRAM tile page is published for that part, so `dram_gddr_channel_size` is `None`, `DramChannels.bytes_per_cycle` is `None`, and every `claim()` is a no-op. Perfect linear scaling is what an unmodelled endpoint gives. With one tile it reads `DEGENERATE` instead, for want of a second point. **On Wormhole with `TT_SIM_COST_MODEL=1` it reads `ENDPOINT BOUND`** — see below. **And the smoke sizes are load-bearing in that sentence**: at the vendor's own 1 MiB / 4096 B, twelve Blackhole tiles read `ENDPOINT BOUND` too, ratio 0.25, with the endpoint queue still switched off — the flat arm is sitting on the DRAM tile's 64 B/cycle NoC link, which a scaling ratio cannot tell from a channel. `dramratebench/README.md` has the table | the whole question |
 | `noc`, `noc-epoch` | `SKIPPED` — see below | the experiment, or `DEFERRED` if the box has no `tt_sim/` |
 
 **The congestion probes do not merely read `INVALID` against tt-sim; they hang**,
@@ -254,11 +254,23 @@ simulator and every one of those is correct.** The simulator is not the
 instrument; it is how you check the instrument runs.
 
 Two readings are worth stating twice, because at the card they will look like
-differences and are not. `tensix-rdcfg`'s sub-floor difference comes from a
-reason internal to tt-sim's Wait Gate — `case _: return True` for an unmapped
-`STALLWAIT` condition, in `tt_sim/pe/tensix/frontend.py`, and neither
-architecture maps `TRISC_CFG` — rather than from anything about the hardware,
-which is also why it cannot hang the simulator. And `dram` reporting **NO
+differences and are not. `tensix-rdcfg` reads `d_min = 1` for a reason internal
+to tt-sim rather than anything about the hardware: its Configuration Unit writes
+the destination GPR in the cycle that issued the `RDCFG`, so there is no latency
+to be invisible to a consumer, and the same single-cycle retirement is why
+condition **C12** (`CFGEXU`, "any thread has an instruction in any stage of the
+Configuration Unit pipeline") never observes anything either.
+`WaitGate._check_blackhole_condition` *does* implement C12, against
+`config_unit.hasInflightInstructionsFromThread`, and `_read_wait_res`
+additionally trims the condition mask to raw bits 11:0 so C12 is cut off before
+the gate sees it — the ISA page gives the field as 13 bits
+(`TT_STALLWAIT(/* u9 */ BlockMask, /* u13 */ ConditionMask)`) while the width
+tt-sim took from ttsim's `data/bh/tensix_isa.json` is 12. **That is a source
+conflict worth raising upstream**, but it is not the whole story here: widening
+the field to 13 bits leaves the control flat, and only giving the unit a real
+one-cycle post-issue residency makes it move. Two separate gaps, and the second
+is the one that matters for this measurement. It is also why the probe cannot
+hang the simulator. And `dram` reporting **NO
 ENDPOINT BOUND** on Blackhole is not a refutation of anything: the term is
 **live only on Wormhole**, because Blackhole has no published DRAM tile page at
 all, so `ArchProfile.dram_gddr_channel_size` is `None` there and the queue the
@@ -353,18 +365,33 @@ Four roadmap probes are deliberately absent, because each needs new device code
 and a shipped block covering twelve beats a half-built one covering sixteen.
 What each would take, established by reading rather than guessed. Two more used
 to be on this list and were built on 2026-08-09 — the `RDCFG` latency difference
-(now the `tensix-rdcfg` probe, slots 20 and 21) and phase G at 4608 / 5632 B
+(now the `tensix-rdcfg` probe, slots 20–29) and phase G at 4608 / 5632 B
 (now `--gset 3` and `--gset 4`) — and what that cost is recorded under "The
 magic bump, answered" below, because the question it turned on is the one the
-next probe to widen a layout will hit too.
+next probe to widen a layout will hit too. That probe has now returned **two**
+negatives about itself, both on a card. Slots 20/21 waited on
+`p_stall::TRISC_CFG`, which is the RISCV core's outstanding *memory requests*
+and not the Configuration Unit's pipeline, and measured 0.0000 cycles/pair
+against a stall that provably cost cycles (2026-08-09). Slots 22–25 took the
+same difference against Blackhole's condition **C12** (`CFGEXU`), the one
+documented condition that does observe that unit — and measured 0.0000 again,
+with all three arms identical to four decimal places (2026-08-12). The
+documents say why: `ConfigurationUnit.md` tabulates `RDCFG`'s `>= 2` under a
+column headed **Latency** at IPC 1, so it is a latency to the destination GPR
+and a busy-condition sees occupancy. The reading moved to a **distance** — the
+smallest producer-to-consumer separation at which the value becomes visible,
+which is the observable `RDCFG.md`'s "Software must ensure that the
+instruction(s) immediately after `RDCFG` are not trying to consume the GPR"
+describes. Slots 20–25 stay as the two documented negatives, and slots 28/29 are
+the cross-thread control that says whether C12 was blind or inert.
 
 - **`ATCAS` / `ATINCGETPTR` against a real L1 semaphore.** No probe exists — the
   strings appear nowhere in `perfbench/`. `docs/plans/tensix-cost-benchmark.md`
   calls the probe "straightforward" and names it as one of two next steps; it
   needs two new `RUN(...)` slots in
-  `tensixbench/src/kernels/compute/raw_probes.cpp` past the current 22, which
+  `tensixbench/src/kernels/compute/raw_probes.cpp` past the current 30, which
   crosses `TTBENCH_NUM_PROBES` and so the result-buffer size and
-  `TTBENCH_MAGIC` — all three of which slots 20 and 21 have now done once, so
+  `TTBENCH_MAGIC` — all three of which slots 20–25 have now done twice, so
   the pattern to copy is in the tree rather than in this list. The wrinkle the
   plan does not spell out is that, unlike every existing phase-A probe, these
   are **not side-effect-free**: the block is
