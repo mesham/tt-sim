@@ -1,0 +1,186 @@
+2026-08-12 21:57:42.324 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-12 21:57:42.325 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-12 21:57:42.326 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:95)
+2026-08-12 21:57:42.326 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-12 21:58:20.224 | info     |             UMD | Established firmware bundle version: 19.6.0 (topology_discovery.cpp:574)
+2026-08-12 21:58:20.224 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-12 21:58:20.345 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {} (cluster.cpp:168)
+2026-08-12 21:58:20.346 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-12 21:58:20.346 | info     |             UMD | KMD version: 2.10.0 (cluster.cpp:145)
+2026-08-12 21:58:20.346 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-12 21:58:20.351 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-12 21:58:20.528 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-12 21:58:21.456 | info     |     Distributed | Using auto discovery to generate mesh graph. (metal_env.cpp:408)
+2026-08-12 21:58:21.456 | info     |     Distributed | Constructing control plane using auto-discovery (no mesh graph descriptor). (metal_env.cpp:470)
+2026-08-12 21:58:21.456 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=0 (bus_id=0x27) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 21:58:21.456 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=1 (bus_id=0x83) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 21:58:21.457 | warning  |          Fabric | TopologyMapper auto-discovery: Downgrading to mesh shape 1x1 (1 total nodes) for 2 physical chips. Some physical chips may not be used. This may indicate connectivity issues, topology mismatches, or insufficient fabric links between chips. Verify your physical chip connectivity and ensure that the fabric links are correctly configured. (topology_mapper.cpp:1696)
+2026-08-12 21:58:21.458 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:1} (topology_mapper_utils.cpp:2342)
+2026-08-12 21:58:21.458 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:2} (topology_mapper_utils.cpp:2350)
+2026-08-12 21:58:21.480 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/13617218422840890655/ (build_env_manager.cpp:347)
+2026-08-12 21:58:21.481 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/13617218422840890655/ (build_env_manager.cpp:347)
+2026-08-12 21:58:21.509 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase A [t1]: done (1 issuing thread), 80 rows written to /home/nx09/nx09/nebriscv/tt_traces/dvalid/4-clean-once.csv
+phase A [t2]: done (2 issuing threads), 240 rows written to /home/nx09/nx09/nebriscv/tt_traces/dvalid/4-clean-once.csv
+phase A [t3]: done (3 issuing threads), 480 rows written to /home/nx09/nx09/nebriscv/tt_traces/dvalid/4-clean-once.csv
+phase B [LoFi]: done, 488 rows written to /home/nx09/nx09/nebriscv/tt_traces/dvalid/4-clean-once.csv
+phase B [HiFi2]: done, 496 rows written to /home/nx09/nx09/nebriscv/tt_traces/dvalid/4-clean-once.csv
+phase B [HiFi4]: done, 504 rows written to /home/nx09/nx09/nebriscv/tt_traces/dvalid/4-clean-once.csv
+
+==============================================================================
+tensixbench summary [blackhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+dvalid setup: once -- one SETDVALID for the tile (X1, de-confounded)
+
+probe          variant unit      thr     cyc/block  cyc/instr      R^2
+loop_overhead  t1      -         1            2.00      0.000   1.0000
+NOP            t1      NONE      1           65.85      0.998   1.0000
+DMANOP         t1      TDMA      1           65.86      0.998   1.0000
+SFPNOP         t1      SFPU      1           65.86      0.998   1.0000
+SFPMOV         t1      SFPU      1           65.87      0.998   1.0000
+SFPADD         t1      SFPU      1           65.86      0.998   1.0000
+SFPMUL         t1      SFPU      1           65.87      0.998   1.0000
+SFPMAD         t1      SFPU      1           65.86      0.998   1.0000
+SFPABS         t1      SFPU      1           65.87      0.998   1.0000
+SETDMAREG      t1      THCON     1           65.86      0.998   1.0000
+ADDDMAREG      t1      THCON     1          192.23      2.972   1.0000
+MULDMAREG      t1      THCON     1          192.20      2.972   1.0000
+SHIFTDMAREG    t1      THCON     1          192.23      2.972   1.0000
+CMPDMAREG      t1      THCON     1          192.20      2.972   1.0000
+RDCFG          t1      CFG       1           65.86      0.998   1.0000
+SETRWC         t1      MATH      1           65.86      0.998   1.0000
+INCRWC         t1      MATH      1           65.87      0.998   1.0000
+MVMUL          t1      MATH      1          385.22      5.988   1.0000
+ELWADD         t1      MATH      1          384.37      5.975   1.0000
+ELWMUL         t1      MATH      1          384.33      5.974   1.0000
+loop_overhead  t2      -         0            2.00      0.000   1.0000
+NOP            t2      NONE      0           65.87      0.998   1.0000
+DMANOP         t2      TDMA      0          127.69      1.964   1.0000
+SFPNOP         t2      SFPU      0          127.79      1.966   1.0000
+SFPMOV         t2      SFPU      0          128.01      1.969   1.0000
+SFPADD         t2      SFPU      0          128.03      1.969   1.0000
+SFPMUL         t2      SFPU      0          127.86      1.967   1.0000
+SFPMAD         t2      SFPU      0          127.85      1.966   1.0000
+SFPABS         t2      SFPU      0          127.94      1.968   1.0000
+SETDMAREG      t2      THCON     0          127.88      1.967   1.0000
+ADDDMAREG      t2      THCON     0          384.79      5.981   1.0000
+MULDMAREG      t2      THCON     0          384.01      5.969   1.0000
+SHIFTDMAREG    t2      THCON     0          384.03      5.969   1.0000
+CMPDMAREG      t2      THCON     0          384.06      5.970   1.0000
+RDCFG          t2      CFG       0          127.74      1.965   1.0000
+SETRWC         t2      MATH      0          127.93      1.968   1.0000
+INCRWC         t2      MATH      0          127.92      1.968   1.0000
+MVMUL          t2      MATH      0          770.69     12.011   1.0000
+ELWADD         t2      MATH      0          768.04     11.969   1.0000
+ELWMUL         t2      MATH      0          768.03     11.969   1.0000
+loop_overhead  t2      -         1            2.00      0.000   1.0000
+NOP            t2      NONE      1           65.86      0.998   1.0000
+DMANOP         t2      TDMA      1          128.07      1.970   1.0000
+SFPNOP         t2      SFPU      1          128.00      1.969   1.0000
+SFPMOV         t2      SFPU      1          128.00      1.969   1.0000
+SFPADD         t2      SFPU      1          128.00      1.969   1.0000
+SFPMUL         t2      SFPU      1          128.00      1.969   1.0000
+SFPMAD         t2      SFPU      1          128.00      1.969   1.0000
+SFPABS         t2      SFPU      1          128.00      1.969   1.0000
+SETDMAREG      t2      THCON     1          128.00      1.969   1.0000
+ADDDMAREG      t2      THCON     1          385.01      5.984   1.0000
+MULDMAREG      t2      THCON     1          384.14      5.971   1.0000
+SHIFTDMAREG    t2      THCON     1          384.14      5.971   1.0000
+CMPDMAREG      t2      THCON     1          384.14      5.971   1.0000
+RDCFG          t2      CFG       1          127.52      1.961   1.0000
+SETRWC         t2      MATH      1          128.02      1.969   1.0000
+INCRWC         t2      MATH      1          128.01      1.969   1.0000
+MVMUL          t2      MATH      1          770.46     12.007   1.0000
+ELWADD         t2      MATH      1          767.98     11.968   1.0000
+ELWMUL         t2      MATH      1          768.05     11.969   1.0000
+loop_overhead  t3      -         0            2.00      0.000   1.0000
+NOP            t3      NONE      0           65.87      0.998   1.0000
+DMANOP         t3      TDMA      0          192.32      2.974   1.0000
+SFPNOP         t3      SFPU      0          192.28      2.973   1.0000
+SFPMOV         t3      SFPU      0          192.11      2.971   1.0000
+SFPADD         t3      SFPU      0          192.19      2.972   1.0000
+SFPMUL         t3      SFPU      0          192.10      2.970   1.0000
+SFPMAD         t3      SFPU      0          192.50      2.977   1.0000
+SFPABS         t3      SFPU      0          192.46      2.976   1.0000
+SETDMAREG      t3      THCON     0          192.06      2.970   1.0000
+ADDDMAREG      t3      THCON     0          577.62      8.994   1.0000
+MULDMAREG      t3      THCON     0          576.05      8.970   1.0000
+SHIFTDMAREG    t3      THCON     0          575.97      8.968   1.0000
+CMPDMAREG      t3      THCON     0          576.02      8.969   1.0000
+RDCFG          t3      CFG       0          191.22      2.957   1.0000
+SETRWC         t3      MATH      0          191.86      2.967   1.0000
+INCRWC         t3      MATH      0          191.88      2.967   1.0000
+MVMUL          t3      MATH      0         1156.00     18.031   1.0000
+ELWADD         t3      MATH      0         1152.05     17.970   1.0000
+ELWMUL         t3      MATH      0         1151.98     17.968   1.0000
+loop_overhead  t3      -         1            2.00      0.000   1.0000
+NOP            t3      NONE      1           65.87      0.998   1.0000
+DMANOP         t3      TDMA      1          192.18      2.972   1.0000
+SFPNOP         t3      SFPU      1          192.20      2.972   1.0000
+SFPMOV         t3      SFPU      1          192.27      2.973   1.0000
+SFPADD         t3      SFPU      1          192.25      2.973   1.0000
+SFPMUL         t3      SFPU      1          192.01      2.969   1.0000
+SFPMAD         t3      SFPU      1          192.14      2.971   1.0000
+SFPABS         t3      SFPU      1          192.01      2.969   1.0000
+SETDMAREG      t3      THCON     1          192.01      2.969   1.0000
+ADDDMAREG      t3      THCON     1          577.90      8.998   1.0000
+MULDMAREG      t3      THCON     1          576.21      8.972   1.0000
+SHIFTDMAREG    t3      THCON     1          576.28      8.973   1.0000
+CMPDMAREG      t3      THCON     1          576.28      8.973   1.0000
+RDCFG          t3      CFG       1          190.64      2.948   1.0000
+SETRWC         t3      MATH      1          192.01      2.969   1.0000
+INCRWC         t3      MATH      1          192.01      2.969   1.0000
+MVMUL          t3      MATH      1         1156.35     18.037   1.0000
+ELWADD         t3      MATH      1         1152.10     17.970   1.0000
+ELWMUL         t3      MATH      1         1152.11     17.971   1.0000
+loop_overhead  t3      -         2            2.00      0.000   1.0000
+NOP            t3      NONE      2           65.86      0.998   1.0000
+DMANOP         t3      TDMA      2          192.09      2.970   1.0000
+SFPNOP         t3      SFPU      2          192.10      2.970   1.0000
+SFPMOV         t3      SFPU      2          192.06      2.970   1.0000
+SFPADD         t3      SFPU      2          192.06      2.970   1.0000
+SFPMUL         t3      SFPU      2          192.00      2.969   1.0000
+SFPMAD         t3      SFPU      2          192.02      2.969   1.0000
+SFPABS         t3      SFPU      2          192.00      2.969   1.0000
+SETDMAREG      t3      THCON     2          191.98      2.968   1.0000
+ADDDMAREG      t3      THCON     2          577.77      8.996   1.0000
+MULDMAREG      t3      THCON     2          576.01      8.969   1.0000
+SHIFTDMAREG    t3      THCON     2          576.01      8.969   1.0000
+CMPDMAREG      t3      THCON     2          576.02      8.969   1.0000
+RDCFG          t3      CFG       2          190.48      2.945   1.0000
+SETRWC         t3      MATH      2          191.96      2.968   1.0000
+INCRWC         t3      MATH      2          192.00      2.969   1.0000
+MVMUL          t3      MATH      2         1156.46     18.038   1.0000
+ELWADD         t3      MATH      2         1152.15     17.971   1.0000
+ELWMUL         t3      MATH      2         1152.15     17.971   1.0000
+matmul_tiles   LoFi    MATH      0           34.62     34.625   1.0000
+matmul_tiles   LoFi    MATH      1           34.84     34.839   1.0000
+matmul_tiles   HiFi2   MATH      0           52.02     52.019   0.9999
+matmul_tiles   HiFi2   MATH      1           52.55     52.555   0.9997
+matmul_tiles   HiFi4   MATH      0           85.53     85.534   0.9996
+matmul_tiles   HiFi4   MATH      1           86.12     86.125   0.9994
+
+------------------------------------------------------------------------------
+phase B: fidelity deltas (math thread), and what bounded the loop
+------------------------------------------------------------------------------
+  LoFi   -> HiFi2   measured   +17.72   predicted  +16.00   residual    +1.72
+  HiFi2  -> HiFi4   measured   +33.57   predicted  +32.00   residual    +1.57
+  (predicted = 16 MVMULs per fidelity phase x 1 cycle each)
+
+  fidelity   math (thr 1) unpack (thr 0)
+  LoFi              34.84          34.62
+  HiFi2             52.55          52.02
+  HiFi4             86.12          85.53
+
+wrote 504 rows to /home/nx09/nx09/nebriscv/tt_traces/dvalid/4-clean-once.csv
+TTBENCH_VALID_A: yes
+TTBENCH_VALID_B: yes
+TTBENCH_VALID: yes
+Completed successfully on the device
+2026-08-12 21:58:21.881 | info     |    BuildKernels | JIT cache stats: 19/19 hits (100.0%) [19 cached, 4 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-12 21:58:21.881 | info     |    BuildKernels | JIT telemetry: 3 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-12 21:58:21.887 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-12 21:58:21.887 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-12 21:58:23.312 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-12 21:58:23.312 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-12 21:58:23.312 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

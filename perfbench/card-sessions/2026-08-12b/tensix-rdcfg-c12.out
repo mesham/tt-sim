@@ -1,0 +1,82 @@
+2026-08-12 21:54:45.331 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-12 21:54:45.333 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-12 21:54:45.334 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:95)
+2026-08-12 21:54:45.334 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-12 21:54:45.346 | info     |             UMD | Established firmware bundle version: 19.6.0 (topology_discovery.cpp:574)
+2026-08-12 21:54:45.347 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-12 21:54:45.492 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {} (cluster.cpp:168)
+2026-08-12 21:54:45.492 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-12 21:54:45.492 | info     |             UMD | KMD version: 2.10.0 (cluster.cpp:145)
+2026-08-12 21:54:45.492 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-12 21:54:45.497 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-12 21:54:45.619 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-12 21:54:46.564 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-12 21:54:46.564 | info     |     Distributed | Using auto discovery to generate mesh graph. (metal_env.cpp:408)
+2026-08-12 21:54:46.564 | info     |     Distributed | Constructing control plane using auto-discovery (no mesh graph descriptor). (metal_env.cpp:470)
+2026-08-12 21:54:46.564 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=0 (bus_id=0x27) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 21:54:46.565 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=1 (bus_id=0x83) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 21:54:46.565 | warning  |          Fabric | TopologyMapper auto-discovery: Downgrading to mesh shape 1x1 (1 total nodes) for 2 physical chips. Some physical chips may not be used. This may indicate connectivity issues, topology mismatches, or insufficient fabric links between chips. Verify your physical chip connectivity and ensure that the fabric links are correctly configured. (topology_mapper.cpp:1696)
+2026-08-12 21:54:46.566 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:1} (topology_mapper_utils.cpp:2342)
+2026-08-12 21:54:46.566 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:2} (topology_mapper_utils.cpp:2350)
+2026-08-12 21:54:46.572 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-12 21:54:46.589 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-12 21:54:46.589 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-12 21:54:46.617 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase A [t1]: done (1 issuing thread), 12 rows written to /home/nx09/nx09/nebriscv/tt_traces/rdcfg-2/tensix-rdcfg-c12.blackhole.csv
+phase A [t2]: skipped (--variants t1,t3)
+phase A [t3]: done (3 issuing threads), 48 rows written to /home/nx09/nx09/nebriscv/tt_traces/rdcfg-2/tensix-rdcfg-c12.blackhole.csv
+
+==============================================================================
+tensixbench summary [blackhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+dvalid setup: once -- one SETDVALID for the tile (X1, de-confounded)
+
+probe          variant unit      thr     cyc/block  cyc/instr      R^2
+loop_overhead  t1      -         1            2.00      0.000   1.0000
+C12_XTHREAD    t1      CFG-C12   1          191.97      2.968   1.0000
+C12_XTHREAD_NULL t1      CFG-C12   1          129.78      1.996   1.0000
+loop_overhead  t3      -         0            2.00      0.000   1.0000
+C12_XTHREAD    t3      CFG-C12   0          129.75      1.996   1.0000
+C12_XTHREAD_NULL t3      CFG-C12   0          129.73      1.996   1.0000
+loop_overhead  t3      -         1            2.00      0.000   1.0000
+C12_XTHREAD    t3      CFG-C12   1          316.59      4.916   0.9999
+C12_XTHREAD_NULL t3      CFG-C12   1          129.80      1.997   1.0000
+loop_overhead  t3      -         2            2.00      0.000   1.0000
+C12_XTHREAD    t3      CFG-C12   2          129.78      1.997   1.0000
+C12_XTHREAD_NULL t3      CFG-C12   2          129.79      1.997   1.0000
+
+------------------------------------------------------------------------------
+phase A: is C12 live? the cross-thread control (slots 28/29)
+------------------------------------------------------------------------------
+  thread 1 runs STALLWAIT(STALL_THREAD, CFGEXU)+NOP in slot 28 and NOP+NOP
+  in slot 29; threads 0 and 2 run RMWCIB0+NOP in BOTH, so at t2/t3 they
+  hold the Configuration Unit from outside thread 1's issue path. C12 is
+  "Any thread has an instruction in any stage of the Configuration Unit
+  pipeline", so a live C12 must make thread 1's stall grow with the
+  number of hammering threads. Slot 29 carries the cross-thread issue
+  interference that grows anyway, and subtracts it.
+
+  variant thr    stall/pair    null/pair d = difference
+  t1      1           2.968        1.996       +0.972
+  t3      1           4.916        1.997       +2.919
+
+TTBENCH_C12_LIVE: 0.9718 2.9186 t3
+  d(t1) = 0.972 is the stall's own floor with nobody else in the unit.
+  d(t3) = 2.919 is the same stall while two hammering thread(s) keep the
+  unit busy. A large positive difference says C12 IS live, and then
+  slots 22-25 reading zero means RDCFG's post-issue residency is no
+  wider than the stall's own documented one-cycle lag. A zero says C12
+  is inert on this part, and then slots 22-25 say nothing about RDCFG
+  at all. Both are reachable; neither is the default.
+
+wrote 48 rows to /home/nx09/nx09/nebriscv/tt_traces/rdcfg-2/tensix-rdcfg-c12.blackhole.csv
+TTBENCH_VALID_A: yes
+TTBENCH_VALID: yes
+Completed successfully on the device
+2026-08-12 21:54:46.693 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 1 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-12 21:54:46.693 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-12 21:54:46.698 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-12 21:54:46.698 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-12 21:54:48.046 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-12 21:54:48.047 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-12 21:54:48.047 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

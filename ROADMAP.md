@@ -38,89 +38,55 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ## Priority list
 
-### Tier 1 — load-bearing, start here
+Items 1–8 map to the detail sections §1–§8. **Do not renumber** —
+other docs cite these numbers.
 
-> **Tier 1 is effectively clear as of 2026-08-12.** Its one item's
-> load-bearing halves both closed (endpoint occupancy 2026-08-09, the
-> Blackhole channel rate 2026-08-12); what is left below is residue.
-> The live load-bearing work is now the **"Toward a v2.0 release"**
-> list. The numbering here is kept because items 1–8 map to the
-> detail sections §1–§8; do not renumber.
+The live load-bearing work is the **"Toward a v2.0 release"** list
+below, not this one: Tier 1 cleared on 2026-08-12 and Tier 2's
+remaining half needs hardware, not code.
 
-1. **DRAM residue** — endpoint occupancy closed 2026-08-09; Blackhole's
-   channel rate closed 2026-08-12 (see §1). **The block was never the
-   missing page.** `dram.bandwidth` is a GB/s *spec* block — per-channel
-   rate, channel count, achievable fraction — and all three do need a
-   document BlackholeA0 lacks. But the term the model *spends* is
-   `dram.channel_serialisation`, in **bytes per cycle**, and that never
-   had to arrive by unit conversion from a GB/s. It now arrives from one
-   division on two of tt-metal's own measured cycle counts:
-   `vendor_source_derived`, **47.0805 B/cycle for reads**. The ladder
-   never asked for a page — `access_latency` is chargeable at 126 on the
-   same arch, in the same section, by the same route. A silicon
-   measurement is still `corroboration`, never provenance, and the
-   2026-08-12 card's 47.147 is exactly that: it agrees to **0.14 %** with
-   a derivation that predates it and never saw it. The **write**
-   direction stays uncharged deliberately — its secant lands within
-   2.5 % of the same arch's L1 rows, so the dataset resolves no
-   DRAM-specific write bound, and charging it would deepen a named
-   over-charge. What remains here is the Blackhole `l1_local_cycles = 88`
-   anomaly and the unmodelled bank/refresh terms.
+### Tier 1 — cleared 2026-08-12
+
+1. **DRAM residue** (§1) — both load-bearing halves closed. What is
+   left is residue: the BH `l1_local_cycles = 88` anomaly, the BH
+   write over-charge, and bank/refresh terms nothing publishes.
 
 ### Tier 2 — high value, small-to-medium effort
 
-2. **Silicon follow-ups** — three Blackhole sessions ran 2026-08-09
-   (see §2). The endpoint-occupancy term is **corroborated on
-   silicon**, the fetch onset is bracketed by five measured
-   footprints, and the session is twelve probes. **All four offline
-   analyses are done** (2026-08-10): the congestion pair reproduces,
-   the (11,2) epoch is closed, the fetch ramp is a graded 1/F rise to
-   a ceiling, and phase Q's failure was a grader mislabel. What is
-   left needs **hardware**: the dvalid mode-vs-card-state run that
-   re-opens the Matrix Unit, a Blackhole run of the redesigned `RDCFG`
-   probe, and the **Wormhole follow-on** — which now also carries the
-   DRAM sustained-rate sweep, whose prediction is committed. Both
-   probe redesigns landed 2026-08-12; neither has been to a card.
-3. **Tensix issue latency & wait-gates** — the ThCon whole-thread hold
-   landed 2026-08-11 with no number changed, and srcA/srcB gating was
-   already modelled (see §3). What is left is **three gaps with two
-   causes**: two await an arbitration rule the docs do not publish,
-   while the unpacker's issuing-thread interlock is *sourced* and
-   blocked on timing the Src `AllowedClient` flip against the
-   unpacker's occupancy. PC-buffer write delays are **unsourceable**,
-   not deferred; the mover point fixes remain.
+2. **Silicon follow-ups** (§2) — **the Blackhole half is done**
+   (2026-08-12): the dvalid matrix closed the Matrix Unit question and
+   the redesigned `RDCFG` probe ran. What is left is **one hardware
+   booking**: the Wormhole follow-on, carrying the committed DRAM
+   sustained-rate prediction, the store-coalescing and multiply pairs,
+   and the `nocreadbench` half. No code is outstanding — every probe
+   already runs with `--arch wormhole`.
+3. **Tensix issue latency & wait-gates** (§3) — two gaps remain, one
+   cause: no published arbitration rule. PC-buffer write delays are
+   **unsourceable**, not deferred. The mover point fixes remain.
 
 ### Tier 3 — larger or later
 
-4. **Rung-4 calibration against silicon traces** — the eventual bar
-    for claiming anything stronger than "estimator".
+4. **Rung-4 calibration against silicon traces** (§4) — the bar for
+   claiming anything stronger than "estimator".
 
 ### Tier 4 — opportunistic / housekeeping
 
-5. **Tracing & observability follow-ups** — the perf-budget decision,
-    `chip_id`, the Jupyter / NoC-heatmap demonstration, and the long
-    tail.
-6. **Functional backlog** (pick up when a kernel demands it) — Tensix
-    backend gaps, NoC registers/atomics, device/tile infrastructure,
-    Blackhole ISA extensions.
-7. **Architectural clarity & quick wins** — module boundaries,
-    docstring audit, diagrams, ISA index; shellcheck,
-    `MEM_BOOT_CODE_BASE`.
-8. **Parked decisions & re-measurements** — Wormhole reset fan-out,
-    the Blackhole watchdog A/B, re-timing the example sweep.
+5. **Tracing & observability follow-ups** (§5).
+6. **Functional backlog** (§6) — pick up when a kernel demands it.
+7. **Architectural clarity & quick wins** (§7).
+8. **Parked decisions & re-measurements** (§8).
 
-Closed and removed from this list: **bottleneck attribution for the
-compiler team** (2026-08-07 — the frozen schema at
-[`docs/trace-schema.md`](docs/trace-schema.md), `StallEvent`,
-`TT_SIM_PROFILE`, source-level hotspots, honest framing), **Numba /
-the threading revival** (2026-08-07), **a cheaper live Tensix tile**
-and **the MVMUL gather/scatter** (2026-08-08), **the issue-loop
-model** (2026-08-08) and **the outstanding-read-request credit limit**
-(2026-08-09 — the number was wrong on one arch and the name wrong on
-both; the probe that replaced it has since **retired the term on
-silicon**, see §2). See "Not to be started" for what each settled. History is in git;
-`driver/wormhole/docs/profiling.md` and `docs/plans/cost-model.md`
-have the numbers.
+Closed and removed from this list, with the reasoning kept in
+`docs/plans/cost-model.md` and git history: bottleneck attribution for
+the compiler team (2026-08-07), Numba / the threading revival
+(2026-08-07), a cheaper live Tensix tile and the MVMUL gather/scatter
+(2026-08-08), the issue-loop model (2026-08-08), the
+outstanding-read-request credit limit (2026-08-09 — **retired on
+silicon**, not confirmed), the Tensix residency terms and the
+PC-buffer read side (2026-08-11), and multi-tile with on-demand
+materialisation (2026-08-12). See "Not to be started" for what must
+not be re-attempted.
+
 
 ### Not to be started
 
@@ -426,71 +392,63 @@ that session settled, and what it left.
 
 ### Still open, and what each needs
 
-- **The DRAM sustained-rate sweep — validation, not unblocking.** N
-  Tensix tiles reading 1 MiB from **one** DRAM channel, N swept, as
-  `wh_dram`'s own performance table describes. It is the **only
-  validation available for the endpoint occupancy term on either
-  arch**, because rung 2 cannot reach it: every retained DRAM row is
-  `num_transactions = 1`, and a lone request never finds the channel
-  busy. Predict against the published table before running — 1 / 12 /
-  48 tiles on one channel measure 22.2 / 22.3 / 22.3 GB/s, an
-  aggregate that does **not** grow with readers, which is endpoint
-  occupancy as a vendor measurement.
-  **What it does NOT do is make Blackhole chargeable — and it did not
-  need to.** Vendor arithmetic did that on 2026-08-12 (§1); a card run
-  enters as `corroboration` whatever it says.
+- **The DRAM sustained-rate sweep — Wormhole half outstanding.** The
+  probe is built and its prediction is committed at
+  `perfbench/dramratebench/prediction-sustained.csv`: Wormhole flat at
+  23.75 → 23.99 B/cycle, **+7 % over the published 22.2 / 22.3 / 22.3**,
+  which is the documented `achievable_fraction: 0.92` the cost table
+  deliberately refuses to fold in (24 × 0.92 = 22.1). **What remains is
+  a Wormhole part, not code.**
+  The Blackhole half ran 2026-08-12 and left a finding: the plateau is
+  **47.147 B/cycle, at *neither* modelled ceiling** — not the 64 B/cycle
+  NoC link tt-sim flattens on, not a channel rate Blackhole publishes.
+  tt-sim predicted 62.2–64.0, so **the model is 26–35 % high on the
+  level** even though the shape holds. The measured 47.1 agrees with
+  rung 2's independent sizing to ~0.05 %. That gap is **not closable by
+  measurement**; the read direction is now charged from the vendor
+  dataset instead (§1).
+  Two things that must survive: **shape alone cannot separate the
+  endpoint from the DRAM tile's inbound link**, because a scaling ratio
+  is invariant to the level — read the plateau's height, not just its
+  flatness. And
   `costs_test.py::test_the_dram_channel_rate_is_exactly_its_own_derivation`
-  still stops Wormhole's 24 reaching Blackhole — now for the **write**
-  direction, which is the live laundering route, since the read
-  direction is charged from Blackhole's own row. The 26 % asymmetry
-  between the two directions is why a scaled Wormhole number was
-  always wrong, and it is honoured by charging one direction and
-  refusing the other rather than averaging them.
-  **RAN ON A BLACKHOLE CARD 2026-08-12, and the level disagrees with
-  the model by 26–35 %.** The shape holds — fan-out control ×4.85
-  against one-channel ×1.018, every gate passed — but the plateau is
-  **47.147 B/cycle and sits at *neither* modelled ceiling**: not the
-  64 B/cycle NoC link tt-sim flattens on, not the DRAM channel, which
-  Blackhole does not publish. tt-sim predicted 62.2–64.0 across the
-  sweep. The measured 47.1 agrees with **rung 2's independent sizing
-  to ~0.05 %**, so two unrelated methods now size a bound the cost
-  tables do not hold. This is currently the best-evidenced gap in the
-  model, and it is **not closable by measurement** — no published page
-  means no provenance. Artefacts:
-  `perfbench/card-sessions/2026-08-12/`. Unexplained: 2 readers reads
-  40.96 B/cycle, *below* 1 reader's 46.31, before recovering.
-  Wormhole remains untested; that part is still the outstanding item.
+  now guards the **write** direction, which is the live laundering
+  route since the read direction is charged from Blackhole's own row.
 
-  **The probe is built and the prediction is committed** (2026-08-12):
-  `perfbench/dramratebench/prediction-sustained.csv`, pinned cell by
-  cell, has Wormhole flat at 23.75 → 23.99 B/cycle — the right shape,
-  **+7 % over the published 22.2 / 22.3 / 22.3**, which is the
-  documented `achievable_fraction: 0.92` the cost table deliberately
-  refuses to fold in (24 × 0.92 = 22.1). What remains is **a Wormhole
-  part**, not code.
-  One correction this forced: **shape alone cannot separate the
-  endpoint from the DRAM tile's inbound link**, because a scaling
-  ratio is invariant to the level and the two resources run at
-  different rates. tt-sim reports `ENDPOINT BOUND` on Blackhole at the
-  vendor's own parameters with **no endpoint modelled at all** — the
-  flat arm is on the 64 B/cycle link. Read the plateau's height, not
-  just its flatness; this entry measures *a bound at the shared
-  endpoint*, and only the level says which one.
-
-- **Phase A cannot currently measure the Matrix Unit reproducibly.**
-  16 of 19 probes and all of phase B corroborate the X1 dataset
-  (≤ 0.012 cycles/instruction; the marginal MVMUL reproduces to
-  0.6 %), but `MVMUL`/`ELWADD`/`ELWMUL` moved ~6 cycles and run 2's
-  MATH t1 series is **bit-identical to its own NOP series** — the
-  front end's 1-IPC floor, carrying no information about the unit.
-  The X1 retraction ("with one legal SETDVALID the matrix unit is a
-  plain shared port") rested on a comparison in which the dvalid mode
-  and the binary changed *together*; its support is withdrawn.
-  **Needs:** `--dvalid-once` vs `--dvalid-per-thread` on **one**
-  binary, four runs, each after `tt-smi -r 0` and each on a
-  deliberately dirtied card. Card state is the confound neither run
-  controlled — SETDVALID runs leave the Src banks owned by the Matrix
-  Unit with no release.
+- **Phase A and the Matrix Unit — CLOSED 2026-08-12.** The dvalid
+  matrix ran: one binary (`sha256 0afe8825…`, recorded), four runs,
+  `--dvalid-once` and `--dvalid-per-thread` crossed with clean and
+  deliberately dirtied card state. **Card state was the confound**, as
+  suspected, and the pre-registered rule's first branch fired: runs 1
+  and 4 (both clean/once) agree to a thousandth while run 3 (dirty)
+  differs. The mode itself changes **nothing** in phase A — runs 1 and
+  2 are identical at every thread count.
+  The dirty run reproduced the exact failure that withdrew X1's
+  support: `MVMUL t1 = 0.998`, **bit-identical to its own NOP series**,
+  the front-end's 1-IPC floor carrying no information about the unit.
+  Its mechanism is legible — dirty t2 (6.080) ≈ clean t1 (5.988) and
+  dirty t3 (12.102) ≈ clean t2 (12.009), i.e. the card behaves as
+  though it has **one fewer contending thread**, which is what Src
+  banks left owned by the Matrix Unit with no release would do.
+  **X1's claim is re-derived and stands**, on the reset-clean runs
+  only. Per-thread occupancy normalised (`t1`, `t2/2`, `t3/3`) is
+  constant across 1–3 contending threads to **0.38 %** for `MVMUL` and
+  0.25 % for `ELWADD`, against 0.89 % for THCON's `ADDDMAREG` and
+  1.42 % for the SFPU's `SFPADD`. The Matrix Unit is not merely *a*
+  plain shared port; it is the **cleanest one in the probe set**. The
+  qualifier "with one legal SETDVALID" turns out to be unnecessary for
+  phase A.
+  **But there is a double dissociation, and it must travel with this.**
+  Phase A depends on card state and not on mode; **phase B depends on
+  mode and not on card state**. `matmul_tiles` HiFi2 reads 52.0 in
+  runs 1/3/4 and **35.3** in run 2, whose fidelity ladder gives
+  LoFi→HiFi2 of **+0.23 against a predicted +16.00** where the others
+  give +17.6 to +17.7. So `--dvalid-per-thread` breaks the fidelity
+  measurement while leaving thread scaling untouched. "The dvalid mode
+  does not matter" is true of phase A only.
+  Marginal `MVMUL` — (HiFi4 − LoFi)/48 — reads **1.0606–1.0628** here,
+  a **third** independent session inside the 1.061–1.067 band.
+  Artefacts: `perfbench/card-sessions/2026-08-12b/`.
 - **The fetch ramp is a GRADED ramp, not a step — analysis closed.**
   1.0000 / 1.0915 / 1.1573 / 1.2115 / 1.2538 at 4096–6144 B, then flat
   (1.2529 at 7168, 1.2522 at 8192). Four *decreasing* increments
@@ -523,131 +481,46 @@ that session settled, and what it left.
 - Any first-ever Wormhole rung-3 sample.
 - The per-arch half of the read floor.
 
-### Built and RUN on the card, 2026-08-09 — twelve probes
+### Ran on the card — what each probe settled
 
-- **`dram`** (`perfbench/dramratebench/`) — **the endpoint-occupancy
-  term is CORROBORATED on silicon.** One channel is flat at
-  **46.33 → 47.12 B/cycle across 1 → 120 readers** (x1.02) while the
-  same readers fanned across banks reach **227 B/cycle** (x4.90);
-  per-reader throughput on one channel falls as exactly 1/N (46.3,
-  23.1, 11.3, 5.68, 3.84, 2.89, 1.95, 1.47, 0.98, 0.39), which is what
-  perfect serialisation at an endpoint looks like. Same reader count,
-  same issue loop, same transaction size — only the endpoint differed.
-  **And 47.1 B/cycle is what rung 2 already derives for Blackhole DRAM
-  reads from the vendor's 8,140-point NoC dataset**: two wholly
-  independent methods agreeing to ~0.05 %, which is the strongest
-  cross-check this model has had.
-  Still `corroboration`, never provenance — and that never was what
-  blocked the entry. `dram.channel_serialisation` became chargeable on
-  Blackhole on 2026-08-12 from the *dataset* arithmetic, not from this
-  card; the card's 47.147 against the derivation's 47.08 is a check on
-  a derivation that never saw it. `dram.bandwidth` (the GB/s block) is
-  still `unknown`, still needs a document, and gates nothing. And the
-  `samecore` arm fires on neither descriptor (tt-metal maps every bank
-  to a distinct NoC coord), so this separates **the endpoint from the
-  fabric**, not the GDDR6 channel from its inbound router link.
-  Dataset: `tt_sim/perf/datasets/dramratebench-blackhole-2026-08-09.csv`.
-  *First run was refused by its own tag check — the tag was written
-  only at slice 0, so every reader past the first had nothing to match
-  and the guard condemned data that was in fact clean. A check that
-  cannot pass is as damaging as one that cannot fail.*
-- **`tensix-rdcfg`** — **ran, and the construction does not reach the
-  quantity.** The control moved (`SETDMAREG`+`STALLWAIT` 2.968 against
-  0.998 bare, so the stall instruction costs something) but the paired
-  difference is **0.0000 cycles/pair**, under the half-cycle floor.
-  **Diagnosed and redesigned 2026-08-12.** `p_stall::TRISC_CFG` is
-  condition C10/C13 — *the RISCV T core's* outstanding memory requests
-  against GPRs, config or TDMA-RISC, not a Tensix instruction in the
-  Configuration Unit's pipeline. The name is the trap: it was a
-  correct measurement of the wrong quantity. The condition that does
-  observe it is **C12 / `p_stall::CFGEXU`, Blackhole only** ("any
-  thread has an instruction in any stage of the Configuration Unit
-  pipeline"), which `RDCFG.md` explicitly recommends. Slots 22–25 take
-  the difference against an in-unit `RMWCIB0` baseline; 20/21 stay as
-  the falsification control. **Wormhole needs no probe** — there
-  `RDCFG` blocks its issuing thread for the whole duration, so the
-  `>= 2` is an occupancy and probe 14 already reaches it; only a
-  dataset is missing.
-  **The C12 construction ran on a card 2026-08-12 and did not reach
-  the quantity either.** All three arms cost identically to four
-  decimal places — 2.9682 whether the preceding instruction was
-  `RDCFG`, an in-unit `RMWCIB0` or an off-unit `SETDMAREG` — with the
-  intended condition confirmed used (`COND: C12 CFGEXU 0x1000`) and
-  every bare occupancy at 0.998.
-  **Settled from the docs 2026-08-12: no stall can reach it.**
-  `ConfigurationUnit.md` tabulates the `>= 2` under a column headed
-  **Latency** at **IPC 1**, so the 0.998 occupancy is the documented
-  throughput, not a contradiction — it is a GPR-write latency, and a
-  busy condition observes occupancy. Nor does the `riscvbench`
-  dependent-operand method transplant: `RDCFG.md` says *"software must
-  ensure that the instruction(s) immediately after `RDCFG` are not
-  trying to consume the GPR written by"* it, and an obligation on
-  software is the documented **absence of an interlock** — a close
-  consumer reads a stale value rather than waiting.
-  So it is measured as a **distance, not a duration**: sweep the
-  producer-to-consumer separation and take the smallest at which the
-  value is fresh every time (`--vis-reps`, `TTBENCH_VIS_DMIN`). That
-  is a **lower** bound, the direction the charging policy takes bounds
-  in; `d_min = 2` corroborates the `>= 2`, `d_min = 1` leaves it
-  unreached rather than refuted. Slots 22–25 stay as the documented
-  negative, and slots 28/29 are a **C12 liveness control** using the
-  cross-thread path (C12 is "ANY thread"), which is the only
-  doc-supported way to hold it longer than `STALLWAIT`'s own one-cycle
-  lag. **Wormhole needs none of this** — there `RDCFG` blocks its
-  issuing thread, so the `>= 2` is an occupancy and probe 14 reaches
-  it.
+Twelve probes on 2026-08-09, two more on 2026-08-12. Artefacts are
+banked under `perfbench/card-sessions/`; the numbers and derivations
+are in `docs/plans/cost-model.md`. Only what still bites is kept here.
 
-  **Open simulator question this surfaced:** `_read_wait_res`
-  (`tt_sim/pe/tensix/backends/sync.py`) decodes Blackhole `wait_res`
-  as 12 bits where the ISA page gives `u13`, so `CFGEXU` was trimmed
-  off and the wait degraded to the default mask — which on Blackhole
-  selects C0–C6, i.e. **the wrong wait, not a shorter one**. There
-  were **two independent gaps**: that decode width, and the
-  Configuration Unit retiring inside the cycle that issued, which left
-  `hasInflightInstructionsFromThread` empty whenever another thread's
-  Wait Gate looked.
-  **Both closed 2026-08-11.** The unit now holds the residency
-  `ConfigurationUnit.md` tabulates in its **Latency** column (`WRCFG`
-  2 at IPC 1 — the unit accepts its next instruction a cycle *before*
-  the previous leaves, which is why residency needed its own column
-  and could not be read off `busy_until`), and `wait_res` widened to
-  13 bits. That last is a **source conflict decided on rank**: four
-  sources say 13 — the page's `u13` syntax, its encoding diagram, its
-  C0–C12 table, and tt-metal's own LLK header, where
-  `p_stall::CFGEXU = 0x1000` cannot fit in 12 bits — against ttsim's
-  `data/bh/tensix_isa.json` alone, whose own executor passes `0x1000`
-  to a check its decoder can never deliver. `PROVENANCE_RANK` already
-  puts `isa_doc` above `vendor_source`. Reversing it is one constant,
-  `BLACKHOLE_WAIT_RES_BITS`.
-  C12 is now observable and deterministic — `burst + 2` under every
-  clock and Wait-Gate ordering, where before ten instructions in
-  flight were as invisible as none. **No cycle moved**: the residency
-  arms 1,280 times across 33 guards, and of 4,739 predicate calls none
-  concerns the resident thread. Nothing in tt-metal 0.74 emits
-  `CFGEXU`, so only the card probe reaches it.
-- **phase G at 4608/5632 B** — ran; four gsets written, all rows
-  differing. With gset 0 that is **five measured footprints — 4608,
-  5120, 5632, 6144, 7168 B** — around a ramp whose onset was bracketed
-  only to (4096, 5120]. **Answered 2026-08-10: a graded 1/F rise to a
-  ~1.253 cycles/instruction ceiling, not a step** — see item 1.
+**Corroborated** (all `corroboration`, never provenance): endpoint
+occupancy — one channel flat at 46.3 → 47.1 B/cycle over 1 → 120
+readers (x1.02) while a fan-out control reaches x4.9, per-reader
+falling as exactly 1/N; the congestion step, whose height is the
+packet's occupancy to 0.88–0.99; hop latency 8.8 (WH) / 8.65 (BH)
+against the docs' 9; and rung 3's `tensix` sample reproducing to
+0.02 % across three sessions.
 
-Both magics bumped, which is safe: the sweep readers parse `magic=` as
-metadata and never validate it (proven three ways). **Renumbering**
-would not have been — `probe_id` is a CSV column *and* a bit of every
-`--probes` mask — so all four slots are appended rather than inserted
-in footprint order.
+**Negative results worth not re-deriving**: the `nocread` outstanding-
+read-request term was **retired** on silicon, not confirmed. The
+`tensix-rdcfg` C12 construction did not reach its quantity on a card
+either — all three arms identical to four decimals — which is what
+established that `RDCFG`'s `>= 2` is a GPR-write latency no
+busy-condition can observe (§3).
 
-Also from that session: a **third** rung-3 `tensix` sample (86.144,
-against 86.125 and X1's 86.12 — reproducing to 0.02 %); `nocread`
-correctly re-graded `DEGENERATE` by the falsifying dist test, on
-silicon; and `rv-cross`'s phase-Q failure, which was a **mislabel, not
-a threshold breach** — the pair was `n=16 → 70, n=32 → 48`, everything
-from n=32 up is **bit-identical** between the two runs, and the grader
-read the pair's *larger* n. Fixed to grade by the smaller burst.
-Measured run-to-run scatter is roughly constant at 21–45 cycles while
-the monotone step grows with burst, so **the first pair phase Q can
-honestly be gated on is 32 → 64**; the README's `n <= 16` is
-defensible but one notch tight.
+**Method lessons, all of which cost a run**:
+- **A guard that cannot pass is as damaging as one that cannot fail.**
+  `dramratebench`'s first run was condemned by its own tag check,
+  because the tag was written only at slice 0.
+- **MEANINGFUL is only ever awarded for a control that MOVED.** The
+  2026-08-09 session awarded two on the grounds that a value was
+  present and well-formed; `card_session_verdicts.sh` now holds the
+  checks and `card_session_verdicts_test.sh` runs them against that
+  session's own CSVs.
+- **Never renumber `probe_id`** — it is a CSV column *and* a bit in
+  every `--probes` mask. Append. (Bumping `magic=` is safe.)
+- Phase Q's failure was a **grader mislabel**, not a card fault: it
+  graded the larger n of a pair that is bit-identical from n=32 up.
+  The first pair it can honestly be gated on is 32 → 64.
+- `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE` is a **harvesting**
+  workaround on real silicon, not a simulator one — removing it took
+  rung 5 from PASS to a YAML conversion error. Its end coords are
+  **inclusive**.
+
 
 ### Not built, by design
 
@@ -664,68 +537,54 @@ own `core_bidirectional` family with `// Timeout issue (#36428)`.
 
 ## 3. Tensix issue latency, wait-gates & PC-buffer timing
 
-The ThCon half closed 2026-08-11. `ScalarUnit.md`'s "no instructions
-of any kind from the issuing thread can pass through its Wait Gate …
-regardless of which unit that next instruction executes in" is a
-whole-thread hold that no per-unit issue refusal can express; it is
-now a per-thread deadline at the gate (`thread_issue_block`), armed
-from the ThCon occupancy already in the table, so **no number
-changed**. srcA/srcB wait-gate stalls were already modelled on both
-sides. ttsim is **not** an oracle here (also not cycle-accurate);
-cycle assertions must come from the ISA docs.
+The ThCon whole-thread hold, the Src hand-over timing, the unpacker's
+issuing-thread interlock and `STALLWAIT` C7/C14 all closed 2026-08-11
+and 2026-08-12; the write-ups are in `docs/plans/cost-model.md`. What
+is left, and what must not be re-attempted:
 
-**PC-buffer write delays are unsourceable, not deferred.**
-`BabyRISCV/PCBufs.md` publishes the FIFO depth exactly — 16 32-bit
-values — but the next sentence puts the overflow in "shared buffers
-within the RISCV B memory subsystem", whose capacity is published
-nowhere. For a queue depth the low end is the *over-charging* end, so
-bounding at 16 invents back-pressure the hardware does not have, the
-one direction the floor policy forbids. No in-tree workload touches a
-PCBuf at all: tt-metal 0.74 launches TRISCs through mailboxes. The
-**read** side is implemented per `PCBufs.md` (2026-08-11) and, having
-no in-tree caller, is covered only by `tt_sim/pe/pcbuf_test.py`.
+- **Two gaps remain, one cause — no published arbitration rule**: the
+  80 B/cycle joint ceiling shared between two streaming unpackers, and
+  the cross-unpacker half of the address-phase interlock ("nor can any
+  other thread start an `UNPACR`"). Both pinned by name in the tests.
+- **PC-buffer write delays are unsourceable, not deferred.**
+  `PCBufs.md` publishes the FIFO depth (16) but puts the overflow in
+  "shared buffers within the RISCV B memory subsystem", whose capacity
+  is published nowhere. For a queue depth the low end is the
+  **over-charging** end, so bounding at 16 invents back-pressure the
+  hardware does not have. No in-tree workload touches a PCBuf at all —
+  tt-metal 0.74 launches TRISCs through mailboxes. The **read** side
+  is implemented, covered only by `tt_sim/pe/pcbuf_test.py`.
+- **`RDCFG`'s `>= 2` stays UNREACHED — three card runs, two retired
+  methods.** `ConfigurationUnit.md` tabulates it under **Latency** at
+  IPC 1, so it is a GPR-write latency, and `RDCFG.md`'s "software must
+  ensure" is the documented **absence of an interlock** — a close
+  consumer reads a stale value rather than waiting.
+  *Stall-based approaches are retired with evidence.* The C12 run on
+  2026-08-12 moved its liveness control — stall floor 0.9718
+  cycles/pair at t1 against **2.9186 at t3**, where two other threads
+  hold the Configuration Unit — so **C12 is live on silicon**, and
+  slots 22–25 reading 0.0000 means RDCFG's post-issue residency is no
+  wider than the stall's own documented one-cycle lag: structurally
+  invisible to any busy-condition, not absent.
+  *The distance method also does not resolve it.* `VIS_DMIN = 1` in
+  all 64 repetitions — the result is visible in the very next issue
+  slot. **Unreached, not refuted**: a consumer that reads its operand
+  a cycle into its own execution explains it completely, and the
+  timing form (slots 26/27) reads 0.0001 as the documents predict.
+  A sharper consumer would be `WRCFG`, which reads its GPR on entry —
+  but it writes backend configuration and this benchmark does not
+  mutate device state. **Do not attempt a fourth probe without solving
+  that**, and note `d_min` is a *lower* bound either way.
+- The mover / PC-buffer point fixes remain.
+- **Open, and a vendor-vs-doc conflict**: tt-sim decodes Blackhole's
+  `wait_res` at 13 bits per the ISA page, against ttsim's data file at
+  12. Four sources say 13, including tt-metal's own LLK header where
+  `p_stall::CFGEXU = 0x1000` cannot fit in 12. Reversing it is one
+  constant, `BLACKHOLE_WAIT_RES_BITS`.
 
-The unpacker's **issuing-thread** interlock closed 2026-08-11 once the
-Src `AllowedClient` flip moved to the end of the transfer, where
-`UNPACR_Regular.md` puts it — tt-sim had flipped it at retire, leaving
-one-cycle margins that a correctly anchored charge spent. The same
-window now answers `STALLWAIT`'s C1/C2 ("any stage of Unpacker N's
-pipeline"), which used to clear at retire mid-transfer.
+ttsim is **not** an oracle here (also not cycle-accurate); cycle
+assertions must come from the ISA docs.
 
-**Two gaps remain, one cause** — no published arbitration rule: the
-80 B/cycle joint ceiling shared between two streaming unpackers, and
-the cross-unpacker half of the address-phase interlock ("nor can any
-other thread start an `UNPACR`"). Both are pinned by name in the
-tests. **`STALLWAIT` C7 (Matrix) and C14 (SFPU) closed 2026-08-12**,
-and the earlier "inert" reading was instructive: it was about the
-*occupancy* column, and the question is about the other one.
-`MatrixUnit.md` publishes **latency 5** for
-`MVMUL`/`DOTPV`/`GAPOOL`/`GMPOOL`/`ELWMUL`/`ELWADD`/`ELWSUB` and **4**
-for the `MOV*` forms, all at IPC 1; `VectorUnit.md` **2** for the
-SFPU's arithmetic and LUT rows. Both units reported every instruction
-out of the pipeline up to four cycles early, and the values were
-already in `tensix_instruction_costs.yaml`, unread. The Configuration
-Unit's residency moved up into `TensixBackendUnit` and both units now
-read their own Latency column. **No computed value and no guard cycle
-count moved**, model on or off — but unlike C12 this one is
-*observed*: `blackhole/reduce` goes from 0 blocked looks to 14 of its
-16 latched Matrix waits, `twolaunch` from 0 to 4. The guard totals
-hold because the host polls every 100 cycles and the extra cycles are
-absorbed inside a poll window — a statement about resolution, not a
-claim of no effect. **C14 is inert for a stated reason**: the Wait
-Gate costs three cycles before the instruction a `STALLWAIT` blocks
-and the SFPU's deepest latency is 2, so nothing there reaches past it;
-a row deeper than 3 would show without a rewrite.
-
-Separately, `STALLWAIT`'s empty-condition-mask default is now
-per-arch. `STALLWAIT.md` gives `0x0F` on Blackhole against Wormhole's
-`0x7F`, and tt-sim used `0x7F` on both — which on Blackhole is **not a
-superset but a different set**: bits 4–6 there are the Matrix Unit
-pipeline (an invented wait) and `SrcA`/`SrcB` not yet back with the
-*unpackers* (inverted). No number moves, because the LLK always passes
-an explicit `p_stall::` mask. `SEMWAIT` with a zero mask is
-`UndefinedBehavior()` on both arches, so tt-sim's fallback there is
-its own choice; it now follows the same per-arch constant.
 
 ## 4. Rung-4 calibration
 
