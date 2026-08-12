@@ -498,20 +498,25 @@ within the RISCV B memory subsystem", whose capacity is published
 nowhere. For a queue depth the low end is the *over-charging* end, so
 bounding at 16 invents back-pressure the hardware does not have, the
 one direction the floor policy forbids. No in-tree workload touches a
-PCBuf at all: tt-metal 0.74 launches TRISCs through mailboxes.
+PCBuf at all: tt-metal 0.74 launches TRISCs through mailboxes. The
+**read** side is implemented per `PCBufs.md` (2026-08-11) and, having
+no in-tree caller, is covered only by `tt_sim/pe/pcbuf_test.py`.
 
-Three gaps remain, with **two different causes**, all pinned by name
-in the tests. *No published arbitration rule* — the 80 B/cycle joint
-ceiling shared between two streaming unpackers, and the
-cross-unpacker half of the address-phase interlock ("nor can any
-other thread start an `UNPACR`"). *Sourced, blocked on a mechanism* —
-the unpacker's **issuing-thread** interlock ("For the duration of
-these cycles, the issuing thread cannot start its next instruction"),
-which needs the Src `AllowedClient` flip timed against the unpacker's
-own occupancy: tt-sim flips it at retire where hardware flips it at
-the end of a pipelined transfer, leaving one-cycle margins that a
-correctly anchored charge spends. Wiring it without that fix costs
-three Wormhole value guards.
+The unpacker's **issuing-thread** interlock closed 2026-08-11 once the
+Src `AllowedClient` flip moved to the end of the transfer, where
+`UNPACR_Regular.md` puts it — tt-sim had flipped it at retire, leaving
+one-cycle margins that a correctly anchored charge spent. The same
+window now answers `STALLWAIT`'s C1/C2 ("any stage of Unpacker N's
+pipeline"), which used to clear at retire mid-transfer.
+
+**Two gaps remain, one cause** — no published arbitration rule: the
+80 B/cycle joint ceiling shared between two streaming unpackers, and
+the cross-unpacker half of the address-phase interlock ("nor can any
+other thread start an `UNPACR`"). Both are pinned by name in the
+tests. The residency-vs-occupancy question `STALLWAIT` C7 (Matrix) and
+C14 (SFPU) raise is inert today — no in-tree entry charges those units
+occupancy above 1 — and settling it needs each unit's own published
+latency.
 
 ## 4. Rung-4 calibration
 
@@ -614,10 +619,11 @@ fails loudly today. Grep for `NotImplementedError` in the named files.
 - Tile-control registers: `misc/tile_ctrl.py` is a silently-plausible
   generic store — a register with real side effects would go
   unnoticed.
-- PC buffer *read*-side synchronisation (`pe/pcbuf.py` TODO): a BRISC
-  read returns 0 at once instead of the documented three-condition
-  wait, and a TRISC read pops an empty FIFO. Both are functional, not
-  timing — the write delays are unsourceable (§3).
+- PC buffer waits emit no trace event, unlike `Mailbox` and `TTSync`;
+  adding one needs a new `Unit` enum member and schema-doc updates,
+  so it is a schema change rather than a point fix. (The read-side
+  handshake itself landed 2026-08-11; write delays are unsourceable,
+  see §3.)
 - Extra core types: `tt_device.py` raises beyond BRISC/NCRISC/TRISC0-2;
   widen if ERISC becomes bridge-visible.
 - Watchdog residual: a loop longer than the confirmation window still
