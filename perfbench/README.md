@@ -240,14 +240,22 @@ observed result of `--sim --arch blackhole` at smoke sizes with the cost model
 | `dram` | `MEANINGFUL`, reporting **NO ENDPOINT BOUND** — and that is correct there. The probe widens `TT_SIM_TENSIX_COORDS` to two tiles for its own run, so the sweep and the barrier really do execute (`max_barrier_spins` 22, both tags verified), and both arms then scale ×2.00 exactly. On **Blackhole** the endpoint queue is switched off by construction: no DRAM tile page is published for that part, so `dram_gddr_channel_size` is `None`, `DramChannels.bytes_per_cycle` is `None`, and every `claim()` is a no-op. Perfect linear scaling is what an unmodelled endpoint gives. With one tile it reads `DEGENERATE` instead, for want of a second point. **On Wormhole with `TT_SIM_COST_MODEL=1` it reads `ENDPOINT BOUND`** — see below. **And the smoke sizes are load-bearing in that sentence**: at the vendor's own 1 MiB / 4096 B, twelve Blackhole tiles read `ENDPOINT BOUND` too, ratio 0.25, with the endpoint queue still switched off — the flat arm is sitting on the DRAM tile's 64 B/cycle NoC link, which a scaling ratio cannot tell from a channel. `dramratebench/README.md` has the table | the whole question |
 | `noc`, `noc-epoch` | `SKIPPED` — see below | the experiment, or `DEFERRED` if the box has no `tt_sim/` |
 
-**The congestion probes do not merely read `INVALID` against tt-sim; they hang**,
-so `--sim` skips them unless you name them explicitly. `nocbench --dump-grid`
-probes the first logical row and column of the whole compute grid, but the
-simulator instantiates only the tiles listed in `TT_SIM_TENSIX_COORDS` — one, by
-default — so the launch waits forever on cores that do not exist. Nothing is
-lost by skipping: tt-sim models no link congestion, so the honest verdict there
-is `INVALID` by construction. To force them, set a multi-tile
-`TT_SIM_TENSIX_COORDS` and name the probe.
+**The congestion probes cannot run against tt-sim unless you widen the tile
+pool**, so `--sim` skips them unless you name them explicitly. `nocbench
+--dump-grid` probes the first logical row and column of the whole compute grid,
+but the simulator instantiates only the tiles listed in `TT_SIM_TENSIX_COORDS` —
+one, by default — so the launch reaches cores that do not exist. Nothing is lost
+by skipping: tt-sim models no link congestion, so the honest verdict there is
+`INVALID` by construction. To force them, set a multi-tile
+`TT_SIM_TENSIX_COORDS` (the whole probed row and column) and name the probe.
+
+This **used to hang**, which is why the skip exists at all. It no longer does:
+the server now names the first missing tile and stops the host with it, so a
+`--dump-grid` against the default single-tile pool exits in about three seconds
+with `ERROR: kernel launch (go=GO) sent to functional worker 1-2 … Add \`1-2\` to
+TT_SIM_TENSIX_COORDS` rather than waiting forever (measured, 2026-08-12; see
+`tt_sim/bridge/hostlink.py`). The skip stays because the *verdict* would still be
+`INVALID`, not because the run would never end.
 
 So **ten of the twelve probes read `DEGENERATE` or `SKIPPED` against the
 simulator and every one of those is correct.** The simulator is not the

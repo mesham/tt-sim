@@ -662,15 +662,16 @@ plan_tiles_missing_from_grid() {
 }
 
 probe_noc() {
-  # Against tt-sim this needs an EXPLICIT opt-in, because it does not merely
-  # read INVALID -- it hangs. `--dump-grid` probes the first logical row and
-  # column of the whole compute grid, but the simulator only instantiates the
-  # tiles named in TT_SIM_TENSIX_COORDS (one, by default), so the launch waits
-  # forever on cores that do not exist. Nothing is lost by skipping it: the
-  # simulator models no link congestion, so nocbench's honest verdict there is
-  # INVALID by construction and is documented as such.
+  # Against tt-sim this needs an EXPLICIT opt-in. `--dump-grid` probes the first
+  # logical row and column of the whole compute grid, but the simulator only
+  # instantiates the tiles named in TT_SIM_TENSIX_COORDS (one, by default), so
+  # the launch reaches cores that do not exist. That used to hang; it now aborts
+  # in seconds naming the first missing tile (tt_sim/bridge/hostlink.py), but
+  # nothing is gained by running it: the simulator models no link congestion, so
+  # nocbench's honest verdict there is INVALID by construction and is documented
+  # as such.
   if [ "$DO_SIM" = 1 ] && [ "$SIM_NOC_OPT_IN" != 1 ]; then
-    skip noc "against tt-sim this hangs (--dump-grid probes the full grid; the sim instantiates only TT_SIM_TENSIX_COORDS) and its verdict would be INVALID anyway. Name it explicitly with a multi-tile TT_SIM_TENSIX_COORDS to force it"
+    skip noc "against tt-sim --dump-grid probes the full grid but the sim instantiates only TT_SIM_TENSIX_COORDS, and its verdict would be INVALID anyway. Name it explicitly with a multi-tile TT_SIM_TENSIX_COORDS to force it"
     return
   fi
   build_once "$NB" nocbench || { verdict noc FAILED "build failed"; return; }
