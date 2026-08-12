@@ -19,9 +19,10 @@ def _parse_tensix_pool(env):
 
     - ``TT_SIM_TENSIX_COORDS``: comma-separated ``x-y`` physical NoC coords,
       e.g. ``"1-1,2-1"`` — exact control over which workers exist.
-    - ``TT_SIM_TENSIX_CORES``: a bare count ``N`` — materialise N workers at a
-      sensible default coord set (``coords.default_tensix_coords``, column-major
-      from ``1-1``), so you can drive by core *count* without naming coords.
+    - ``TT_SIM_TENSIX_CORES``: a bare count ``N`` — materialise the N workers
+      tt-metal will actually launch on (``coords.default_tensix_coords``:
+      column-major over its compute grid), so you can drive by core *count*
+      without naming coords.
 
     Setting both is an error (ambiguous). Neither defaults to ``[(1, 1)]`` — the
     single-tile coord every wormhole example targets. Coords are validated
@@ -163,9 +164,15 @@ def main(argv=None):
         install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP, wire_addr=addr)
 
         enabled = enabled_diagnostic_names(diagnostics)
+        from tt_sim.bridge import compute_grid
+
+        from .coords import DEFAULT_COMPUTE_GRID
+
+        grid = compute_grid(DEFAULT_COMPUTE_GRID)
         print(
             f"[server] tt-sim Wormhole ready "
             f"(tensix={tensix_pool}, dram={list(DRAM_COORD_MAP)}, "
+            f"compute_grid={grid[0]}x{grid[1]}, "
             f"cycles_per_poll={args.cycles_per_poll})",
             file=sys.stderr,
             flush=True,

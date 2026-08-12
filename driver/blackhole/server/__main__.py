@@ -20,6 +20,7 @@ from tt_sim.bridge import (
     TensixCore,
     TraceWriter,
     Transport,
+    compute_grid,
     diagnostics_from_env,
     enabled_diagnostic_names,
     host_not_stranded,
@@ -27,7 +28,12 @@ from tt_sim.bridge import (
 )
 
 from .bh_device import make_device
-from .coords import DRAM_COORD_MAP, TENSIX_COORD_MAP, default_tensix_coords
+from .coords import (
+    DEFAULT_COMPUTE_GRID,
+    DRAM_COORD_MAP,
+    TENSIX_COORD_MAP,
+    default_tensix_coords,
+)
 
 
 def _parse_tensix_pool(env):
@@ -102,9 +108,12 @@ def main(argv=None):
         # TT_SIM_TENSIX_COORDS is silently NullCore-swallowed.
         install_worker_guards(fabric, tensix_pool, TENSIX_COORD_MAP, wire_addr=addr)
         enabled = enabled_diagnostic_names(diagnostics)
+        grid = compute_grid(DEFAULT_COMPUTE_GRID)
         print(
             f"[server] tt-sim Blackhole ready (tensix={tensix_pool}, "
-            f"dram={list(DRAM_COORD_MAP)}, cycles_per_poll={args.cycles_per_poll})",
+            f"dram={list(DRAM_COORD_MAP)}, "
+            f"compute_grid={grid[0]}x{grid[1]}, "
+            f"cycles_per_poll={args.cycles_per_poll})",
             file=sys.stderr,
             flush=True,
         )

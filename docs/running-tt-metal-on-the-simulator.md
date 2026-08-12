@@ -39,8 +39,27 @@ If you are not using the venv, export those four yourself.
 
 **Nothing extra is required on 0.74** — it works out of the box.
 `driver/wormhole/soc_descriptor.yaml` declares the full 8×10 Wormhole worker
-grid, matching tt-metal's default compute-grid range, so the host allocates
-cleanly with no override.
+grid, which *contains* tt-metal's default compute-grid range, so the host
+allocates cleanly with no override.
+
+**The default compute grid is 8×9 = 72 cores, not 8×10 = 80.** The simulated
+chip reports zero harvested rows, so tt-metal resolves the `galaxy` product's
+row-dispatch entry in `tt_metal/core_descriptors/wormhole_b0_80_arch.yaml`,
+whose `compute_with_storage_grid_range` ends at logical `[7, 8]`. Physical
+worker row 11 is therefore never a compute core, and materialising it is wasted
+money. Measure it rather than trusting this paragraph across releases — the
+override's own bounds check prints the answer in about a second:
+
+```bash
+TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=7,9 ./metal_example_add_2_integers_in_compute
+# -> TT_FATAL ... compute_with_storage_end[1]= 8 should be >= ...override[1]= 9
+```
+
+Blackhole's is **13×10 = 130** (`blackhole_140_arch.yaml`, `unharvested`/`col`,
+ending `[12, 9]`), against 14×10 = 140 declared workers. Both numbers live in
+`DEFAULT_COMPUTE_GRID` in each driver's `server/coords.py`; each server prints
+the grid it resolved in its `ready` line, and `TT_SIM_COMPUTE_GRID=WxH`
+overrides it if a release moves the default.
 
 ```bash
 # OPTIONAL — restricts tt-metal to the gap-free 4x5 sub-block:
@@ -72,29 +91,35 @@ export TT_SIM_TENSIX_COORDS=1-1,1-2      # comma-separated PHYSICAL x-y coords
 export TT_SIM_TENSIX_CORES=2             # materialise 2 workers at 1-1, 1-2
 ```
 
-`TT_SIM_TENSIX_CORES=N` materialises N workers **column-major from `1-1`**
-(`1-1,1-2,1-3,1-4,1-5,2-1,…`). This matches the order tt-metal actually drives
-program cores under the default grid override — both `matmul_multi_core` and
-`noc_tile_transfer` launch `1-1` then `1-2`, and matmul fills the whole `x=1`
-column first — so a plain count covers the coords typical programs use without
-your having to know them. If a program launches on a coord outside the chosen
-set you still get the exact go=GO error (§1.3, below) naming what to add; switch
-to explicit `TT_SIM_TENSIX_COORDS` for off-origin placements. The two vars are
+`TT_SIM_TENSIX_CORES=N` materialises **the N workers tt-metal will actually
+launch on**: its compute grid, filled column-major, which is what
+`split_work_to_cores` → `num_cores_to_corerangeset` does. The column is as tall
+as *that* grid, so the answer moves with §1.2 — with no override the 6th core is
+`1-7` (a 9-tall column, skipping the ethernet row), under
+`…OVERRIDE_TODEPRECATE=3,4` it is `2-1` (a 5-tall one). tt-sim reads the
+override out of the environment for you, so a plain count is correct in both
+regimes; the resolved grid is printed in the server's `ready` line. If a program
+places cores some other way you still get the exact go=GO error (below) naming
+what to add; switch to explicit `TT_SIM_TENSIX_COORDS` then. The two vars are
 **mutually exclusive** — set one, not both.
 
 > **Interaction with §1.2.** A `*_multi_core` program distributes its work
-> across tt-metal's *compute grid*. With no override that grid is the full 8×10,
-> so correct results would need **all 80** worker tiles materialized
-> (impractically slow). Exporting `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4`
-> shrinks the compute grid to the 4×5 block, so you only need those **20** tiles.
-> Either way, cores you don't materialize return zeros. **Beware:** some
-> examples (e.g. `vecadd_multi_core`, `vecadd_sharding`) print per-element
-> mismatches but still `exit 0`, so exit code alone is not a correctness signal
-> for them — grep the log for `Mismatch`.
+> across tt-metal's *compute grid*. With no override that grid is 8×9, so
+> correct results need **72** worker tiles materialized (`TT_SIM_TENSIX_CORES=72`,
+> ~90 s for `vecadd_multi_core`). Exporting
+> `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4` shrinks the compute grid to the
+> 4×5 block, so you only need those **20** tiles. Either way, cores you don't
+> materialize return zeros. **Beware:** some examples (e.g. `vecadd_multi_core`,
+> `vecadd_sharding`) print per-element mismatches but still `exit 0`, so exit
+> code alone is not a correctness signal for them — grep the log for `Mismatch`.
 
-- Coords are **physical NoC** coords, not logical. Logical→physical within the
-  4×5 block: logical `(col, row)` → physical `(col+1, row+1)`. So logical
-  `(0,0)`→`1-1`, logical `(0,1)`→`1-2`.
+- Coords are **physical NoC** coords, not logical, and the mapping is an
+  **index into the sorted worker axes, not `+1`**: logical `(i, j)` is physical
+  `(xs[i], ys[j])` where `xs = 1,2,3,4,6,7,8,9` and `ys = 1,2,3,4,5,7,8,9,10,11`
+  on Wormhole. Inside the gap-free 4×5 corner that happens to look like
+  `(col+1, row+1)` — logical `(0,0)`→`1-1`, `(0,1)`→`1-2` — but logical row 5 is
+  physical `7`, not `6`, and on Blackhole logical column 7 is physical `10`, not
+  `8`. Assuming the offset rule has already cost this project a wrong run.
 - The 4×5 sub-block (what `…OVERRIDE_TODEPRECATE=3,4` selects) is 20 tiles
   (physical `x∈{1,2,3,4}`, `y∈{1,2,3,4,5}`):
   ```
@@ -152,12 +177,13 @@ but `2,4` → **15 ✗** and `2,2` → **9 ✗**.
 **Worked example — an 8-core 2×4 grid.** A program that asks for 8 cores out of
 `compute_with_storage_grid_size()` (e.g. via `num_cores_to_corerangeset(8, …)`)
 wants a compute grid of exactly 8, i.e. override `1,3` (logical `x∈{0,1}`,
-`y∈{0,1,2,3}`). Translating logical→physical (`+1` on each axis) gives the
-coords to materialise:
+`y∈{0,1,2,3}`). That grid is inside the gap-free corner, so logical→physical is
+`+1` on each axis here:
 
 ```bash
 export TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=1,3     # 2 x 4 compute grid -> 8 L1 banks
-export TT_SIM_TENSIX_COORDS=1-1,1-2,1-3,1-4,2-1,2-2,2-3,2-4
+export TT_SIM_TENSIX_CORES=8                           # or name them:
+#      TT_SIM_TENSIX_COORDS=1-1,1-2,1-3,1-4,2-1,2-2,2-3,2-4
 ```
 
 Verify from the JIT compile line in the log — it carries the bank count the
@@ -167,10 +193,64 @@ host actually derived:
 -DNUM_L1_BANKS=8 -DLOG_BASE_2_OF_NUM_L1_BANKS=3
 ```
 
-`TT_SIM_TENSIX_CORES=8` is **not** a substitute here: it fills column-major to
-the full column height, giving `1-1,1-2,1-3,1-4,1-5,2-1,2-2,2-3`, which is not
-the 2×4 block. Whenever the override's grid is not 5 rows tall, name the coords
-explicitly.
+`TT_SIM_TENSIX_CORES=8` **is** a substitute here, as long as the override is
+exported in the same environment: the count knob reads it and fills that grid's
+own 4-tall columns, giving exactly the eight coords above. (It did not always —
+it used to fill a fixed 4×5 block first, producing
+`1-1,1-2,1-3,1-4,1-5,2-1,2-2,2-3`, three of which the program never launches on
+while three it does launch on were missing. That is the class of bug the
+go=GO error below exists to catch, and `tt_sim/bridge/grid_test.py` now pins the
+order.)
+
+#### 1.3.2 What a bigger grid actually costs (measured 2026-08-12)
+
+A grid sweep of `metal_example_vecadd_multi_core` (640 tiles of bfloat16 vector
+add, spread across the whole compute grid) on Wormhole, tt-metal 0.74, one
+worker per compute core. Every run computed the right answer — the example's own
+`All results match expected values within tolerance`, checked for absence of
+`Mismatch` as well:
+
+| workers | grid override | compute grid | wall | verdict |
+| --- | --- | --- | --- | --- |
+| 1 | `0,0` | 1×1 | 49.5 s | correct |
+| 4 | `1,1` | 2×2 | 44.4 s | correct |
+| 12 | `3,2` | 4×3 | 65.0 s | correct |
+| 20 | `3,4` | 4×5 | 68.0 s | correct |
+| 32 | `7,3` | 8×4 | 79.0 s | correct |
+| 64 | `7,7` | 8×8 | 87.7 s | correct |
+| 80 | none | 8×9 (+8 idle) | 89.4 s | correct |
+| 72 | none, `TT_SIM_TENSIX_CORES=72` | 8×9 | 81.5 s | correct |
+
+**Wall clock is roughly flat in the worker count for a fixed problem.** That is
+not a paradox: the total simulated work is the same 640 tiles however they are
+split, tt-sim executes it sequentially, and firmware-loop parking means a worker
+waiting on its go message costs almost nothing. The ~1.8× spread from 1 to 80 is
+the per-tile fixed cost — construction, the launch handshake, the pump visiting
+each tile — not the compute. **A wide grid is not the expensive thing a
+single-tile intuition suggests.**
+
+`metal_example_matmul_multi_core` (640³, PCC-checked against a host golden) on
+the same day: 4 workers 352.7 s at PCC 0.99991, 20 workers 359.4 s at PCC
+0.99989, 72 workers 492.3 s at PCC 0.99992 — all three inside the vendor
+simulator's own PCC band, and 1.4× wall for 18× the workers. The smaller
+multi-core examples: `noc_tile_transfer` 2 workers 7.9 s, `shard_data_rm` 4
+workers 8.8 s, `contributed/multicast` 4 workers 10.2 s, `vecadd_sharding` 8
+workers 11.3 s, `pad_multi_core` 4 workers 26.8 s. On Blackhole,
+`TT_SIM_TENSIX_CORES=2` runs `noc_tile_transfer` in 8.6 s and
+`TT_SIM_TENSIX_CORES=20` with `…OVERRIDE_TODEPRECATE=3,4` runs
+`vecadd_multi_core` on `1-2 … 4-6` in 56.1 s.
+
+**What is still expensive is a materialised worker a program never launches on.**
+`add_2_integers_in_compute` is a one-core program: 7.6 s with one worker
+materialised, **28.9 s with 72** (and 7.6 s again on the repeat, so that is not
+drift). Every declared worker is released from soft reset by the grid-wide init
+handshake and runs firmware whether or not a kernel lands on it. That 3.8× is
+the reason the default is still **one** worker: the whole example ladder, every
+replay guard and the cost-model gate are single-core, and they would all pay it.
+Ask for the workers your program uses — no more, and no fewer.
+
+Timings are single runs on a machine with other work on it — read them as
+shape, not as a benchmark.
 
 ---
 
