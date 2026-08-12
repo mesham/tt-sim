@@ -24,7 +24,10 @@ fixes, the last two Tensix unit costs and firmware-loop parking (with
 and without the cost model) have all landed, and as of 2026-08-07 so
 has the attribution pipe that carries it to the people who will act on
 it. What remains is closing the few uncosted terms that are left, and
-the simulator's own wall clock.
+the simulator's own wall clock — though note that as of 2026-08-12 the
+wall clock does **not** degrade with grid size (1 to 80 workers is
+1.8x for a problem that uses them); the cost is materialising workers a
+program never launches on. See the v2.0 list, item 2.
 The first named external consumer is the **compiler team**: they will
 drive kernels through tt-sim to trace where cycles go — instruction
 mix, data movement, stalls — and generate more efficient code from it.
@@ -37,17 +40,32 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 
 ### Tier 1 — load-bearing, start here
 
-1. **DRAM residue** — endpoint occupancy closed 2026-08-09 (see §1).
-   What remains is blocked, but **not all of it on measurement**:
-   Blackhole's `dram.bandwidth` is `unknown` because BlackholeA0 has
-   **no DRAM tile directory in the ISA docs at all**, and a silicon
-   measurement is `corroboration`, never provenance — so no card run
-   can make it chargeable. That is a documentation gap, like
-   `CMD_BUF_AVAIL`. What a card *could* do it now **has**: the
-   endpoint-occupancy term is **corroborated on silicon** — one
-   channel flat across 1 → 120 readers while a fan-out control scales
-   x4.9, at a rate matching rung 2's independent derivation to
-   ~0.05 %. See item 2.
+> **Tier 1 is effectively clear as of 2026-08-12.** Its one item's
+> load-bearing halves both closed (endpoint occupancy 2026-08-09, the
+> Blackhole channel rate 2026-08-12); what is left below is residue.
+> The live load-bearing work is now the **"Toward a v2.0 release"**
+> list. The numbering here is kept because items 1–8 map to the
+> detail sections §1–§8; do not renumber.
+
+1. **DRAM residue** — endpoint occupancy closed 2026-08-09; Blackhole's
+   channel rate closed 2026-08-12 (see §1). **The block was never the
+   missing page.** `dram.bandwidth` is a GB/s *spec* block — per-channel
+   rate, channel count, achievable fraction — and all three do need a
+   document BlackholeA0 lacks. But the term the model *spends* is
+   `dram.channel_serialisation`, in **bytes per cycle**, and that never
+   had to arrive by unit conversion from a GB/s. It now arrives from one
+   division on two of tt-metal's own measured cycle counts:
+   `vendor_source_derived`, **47.0805 B/cycle for reads**. The ladder
+   never asked for a page — `access_latency` is chargeable at 126 on the
+   same arch, in the same section, by the same route. A silicon
+   measurement is still `corroboration`, never provenance, and the
+   2026-08-12 card's 47.147 is exactly that: it agrees to **0.14 %** with
+   a derivation that predates it and never saw it. The **write**
+   direction stays uncharged deliberately — its secant lands within
+   2.5 % of the same arch's L1 rows, so the dataset resolves no
+   DRAM-specific write bound, and charging it would deepen a named
+   over-charge. What remains here is the Blackhole `l1_local_cycles = 88`
+   anomaly and the unmodelled bank/refresh terms.
 
 ### Tier 2 — high value, small-to-medium effort
 
@@ -220,6 +238,184 @@ have the numbers.
 
 ---
 
+## Toward a v2.0 release
+
+**The claim a 2.0 would be making.** As of 2026-08-12 the strongest
+honest one is: *runs real tt-metal programs unmodified on both
+architectures, with a documented-provenance timing model corroborated
+at the slope and launch level*. Everything below either removes a
+caveat from that sentence or extends it. Nothing here is a promise
+about dates; it is a statement of what would have to be true.
+
+### Crucial
+
+1. **Multi-tile — surveyed 2026-08-12, and nothing breaks.** Every
+   grid size from 1 to the full compute grid completes and computes
+   correctly on both arches, including multicast and semaphore
+   programs (`matmul_multi_core` at 72 workers, PCC 0.99992). Three
+   real defects were found and fixed: `TT_SIM_TENSIX_CORES=N`
+   materialised the **wrong** workers past the fifth (it filled a
+   hardcoded 4x5 block; tt-metal fills its own compute grid
+   column-major), the two-tile plumbing test was **dead** — it dialled
+   a socket nothing listened on and defined no `test_` function, so
+   multi-tile had no working coverage at all — and the documented
+   default compute grid was wrong: **8x9 = 72 on Wormhole** (not 80)
+   and **13x10 = 130 on Blackhole** (not 140), the SoC descriptor
+   *containing* rather than *matching* it. `CLAUDE.md` still says
+   "matching" and wants correcting. What remains is item 2's
+   self-configuring materialisation. The original framing follows,
+   since it is what motivated the survey: **every validation in this
+   project was single-core on a 120-core part** — nekbone's ±10 %, the whole example ladder,
+   the cost model's 44 guards. `TT_SIM_TENSIX_COORDS` /
+   `TT_SIM_TENSIX_CORES` work, but one worker is the default and the
+   multi-tile path is thinly exercised. Anyone benchmarking a real
+   workload reaches for many cores immediately, and we would be
+   shipping a regime we have never checked. It also subsumes two known
+   problems: the launch-on-a-missing-tile hang (§6) was a symptom of
+   single-tile-by-default, and NoC contention is invisible until cores
+   contend.
+2. **Self-configuring materialisation** — and note this item's original
+   premise, "simulation speed at scale", was **disproved by item 1's
+   survey on 2026-08-12**. Wall clock is close to *flat* in worker
+   count for a fixed problem: 1 → 80 workers is **1.8×**, `matmul`
+   4 → 72 is **1.4×**. The simulated work is the same however it is
+   split and firmware parking makes a waiting worker nearly free, so
+   the ">2M cycles, an asymptote" folklore does not describe used
+   workers.
+   What *is* expensive is materialising workers a program never
+   launches on, because tt-metal's init handshake releases BRISC on
+   every declared worker: `add_2_integers_in_compute` measures
+   **7.6 s at 1 worker, 28.9 s at 72, 7.6 s again** (A/B/A). That is
+   why the default stays at one — a bigger default taxes the whole
+   suite ~4× for nothing — and why the answer is not a bigger default
+   but **materialising exactly what the program launches on**. The
+   sketch is in §1's report: buffer host writes in `NullCore`,
+   materialise and replay on go=GO, **and** materialise on a NoC
+   directory miss — both triggers, since go=GO alone silently drops a
+   peer's earlier traffic. A real change to the wire and NoC paths,
+   deserving its own measured pass.
+   The old premise, retained because it is still true of a *single*
+   tile: nekbone is 46 µs of device work taking ~7.8 s to simulate.
+   That decides whether
+   item 1 is usable or merely possible.
+### Useful
+
+3. **NoC link contention** — scoped 2026-08-12, and **it is not a
+   blocker: most of it is already done.** Three questions were being
+   carried as one.
+   * **The cycle cost of sharing a link is sourced and wired**
+     (2026-08-05, `NocLinkRegistry` at `tt_sim/network/tt_noc.py:121`,
+     per NoC at `tt_device.py:154`, `isa_doc_derived`, no new number).
+     `RoutingPaths.md` — *"Congestion occurs when two packets want to
+     use the same link between routers … one packet will wait for the
+     other"* — plus the README's one flit per cycle per axis is a
+     complete parameter-free rule over static dimension-ordered
+     routes. **~98 % of the measured effect.** The checked-in
+     simulator report reads `RESULT: CONGESTION MEASURED`, +59.38
+     cycles per shared link at r² 1.00. See `cost-model.md`, "The
+     congestion step, wired".
+   * **The arbitration order is published, and `unit_costs.yaml` says
+     it is not.** Two `vendor_source` documents state it — tt-metal's
+     `Saturating_DRAM_bandwidth` tech report (*"the NoC will serve on
+     the requests in a first-come first-serve strategy within the same
+     VC"*) and `memory_for_kernel_developers.rst` (*"each link can only
+     carry one packet at a time … one must wait"*). Both **confirm**
+     the mechanism already implemented. A citation edit — no number,
+     no cycle, no gate run. **Cheapest correctness win available.**
+   * **Buffer back-pressure stays `unknown`, and is the whole
+     residual** — measured at **~2 %** of the effect (different VCs do
+     not avoid the halving). Geometry is published, dynamics are not,
+     and Blackhole has no DRAM tile page at all. Charging it would be
+     `estimated` and in the **over-charging** direction, refused for
+     the same reason as PC-buffer write delays (§3).
+
+   What is unsettled is **validation**: the term is inert on every
+   in-tree workload — *3,960 link claims, zero waits* on
+   `blackhole/six` — so it needs item 1's grid to fire at all. **Item 3
+   depends on item 1; item 1 does not depend on item 3.** Nothing is
+   likely to change from the docs: every commit touching either NoC
+   tree since 2025-11 is a typo fix.
+
+   **`tenstorrent/tt-npe` is cited nowhere in this tree** and is the
+   best next move. Tenstorrent's own NoC estimator (Apache-2.0, both
+   arches, inside the tt-metal profiler flow) models a single-pass
+   demand-proportional derate over dimension-ordered routes, no VCs,
+   no arbitration order — **corroborating tt-sim's shape**. Its
+   numbers are **not importable**: every constant is uncited (no
+   calibration script, no measured data, no validation document,
+   `VERSION 0.00.1`), `getLinkBandwidth()` is 30/60.9 against the
+   docs' 32/64, and `CYCLES_PER_HOP` is 10/11 against the ISA docs' 9
+   *and* the 8.8/8.65 this project reproduced from tt-metal's own
+   dataset and confirmed on a card. Its multicast sink derate is dead
+   code (`sink_demand` initialised to 0, combined with `std::min`).
+   Record that conflict; do not resolve it. Cross-check **shapes**
+   only, normalising the hop constant out first, and frame it as §3
+   frames ttsim: **not an oracle**.
+
+   **Correct the stale claim while you are here.** *"tt-sim models no
+   link congestion"* survives in seven places written before the term
+   was wired — `perfbench/README.md:49,226,248`,
+   `card_session_verdicts.sh:499,743`, `run_card_session.sh:670`,
+   `docs/plans/evalplan.md:378,806`. The two in the verdict script are
+   **operator-facing**: they tell a card operator a real disagreement
+   is expected.
+
+4. **Rung-4, a matched cycle trace** (§4). Until totals are checked
+   instruction for instruction, "estimator" is the ceiling: the
+   interior can be wrong in compensating directions while the envelope
+   agrees. The bottleneck report's 79.8 % NoC split is exactly such an
+   unverified interior.
+5. **A Wormhole card session.** Not code — a hardware booking, so it
+   is lead time rather than effort and should be requested early. It
+   is the binding constraint on **three** separate items: the
+   committed DRAM sustained-rate prediction (Wormhole-only), the
+   store-coalescing and multiply pairs, and the `nocreadbench` half.
+6. **Upstream example coverage as a release gate.**
+   `docs/upstream-examples-status.md` exists; making the sweep
+   pass/fail turns "runs real programs" from an anecdote into a number
+   a release note can carry.
+
+### Interesting
+
+7. **Energy, at ranking level.** The activity counters already exist
+   (`busy_cycles`, `instr_retired`, `noc_bytes_total`,
+   `noc_flight_cycles`, `dispatch_total`). Absolute Joules are out of
+   reach — board telemetry is ~1 Hz against kernels of microseconds —
+   but *which kernel costs more* is tractable, useful to the
+   compiler-team consumer, and offered by nothing else here. Any
+   coefficients would be **fitted**, so they must sit outside the
+   provenance ladder and be labelled as such.
+8. **Blackhole `dram.bandwidth` provenance** (§1). If rung 2's
+   derivation from the vendor's 8,140-point dataset qualifies as
+   `vendor_source_derived`, it closes a Tier-1 item and a 26–35 %
+   model gap with no card time.
+
+### Suggested order
+
+**Make multi-tile the 2.0 story**: 1 → 2 — materialise and validate a
+real grid, then measure and fix what that costs. Item 3 was written
+here as a third crucial pillar and **that was wrong**: its cycle term
+has been wired since 2026-08-05, and the "tt-sim models no link
+congestion" line repeated across seven files predates the wiring. It
+is a validation dependency on item 1 plus a two-document citation
+edit, and it moved to Useful on 2026-08-12. Items 3–6 are the
+credibility layer; **book item 5 now** regardless, since it is lead
+time rather than effort.
+
+A smaller, also-defensible 2.0 is **"Blackhole reaches parity with
+Wormhole"** — closer than it looks: the DRAM channel rate (item 8)
+landed 2026-08-12, leaving mainly a coverage sweep (item 6).
+
+**A caution this section earned.** Two of these items were mis-scoped
+by reading the tree's own prose rather than its code — item 3 as
+unmodelled when it is wired, and §3's C7/C14 as inert by quoting a
+sentence about the *occupancy* column at a question about *latency*.
+Both were caught by an agent instructed to verify the premise
+first-hand before acting on it. Prose here drifts from code; check the
+code.
+
+---
+
 ## Working rules
 
 These apply across every item below and are enforced by tests where
@@ -354,14 +550,16 @@ that session settled, and what it left.
   48 tiles on one channel measure 22.2 / 22.3 / 22.3 GB/s, an
   aggregate that does **not** grow with readers, which is endpoint
   occupancy as a vendor measurement.
-  **What it does NOT do is make Blackhole chargeable.** Its
-  `dram.bandwidth` is `unknown` for want of a published page, not for
-  want of a number, and silicon enters as `corroboration` only —
+  **What it does NOT do is make Blackhole chargeable — and it did not
+  need to.** Vendor arithmetic did that on 2026-08-12 (§1); a card run
+  enters as `corroboration` whatever it says.
   `costs_test.py::test_the_dram_channel_rate_is_exactly_its_own_derivation`
-  exists precisely to stop Wormhole's 24 being laundered into that
-  gap. Rung 2 already *sizes* Blackhole at 47.1 B/cycle reading and
-  59.4 writing; the 26 % asymmetry is why a scaled Wormhole number is
-  wrong, and it would remain wrong with a measured one.
+  still stops Wormhole's 24 reaching Blackhole — now for the **write**
+  direction, which is the live laundering route, since the read
+  direction is charged from Blackhole's own row. The 26 % asymmetry
+  between the two directions is why a scaled Wormhole number was
+  always wrong, and it is honoured by charging one direction and
+  refusing the other rather than averaging them.
   **RAN ON A BLACKHOLE CARD 2026-08-12, and the level disagrees with
   the model by 26–35 %.** The shape holds — fan-out control ×4.85
   against one-channel ×1.018, every gate passed — but the plateau is
@@ -453,8 +651,12 @@ that session settled, and what it left.
   reads from the vendor's 8,140-point NoC dataset**: two wholly
   independent methods agreeing to ~0.05 %, which is the strongest
   cross-check this model has had.
-  Still `corroboration`, never provenance — BlackholeA0 publishes no
-  DRAM page, so `dram.bandwidth` stays unchargeable there. And the
+  Still `corroboration`, never provenance — and that never was what
+  blocked the entry. `dram.channel_serialisation` became chargeable on
+  Blackhole on 2026-08-12 from the *dataset* arithmetic, not from this
+  card; the card's 47.147 against the derivation's 47.08 is a check on
+  a derivation that never saw it. `dram.bandwidth` (the GB/s block) is
+  still `unknown`, still needs a document, and gates nothing. And the
   `samecore` arm fires on neither descriptor (tt-metal maps every bank
   to a distinct NoC coord), so this separates **the endpoint from the
   fabric**, not the GDDR6 channel from its inbound router link.
@@ -751,7 +953,17 @@ fails loudly today. Grep for `NotImplementedError` in the named files.
   on `NIU_MST_ATOMIC_RESP_RECEIVED`.
 - Router arbitration & flow control: no buffer back-pressure, no
   fairness, no virtual channels (which is why tt-sim is structurally
-  blind to the `DIR_BIDIR` hang class).
+  blind to the `DIR_BIDIR` hang class). **Not to be misread as "no
+  contention"** — the cycle cost of two flows sharing a link *is*
+  modelled (`NocLinkRegistry`, wired 2026-08-05, `isa_doc_derived`,
+  ~98 % of the measured effect). It is the arbitration *order* and the
+  buffer dynamics that are absent. See the v2.0 list, item 3.
+- **`NOC_CMD_BRCST_SRC_INCLUDE` (bit 17) is ignored**, so a multicast
+  whose rectangle contains its own sender always loops back. Found
+  2026-08-12 during the multi-tile survey. It does not bite the
+  examples tested — `contributed/multicast` excludes the sender and
+  matmul-mcast writes identical data — but it is a real gap and wants
+  its own guard.
 
 **Device / tile** (`tt_sim/device/`, `tt_sim/misc/`):
 - Soft-reset sequencing applied immediately (multi-step ISA sequence
@@ -766,6 +978,12 @@ fails loudly today. Grep for `NotImplementedError` in the named files.
   see §3.)
 - Extra core types: `tt_device.py` raises beyond BRISC/NCRISC/TRISC0-2;
   widen if ERISC becomes bridge-visible.
+- **Watchdog verbosity at scale**: the deadlock watchdog fires benignly
+  once per run at teardown, printing ~5 lines per materialised tile —
+  **~400 lines on an 80-tile grid**, with every core in a *recognised*
+  firmware wait loop during host readback. Summarise identical
+  entries; do **not** suppress the case, because that would also
+  silence the launch-on-a-missing-tile symptom.
 - Watchdog residual: a loop longer than the confirmation window still
   reads as progress. Note the **launch-on-a-missing-tile** hang is
   *not* this and was never a watchdog problem: the guard already named
@@ -798,6 +1016,20 @@ accelerator. Wormhole's RV32IM-only set is complete and correct.
   Two read paths on different VCs is a cheap candidate for why only
   the non-stateful Wormhole rows show the burst-depth step. No card
   needed.
+- **`CLAUDE.md` says the SoC descriptor "matches" tt-metal's default
+  compute-grid range. It *contains* it** — measured 2026-08-12, the
+  default is 8x9 = 72 on Wormhole (not 80) and 13x10 = 130 on
+  Blackhole (not 140). One word, and the runbook is already correct.
+- **Retire the stale "tt-sim models no link congestion" claim**, which
+  predates the 2026-08-05 wiring and survives in seven places:
+  `perfbench/README.md:49,226,248`,
+  `perfbench/card_session_verdicts.sh:499,743`,
+  `perfbench/run_card_session.sh:670`,
+  `docs/plans/evalplan.md:378,806`. The two in the verdict script are
+  **operator-facing** — they tell someone at a card that a real
+  disagreement is expected. While there, add the two `vendor_source`
+  citations for the arbitration order (v2.0 item 3), correcting
+  `unit_costs.yaml`'s "nothing publishes what the real order is".
 - Module boundaries per hardware block — `frontend.py` mixes decode
   and dispatch; `tt_noc.py` bundles NIU + both NoCs + directory.
   Acceptance: a table in `CLAUDE.md` mapping ISA-docs subsection → one
