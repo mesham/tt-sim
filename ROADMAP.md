@@ -511,20 +511,32 @@ that session settled, and what it left.
 
   **Open simulator question this surfaced:** `_read_wait_res`
   (`tt_sim/pe/tensix/backends/sync.py`) decodes Blackhole `wait_res`
-  as 12 bits where the ISA page gives `u13` and tabulates C0–C12, so
-  `CFGEXU` is trimmed off and the wait degrades to the `0x7F`
-  fallback. `WaitGate._check_blackhole_condition` implements C12 —
-  live but unreachable. The 12-bit width came from ttsim's
-  `data/bh/tensix_isa.json`, so **vendor source and published page
-  disagree** and tt-sim followed the vendor; two tests pin the current
-  behaviour and a fix would move computed values.
-  **That is not the whole of it, and on its own it is not the part
-  that matters.** Widening the mask to 13 bits changes nothing,
-  because tt-sim's Configuration Unit retires inside the cycle that
-  issued, so `hasInflightInstructionsFromThread` is empty whenever
-  another thread's Wait Gate looks. **Two independent gaps** — the
-  decode width and the unit's zero residency — and the residency one
-  is what makes C12 unobservable in the simulator.
+  as 12 bits where the ISA page gives `u13`, so `CFGEXU` was trimmed
+  off and the wait degraded to the default mask — which on Blackhole
+  selects C0–C6, i.e. **the wrong wait, not a shorter one**. There
+  were **two independent gaps**: that decode width, and the
+  Configuration Unit retiring inside the cycle that issued, which left
+  `hasInflightInstructionsFromThread` empty whenever another thread's
+  Wait Gate looked.
+  **Both closed 2026-08-11.** The unit now holds the residency
+  `ConfigurationUnit.md` tabulates in its **Latency** column (`WRCFG`
+  2 at IPC 1 — the unit accepts its next instruction a cycle *before*
+  the previous leaves, which is why residency needed its own column
+  and could not be read off `busy_until`), and `wait_res` widened to
+  13 bits. That last is a **source conflict decided on rank**: four
+  sources say 13 — the page's `u13` syntax, its encoding diagram, its
+  C0–C12 table, and tt-metal's own LLK header, where
+  `p_stall::CFGEXU = 0x1000` cannot fit in 12 bits — against ttsim's
+  `data/bh/tensix_isa.json` alone, whose own executor passes `0x1000`
+  to a check its decoder can never deliver. `PROVENANCE_RANK` already
+  puts `isa_doc` above `vendor_source`. Reversing it is one constant,
+  `BLACKHOLE_WAIT_RES_BITS`.
+  C12 is now observable and deterministic — `burst + 2` under every
+  clock and Wait-Gate ordering, where before ten instructions in
+  flight were as invisible as none. **No cycle moved**: the residency
+  arms 1,280 times across 33 guards, and of 4,739 predicate calls none
+  concerns the resident thread. Nothing in tt-metal 0.74 emits
+  `CFGEXU`, so only the card probe reaches it.
 - **phase G at 4608/5632 B** — ran; four gsets written, all rows
   differing. With gset 0 that is **five measured footprints — 4608,
   5120, 5632, 6144, 7168 B** — around a ramp whose onset was bracketed
@@ -596,19 +608,64 @@ pipeline"), which used to clear at retire mid-transfer.
 80 B/cycle joint ceiling shared between two streaming unpackers, and
 the cross-unpacker half of the address-phase interlock ("nor can any
 other thread start an `UNPACR`"). Both are pinned by name in the
-tests. The residency-vs-occupancy question `STALLWAIT` C7 (Matrix) and
-C14 (SFPU) raise is inert today — no in-tree entry charges those units
-occupancy above 1 — and settling it needs each unit's own published
-latency.
+tests. **`STALLWAIT` C7 (Matrix) and C14 (SFPU) closed 2026-08-12**,
+and the earlier "inert" reading was instructive: it was about the
+*occupancy* column, and the question is about the other one.
+`MatrixUnit.md` publishes **latency 5** for
+`MVMUL`/`DOTPV`/`GAPOOL`/`GMPOOL`/`ELWMUL`/`ELWADD`/`ELWSUB` and **4**
+for the `MOV*` forms, all at IPC 1; `VectorUnit.md` **2** for the
+SFPU's arithmetic and LUT rows. Both units reported every instruction
+out of the pipeline up to four cycles early, and the values were
+already in `tensix_instruction_costs.yaml`, unread. The Configuration
+Unit's residency moved up into `TensixBackendUnit` and both units now
+read their own Latency column. **No computed value and no guard cycle
+count moved**, model on or off — but unlike C12 this one is
+*observed*: `blackhole/reduce` goes from 0 blocked looks to 14 of its
+16 latched Matrix waits, `twolaunch` from 0 to 4. The guard totals
+hold because the host polls every 100 cycles and the extra cycles are
+absorbed inside a poll window — a statement about resolution, not a
+claim of no effect. **C14 is inert for a stated reason**: the Wait
+Gate costs three cycles before the instruction a `STALLWAIT` blocks
+and the SFPU's deepest latency is 2, so nothing there reaches past it;
+a row deeper than 3 would show without a rewrite.
+
+Separately, `STALLWAIT`'s empty-condition-mask default is now
+per-arch. `STALLWAIT.md` gives `0x0F` on Blackhole against Wormhole's
+`0x7F`, and tt-sim used `0x7F` on both — which on Blackhole is **not a
+superset but a different set**: bits 4–6 there are the Matrix Unit
+pipeline (an invented wait) and `SrcA`/`SrcB` not yet back with the
+*unpackers* (inverted). No number moves, because the LLK always passes
+an explicit `p_stall::` mask. `SEMWAIT` with a zero mask is
+`UndefinedBehavior()` on both arches, so tt-sim's fallback there is
+its own choice; it now follows the same per-arch constant.
 
 ## 4. Rung-4 calibration
 
 The bar for claiming anything stronger than "first-order estimator":
-match a captured silicon cycle trace within X %. Needs golden traces —
-one per major unit (RV-only, Tensix-only, NoC-heavy) — checked in
-under `driver/wormhole/server/traces/`. Until then, no in-tree cycle
-count has ever been compared to silicon; say "performance estimator",
-not "cycle-accurate".
+match a captured silicon cycle **trace** within X %, instruction for
+instruction. Needs golden traces — one per major unit (RV-only,
+Tensix-only, NoC-heavy) — checked in under
+`driver/wormhole/server/traces/`.
+
+**"No in-tree cycle count has ever been compared to silicon" is
+retired as of 2026-08-12 — it is no longer true.** Three independent
+comparisons now exist. Component slopes: six `perfbench` probes
+against a Blackhole card, agreeing to ~1 % (the `divu` row's −82 % is
+a deliberate charge-the-floor policy outcome, not a miss). An
+application: `nekbone` (4 elements, 16³, single core) profiled on both
+this simulator and a p150, **all fifteen per-core zones within
+±10.2 %, mean absolute error 7.3 %, total −3.9 %**, host work
+excluded — and, as the control, **2.7–5.3× under-prediction with the
+cost model off**. A shape: `dramratebench`'s endpoint scaling, though
+its *level* is 26–35 % out (§2).
+
+What that does **not** license is "cycle-accurate". A per-launch total
+matching to ±10 % is a much weaker claim than a matched trace: the
+totals could agree while the interior is wrong in compensating
+directions, and nothing yet checks the interior against hardware —
+that is exactly what this item is for. Say **"performance
+estimator, corroborated at the launch and slope level"**; do not say
+cycle-accurate, and do not say uncompared.
 
 ## 5. Tracing & observability follow-ups
 
@@ -710,7 +767,21 @@ fails loudly today. Grep for `NotImplementedError` in the named files.
 - Extra core types: `tt_device.py` raises beyond BRISC/NCRISC/TRISC0-2;
   widen if ERISC becomes bridge-visible.
 - Watchdog residual: a loop longer than the confirmation window still
-  reads as progress.
+  reads as progress. Note the **launch-on-a-missing-tile** hang is
+  *not* this and was never a watchdog problem: the guard already named
+  the absent tile, but its `os._exit` was itself the hang, because UMD
+  calls `nng_recvmsg` with no deadline and a dead simulator strands the
+  host for ever. Closed 2026-08-11 — the server now identifies the host
+  as the owner of the wire's listening socket and stops it, on the
+  launch guard and on any simulator exception, exiting only once it
+  has. Fails closed on every ambiguity; `TT_SIM_NO_HOST_STOP=1`
+  disables. Accepted residuals: a materialised core blocked on a ghost
+  peer with no identifiable host still hangs, and PID reuse in the
+  moment before `SIGTERM` is unguarded.
+- Ctrl-C on the *host* orphans the server — `uv_spawn` uses
+  `UV_PROCESS_DETACHED`, so the simulator never sees the terminal's
+  SIGINT. The mirror image of the hang above; `driver/sim_procs.sh`
+  exists to clean up after it.
 - ARC tile: nothing modelled; `arc_msg` returns 0.
 
 **Blackhole RV extensions** (all loud guards, none reached by any
