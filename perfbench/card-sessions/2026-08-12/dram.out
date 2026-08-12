@@ -1,0 +1,77 @@
+2026-08-12 13:40:44.051 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-12 13:40:44.053 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-12 13:40:44.055 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:95)
+2026-08-12 13:40:44.055 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-12 13:40:44.066 | info     |             UMD | Established firmware bundle version: 19.6.0 (topology_discovery.cpp:574)
+2026-08-12 13:40:44.066 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-12 13:40:44.212 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {} (cluster.cpp:168)
+2026-08-12 13:40:44.212 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-12 13:40:44.212 | info     |             UMD | KMD version: 2.10.0 (cluster.cpp:145)
+2026-08-12 13:40:44.212 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-12 13:40:44.217 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-12 13:40:44.337 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-12 13:40:45.266 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-12 13:40:45.266 | info     |     Distributed | Using auto discovery to generate mesh graph. (metal_env.cpp:408)
+2026-08-12 13:40:45.266 | info     |     Distributed | Constructing control plane using auto-discovery (no mesh graph descriptor). (metal_env.cpp:470)
+2026-08-12 13:40:45.266 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=0 (bus_id=0x27) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 13:40:45.266 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=1 (bus_id=0x83) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 13:40:45.267 | warning  |          Fabric | TopologyMapper auto-discovery: Downgrading to mesh shape 1x1 (1 total nodes) for 2 physical chips. Some physical chips may not be used. This may indicate connectivity issues, topology mismatches, or insufficient fabric links between chips. Verify your physical chip connectivity and ensure that the fabric links are correctly configured. (topology_mapper.cpp:1696)
+2026-08-12 13:40:45.267 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:1} (topology_mapper_utils.cpp:2342)
+2026-08-12 13:40:45.267 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:2} (topology_mapper_utils.cpp:2350)
+2026-08-12 13:40:45.275 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-12 13:40:45.291 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-12 13:40:45.291 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-12 13:40:45.320 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+dramratebench: arch=blackhole grid=12x10 clock=1350MHz banks=8 readers<=120 points=20
+dramratebench: bytes/reader=1048576 tx=4096B num_tx=256 repeats=3 dram_base=0x00593E80
+  bank  0  logical (0,0)  noc (17,14)  offset 0x00000000  tag 0xDB000000
+  bank  1  logical (1,0)  noc (17,15)  offset 0x00000000  tag 0xDB000001
+  bank  2  logical (2,0)  noc (17,18)  offset 0x00000000  tag 0xDB000002
+  bank  3  logical (3,0)  noc (17,21)  offset 0x00000000  tag 0xDB000003
+  bank  4  logical (4,0)  noc (18,14)  offset 0x00000000  tag 0xDB000004
+  bank  5  logical (5,0)  noc (18,17)  offset 0x00000000  tag 0xDB000005
+  bank  6  logical (6,0)  noc (18,20)  offset 0x00000000  tag 0xDB000006
+  bank  7  logical (7,0)  noc (18,23)  offset 0x00000000  tag 0xDB000007
+dramratebench: no physical DRAM core fronts two banks on this part, so the
+  `samecore` arm (same inbound NoC link, different GDDR6 channel) is SKIPPED.
+  Without it, `onechan` cannot separate a channel limit from the limit of the
+  one router link every reader's flow converges on. Say so when reporting.
+
+dramratebench: wrote /home/nx09/nx09/nebriscv/tt_traces/probes-1/dram.blackhole.csv (0 failures)
+dramratebench: 20 point(s); 18 of 18 multi-reader point(s) had a reader wait at the
+  barrier; 0 point(s) had a reader that did not verify its DRAM tag
+
+dramratebench: SUSTAINED RATE -- N readers, 1048576 B each, ONE channel
+  readers   aggregate B/cycle   per reader   aggregate GB/s   fanchan B/cycle
+        1              46.313       46.313          62.52           46.315
+        2              40.963       20.482          55.30           92.614
+        4              45.402       11.350          61.29          148.718
+        8              45.878        5.735          61.94          188.911
+       12              46.200        3.850          62.37          171.196
+       16              46.475        2.905          62.74          211.668
+       24              46.962        1.957          63.40          203.308
+       32              47.105        1.472          63.59          237.130
+       48              47.089        0.981          63.57          193.278
+      120              47.147        0.393          63.65          229.287
+  No published table applies: wh_dram#performance is a WORMHOLE page, and this
+  part is blackhole. Blackhole publishes no DRAM tile page at all -- no per-channel
+  rate, no address map -- so there is nothing here to compare against and
+  nothing measured here can supply it.
+  fanchan aggregate 46.346 -> 229.287 B/cycle over 1 -> 120 readers (x4.95)
+  onechan aggregate 46.313 -> 47.126 B/cycle over 1 -> 120 readers (x1.02)
+  VERDICT: ENDPOINT BOUND -- the fan-out control scaled x4.95 while the
+  same readers on ONE channel managed only x1.02, which is 21% of it.
+  Same reader count, same issue loop, same transaction size: only the
+  endpoint differed, so the endpoint is what cost the difference. This is
+  the shape tt-sim's DramChannels term asserts. It is CORROBORATION and
+  never provenance: it cannot make dram.bandwidth chargeable, least of all
+  on a part with no published DRAM page.
+  samecore: not run on this part, so a channel limit and the limit of the
+  one router link every onechan flow converges on stay confounded.
+2026-08-12 13:40:50.123 | info     |    BuildKernels | JIT cache stats: 0/1 hits (0.0%) [0 cached, 59 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-12 13:40:50.123 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-12 13:40:50.128 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-12 13:40:50.128 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-12 13:40:50.837 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-12 13:40:50.837 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-12 13:40:50.837 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

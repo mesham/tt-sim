@@ -1,0 +1,99 @@
+2026-08-12 13:40:24.020 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-12 13:40:24.025 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-12 13:40:24.032 | info     |             UMD | Creating TopologyDiscovery for architecture: blackhole (topology_discovery.cpp:95)
+2026-08-12 13:40:24.032 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-12 13:40:24.061 | info     |             UMD | Established firmware bundle version: 19.6.0 (topology_discovery.cpp:574)
+2026-08-12 13:40:24.062 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-12 13:40:24.497 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {} (cluster.cpp:168)
+2026-08-12 13:40:24.497 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-12 13:40:24.497 | info     |             UMD | KMD version: 2.10.0 (cluster.cpp:145)
+2026-08-12 13:40:24.497 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-12 13:40:24.511 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-12 13:40:24.635 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-12 13:40:25.750 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-12 13:40:25.750 | info     |     Distributed | Using auto discovery to generate mesh graph. (metal_env.cpp:408)
+2026-08-12 13:40:25.752 | info     |     Distributed | Constructing control plane using auto-discovery (no mesh graph descriptor). (metal_env.cpp:470)
+2026-08-12 13:40:25.770 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=0 (bus_id=0x27) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 13:40:25.770 | warning  |          Always | Unknown motherboard 'ProLiant DL385 Gen10 Plus' for chip_id=1 (bus_id=0x83) — falling back to bus_id as tray_id. Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp. (physical_system_discovery.cpp:89)
+2026-08-12 13:40:25.805 | warning  |          Fabric | TopologyMapper auto-discovery: Downgrading to mesh shape 1x1 (1 total nodes) for 2 physical chips. Some physical chips may not be used. This may indicate connectivity issues, topology mismatches, or insufficient fabric links between chips. Verify your physical chip connectivity and ensure that the fabric links are correctly configured. (topology_mapper.cpp:1696)
+2026-08-12 13:40:25.818 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:1} (topology_mapper_utils.cpp:2342)
+2026-08-12 13:40:25.818 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {0:2} (topology_mapper_utils.cpp:2350)
+2026-08-12 13:40:25.852 | info     |          Device | Slow dispatch mode: Using full logical grid (12, 10) (core_descriptor.cpp:220)
+2026-08-12 13:40:25.980 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-12 13:40:25.980 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nx09/nx09/nebriscv/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/17852274912291545571/ (build_env_manager.cpp:347)
+2026-08-12 13:40:26.212 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase A [t1]: done (1 issuing thread), 36 rows written to /home/nx09/nx09/nebriscv/tt_traces/probes-1/tensix-rdcfg.blackhole.csv
+phase A [t2]: skipped (--variants t1)
+phase A [t3]: skipped (--variants t1)
+
+==============================================================================
+tensixbench summary [blackhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+dvalid setup: once -- one SETDVALID for the tile (X1, de-confounded)
+
+probe          variant unit      thr     cyc/block  cyc/instr      R^2
+loop_overhead  t1      -         1            2.00      0.000   1.0000
+SETDMAREG      t1      THCON     1           65.87      0.998   1.0000
+RDCFG          t1      CFG       1           65.86      0.998   1.0000
+RDCFG_STALL    t1      CFG-LAT   1          191.95      2.968   1.0000
+SETDMA_STALL   t1      THCON-LAT 1          191.97      2.968   1.0000
+RDCFG_CFGSTALL t1      CFG-LAT   1          191.96      2.968   1.0000
+RMWCIB_CFGSTALL t1      CFG-LAT   1          191.96      2.968   1.0000
+SETDMA_CFGSTALL t1      THCON-LAT 1          191.97      2.968   1.0000
+RMWCIB0        t1      CFG       1           65.87      0.998   1.0000
+
+------------------------------------------------------------------------------
+phase A: RDCFG latency by STALLWAIT on the Configuration Unit (C12/CFGEXU)
+------------------------------------------------------------------------------
+  BlackholeA0 STALLWAIT.md, condition C12: "Any thread has an instruction in
+  any stage of the Configuration Unit pipeline", with block bit B7 (inside
+  STALL_THREAD) "Block thread from starting new Configuration Unit
+  instructions". BlackholeA0 RDCFG.md: "After issuing one or more `RDCFG`
+  instructions, software is encouraged to use `STALLWAIT` to wait for the
+  Configuration Unit to no longer be busy."
+  Predicted from ConfigurationUnit.md's stage table: RDCFG holds stage 0 then
+  stage +1, RMWCIB holds stage 0 alone, so the difference is >= 1 cycle/pair.
+
+  variant thr        rdcfg      rmwcib      setdma   d(rmwcib)   d(setdma)
+  t1      1          2.968       2.968       2.968      +0.000      -0.000
+
+  bare occupancies (must agree, or the difference is occupancy):
+    RDCFG 0.998   RMWCIB0 0.998   SETDMAREG 0.998
+
+TTBENCH_CFGLAT_OCC: 0.9978 0.9979 0.9979
+TTBENCH_CFGLAT_STALLCOST: 1.9704
+TTBENCH_CFGLAT_COND: C12 CFGEXU 0x1000
+TTBENCH_CFGLAT_PAIRS: 2.9682 2.9682 2.9683
+TTBENCH_CFGLAT_DIFF: 0.0000 -0.0001
+
+  DIFFERENCE 0.000, BELOW THE 0.5 CYCLE/PAIR FLOOR against both baselines.
+  ConfigurationUnit.md predicts >= 1, so this is the NULL and not a small
+  value. EXPECTED against tt-sim, which reads Blackhole's STALLWAIT
+  condition mask as 12 bits (raw 11:0, tt_sim/pe/tensix/backends/sync.py
+  `_read_wait_res`) where the ISA doc gives 13, so C12 never survives the
+  decode and the wait degrades to the 0x7F `all resources` fallback. On a
+  card it means the construction did not reach the quantity.
+
+------------------------------------------------------------------------------
+phase A: the wrong-condition control (slots 20/21, TRISC_CFG)
+------------------------------------------------------------------------------
+  variant thr    rdcfg/pair    base/pair   difference
+  t1      1           2.968        2.968       -0.000
+
+TTBENCH_CFGLAT_WRONGBIT: 0.0000
+  TRISC_CFG is about the RISCV core's outstanding memory requests, not
+  about the Configuration Unit's pipeline, so ~0 here is the CORRECT
+  reading and is what makes the C12 difference above attributable to the
+  condition bit. A control that moved would mean it is not.
+
+wrote 36 rows to /home/nx09/nx09/nebriscv/tt_traces/probes-1/tensix-rdcfg.blackhole.csv
+TTBENCH_VALID_A: yes
+TTBENCH_VALID: yes
+Completed successfully on the device
+2026-08-12 13:40:34.483 | info     |    BuildKernels | JIT cache stats: 0/3 hits (0.0%) [0 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-12 13:40:34.483 | info     |    BuildKernels | JIT telemetry: 1 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-12 13:40:34.491 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-12 13:40:34.491 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-12 13:40:35.858 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-12 13:40:35.859 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-12 13:40:35.859 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
