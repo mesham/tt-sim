@@ -7667,6 +7667,212 @@ explicit `p_stall::`-derived mask. `SEMWAIT`'s zero-condition arm is
 `UndefinedBehavior()` on both arches, so tt-sim's choice there is its own; it
 follows the same constant rather than always Wormhole's.
 
+## Blackhole's DRAM channel rate: the block was never the missing page
+
+Two sentences sat next to each other in this file and in `ROADMAP.md` for three
+days, and they do not connect:
+
+> Rung 2 puts Blackhole's DRAM at **47.1 B/cycle reading and 59.4 writing**
+> against a 64 B/cycle link.
+
+> `dram.bandwidth` is `provenance: unknown` — BlackholeA0 has no DRAM tile
+> directory in the ISA docs at all — … so `dram.channel_serialisation` "follows
+> `bandwidth` straight down": with no published GB/s there is nothing to
+> convert.
+
+The second is a statement about **`bandwidth`**, which is a GB/s spec block —
+per-channel rate, channel count, achievable fraction — and every one of those
+three does need a document. The term the model actually spends is
+`channel_serialisation`, which is **bytes per cycle**, and a bytes-per-cycle
+figure does not have to arrive by unit conversion from a GB/s. On Wormhole it
+happens to; that is a fact about Wormhole's sources, not a rule about the
+quantity. Nothing in the provenance ladder asks for a page: `vendor_source_
+derived` asks for *arithmetic on vendor numbers, written out*, which is why
+`dram.access_latency` is chargeable at 126 cycles on the same arch, in the same
+section, off tt-metal's measured `tm_dm_common` rows, with no Blackhole DRAM
+page in existence.
+
+So the standing question — "can a card measurement make this chargeable?" — was
+the wrong question, and its answer is still no. The right one is "is there
+vendor arithmetic that reaches it?", and there is.
+
+### The derivation, and it is the one that was already there
+
+`tt_sim.perf.noc_dataset_sweep` has printed this since 2026-08-08, unchanged,
+for every series on both arches at once, under "implied sustained bandwidth,
+from the large-transfer slope":
+
+```python
+measured_rate = d_bytes / (big[-1].measured - big[0].measured)
+```
+
+A two-point secant on the *measured* column of one row of tt-metal's
+`tm_noc_latencies` — no model input, no fit, no coefficient. For a DRAM row the
+two points are 4096 B and 8192 B, because the sweep drops DRAM sizes above
+8 KiB as extractor padding, so it is literally one subtraction and one division:
+
+| row | 4096 B | 8192 B | Δ | B/cycle |
+| --- | ---: | ---: | ---: | ---: |
+| Blackhole DRAM read | 578 | 665 | 87 | **47.0805** |
+| Blackhole DRAM write | 454 | 523 | 69 | 59.3623 |
+| Wormhole DRAM read | 565 | 733 | 168 | 24.3810 |
+| Wormhole DRAM write | 601 | 768 | 167 | 24.5269 |
+
+Differencing two sizes on the *same* row cancels everything constant — the
+round trip, the flat endpoint service time, the issuing core's path, the
+profiler's own instrumentation — exactly as `access_latency`'s subtraction
+cancels the round trip. What is left is the slowest per-byte stage.
+
+**The control is Wormhole, and it is what makes this a rate rather than a
+residual.** The same arithmetic, on the same file, run on the arch that *does*
+publish a per-channel figure, returns 24.38 and 24.53 against a published 24
+that has been in this table at `isa_doc` since long before the dataset was ever
+read. The derivation recovers a number it was never given, to +1.6 % and
++2.2 %. It also settles which composition model applies: if the link and the
+channel *added* rather than pipelined, a 24.38 end-to-end behind a 32 B/cycle
+link would require a 102 B/cycle channel, four times the published figure. The
+slope reads the bottleneck.
+
+And on Blackhole the bottleneck it reads is not the fabric: the same file's L1
+rows, which cross the link and no DRAM, slope at 60.35 / 60.59 / 60.89 / 60.83
+on that arch. 47.08 sits 22 % below all four.
+
+**I did not adjust the derivation to reach 47.1.** It is the existing function,
+run unmodified, and its output is the same output it produced before the
+2026-08-12 card session existed. Had it needed re-parameterising or row
+selection to land on the card's number, that would have been laundering silicon
+through a derivation and the right answer would have been to refuse.
+
+### The write direction is refused, and that is the finding
+
+The instruction the work started from was to charge **both** numbers, 47.1 and
+59.4, on the ground that the 26 % gap is the whole reason a scaled Wormhole
+figure is wrong. The gap is real and it is not averaged away. But two things
+say 59.36 is not a DRAM bound, and both are checkable above:
+
+1. **It is not separable from the fabric.** Blackhole's four L1 slopes are
+   60.35 – 60.89, and 59.36 is within 2.5 % of every one of them. Wormhole
+   separates cleanly — DRAM write 24.53 against L1 write 30.16, 19 % apart —
+   which is what a resolved endpoint bound looks like, and is what Blackhole's
+   *read* direction looks like. The dataset does not resolve a Blackhole DRAM
+   write limit at all.
+2. **Charging it would deepen a named over-charge.** `KNOWN_OVER_CHARGED` holds
+   exactly one row, `("blackhole", "DRAM write diff-axis")`, because
+   `access_latency` is derived from the read figures and a Blackhole write is
+   answered on acceptance rather than after the array. Its eight residuals run
+   **−52 −44 −52 −49 −52 −42 −42 −37**; adding the write channel term takes
+   them to **−53 −45 −53 −50 −54 −45 −48 −48**. Over-charging is the direction
+   every bound in these tables is chosen to avoid.
+
+The explanation for the 26 % gap was already in this file, in the neighbouring
+`access_latency` note: "a write is answered when it is accepted, a read when
+the array has been read". A write's measured time does not contain the array,
+so its slope cannot measure the array. Honouring the asymmetry therefore means
+charging one direction and refusing the other — not averaging, and not
+inventing a write rate from the read one.
+
+That made the term **per direction** rather than per arch, which is the one
+structural change: `DramCostModel.channel_bytes_per_cycle(is_write)`,
+`DramChannels(bytes_per_cycle, write_bytes_per_cycle=…)`, and a rule that a
+directional key in an override **replaces** the deep-merged flat one instead of
+falling back to it. That rule is what keeps Wormhole's 24 out of Blackhole's
+write direction, and it is now the *more* likely laundering route than the old
+one: an override reading `unknown` announces itself, one carrying a read rate
+looks complete until you ask it for the other direction.
+
+### What it costs in independence, stated rather than buried
+
+Rung 2 validates the model against this dataset, and the entry now comes from
+it. So the Blackhole DRAM read row's large-transfer residual is **no longer an
+independent check** of the size term — it is the term's own source, and its
+flattening is an identity, not evidence:
+
+| Blackhole rung 2 | before | after |
+| --- | --- | --- |
+| DRAM read diff-axis, residual | 58 + **5.63** cycles/KiB | 60 + **0.55** |
+| DRAM write diff-axis, residual | −50 + 1.70 | −50 + 1.70 (untouched) |
+| implied model rate, DRAM read | 64.00 B/cycle | **46.55** against a measured 47.08 |
+
+which is the same shape Wormhole's 24 produced on 2026-08-04 (+10.03 → −0.65),
+and is quoted here as a *consistency* check on the arithmetic rather than as
+support for it. Two checks survive that are not circular:
+
+* the Wormhole control above, which recovers an `isa_doc` number the arithmetic
+  was never shown;
+* the small DRAM sizes on Blackhole, where no bandwidth term is in play and the
+  residuals are untouched.
+
+The 2026-08-12 card plateau of 47.147 is a **third**, and it stays
+`corroboration` — a derivation that predates it and never saw it, agreeing to
+0.14 %. What changed there is only the verdict `plateau_sits_at` returns:
+`neither` before, `channel` now, because the tables finally hold a bound for it
+to sit on. `test_the_tracked_card_plateau_now_sits_at_the_channel_ceiling`
+records which of the two facts moved.
+
+### Measured, at one-cycle poll resolution
+
+Blackhole guards, cost model on, against the same tree with the arch's channel
+rates forced to `None` — a like-for-like A/B in one checkout, and the "before"
+arm is confirmed to be the pre-change tree rather than a simulation of it: three
+guards re-run against a `git stash`ed working copy return `six` 85,798,
+`matmulblock` 17,267 and `where` 11,397, the same three figures. Every movement
+is an increase, because the change only ever charges more.
+
+| Blackhole guard | before | after | Δ |
+| --- | ---: | ---: | ---: |
+| `six` | 85,798 | **87,715** | **+1,917** (+2.23 %) |
+| `matmulblock` | 17,267 | **17,357** | +90 (+0.52 %) |
+| `where` | 11,397 | **11,469** | +72 (+0.63 %) |
+| `tilize` | 72,146 | **72,191** | +45 (+0.06 %) |
+| `matmulidx` | 11,934 | **11,970** | +36 (+0.30 %) |
+| `sfpumath` | 20,333 | **20,368** | +35 (+0.17 %) |
+| `transpose` | 10,567 | **10,594** | +27 (+0.26 %) |
+| `untilize` | 12,509 | **12,536** | +27 (+0.22 %) |
+| `optest` | 13,228 | **13,252** | +24 (+0.18 %) |
+| `reduce` | 11,608 | **11,626** | +18 (+0.16 %) |
+| `reduceneg` | 11,608 | **11,626** | +18 (+0.16 %) |
+| `sfpuchain` | 16,329 | **16,347** | +18 (+0.11 %) |
+| `noc_tile_transfer` | 9,839 | **9,848** | +9 (+0.09 %) |
+| `dramtop` `eight` `five` `five_fp` `four` `four_fp` `loopback` `nine` `pad_multi_core` `pipestall` `shard_data_rm` `softplus` `three` `twolaunch` `vecadd_sharding` | | | **0** |
+
+Thirteen moved and fifteen did not, all in one direction. (`blackhole/offline`
+and `blackhole/two` are the poll-budget guards this harness cannot drive at
+one-cycle resolution by construction; they fail identically in *both* arms, and
+the gate covers them.) **All thirteen Wormhole guards are cycle-identical**,
+measured rather than argued — the same harness run against a `git stash`ed tree
+returns 8,991 / 15,207 / 9,944 / 7,711 / 8,178 / 32,073 / 9,714 / 9,714 /
+20,638 / 19,965 / 9,408 / 8,850 / 59,186 both before and after. That is the
+control the per-direction refactor needed: Wormhole's table gives one figure, so
+both directions read it and nothing about its arithmetic moved.
+
+`six` is the expected headline — the 128³ bf16 matmul is the only guard that
+streams tile after tile out of interleaved DRAM — and 2.2 % is well under the
+~24 % the old note guessed the size term alone was worth, because most of its
+DRAM time was never on the critical path.
+
+**No computed value moved.** Every value guard still passes;
+`python3 -m driver.tests.cost_model_gate` is `RESULT: PASS` with each
+budget-dependent guard needing exactly the multiplier it needed on the frozen
+tree (`dramtop` 1×, `two` 2×, `offline` 4×); and `--model-off` is `RESULT: PASS`
+with all 44 traces 100 % bit-for-bit at 1×, so the flag-off path is untouched.
+
+### Files
+
+- `tt_sim/perf/unit_costs.yaml` — the Blackhole `channel_serialisation`
+  override (the only new number), its `bandwidth` note demoted from a blocker
+  to a record of why it was thought to be one, and the header's count of
+  `vendor_source_derived` entries.
+- `tt_sim/perf/model.py` — per-direction rates and the replace-not-fall-back
+  rule.
+- `tt_sim/device/tiles.py` — `DramChannels` and `DRAMEndpointNUI` per direction;
+  an ATOMIC counts as a read, because it reads the array before modifying it.
+- `tt_sim/perf/dram_rate_sweep.py`, `tt_sim/perf/noc_dataset_sweep.py` — the
+  attribution and the reference readout, both of which had the old rule wired
+  into their prose.
+- Tests: `costs_test.py` (the anti-laundering guard extended, not weakened, and
+  the `vendor_source_derived` list), `dram_cost_model_test.py`,
+  `dram_rate_sweep_test.py`.
+
 ## Using it, when the time comes
 
 ```python
