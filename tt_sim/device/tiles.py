@@ -654,9 +654,12 @@ class TensixTile(TTDeviceTile):
         tile_ctrl_range = AddressRange(0xFFB12000, self.tile_ctrl.getSize())
         tensix_mem_map[tile_ctrl_range] = self.tile_ctrl
 
-        self.pc_buf_0 = PCBuf(self.tile_ctrl, 0)
-        self.pc_buf_1 = PCBuf(self.tile_ctrl, 1)
-        self.pc_buf_2 = PCBuf(self.tile_ctrl, 2)
+        # The coprocessor is the third condition of a BRISC PCBuf read (the
+        # thread's Tensix instructions must all have retired) -- see
+        # tt_sim/pe/pcbuf.py.
+        self.pc_buf_0 = PCBuf(self.tile_ctrl, 0, self.tensix_coprocessor)
+        self.pc_buf_1 = PCBuf(self.tile_ctrl, 1, self.tensix_coprocessor)
+        self.pc_buf_2 = PCBuf(self.tile_ctrl, 2, self.tensix_coprocessor)
 
         self.ttsync_0 = TTSync(self.tile_ctrl, self.tensix_coprocessor, 0)
         self.ttsync_1 = TTSync(self.tile_ctrl, self.tensix_coprocessor, 1)

@@ -375,8 +375,8 @@ class FirmwareSpin:
         before a watch is ever built: a stalling ``sw`` and a stalling
         ``.ttinsn`` push both reach :class:`_ObservedMemory.write` first, which
         aborts the attempt outright, and a stalling ``lw`` can only be a load
-        from ``Mailbox`` or ``TTSync`` (the sole ``MemoryStall`` sources on a
-        read path), neither of which is a plain-RAM leaf, so
+        from ``Mailbox``, ``TTSync`` or ``PCBuf`` (the sole ``MemoryStall``
+        sources on a read path), none of which is a plain-RAM leaf, so
         :meth:`_build_watch` refuses it. If a *plain-RAM* read is ever given a
         stalling path, this gate has to learn to see it with the model off too.
         """
