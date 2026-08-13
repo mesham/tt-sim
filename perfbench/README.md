@@ -19,10 +19,20 @@ perfbench/
 ├── nocreadbench/       what caps the sustained NoC *read* rate: the initiator's
 │                       outstanding-request counter, read directly, plus the
 │                       source-fan-out axis tt-metal's dataset cannot express
-└── dramratebench/      does a DRAM channel's aggregate read rate grow with the
-                        number of tiles reading it? The only probe that can
-                        reach the endpoint-occupancy term at all
+├── dramratebench/      does a DRAM channel's aggregate read rate grow with the
+│                       number of tiles reading it? The only probe that can
+│                       reach the endpoint-occupancy term at all
+└── energybench/        the odd one out: its output is WATTS, not cycles. A
+                        loop-to-steady-state harness for ranking-level energy
+                        estimation, plus the card protocol and the analysis
 ```
+
+`energybench` is not a cycle-cost probe and does not belong to the table below.
+It measures **steady-state repeated-kernel board power** against an in-session
+idle baseline, because `tt-smi` samples at ~1 Hz and a single microsecond launch
+is invisible to it. Its coefficients are **fitted**, they are quarantined outside
+the provenance ladder on purpose, and it fits nothing until a card session
+exists. See [`energybench/README.md`](energybench/README.md).
 
 The first two are complements, and the second exists because of the first's headline
 result: `tensixbench` measures what a Tensix unit costs, and found that against

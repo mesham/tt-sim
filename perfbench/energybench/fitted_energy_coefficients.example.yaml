@@ -1,0 +1,48 @@
+# FITTED ENERGY COEFFICIENTS -- NOT A COST TABLE.  ** TEMPLATE, NO VALUES **
+#
+# This file shows the SHAPE of what `energy_rank --write-coefficients` writes.
+# It is checked in with the numbers deliberately absent, because no card session
+# has been run yet and there is nothing to fit. Do not fill it in by hand.
+#
+# Every number that will eventually appear below is a REGRESSION COEFFICIENT
+# fitted to board-level tt-smi telemetry sampled at roughly 1 Hz. Tenstorrent
+# publishes no per-event energy figure -- no pJ/op, no pJ/bit -- so none of these
+# can ever be traced to a document. They are WEAKER than the `estimated`
+# provenance that tt_sim/perf/unit_costs.yaml forbids.
+#
+# DO NOT MOVE THESE INTO tt_sim/perf/unit_costs.yaml OR
+# tt_sim/pe/tensix/tensix_instruction_costs.yaml.
+#
+#   * `provenance: fitted` is not in tt_sim.perf.costs.PROVENANCE_RANK, so the
+#     cost loader raises KeyError on any table carrying it;
+#   * tt_sim.perf.energy_rank.check_destination refuses to write this file
+#     anywhere under tt_sim/;
+#   * tt_sim/perf/energy_quarantine_test.py asserts both, in both directions.
+#
+# What these predict is STEADY-STATE REPEATED-KERNEL BOARD POWER against an
+# idle baseline measured in the same session -- not the energy of a single
+# launch -- and they are validated on ORDERING and RATIOS, never on absolute
+# joules. See ./README.md.
+
+not_a_cost_table: true
+provenance: fitted
+units: joules per unit of activity, per launch
+fitted_on: null          # the session date, stamped by --write-coefficients
+
+fitting_record:
+  activity_csv: null     # which simulator activity vectors
+  measured_csv: null     # which card session
+  spearman_loo: null     # the claim: leave-one-out rank correlation
+  spearman_in_sample: null
+  baseline_w: null       # the in-session idle floor every delta is against
+  noise_floor_w: null    # RMS of each label's across-cycle standard deviation
+  workloads: []          # every label that survived the gates
+  gates: {}              # each gate's verdict text, verbatim
+
+coefficients: {}
+  # launch:               <J per launch, the launch machinery itself>
+  # instr_retired:        <J per retired baby-RISC-V instruction>
+  # noc_bytes_total:      <J per byte moved over the NoC>
+  # matrix_busy_cycles:   <J per cycle of Matrix-unit occupancy>
+  # sfpu_busy_cycles:     <J per cycle of Vector-unit occupancy>
+  # ... one per term the identifiability gate allowed

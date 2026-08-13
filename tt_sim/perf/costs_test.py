@@ -1048,6 +1048,15 @@ EXPECTED_CONSUMERS = {
     # came from. No import; the event is a plain dataclass field populated by
     # ``TensixBackendUnit.clock_tick``, which is already on this list.
     "tt_sim/trace/events.py",
+    # Prose only, and the furthest thing from a cost consumer on this list: the
+    # energybench card-side aggregator turns tt-smi telemetry into a power CSV.
+    # It is standard-library only — it runs on a card box that has no ``tt_sim``
+    # to import — and it names ``tt_sim.perf.energy_rank`` solely to say which
+    # module reads its output at home. Nothing in the energy work may ever reach
+    # these tables: its coefficients are FITTED, which is weaker than the
+    # ``estimated`` provenance they forbid, and ``energy_quarantine_test.py``
+    # is the tripwire that keeps them out.
+    "perfbench/energybench/aggregate_power.py",
 }
 
 #: The Tensix backend units that are *not* wired to the tables, and why. Kept
