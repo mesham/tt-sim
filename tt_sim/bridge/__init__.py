@@ -29,6 +29,7 @@ from tt_sim.bridge.device import (
     Device,
     diagnostics_from_env,
     enabled_diagnostic_names,
+    link_contention_summary,
 )
 from tt_sim.bridge.fabric import Fabric, install_worker_guards
 from tt_sim.bridge.grid import compute_grid, fill_order
@@ -55,6 +56,7 @@ __all__ = [
     "find_wire_peer",
     "host_not_stranded",
     "install_worker_guards",
+    "link_contention_summary",
     "parse_trace_line",
     "stop_host",
 ]

@@ -302,10 +302,23 @@ many, so the plan file records the exact value to use in a comment
 (`# tt_sim_tensix_coords=...`):
 
 ```bash
-COORDS=$(grep -o 'tt_sim_tensix_coords=[^ ]*' plan.csv | cut -d= -f2)
-TT_METAL_HOME=/path/to/tt-metal TT_SIM_TENSIX_COORDS="$COORDS" TT_SIM_COST_MODEL=1 \
+TT_METAL_HOME=/path/to/tt-metal TT_SIM_COST_MODEL=1 \
     ../../run.sh nocbench -- --plan plan.csv
 ```
+
+**Do not set `TT_SIM_TENSIX_COORDS`.** It used to be required and is now the
+thing to avoid: setting it is how tt-sim is told the pool is *pinned*, and a
+pinned pool switches off on-demand materialisation, so the plan dies on its
+first kernel launch outside the pool. Left alone, the run materialises every
+worker the plan addresses as it reaches them (12 tiles, 11 on demand, for the
+plan above). The `# tt_sim_tensix_coords=` comment the planner still writes is
+kept for reproducing a *fixed* grid, not for this.
+
+Plan against the **simulator's own** `--dump-grid`, not the shipped
+`noc-plan-<arch>.csv`: that one was built for a harvested card, and although
+every tile it names exists on the simulator's full grid, its physical
+coordinates are another part's — nocbench then reports "NIU reports physical
+coord X, plan says Y" on most flows.
 
 Keep it small: the simulator runs tens of thousands of cycles per second where
 the card runs a billion, so use `--num-tx 8 --max-points 2 --tx-bytes 512` and a
@@ -506,6 +519,43 @@ flow: 75.1 / 132.1 / 137.8 / 138.0 at 0 / 1 / 2 / 3 shared links — a step, the
 flat, with a 1-to-3 span of 10 % of the step that shrinks as the ramp
 amortises (it is 20 % at 8 transactions per flow).
 
+### The full sweep, on both arches, 2026-08-12
+
+The archived runs above are one transaction size at a time. Running the session
+block's own five-size plan — 64 / 512 / 2048 / 8192 / 16384 B, planned from the
+simulator's own grid dump — puts the whole shape beside the card's for the
+first time. **Nothing was fitted, on either side.** The modelled step is
+`bytes / flit_bytes`, and `flit_bits` and `throughput_flits_per_cycle` are both
+`isa_doc` and were both in `unit_costs.yaml` before the card campaign existed.
+
+| step at one shared link | 64 B | 512 B | 2048 B | 8192 B | 16384 B |
+| --- | --- | --- | --- | --- | --- |
+| **Blackhole card** (banked) | 0.0 | 0.0 | +28.1 | +124.5 | +250.4 |
+| **Blackhole sim** | 0.0 | 0.0 | +27.5 | +119.0 | +239.5 |
+| occupancy, bytes / 64 | 1 | 8 | 32 | 128 | 256 |
+| **Wormhole sim** | 0.0 | +0.5 | +59.0 | +239.0 | +495.5 |
+| occupancy, bytes / 32 | 2 | 16 | 64 | 256 | 512 |
+
+The two Blackhole rows agree to **2–4.5 %**, and both are flat below the
+~40-cycle issue loop and saturating above it. Wormhole's steps are twice
+Blackhole's, which is the 256-bit flit against the 512-bit one and is not a
+fitted number either; there is **no Wormhole silicon to check it against**, so
+that row is a prediction, not a corroboration.
+
+Read the card's row as a **step**, which is what it is. A straight line through
+all eight of its shared-link counts gives +2.55 / +10.98 / +22.47 cycles per
+shared link at 2048 / 8192 / 16384 B — but at r² **0.36 / 0.36 / 0.37**, because
+it is a line drawn through a step. Those slopes are not coefficients and must
+not be quoted as though the fit supported them; the step is the reading, and it
+is what the table above compares.
+
+The term also **fires** rather than being wired and idle, which until this run
+had never been shown end to end: the server now prints its `NocLinkRegistry`
+counters at shutdown, and this plan gives **7,590 link claims / 45 waits** on
+Blackhole and **6,580 / 69** on Wormhole. Every in-tree workload gives *zero*
+waits (3,960 claims on `blackhole/six`), which is why the probe had to be
+written to create the configuration at all.
+
 `readport` staying at 1.48× is worth a sentence, because on silicon it is the
 one reading that cannot separate the two resources: two masters reading one
 subordinate contend for that tile's injection port *and* for the first link out
@@ -517,8 +567,13 @@ cannot.
 Reproduce with
 
 ```bash
-TT_METAL_HOME=... TT_SIM_TENSIX_COORDS="$(grep -o 'tt_sim_tensix_coords=[^ ]*' plan.csv | cut -d= -f2)" \
-    TT_SIM_COST_MODEL=1 ../../run.sh nocbench -- --plan plan.csv
+TT_METAL_HOME=... TT_SIM_COST_MODEL=1 ../../run.sh nocbench -- --plan plan.csv
+```
+
+or, through the session block, which plans from the simulator's own grid dump:
+
+```bash
+TT_SIM_COST_MODEL=1 ../../run_card_session.sh --sim --arch blackhole noc noc-epoch
 ```
 
 * The hop line comes out end to end: the three round-trip levels give

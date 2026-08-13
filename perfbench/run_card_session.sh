@@ -46,18 +46,6 @@ REPO="$(cd "$PB/.." && pwd)"
 # shellcheck source=card_session_verdicts.sh
 . "$PB/card_session_verdicts.sh"
 
-# Is the analysis half available? The four C++ programs need nothing but a
-# built tt-metal, so `rsync perfbench/` is enough to COLLECT every reading. The
-# nocbench planner and the three report generators live in tt_sim/perf, which
-# is normally NOT on a card box. Rather than fail, the session collects what it
-# can and says which steps were deferred to the analysis box. Analysis of a CSV
-# is not time-critical; being at the card is.
-HAVE_TT_SIM=0
-if [ -d "$REPO/tt_sim/perf" ] && \
-   PYTHONPATH="$REPO" python3 -c "import tt_sim.perf.noc_congestion_plan" 2>/dev/null; then
-  HAVE_TT_SIM=1
-fi
-
 ARCH=""
 OUT=""
 DO_LIST=0
@@ -177,12 +165,14 @@ if [ "$DO_SIM" = 1 ]; then
   # Validation path. This exists so the session block can be exercised end to
   # end without a card; it is NOT a measurement and every artefact says so.
   [ -n "$ARCH" ] || ARCH=blackhole
-  case "$ARCH" in
-    blackhole) COORDS=1-2 ;;
-    wormhole) COORDS=1-1 ;;
-  esac
   export TT_METAL_SIMULATOR="$REPO/driver/$ARCH"
-  export TT_SIM_TENSIX_COORDS="${TT_SIM_TENSIX_COORDS:-$COORDS}"
+  # TT_SIM_TENSIX_COORDS is deliberately NOT defaulted. Exporting it -- even to
+  # the one worker the server builds anyway -- is how tt-sim is told the pool is
+  # PINNED, and a pinned pool switches off on-demand materialisation. This block
+  # used to export the arch's default coord, which is why the congestion probes
+  # could not run against the simulator: the multi-core plan died on the first
+  # kernel launch outside the pool. Unset, the server builds the same default
+  # worker and materialises the rest as the program reaches them.
   VENV="${TT_SIM_VENV:-$REPO/../venv}"
   [ -x "$VENV/bin/python3" ] && export PATH="$VENV/bin:$PATH"
   echo "!! --sim: running against tt-sim at smoke sizes. NOT A MEASUREMENT."
@@ -191,6 +181,24 @@ elif [ -n "${TT_METAL_SIMULATOR:-}" ]; then
   echo "This script is for a real card. Unset it, or pass --sim if you meant" >&2
   echo "to validate the session block against tt-sim." >&2
   exit 2
+fi
+
+# Is the analysis half available? The four C++ programs need nothing but a
+# built tt-metal, so `rsync perfbench/` is enough to COLLECT every reading. The
+# nocbench planner and the three report generators live in tt_sim/perf, which
+# is normally NOT on a card box. Rather than fail, the session collects what it
+# can and says which steps were deferred to the analysis box. Analysis of a CSV
+# is not time-critical; being at the card is.
+#
+# Probed HERE, after the block above, and not earlier: `--sim` puts tt_sim's
+# venv on PATH, and tt_sim/perf imports numpy and pyelftools. Probed before
+# that, the answer was the SYSTEM python3's, which on this box cannot import it
+# -- so a --sim session collected both congestion CSVs and then reported them
+# DEFERRED "because tt_sim/ is not on this box", standing in the repo.
+HAVE_TT_SIM=0
+if [ -d "$REPO/tt_sim/perf" ] && \
+   PYTHONPATH="$REPO" python3 -c "import tt_sim.perf.noc_congestion_plan" 2>/dev/null; then
+  HAVE_TT_SIM=1
 fi
 
 # ------------------------------------------------------------ arch detection
@@ -526,7 +534,7 @@ probe_dram() {
       blackhole) local pair=1-2,2-2 ;;
       *) local pair=1-1,2-1 ;;
     esac
-    case "$TT_SIM_TENSIX_COORDS" in
+    case "${TT_SIM_TENSIX_COORDS:-}" in
       *,*) pair="$TT_SIM_TENSIX_COORDS" ;;      # already multi-tile; leave it
     esac
     sim_coords="$pair"
@@ -662,16 +670,16 @@ plan_tiles_missing_from_grid() {
 }
 
 probe_noc() {
-  # Against tt-sim this needs an EXPLICIT opt-in. `--dump-grid` probes the first
-  # logical row and column of the whole compute grid, but the simulator only
-  # instantiates the tiles named in TT_SIM_TENSIX_COORDS (one, by default), so
-  # the launch reaches cores that do not exist. That used to hang; it now aborts
-  # in seconds naming the first missing tile (tt_sim/bridge/hostlink.py), but
-  # nothing is gained by running it: the simulator models no link congestion, so
-  # nocbench's honest verdict there is INVALID by construction and is documented
-  # as such.
+  # Against tt-sim this needs an EXPLICIT opt-in, and the reason is COST, not
+  # impossibility. It runs there and it reads CONGESTION MEASURED on both arches
+  # (2026-08-12): tt-sim has modelled link congestion since 2026-08-05, and the
+  # workers the plan addresses materialise on demand now that this script no
+  # longer pins the pool. But it is minutes where the rest of the block is
+  # seconds, so a plain `--sim` smoke run leaves it out. Set TT_SIM_COST_MODEL=1
+  # when you name it -- with the model off the link term is never spent and the
+  # sweep really is forced flat.
   if [ "$DO_SIM" = 1 ] && [ "$SIM_NOC_OPT_IN" != 1 ]; then
-    skip noc "against tt-sim --dump-grid probes the full grid but the sim instantiates only TT_SIM_TENSIX_COORDS, and its verdict would be INVALID anyway. Name it explicitly with a multi-tile TT_SIM_TENSIX_COORDS to force it"
+    skip noc "against tt-sim this is minutes where the rest of the block is seconds, so it is opt-in. It DOES run there and reads CONGESTION MEASURED -- name it explicitly, with TT_SIM_COST_MODEL=1"
     return
   fi
   build_once "$NB" nocbench || { verdict noc FAILED "build failed"; return; }
@@ -693,13 +701,21 @@ probe_noc() {
   # The shipped plan lives beside the bench, not in its src/ tree. Look in both,
   # because "it is right there and the session did not see it" is exactly the
   # failure that wastes a card session.
+  # Not against tt-sim, though. The shipped plan was built for a HARVESTED
+  # card, and the simulator has the whole grid: every tile it names exists, so
+  # the check below passes, but the physical coordinates it was planned in are
+  # a different part's. nocbench then reports "NIU reports physical coord X,
+  # plan says Y" on most flows and the run measures the wrong geometry. The
+  # simulator has no reason to avoid the planner -- it is the analysis box.
   local shipped
-  for shipped in "$PB/nocbench/noc-plan-$ARCH.csv" "$NB/noc-plan-$ARCH.csv"; do
-    if [ ! -s "$plan" ] && [ -s "$shipped" ]; then
-      cp "$shipped" "$plan"
-      say "   using the pre-built plan $shipped"
-    fi
-  done
+  if [ "$DO_SIM" != 1 ]; then
+    for shipped in "$PB/nocbench/noc-plan-$ARCH.csv" "$NB/noc-plan-$ARCH.csv"; do
+      if [ ! -s "$plan" ] && [ -s "$shipped" ]; then
+        cp "$shipped" "$plan"
+        say "   using the pre-built plan $shipped"
+      fi
+    done
+  fi
   if [ -s "$plan" ] && [ -s "$GRID" ]; then
     local bad
     bad="$(plan_tiles_missing_from_grid "$plan" "$GRID")" || bad=""
@@ -743,7 +759,7 @@ probe_noc_epoch() {
   # independent runs, so one run can never confirm the (11,2) epoch. This is
   # the second run, and it is why the bullet is a probe rather than a note.
   if [ "$DO_SIM" = 1 ] && [ "$SIM_NOC_OPT_IN" != 1 ]; then
-    skip noc-epoch "see the noc probe: against tt-sim this hangs, and a simulator has no per-tile clock epoch to detect"
+    skip noc-epoch "see the noc probe: opt-in against tt-sim on cost. It runs there and reads COLLECTED -- a simulator has one clock, so the detector correctly names no per-tile epoch"
     return
   fi
   build_once "$NB" nocbench || { verdict noc-epoch FAILED "build failed"; return; }

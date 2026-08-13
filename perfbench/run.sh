@@ -34,8 +34,8 @@ SRC="$REPO/perfbench/$NAME/src"
 
 ARCH="${TT_SIM_ARCH:-blackhole}"
 case "$ARCH" in
-  blackhole|bh) ARCH=blackhole; COORDS=1-2 ;;
-  wormhole|wh)  ARCH=wormhole;  COORDS=1-1 ;;
+  blackhole|bh) ARCH=blackhole ;;
+  wormhole|wh)  ARCH=wormhole ;;
   *) echo "unknown TT_SIM_ARCH=$ARCH (want blackhole|wormhole)" >&2; exit 2 ;;
 esac
 
@@ -45,7 +45,14 @@ export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:${LD_LIBRARY_PATH:-}"
 export TT_METAL_SIMULATOR="$REPO/driver/$ARCH"
 export TT_METAL_SLOW_DISPATCH_MODE=1
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
-export TT_SIM_TENSIX_COORDS="${TT_SIM_TENSIX_COORDS:-$COORDS}"
+# TT_SIM_TENSIX_COORDS is deliberately NOT defaulted here. Setting it -- even to
+# the same single worker the server would have built anyway -- is what tt-sim
+# reads as "the user PINNED this pool", and a pinned pool switches off on-demand
+# materialisation (driver/<arch>/server/__main__.py, `pinned`). This script used
+# to export the arch's default coord, which silently made every perfbench run
+# single-tile: a multi-core plan then died on the first kernel launch outside the
+# pool. Left unset, the server builds the same default worker and materialises
+# the rest as the program asks for them. Pass it through if the caller means it.
 VENV="${TT_SIM_VENV:-$REPO/../venv}"
 [ -x "$VENV/bin/python3" ] && export PATH="$VENV/bin:$PATH"
 

@@ -45,10 +45,14 @@ is *planned* by a separate, tested Python module
 (`tt_sim.perf.noc_congestion_plan`) rather than being wired into the C++, because
 the thing that makes or breaks a congestion measurement is which confounds are
 held fixed, and an invariant that lives in tested code is checkable in a way that
-one living in a comment is not. And it is the only one whose honest verdict
-against tt-sim is `INVALID`: the simulator models no link congestion at all, so
-the experiment is forced flat, and the harness refuses to report a flat reading
-as a result when the control that proves flows contend does not move either.
+one living in a comment is not. And it is the only one that reads the simulator
+and a card on the same axis: tt-sim **does** model link congestion
+(`NocLinkRegistry`, wired 2026-08-05), so the shared-link sweep is not forced
+flat there and the run is a real comparison rather than a null. What the
+simulator does not model is **buffer back-pressure and virtual channels** — the
+arbitration *order* is first-come in both, and published as such. The harness's
+refusal still stands where it was aimed: a flat reading is not reported as a
+result when the control that proves flows contend did not move either.
 
 ## One card session
 
@@ -223,10 +227,13 @@ read it before packing up.
 harness. It stamps every artefact `NOT-A-MEASUREMENT`, and it is the only way
 past the guard that otherwise refuses to run with `TT_METAL_SIMULATOR` set.
 Against the simulator most probes read `DEGENERATE` **and that is correct** —
-tt-sim models no link congestion, its NIU queue is unbounded, and nothing
-back-pressures the core that issues a Tensix instruction. The table below is the
-observed result of `--sim --arch blackhole` at smoke sizes with the cost model
-**off**, not a prediction:
+tt-sim's NIU queue is unbounded, nothing back-pressures the core that issues a
+Tensix instruction, and it models no NoC buffer back-pressure or virtual
+channels. Link congestion is **not** on that list: it has been modelled since
+2026-08-05 (`NocLinkRegistry`), which is why the two congestion probes are the
+exception in the table below. Everything else there is the observed result of
+`--sim --arch blackhole` at smoke sizes with the cost model **off**, not a
+prediction:
 
 | probe | against tt-sim | on a card |
 | --- | --- | --- |
@@ -238,28 +245,52 @@ observed result of `--sim --arch blackhole` at smoke sizes with the cost model
 | `rv-gset` | `SKIPPED` — minutes per gset against the simulator | `COLLECTED` |
 | `tensix-rdcfg` | `DEGENERATE` — measured, 2026-08-12, and for a reason internal to the simulator. The visibility sweep's controls both pass (a stale reading and a fresh reading are each representable) and it reports `TTBENCH_VIS_DMIN: 1`: tt-sim's Configuration Unit writes the destination GPR in the issue cycle, so it models no `RDCFG` latency at all and the documented `>= 2` cannot be reached there. The C12 liveness control does not move either — and **not** only because of the 12-bit mask: widening `_read_wait_res` to 13 bits changes nothing, because tt-sim's config unit retires inside the cycle that issued, so `hasInflightInstructionsFromThread` is empty whenever another thread's Wait Gate looks. Giving the unit a genuine one-cycle post-retire residency makes the control move (`TTBENCH_C12_LIVE: 2.03 4.60 t3`), which is how the control was shown to fire in both directions. On Wormhole the C12 slots report `SKIPPED` — the condition does not exist there | `MEANINGFUL`, or an evidenced negative |
 | `dram` | `MEANINGFUL`, reporting **NO ENDPOINT BOUND** — and that is correct there. The probe widens `TT_SIM_TENSIX_COORDS` to two tiles for its own run, so the sweep and the barrier really do execute (`max_barrier_spins` 22, both tags verified), and both arms then scale ×2.00 exactly. On **Blackhole** the endpoint queue is switched off by construction: no DRAM tile page is published for that part, so `dram_gddr_channel_size` is `None`, `DramChannels.bytes_per_cycle` is `None`, and every `claim()` is a no-op. Perfect linear scaling is what an unmodelled endpoint gives. With one tile it reads `DEGENERATE` instead, for want of a second point. **On Wormhole with `TT_SIM_COST_MODEL=1` it reads `ENDPOINT BOUND`** — see below. **And the smoke sizes are load-bearing in that sentence**: at the vendor's own 1 MiB / 4096 B, twelve Blackhole tiles read `ENDPOINT BOUND` too, ratio 0.25, with the endpoint queue still switched off — the flat arm is sitting on the DRAM tile's 64 B/cycle NoC link, which a scaling ratio cannot tell from a channel. `dramratebench/README.md` has the table | the whole question |
-| `noc`, `noc-epoch` | `SKIPPED` — see below | the experiment, or `DEFERRED` if the box has no `tt_sim/` |
+| `noc`, `noc-epoch` | `SKIPPED` by default, but **`MEANINGFUL` / `COLLECTED` when you name them** — see below | the experiment, or `DEFERRED` if the box has no `tt_sim/` |
 
-**The congestion probes cannot run against tt-sim unless you widen the tile
-pool**, so `--sim` skips them unless you name them explicitly. `nocbench
---dump-grid` probes the first logical row and column of the whole compute grid,
-but the simulator instantiates only the tiles listed in `TT_SIM_TENSIX_COORDS` —
-one, by default — so the launch reaches cores that do not exist. Nothing is lost
-by skipping: tt-sim models no link congestion, so the honest verdict there is
-`INVALID` by construction. To force them, set a multi-tile
-`TT_SIM_TENSIX_COORDS` (the whole probed row and column) and name the probe.
+**The congestion probes now run against tt-sim, on both arches, and they are the
+one place `--sim` produces a reading worth reading.** They are still opt-in —
+`--sim` skips them unless you name them — but the reason is cost, not
+impossibility: they are minutes each where the rest of the block is seconds.
 
-This **used to hang**, which is why the skip exists at all. It no longer does:
-the server now names the first missing tile and stops the host with it, so a
-`--dump-grid` against the default single-tile pool exits in about three seconds
-with `ERROR: kernel launch (go=GO) sent to functional worker 1-2 … Add \`1-2\` to
-TT_SIM_TENSIX_COORDS` rather than waiting forever (measured, 2026-08-12; see
-`tt_sim/bridge/hostlink.py`). The skip stays because the *verdict* would still be
-`INVALID`, not because the run would never end.
+```bash
+TT_SIM_COST_MODEL=1 ./perfbench/run_card_session.sh --sim --arch blackhole noc noc-epoch
+```
+
+Measured 2026-08-12, both arches: `noc` reads `MEANINGFUL — RESULT: CONGESTION
+MEASURED`, with the size and readport controls both moving, and `noc-epoch`
+reads `COLLECTED` (a simulator has one clock, so the epoch detector correctly
+names none). **Set `TT_SIM_COST_MODEL=1`** — with the cost model off the link
+term is not spent and the sweep really is forced flat.
+
+Three things had to be true for this to work, and the first two were bugs in
+this harness rather than limits of the simulator:
+
+* **The `--sim` block used to export `TT_SIM_TENSIX_COORDS`.** Setting that
+  variable — even to the one worker the server builds anyway — is how tt-sim is
+  told the pool is *pinned*, and a pinned pool switches off on-demand
+  materialisation. A multi-core plan then died on its first kernel launch
+  outside the pool. Unset, the same run materialises 12 workers (11 on demand)
+  and completes.
+* **`HAVE_TT_SIM` was probed before the venv reached `PATH`**, so a session
+  standing in the repo collected both CSVs and then reported them `DEFERRED`
+  "because `tt_sim/` is not on this box".
+* **The shipped `noc-plan-<arch>.csv` is not usable against the simulator.** It
+  was planned for a *harvested* card; the simulator has the whole grid, so every
+  tile it names exists and the plan passes the tile check, but its physical
+  coordinates are another part's and nocbench reports a mismatch on most flows.
+  `--sim` now always plans from the simulator's own `--dump-grid`.
+
+It also **used to hang**, which is why the skip existed at all. It no longer
+does: the server names the first missing tile and stops the host with it, so
+even a genuinely under-provisioned run exits in about three seconds rather than
+waiting forever (`tt_sim/bridge/hostlink.py`).
 
 So **ten of the twelve probes read `DEGENERATE` or `SKIPPED` against the
-simulator and every one of those is correct.** The simulator is not the
-instrument; it is how you check the instrument runs.
+simulator and every one of those is correct** — and the other two are the
+congestion pair, which is the exception on purpose. The simulator is mostly not
+the instrument; it is how you check the instrument runs. On the shared-link axis
+it is also the only place the two resources can be told apart, because it can be
+asked to spend one and not the other.
 
 Two readings are worth stating twice, because at the card they will look like
 differences and are not. `tensix-rdcfg` reads `d_min = 1` for a reason internal

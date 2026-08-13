@@ -910,16 +910,49 @@ def sweep(rows, emit=print, min_overlap=0.5):
 DEFAULT_MEASURED = Path(__file__).with_name("datasets") / "nocbench-blackhole.csv"
 
 
+def load_measured_many(paths):
+    """Pool several nocbench CSVs into one ``(rows, comments)``.
+
+    ``clock_skew_report`` only accepts a per-core epoch that reproduces across
+    :data:`_SKEW_MIN_RUNS` *independent* runs, so the ``noc-epoch`` probe exists
+    to produce a second file — and pooling them is the only way that rule ever
+    sees two. Run identifiers are file-local and start at 0 in each, so they are
+    offset per file: without that, run 3 of the second file would be folded into
+    run 3 of the first and the two would stop being independent.
+    """
+    rows, comments = [], []
+    for index, path in enumerate(paths):
+        file_rows, file_comments = load_measured(path)
+        if index:
+            comments.append(f"# pooled with {path}")
+        else:
+            comments.extend(file_comments)
+        offset = index * _RUN_ID_STRIDE
+        for row in file_rows:
+            row["run"] = row["run"] + offset
+        rows.extend(file_rows)
+    return rows, comments
+
+
+#: Bigger than any one file's run count, so pooled runs cannot collide.
+_RUN_ID_STRIDE = 1_000_000
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
         "--measured",
-        default=str(DEFAULT_MEASURED),
-        help="a nocbench output CSV (default: the banked Blackhole silicon run)",
+        nargs="+",
+        default=[str(DEFAULT_MEASURED)],
+        metavar="CSV",
+        help=(
+            "one or more nocbench output CSVs, pooled (default: the banked "
+            "Blackhole silicon run). The clock-epoch detector needs two."
+        ),
     )
     ap.add_argument("--min-overlap", type=float, default=0.5)
     args = ap.parse_args(argv)
-    rows, comments = load_measured(args.measured)
+    rows, comments = load_measured_many(args.measured)
     for c in comments:
         print(c)
     out = sweep(rows, min_overlap=args.min_overlap)

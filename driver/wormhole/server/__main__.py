@@ -9,7 +9,13 @@ import contextlib
 import os
 import sys
 
-from tt_sim.bridge import Fabric, TraceWriter, Transport, host_not_stranded
+from tt_sim.bridge import (
+    Fabric,
+    TraceWriter,
+    Transport,
+    host_not_stranded,
+    link_contention_summary,
+)
 
 
 def _parse_tensix_pool(env):
@@ -245,6 +251,9 @@ def main(argv=None):
             f", {len(lazy_pool.materialised)} tensix materialised "
             f"({len(lazy_pool.on_demand)} on demand)"
         )
+    links = link_contention_summary(device)
+    if links:
+        extra += f", {links}"
     print(
         f"[server] shutdown after {transport.msg_count} messages{extra}",
         file=sys.stderr,

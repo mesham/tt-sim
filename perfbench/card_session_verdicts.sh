@@ -496,7 +496,7 @@ dram_verdict() { # out-file, csv
   set -- $fan
   local f_lo="$1" f_hi="$2" f_lov="$3" f_hiv="$4" f_scale="$5"
   if awk -v s="$f_scale" 'BEGIN { exit !(s < 1.5) }'; then
-    echo "DEGENERATE|the fan-out CONTROL did not move: $f_lo -> $f_hi readers on DISTINCT banks took the aggregate only from $f_lov to $f_hiv B/cycle (x$f_scale). Something upstream of the endpoint caps both arms, so the one-channel arm's flatness says nothing about the endpoint. EXPECTED against tt-sim, which models no link congestion and, on Blackhole, publishes no per-channel DRAM rate for an endpoint queue to be built from"
+    echo "DEGENERATE|the fan-out CONTROL did not move: $f_lo -> $f_hi readers on DISTINCT banks took the aggregate only from $f_lov to $f_hiv B/cycle (x$f_scale). Something upstream of the endpoint caps both arms, so the one-channel arm's flatness says nothing about the endpoint. EXPECTED against tt-sim, which models no NoC buffer back-pressure or virtual channels and, on Blackhole, publishes no per-channel DRAM rate for an endpoint queue to be built from. Note tt-sim DOES model link congestion, so a disagreement here is not that"
     return
   fi
   local one
@@ -740,7 +740,7 @@ noc_verdict() { # report-file, have_tt_sim
     return
   fi
   if grep -q 'RESULT: INVALID' "$rep"; then
-    echo "DEGENERATE|$(grep -m1 'RESULT: INVALID' "$rep" | sed 's/^ *//'). EXPECTED against tt-sim, which models no link congestion; on a card it means the experiment was forced flat"
+    echo "DEGENERATE|$(grep -m1 'RESULT: INVALID' "$rep" | sed 's/^ *//'). On a card OR against tt-sim this means the experiment was forced flat -- tt-sim models link congestion (NocLinkRegistry) and reads CONGESTION MEASURED on both arches, so INVALID here is a broken run either way, not an expected simulator difference. Check the size and readport controls first, then that TT_SIM_COST_MODEL=1 was set"
   elif grep -q 'RESULT: CONGESTION MEASURED' "$rep"; then
     echo "MEANINGFUL|$(grep -m1 'RESULT: CONGESTION MEASURED' "$rep" | sed 's/^ *//') -- shared-link sweep at 64/512/2048/8192/16384 B; read the report"
   elif grep -q 'RESULT: NO CONGESTION EFFECT' "$rep"; then

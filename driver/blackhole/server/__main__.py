@@ -26,6 +26,7 @@ from tt_sim.bridge import (
     enabled_diagnostic_names,
     host_not_stranded,
     install_worker_guards,
+    link_contention_summary,
 )
 
 from .bh_device import make_device
@@ -175,6 +176,9 @@ def main(argv=None):
             f", {len(lazy_pool.materialised)} tensix materialised "
             f"({len(lazy_pool.on_demand)} on demand)"
         )
+    links = link_contention_summary(device)
+    if links:
+        extra += f", {links}"
     print(
         f"[server] shutdown after {transport.msg_count} messages{extra}",
         file=sys.stderr,

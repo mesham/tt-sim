@@ -779,8 +779,9 @@ int main(int argc, char** argv) {
                    "  %u readers). Something upstream of the endpoint -- the readers' own issue\n"
                    "  rate, the fabric, or a barrier that did not hold -- caps both arms, so a\n"
                    "  flat one-channel curve says nothing about the endpoint. EXPECTED against\n"
-                   "  tt-sim, which models no link congestion and, on Blackhole, publishes no\n"
-                   "  per-channel DRAM rate for the endpoint queue to be built from.\n",
+                   "  tt-sim, which models no NoC buffer back-pressure or virtual channels and,\n"
+                   "  on Blackhole, publishes no per-channel DRAM rate for the endpoint queue to\n"
+                   "  be built from. (It DOES model link congestion, so that is not the gap.)\n",
                    fan_scale, n_lo, n_hi);
         } else if (one_lo == nullptr || one_hi == nullptr) {
             printf("  VERDICT: DEGENERATE -- the control moved but the one-channel arm has no\n"

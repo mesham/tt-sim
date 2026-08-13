@@ -113,6 +113,38 @@ def enabled_diagnostic_names(diagnostics):
     return on
 
 
+def link_contention_summary(device):
+    """One line of ``NocLinkRegistry`` counters, or ``""`` when nothing claimed.
+
+    A pure diagnostic — it reads three counters and computes no cycle. It exists
+    because ``waits == 0`` is the only thing that distinguishes "this workload
+    has no link contention" from "the link term is dead code", and until now
+    that distinction needed a one-off instrumentation patch to see. Printing it
+    at shutdown makes every simulator run say which of the two it was.
+
+    ``device`` is the :class:`Device` wrapper or a bare tt-sim device; ``None``
+    and a device built before the registries existed both answer ``""``, as does
+    a run with the cost model off, where every counter stays at zero.
+    """
+    tt_device = getattr(device, "tt_device", device)
+    registries = getattr(tt_device, "noc_link_registries", None)
+    if not registries:
+        return ""
+    claims = sum(r.claims for r in registries)
+    if not claims:
+        return ""
+    waits = sum(r.waits for r in registries)
+    waited = sum(r.cycles_waited for r in registries)
+    parts = [
+        f"noc{i}: {r.claims} claims, {r.waits} waits, {r.cycles_waited} cycles"
+        for i, r in enumerate(registries)
+    ]
+    return (
+        f"link contention: {claims} claims, {waits} waits, "
+        f"{waited} cycles waited ({'; '.join(parts)})"
+    )
+
+
 class Device:
     """Wire-bridge wrapper around a tt-sim device (cycle pump + reset tracking).
 

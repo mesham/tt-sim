@@ -110,6 +110,8 @@ vendor_documents:
   tm_dm_stats: tests/tt_metal/tt_metal/data_movement/python/stats_collector.py
   tm_cluster: tt_metal/llrt/tt_cluster.cpp
   umd_bh_impl: tt_metal/third_party/umd/device/api/umd/device/arch/blackhole_implementation.hpp
+  tm_dram_saturation: tech_reports/Saturating_DRAM_bandwidth/Saturating_DRAM_bandwidth.md
+  tm_memory_for_kernels: docs/source/tt-metalium/tt_metal/advanced_topics/memory_for_kernel_developers.rst
 
 # ---------------------------------------------------------------------------
 clock:
@@ -232,7 +234,32 @@ noc:
     occupancy -- which virtual channel wins a link both packets want, and how
     deep a router will buffer before it back-pressures. A link's bandwidth is
     now divided between the packets crossing it; the order they cross it in is
-    still first-come, and nothing publishes what the real order is.
+    first-come, and THAT ORDER IS PUBLISHED -- this line used to say nothing
+    published it, which was simply wrong. Two vendor documents state it, and
+    both CONFIRM the mechanism ``NocLinkRegistry`` already implements rather
+    than asking for a change:
+
+      ``tm_dram_saturation``: "the NoC will serve on the requests in a
+      first-come first-serve strategy within the same VC. With different VC for
+      each reader, the NoC can round-robin through different channels, and
+      serve two readers equally."
+
+      ``tm_memory_for_kernels``: "It can lead to NoC contention since each link
+      can only carry one packet at a time. When multiple packets attempt to
+      traverse the same link, one must wait, causing delays and reduced
+      throughput."
+
+    The second is the registry's whole mechanism in one sentence -- one packet
+    per link, the rest wait -- and the first names the arbitration rule the
+    registry gets by construction, because a watermark per link serves whoever
+    reaches it first. NO NUMBER FOLLOWS FROM EITHER and no cycle moved when
+    they were added: they are `vendor_source` *corroboration* of an
+    `isa_doc_derived` term, not a new charge. What the first quotation also
+    settles is the SHAPE of what is left unmodelled: round-robin across
+    DIFFERENT VCs is a second policy, it is measured at one fiftieth of the
+    effect (see ``congestion`` below), and no vendor document turns either
+    policy into cycles. So the residue is buffer back-pressure and virtual
+    channels -- not the order, which is now cited.
   hops:
     niu_to_router:
       latency: { cycles: 5, bound: approximate }
@@ -440,6 +467,40 @@ noc:
       points are ~1.94x the uncontended 268), and sharing a channel costs a
       further 2.0 % (10.5 cycles) on top. So VC arbitration is real, is worth
       one fiftieth of the effect, and is the part that stays `unknown` here.
+
+      THE ARBITRATION *ORDER*, though, is no longer part of what is unknown, and
+      the ``noc`` note above now carries the two vendor quotations that settle
+      it: ``tm_dram_saturation`` states first-come first-serve within a VC and
+      round-robin across VCs, ``tm_memory_for_kernels`` states one packet per
+      link with the rest waiting. Both CONFIRM the wired term. Neither carries a
+      number, so this entry still reads `unknown` and no cycle moved -- what
+      shrank is the claim, not the model. What remains genuinely unmodelled is
+      **buffer back-pressure and virtual channels**: the static router geometry
+      is published (see ``router_buffering``) but no rule turns it into cycles,
+      and a queue-depth bound would be `estimated` in the OVER-charging
+      direction, which this file refuses for the same reason it refuses
+      PC-buffer write delays. It is ~2 % of the measured effect.
+
+      VALIDATED END TO END, 2026-08-12, which the term had never been. It was
+      inert on every in-tree workload (3,960 link claims and zero waits on
+      `blackhole/six`), so the only evidence it was not dead code was the
+      archived nocbench run. The blocker was that the congestion probes could
+      not reach the simulator: `perfbench/run.sh` and `run_card_session.sh`
+      both exported `TT_SIM_TENSIX_COORDS`, which tt-sim reads as "the pool is
+      PINNED" and which switches off on-demand materialisation, so a multi-core
+      plan died on its first kernel launch. With that removed the probe runs on
+      both arches and the term FIRES: Blackhole 7,590 link claims / 45 waits,
+      Wormhole 6,580 / 69, against the zero waits every in-tree workload gives.
+      The step at one shared link is FLAT at 64 B and 512 B and then, on
+      Blackhole, +27.5 / +119.0 / +239.5 cycles at 2048 / 8192 / 16384 B against
+      occupancies (bytes / 64) of 32 / 128 / 256. The card's own step over the
+      same sizes is 0.0 / 0.0 / +28.1 / +124.5 / +250.4, so the two agree to
+      2-4.5 % WITH NOTHING FITTED -- the modelled step is `bytes / flit_bytes`
+      out of `flit_bits` and `throughput_flits_per_cycle`, both `isa_doc` and
+      both in this file before that campaign existed. Wormhole's steps are
+      +59.0 / +239.0 / +495.5, twice Blackhole's, which is the 256-bit flit
+      against the 512-bit one and is likewise not a fitted number. There is no
+      Wormhole silicon to check it against; that is a hardware booking.
 
 # ---------------------------------------------------------------------------
 dram:

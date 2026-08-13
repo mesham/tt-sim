@@ -476,6 +476,32 @@ def test_a_session_that_crosses_the_stamp_wrap_still_finds_its_epoch():
     assert sweep._elapsed_span(wrapped) == pytest.approx(span, rel=0.05)
 
 
+def test_pooling_two_files_keeps_their_runs_independent():
+    """``noc-epoch`` exists to give the skew detector a second run; pooling is
+    how it gets one, and run identifiers are file-local so they must not merge.
+
+    The session script has always passed the detector both CSVs. Until the
+    loader accepted more than one path that call was an argparse error, so the
+    epoch report never ran at all -- the probe reported FAILED on every session
+    it was part of.
+    """
+    banked = sweep.DEFAULT_MEASURED
+    epoch = banked.with_name("nocbench-blackhole-2026-08-09-2224-epoch.csv")
+    one, _ = sweep.load_measured(banked)
+    two, _ = sweep.load_measured(epoch)
+
+    pooled, comments = sweep.load_measured_many([banked, epoch])
+    assert len(pooled) == len(one) + len(two)
+    assert any("pooled with" in c for c in comments)
+    # The two files' run identifiers overlap; after pooling they must not, or
+    # the "independent runs" the skew rule counts would be double-counted.
+    assert set(r["run"] for r in one) & set(r["run"] for r in two)
+    runs = collections.Counter(r["run"] for r in pooled)
+    assert len(runs) == len(set(r["run"] for r in one)) + len(
+        set(r["run"] for r in two)
+    )
+
+
 def test_the_banked_wrapping_run_reads_its_epoch_and_its_congestion():
     """The 22:24 ``noc-epoch`` file, kept as the fixture for the bug above."""
     path = sweep.DEFAULT_MEASURED.with_name(

@@ -394,6 +394,39 @@ def test_the_watermark_walks_the_route_and_the_wait_accumulates():
     assert (registry.claims, registry.waits, registry.cycles_waited) == (4, 1, 6)
 
 
+def test_the_shutdown_summary_distinguishes_inert_from_dead():
+    """``waits == 0`` is the whole point of printing this, so it must be said.
+
+    The term was inert on every in-tree workload for a week and the only way to
+    see that was a one-off instrumentation patch. A summary that reported claims
+    alone would not have distinguished "nothing contended" from "the term is
+    dead code", which is the one distinction it exists to make.
+    """
+    from tt_sim.bridge.device import link_contention_summary
+
+    class _Dev:
+        def __init__(self, registries):
+            self.noc_link_registries = registries
+
+    # Nothing to say: no registries, and registries nothing ever claimed.
+    assert link_contention_summary(None) == ""
+    assert link_contention_summary(_Dev((NocLinkRegistry(), NocLinkRegistry()))) == ""
+
+    noc0, noc1 = NocLinkRegistry(), NocLinkRegistry()
+    link = ("X", 2, 1)
+    noc0.claim((link,), 0, 10)
+    noc0.claim((link,), 4, 10)  # waits 6
+    summary = link_contention_summary(_Dev((noc0, noc1)))
+    assert "2 claims, 1 waits, 6 cycles waited" in summary
+    assert "noc1: 0 claims, 0 waits" in summary
+
+    # An uncontended run says so rather than falling silent, which is what makes
+    # "the term fired and found nothing" a reportable reading.
+    only_claims = NocLinkRegistry()
+    only_claims.claim((link,), 0, 10)
+    assert "1 claims, 0 waits" in link_contention_summary(_Dev((only_claims,)))
+
+
 def test_an_empty_route_and_an_unsourced_occupancy_charge_nothing():
     """Two endpoints on one tile cross no router-to-router link at all, and a
     cost table with no flit width sources no occupancy. Neither is an error and
