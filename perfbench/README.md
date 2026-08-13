@@ -22,10 +22,24 @@ perfbench/
 ├── dramratebench/      does a DRAM channel's aggregate read rate grow with the
 │                       number of tiles reading it? The only probe that can
 │                       reach the endpoint-occupancy term at all
-└── energybench/        the odd one out: its output is WATTS, not cycles. A
-                        loop-to-steady-state harness for ranking-level energy
-                        estimation, plus the card protocol and the analysis
+├── energybench/        the odd one out: its output is WATTS, not cycles. A
+│                       loop-to-steady-state harness for ranking-level energy
+│                       estimation, plus the card protocol and the analysis
+└── mechbench/          the other odd one out: it measures nothing new about
+                        hardware. It runs one Tensix-bound program on silicon
+                        and on tt-sim under the same tt-metal build and compares
+                        the two *decompositions* -- rung 4's mechanism-
+                        attribution leg
 ```
+
+`mechbench` is not a cycle-cost probe either. It is a **comparison**: it consumes
+the Tensix hardware performance counters (`TT_METAL_PROFILE_PERF_COUNTERS`,
+which needs no in-kernel instrumentation at all) from both sides and reports
+`E_total`, `E_int` and their ratio per core per thread. A disagreement is its
+result, not a bug. Nothing it measures may become a cost — the counter semantics
+come from a vendor tech report and RTL, which is `vendor_source`: fine for
+corroboration, disqualifying as provenance. See
+[`mechbench/README.md`](mechbench/README.md).
 
 `energybench` is not a cycle-cost probe and does not belong to the table below.
 It measures **steady-state repeated-kernel board power** against an in-session

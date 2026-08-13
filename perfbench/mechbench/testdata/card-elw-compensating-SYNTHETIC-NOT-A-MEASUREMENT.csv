@@ -1,0 +1,19 @@
+ARCH: blackhole, CHIP_FREQ[MHz]: 0, Max Compute Cores: 140
+PCIe slot, core_x, core_y, RISC processor type, timer_id, time[cycles since reset], data, run host ID, trace id, trace id counter, zone name, type, source line, source file, meta data
+0,1,2,BRISC,45671,1000,0,0,,,BRISC-FW,ZONE_START,433,brisc.cc,
+0,1,2,BRISC,9090,1001,0,0,,,,TS_DATA,0,,{"counter type":"THREAD_STALLS_0";"ref cnt":650;"value":0}
+0,1,2,BRISC,9090,1002,0,0,,,,TS_DATA,0,,{"counter type":"THREAD_STALLS_1";"ref cnt":650;"value":415}
+0,1,2,BRISC,9090,1003,0,0,,,,TS_DATA,0,,{"counter type":"THREAD_STALLS_2";"ref cnt":650;"value":173}
+0,1,2,BRISC,9090,1004,0,0,,,,TS_DATA,0,,{"counter type":"THREAD_INSTRUCTIONS_0";"ref cnt":650;"value":110}
+0,1,2,BRISC,9090,1005,0,0,,,,TS_DATA,0,,{"counter type":"THREAD_INSTRUCTIONS_1";"ref cnt":650;"value":124}
+0,1,2,BRISC,9090,1006,0,0,,,,TS_DATA,0,,{"counter type":"THREAD_INSTRUCTIONS_2";"ref cnt":650;"value":195}
+0,1,2,BRISC,9090,1007,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONZERO_SEM_0";"ref cnt":650;"value":0}
+0,1,2,BRISC,9090,1008,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONZERO_SEM_1";"ref cnt":650;"value":0}
+0,1,2,BRISC,9090,1009,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONZERO_SEM_2";"ref cnt":650;"value":163}
+0,1,2,BRISC,9090,1010,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONFULL_SEM_0";"ref cnt":650;"value":0}
+0,1,2,BRISC,9090,1011,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONFULL_SEM_1";"ref cnt":650;"value":0}
+0,1,2,BRISC,9090,1012,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONFULL_SEM_2";"ref cnt":650;"value":0}
+0,1,2,BRISC,9090,1013,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCA_VALID";"ref cnt":650;"value":40}
+0,1,2,BRISC,9090,1014,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCB_VALID";"ref cnt":650;"value":4}
+0,1,2,BRISC,9090,1015,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCA_CLEAR";"ref cnt":650;"value":0}
+0,1,2,BRISC,9090,1016,0,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCB_CLEAR";"ref cnt":650;"value":0}
