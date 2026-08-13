@@ -86,6 +86,9 @@ class TensixBackend:
         # point at a *different* unit as the cause -- see ``_refuse``.
         self.last_refusal_reason = ""
         self.last_refusal_blocked_on = ""
+        # ``"A"``/``"B"``/``None`` -- which Src bank a Src-ownership refusal was
+        # about, for the SRCA/SRCB split in the hardware performance counters.
+        self.last_refusal_src_bank = None
         # The documented *whole-thread* issue interlock, as a deadline per
         # Tensix thread: while ``cycle_num < thread_issue_block[i]``, nothing
         # from thread ``i`` may leave its Wait Gate, whichever unit it is bound

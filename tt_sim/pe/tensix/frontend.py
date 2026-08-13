@@ -325,12 +325,20 @@ class WaitGate(TensixFrontendUnit):
         self._stall_since = None
         self._stall_key = None
         self._stall_last = -1
+        # The tile's RISCV_DEBUG_REG_PERF_CNT_* block, set by
+        # ``TensixCoProcessor.__init__``. Unlike the trace bus this is armed by
+        # the *kernel* -- nothing accumulates until a start edge is written to
+        # PERF_CNT_INSTRN_THREAD2 -- so an unprofiled run pays one attribute
+        # read and one boolean test on paths that were already doing more.
+        self.perf_counters = None
         # The STALLWAIT/SEMWAIT condition-mask bit assignments differ between
         # Wormhole and Blackhole (compare the two arch's STALLWAIT.md). When set,
         # ``check_for_semwait_condition_match`` uses the Blackhole layout.
         self.blackhole_conditions = blackhole_conditions
 
-    def _note_stall(self, cycle_num, reason, blocked_on="", opcode="", semaphore=-1):
+    def _note_stall(
+        self, cycle_num, reason, blocked_on="", opcode="", semaphore=-1, src_bank=None
+    ):
         """Record one stalled cycle into the open episode, opening one if needed.
 
         Called from every branch of :meth:`clock_tick` that declines to release
@@ -346,6 +354,13 @@ class WaitGate(TensixFrontendUnit):
         new one, so a thread that moves from waiting on the unpackers to waiting
         on a semaphore is two episodes, not one blurred span.
         """
+        # The hardware perf counters come first and are independent of the
+        # trace bus: ``THREAD_STALLS_n`` is a register a kernel reads, so it
+        # must count whether or not anybody asked for a trace, and it must
+        # count on a tile whose ``unit_id`` was never assigned.
+        counters = self.perf_counters
+        if counters is not None and counters.instrn_running:
+            counters.note_stall(self.frontend.thread_id, reason, src_bank)
         unit_id = self.frontend.unit_id
         if unit_id is None:
             return
@@ -674,14 +689,16 @@ class WaitGate(TensixFrontendUnit):
                     if instruction_info["ex_resource"] == "MATH":
                         # For FPU instructions need to ensure that srcA and srcB
                         # being consumed has allowed client of MatrixUnit
-                        if self.checkIfFPUInstructionShouldStall(
+                        blocked_bank = self.whichSrcBankBlocksFPUInstruction(
                             instruction_info["name"]
-                        ):
+                        )
+                        if blocked_bank is not None:
                             self._note_stall(
                                 cycle_num,
                                 "src_reserved_by_unpacker",
                                 blocked_on="UNPACK",
                                 opcode=instruction_info["name"],
+                                src_bank=blocked_bank,
                             )
                             return
                     instruction_accepted = self.frontend.backend.issueInstruction(
@@ -702,6 +719,7 @@ class WaitGate(TensixFrontendUnit):
                                 or instruction_info["ex_resource"]
                             ),
                             opcode=instruction_info["name"],
+                            src_bank=backend.last_refusal_src_bank,
                         )
                     elif self._stall_since is not None:
                         # Progress: whatever the thread was blocked on has
@@ -725,6 +743,11 @@ class WaitGate(TensixFrontendUnit):
                                 f"Wait gate: issued {instruction_info['name']} to {instruction_info['ex_resource']} "
                                 f"from thread {self.frontend.thread_id}"
                             )
+                        counters = self.perf_counters
+                        if counters is not None and counters.instrn_running:
+                            # THREAD_INSTRUCTIONS_n: the grant side of the same
+                            # RTL instance whose req side is THREAD_STALLS_n.
+                            counters.note_dispatch(self.frontend.thread_id)
                         bus = get_bus()
                         if self.frontend.unit_id is not None and bus.is_enabled(
                             EventCategory.DISPATCH
@@ -740,22 +763,36 @@ class WaitGate(TensixFrontendUnit):
                             )
                         self.frontend.pop_wait_gate_instruction()
 
-    def checkIfFPUInstructionShouldStall(self, opcode):
+    def whichSrcBankBlocksFPUInstruction(self, opcode):
+        """``"A"``, ``"B"`` or ``None`` — which Src bank holds this instruction.
+
+        The bank identity is what separates ``WAITING_FOR_SRCA_VALID`` from
+        ``WAITING_FOR_SRCB_VALID`` in the hardware performance counters, and A
+        is tested before B here for the same reason the boolean predicate this
+        replaces did: an instruction blocked on both is charged once.
+        """
         if opcode in WaitGate.MATH_ALLOWED_CLIENT_INSTRUCTIONS[0]:
             if (
                 self.backend.getMatrixUnit().getSrcA().allowedClient
                 == SrcRegister.SrcClient.Unpackers
             ):
-                return True
+                return "A"
 
         if opcode in WaitGate.MATH_ALLOWED_CLIENT_INSTRUCTIONS[1]:
             if (
                 self.backend.getMatrixUnit().getSrcB().allowedClient
                 == SrcRegister.SrcClient.Unpackers
             ):
-                return True
+                return "B"
 
-        return False
+        return None
+
+    def checkIfFPUInstructionShouldStall(self, opcode):
+        """Boolean form of :meth:`whichSrcBankBlocksFPUInstruction`.
+
+        Kept because the wait-gate guards call it by name.
+        """
+        return self.whichSrcBankBlocksFPUInstruction(opcode) is not None
 
     def informMutexAcquired(self):
         self.mutex_stall = False

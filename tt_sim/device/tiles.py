@@ -715,7 +715,9 @@ class TensixTile(TTDeviceTile):
         tdma_range = AddressRange(0xFFB11000, self.tdma.getSize())
         tensix_mem_map[tdma_range] = self.tdma
 
-        self.tile_ctrl = TensixTileControl()
+        self.tile_ctrl = TensixTileControl(
+            perf_counters=self.tensix_coprocessor.perf_counters
+        )
         # All 5 baby cores (BRISC=11, TRISC0=12, TRISC1=13, TRISC2=14,
         # NCRISC=18) come out of power-on held in soft reset on real silicon.
         # Without this, multi-tile setups would have sibling tiles' cores

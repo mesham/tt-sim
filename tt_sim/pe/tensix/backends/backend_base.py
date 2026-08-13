@@ -121,7 +121,7 @@ class TensixBackendUnit(Clockable, ABC):
         # answers exactly what it answered before.
         self._pipeline_exit = [0, 0, 0]
 
-    def _refuse(self, reason, blocked_on=""):
+    def _refuse(self, reason, blocked_on="", src_bank=None):
         """Record *why* this unit is refusing, then refuse.
 
         The wait gate publishes the :class:`~tt_sim.trace.events.StallEvent`,
@@ -152,6 +152,10 @@ class TensixBackendUnit(Clockable, ABC):
         if backend is not None:
             backend.last_refusal_reason = reason
             backend.last_refusal_blocked_on = blocked_on
+            # ``"A"`` / ``"B"`` when the refusal is about one Src bank, which is
+            # what separates WAITING_FOR_SRCA_CLEAR from WAITING_FOR_SRCB_CLEAR
+            # in the hardware performance counters. ``None`` everywhere else.
+            backend.last_refusal_src_bank = src_bank
         return False
 
     def issueInstruction(self, instruction, from_thread):

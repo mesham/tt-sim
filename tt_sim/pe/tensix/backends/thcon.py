@@ -82,7 +82,14 @@ class ScalarUnit(TensixBackendUnit):
             # Which of the three is genuinely different work, so each is named
             # rather than all three collapsing into "the scalar unit is busy".
             if self.stalled_type == ScalarUnit.THConStallType.SRC_UNPACKER:
-                return self._refuse("src_reserved_by_matrix", blocked_on="MATH")
+                # ``stalled_condition[5]`` is ``storeToSrcB``, set by both
+                # branches of the GPR-to-Src write that raise this stall.
+                condition = self.stalled_condition
+                return self._refuse(
+                    "src_reserved_by_matrix",
+                    blocked_on="MATH",
+                    src_bank="B" if condition and condition[5] else "A",
+                )
             if self.stalled_type == ScalarUnit.THConStallType.FLUSHDMA:
                 return self._refuse("flush_pending")
             return self._refuse("atomic_pending")

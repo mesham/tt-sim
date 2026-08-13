@@ -330,3 +330,24 @@ architecture's NoC byte-enable span.
 | Env var | Effect |
 | --- | --- |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS` | Set truthy (`1`/`true`/`yes`/`on`) to turn alignment checking off. Off by default, i.e. **checking is on**. |
+
+## Tensix performance counters
+
+`RISCV_DEBUG_REG_PERF_CNT_*` is modelled (`tt_sim/misc/perf_counters.py`), so a
+tt-metal program built with `TT_METAL_PROFILE_PERF_COUNTERS=<bitmask>` programs,
+starts, stops and reads the counters exactly as it does on silicon. Bit 5 (`32`)
+selects the `INSTRN_THREAD` bank, which is the one tt-sim sources; the other
+banks answer their registers but decline their counters.
+
+Counters reported from a quantity tt-sim tracks: `THREAD_STALLS_{0,1,2}`,
+`THREAD_INSTRUCTIONS_{0,1,2}`, `WAITING_FOR_NONZERO_SEM_{0,1,2}`,
+`WAITING_FOR_NONFULL_SEM_{0,1,2}`, `WAITING_FOR_SRC{A,B}_VALID` and
+`WAITING_FOR_SRC{A,B}_CLEAR`, plus `ref_cnt` on every bank. Anything else reads
+back as `0` **and prints a warning naming the counter** — the counters are a
+functional register model (`vendor_source`), and none of them feeds the cost
+model or charges a cycle.
+
+| Env var | Effect |
+| --- | --- |
+| `TT_SIM_STRICT_PERF_COUNTERS` | Set truthy to make an unmodelled performance-counter read raise instead of warning. |
+| `TT_SIM_PERMISSIVE_TILE_CTRL` | Set truthy to downgrade an unmodelled `RISCV_DEBUG_REG` read from a raise back to a one-shot warning returning `0`. Off by default, i.e. **unmodelled reads raise**. |

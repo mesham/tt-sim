@@ -1,4 +1,5 @@
 from tt_sim.memory.memory import VisibleMemory
+from tt_sim.misc.perf_counters import TensixPerfCounters
 from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.tensix.backend import TensixBackend
 from tt_sim.pe.tensix.frontend import TensixFrontend
@@ -27,6 +28,14 @@ class TensixCoProcessor(ProcessingElement):
             TensixFrontend(i, self.backend, diags_settings, blackhole) for i in range(3)
         ]
         self.backend.setFrontendThreads(self.threads)
+        # The tile's RISCV_DEBUG_REG_PERF_CNT_* block. Owned here rather than by
+        # TensixTileControl because the quantities behind the INSTRN_THREAD bank
+        # are the wait gate's, and the gate is what has to increment them; the
+        # tile hands the same object to its tile-control register window so a
+        # kernel can read them at the documented addresses.
+        self.perf_counters = TensixPerfCounters(blackhole)
+        for thread in self.threads:
+            thread.wait_gate.perf_counters = self.perf_counters
 
     def getThread(self, idx):
         assert idx < 3
