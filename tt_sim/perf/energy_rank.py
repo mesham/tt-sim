@@ -16,6 +16,26 @@ is why the headline metric is a **Spearman correlation of predicted against
 measured ordering** plus **ratio errors**, and emphatically not an R² on
 absolute joules.
 
+THE QUANTITY
+------------
+
+``power_w`` is **in-slot board power under sustained load** -- sampled while the
+workload runs, which needs ``tt-smi`` >= 4.0.0 (the tt-umd backend; the older
+Luwen backend panics on a device held by a tt-metal program). If a session was
+run with ``run_card.sh --bracket`` it also carries ``power_bracket_w``, a
+post-exit sample on a **decaying edge**. That is a different quantity and this
+module never fits it.
+
+WHAT A SESSION HAS TO CARRY
+---------------------------
+
+The 2026-08-13 card session recorded ``samples=0, power_w=0`` for every arm slot
+of a three-cycle run and still looked like a finished measurement. Three of the
+gates below exist because of that session and refuse the shapes it had: a row
+with no telemetry (``telemetry``), a cycle missing a slot (``schedule``), and a
+clock that moved under the measurement (``clock`` -- its baselines read 61.7 W at
+1350 MHz and ~39 W at 800 MHz in consecutive cycles).
+
 WHERE THE COEFFICIENTS LIVE, AND WHY NOT HERE
 ---------------------------------------------
 
@@ -48,9 +68,28 @@ THE GATES
 ---------
 
 A fit is only meaningful if the measurement it is fitted to actually said
-something. Seven gates run before any ranking is reported, and a failure is a
+something. Eleven gates run before any ranking is reported, and a failure is a
 **refusal**, not a warning:
 
+``telemetry``
+    Every row must carry at least one **successful** power sample and a finite
+    power, and no row may carry a non-``ok`` status. A slot with zero samples is
+    not a slot that measured zero watts, and this is what stops the two being
+    confused: the aggregator writes an empty cell rather than ``0.0``, and an
+    empty cell arrives here as ``nan`` and is refused.
+``schedule``
+    Every interleave cycle must carry every label. Cycle 2 of the 2026-08-13
+    session was simply missing ``idle-0`` -- the CSV jumped slot 0 to slot 2 --
+    because the runner recorded a manifest row only on success, so a failed slot
+    left no trace anywhere machine-readable.
+``thermal``
+    ``tt_therm_trip_count`` must not move. A part that throttled was not running
+    the workload the activity vector describes.
+``clock``
+    No slot's AI clock may drift more than ``--max-clock-drift-pct`` within
+    itself, and the session's slots must agree on it to the same tolerance. This
+    is the confound that made the 2026-08-13 baselines swing 42%: 1350 MHz in one
+    cycle, 800 MHz in the next, differenced against each other.
 ``repeats``
     Every label needs at least ``--min-repeats`` interleave cycles. One
     observation has no spread and so no noise floor.
@@ -249,6 +288,7 @@ class RankReport:
 
     def to_dict(self) -> dict:
         return {
+            "quantity": QUANTITY,
             "refused": self.refused,
             "gates": [
                 {"name": g.name, "passed": g.passed, "detail": g.detail}
@@ -269,26 +309,58 @@ class RankReport:
         }
 
 
+def _optional_float(raw: dict, key: str) -> float | None:
+    """A numeric column that may legitimately be absent or **empty**.
+
+    Empty is not zero. ``aggregate_power.py`` writes an empty cell for a reading
+    that was never taken, precisely so that it cannot be read as a measurement
+    of zero, and this is the other end of that contract: an empty cell comes back
+    as ``None`` and a gate refuses it.
+    """
+    value = raw.get(key)
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def load_measured(path: Path | str) -> list[dict]:
     """Read a card-session power CSV.
 
     Required columns: ``label``, ``cycle``, ``power_w``, ``samples``. Workload
     rows additionally need ``launches`` and ``wall_s``; the baseline does not
-    (it launches nothing).
+    (it launches nothing). A session written by the current ``aggregate_power.py``
+    also carries ``status``, the sysfs clock record and ``therm_trip_delta``,
+    which the ``telemetry``, ``thermal`` and ``clock`` gates require.
+
+    ``power_w`` is parsed leniently on purpose: an **empty** cell becomes ``nan``
+    rather than raising, so the session reaches the gates and is refused there
+    with a row-by-row explanation, instead of dying with a ``ValueError`` that
+    says nothing about which slot failed.
     """
     rows = []
     with open(path, newline="") as fh:
         for raw in csv.DictReader(fh):
             if not raw.get("label"):
                 continue
+            power = _optional_float(raw, "power_w")
             row = {
                 "label": raw["label"].strip(),
                 "cycle": int(float(raw.get("cycle", 0) or 0)),
                 "slot": int(float(raw.get("slot", 0) or 0)),
-                "power_w": float(raw["power_w"]),
+                "power_w": float("nan") if power is None else power,
                 "samples": int(float(raw.get("samples", 0) or 0)),
+                "attempts": int(float(raw.get("attempts", 0) or 0)),
+                "status": (raw.get("status") or "").strip(),
                 "launches": float(raw.get("launches", 0) or 0),
                 "wall_s": float(raw.get("wall_s", 0) or 0),
+                "aiclk_mean": _optional_float(raw, "sysfs_aiclk_mean"),
+                "aiclk_drift_pct": _optional_float(raw, "sysfs_aiclk_drift_pct"),
+                "therm_trip_delta": _optional_float(raw, "therm_trip_delta"),
+                "pre_idle_w": _optional_float(raw, "pre_idle_w"),
+                "tt_smi_version": (raw.get("tt_smi_version") or "").strip(),
             }
             rate = float(raw.get("launches_per_s", 0) or 0)
             if rate <= 0 and row["wall_s"] > 0:
@@ -393,6 +465,152 @@ def _fit(design: np.ndarray, y: np.ndarray) -> np.ndarray:
     return nnls(design, y)
 
 
+def _describe(row: dict) -> str:
+    return f"cycle {row.get('cycle')} slot {row.get('slot')} {row.get('label')}"
+
+
+def _telemetry_gate(rows: list[dict]) -> GateResult:
+    """Every row must actually have been measured.
+
+    This is the gate the 2026-08-13 session needed and did not have. Every arm
+    slot in it came back with zero samples and a power of ``0.0``, and nothing
+    anywhere distinguished that from a board drawing no power -- the session ran
+    to completion, wrote a full CSV and was analysed as if it meant something.
+
+    Three separate things are refused here, because the failure had three faces:
+    a status the runner already knew was bad, a sample count of zero, and a power
+    cell that is empty (``nan``) rather than a number.
+    """
+    problems = []
+    for row in rows:
+        status = row.get("status", "")
+        if status and status != "ok":
+            problems.append(f"{_describe(row)}: status={status}")
+        elif row.get("samples", 0) <= 0:
+            problems.append(f"{_describe(row)}: 0 telemetry samples")
+        elif not math.isfinite(row.get("power_w", float("nan"))):
+            problems.append(f"{_describe(row)}: no power reading")
+    if problems:
+        return GateResult(
+            "telemetry",
+            False,
+            f"{len(problems)} row(s) were never measured: "
+            + "; ".join(problems[:6])
+            + ("; ..." if len(problems) > 6 else "")
+            + ". A slot with no samples did not measure zero watts",
+        )
+    return GateResult(
+        "telemetry",
+        True,
+        f"all {len(rows)} rows carry a status of ok, at least one telemetry "
+        "sample and a finite power",
+    )
+
+
+def _schedule_gate(rows: list[dict]) -> GateResult:
+    """Every interleave cycle must carry every label.
+
+    Cycle 2 of the 2026-08-13 session was missing ``idle-0`` outright and the CSV
+    simply skipped from slot 0 to slot 2, because the runner wrote a manifest row
+    only for a slot that succeeded. A hole was therefore indistinguishable from a
+    schedule that never had that slot, and no gate looked.
+    """
+    by_cycle: dict[int, set] = {}
+    for row in rows:
+        by_cycle.setdefault(row.get("cycle", 0), set()).add(row["label"])
+    if not by_cycle:
+        return GateResult("schedule", False, "no rows at all")
+    every = set().union(*by_cycle.values())
+    holes = [
+        f"cycle {cycle} is missing {label}"
+        for cycle in sorted(by_cycle)
+        for label in sorted(every - by_cycle[cycle])
+    ]
+    return GateResult(
+        "schedule",
+        not holes,
+        f"all {len(by_cycle)} cycles carry all {len(every)} labels"
+        if not holes
+        else "; ".join(holes) + " -- a cycle with a hole in it is not an interleave",
+    )
+
+
+def _thermal_gate(rows: list[dict]) -> GateResult:
+    """``tt_therm_trip_count`` must not move anywhere in the session.
+
+    A part that throttled was not running the workload the activity vector
+    describes, and no amount of averaging recovers that. Read from sysfs, which
+    costs nothing and needs no device handle.
+    """
+    missing = [_describe(r) for r in rows if r.get("therm_trip_delta") is None]
+    if missing:
+        return GateResult(
+            "thermal",
+            False,
+            f"{len(missing)} row(s) have no tt_therm_trip_count record "
+            f"({missing[0]}...): a session that cannot show the part did not "
+            "throttle cannot be differenced",
+        )
+    tripped = [
+        f"{_describe(r)}: +{r['therm_trip_delta']:.0f}"
+        for r in rows
+        if r["therm_trip_delta"] != 0
+    ]
+    return GateResult(
+        "thermal",
+        not tripped,
+        "tt_therm_trip_count held still across every slot"
+        if not tripped
+        else "the part throttled: " + "; ".join(tripped[:6]),
+    )
+
+
+def _clock_gate(rows: list[dict], max_drift_pct: float) -> GateResult:
+    """The AI clock must hold still within a slot and across the session.
+
+    The 2026-08-13 session read a baseline of 61.7 W at 1350 MHz in one cycle and
+    ~39 W at 800 MHz in the next, and differenced them: a 42% swing in the
+    reference, driven by a clock nothing was recording. Two checks, because there
+    are two ways for it to bite -- a clock that moved *during* a slot makes that
+    slot's mean meaningless, and slots at *different* clocks cannot be
+    differenced against each other however steady each one was.
+    """
+    missing = [_describe(r) for r in rows if r.get("aiclk_mean") is None]
+    if missing:
+        return GateResult(
+            "clock",
+            False,
+            f"{len(missing)} row(s) have no clock record ({missing[0]}...): a "
+            "session that cannot show its clock held still cannot be differenced",
+        )
+    within = [
+        f"{_describe(r)}: {r['aiclk_drift_pct']:.2f}%"
+        for r in rows
+        if (r.get("aiclk_drift_pct") or 0.0) > max_drift_pct
+    ]
+    clocks = [r["aiclk_mean"] for r in rows]
+    mean_clock = float(np.mean(clocks))
+    across = 100.0 * (max(clocks) - min(clocks)) / mean_clock if mean_clock else 0.0
+    ok = not within and across <= max_drift_pct
+    detail = (
+        f"within-slot drift <= {max_drift_pct:g}%, across-session spread "
+        f"{across:.2f}% ({min(clocks):.0f}-{max(clocks):.0f} MHz)"
+    )
+    if within:
+        detail = (
+            "the clock moved inside "
+            + "; ".join(within[:6])
+            + f" (cap {max_drift_pct:g}%)"
+        )
+    elif across > max_drift_pct:
+        detail = (
+            f"slots ran at different clocks: {min(clocks):.0f}-{max(clocks):.0f} MHz "
+            f"is a {across:.2f}% spread against a {max_drift_pct:g}% cap, so these "
+            "rows are not differenceable"
+        )
+    return GateResult("clock", ok, detail)
+
+
 def analyse(
     activity_rows: list[dict],
     measured_rows: list[dict],
@@ -400,10 +618,21 @@ def analyse(
     min_repeats: int = 3,
     min_samples: int = 20,
     max_cond: float = 1e6,
+    max_clock_drift_pct: float = 5.0,
     terms: list[str] | None = None,
 ) -> RankReport:
     report = RankReport()
     grouped = _by_label(measured_rows)
+
+    # -- G0 telemetry -----------------------------------------------------
+    # First, and an early return: every other gate averages these numbers, and
+    # averaging a row that was never measured is the failure being guarded
+    # against rather than a degraded version of it.
+    telemetry = _telemetry_gate(measured_rows)
+    report.gates.append(telemetry)
+    if not telemetry.passed:
+        report.refused = True
+        return report
 
     # -- baseline ---------------------------------------------------------
     if BASELINE_LABEL not in grouped:
@@ -430,7 +659,12 @@ def analyse(
     floor = noise_floor(grouped)
     report.noise_floor_w = floor
 
-    # -- G1 repeats -------------------------------------------------------
+    # -- G1 schedule, thermal, clock: was this a session at all ------------
+    report.gates.append(_schedule_gate(measured_rows))
+    report.gates.append(_thermal_gate(measured_rows))
+    report.gates.append(_clock_gate(measured_rows, max_clock_drift_pct))
+
+    # -- G2 repeats -------------------------------------------------------
     thin = {
         label: len(rows) for label, rows in grouped.items() if len(rows) < min_repeats
     }
@@ -444,7 +678,7 @@ def analyse(
         )
     )
 
-    # -- G2 samples -------------------------------------------------------
+    # -- G3 samples -------------------------------------------------------
     starved = sorted(
         {row["label"] for row in measured_rows if row["samples"] < min_samples}
     )
@@ -458,7 +692,7 @@ def analyse(
         )
     )
 
-    # -- G3 control (verified zero) ---------------------------------------
+    # -- G4 control (verified zero) ---------------------------------------
     controls = [label for label in grouped if label.endswith(CONTROL_SUFFIX)]
     if not controls:
         report.gates.append(
@@ -530,7 +764,7 @@ def analyse(
         energy[label] = (power - baseline_w) / rate
     report.measured_energy = energy
 
-    # -- G4 spread --------------------------------------------------------
+    # -- G5 spread --------------------------------------------------------
     # Only workloads that made it as far as a per-launch energy count towards the
     # spread: one whose launch rate never arrived is not a point on the axis the
     # gate is about.
@@ -551,7 +785,7 @@ def analyse(
         )
     )
 
-    # -- G5 identifiability -----------------------------------------------
+    # -- G6 identifiability -----------------------------------------------
     usable = [label for label in labels if label in energy]
     matrix = np.array(
         [
@@ -589,7 +823,7 @@ def analyse(
     )
     report.terms = [ACTIVITY_TERMS[j] for j in chosen]
 
-    # -- G6 enough points to rank -----------------------------------------
+    # -- G7 enough points to rank -----------------------------------------
     rank_ok = len(usable) >= 3
     report.gates.append(
         GateResult(
@@ -642,8 +876,18 @@ def analyse(
 # ---------------------------------------------------------------------------
 
 
+#: What ``power_w`` is, in one line, printed on every report and stamped into
+#: every coefficient file. It is here rather than inline so the report, the JSON
+#: and the YAML cannot drift apart on the one thing a reader must not get wrong.
+QUANTITY = (
+    "MEASURED QUANTITY: in-slot board power under SUSTAINED LOAD -- sampled while "
+    "the kernel is launching, at ~1 Hz, board-wide (DRAM, PHYs, ARC, PCIe, fans "
+    "included). Not the energy of one launch, and not a post-exit decaying edge."
+)
+
+
 def render(report: RankReport) -> str:
-    lines = ["# energybench ranking report", ""]
+    lines = ["# energybench ranking report", "", QUANTITY, ""]
     lines.append(f"baseline (idle, in session): {report.baseline_w:.3f} W")
     lines.append(f"noise floor (RMS of per-label SDs): {report.noise_floor_w:.3f} W")
     lines.append("")
@@ -739,11 +983,14 @@ def coefficients_document(report: RankReport, sources: dict) -> str:
         "# loader raises KeyError on any table that carries it -- that is",
         "# deliberate, and tt_sim/perf/energy_quarantine_test.py asserts it.",
         "#",
-        "# What these predict is STEADY-STATE REPEATED-KERNEL BOARD POWER against a",
-        "# measured in-session idle baseline, not the energy of a single launch,",
-        "# and they are validated on ORDERING and RATIOS, never on absolute joules.",
+        "# What these predict is STEADY-STATE REPEATED-KERNEL BOARD POWER UNDER",
+        "# SUSTAINED LOAD, sampled in slot, against a measured in-session idle",
+        "# baseline -- not the energy of a single launch, and not a post-exit",
+        "# decaying edge. They are validated on ORDERING and RATIOS, never on",
+        "# absolute joules.",
         "",
         "not_a_cost_table: true",
+        f"quantity: {json.dumps(QUANTITY)}",
         f"provenance: {FITTED_PROVENANCE}",
         "units: joules per unit of activity, per launch",
         f"fitted_on: {stamp}",
@@ -777,6 +1024,13 @@ def main(argv=None) -> int:
     ap.add_argument("--min-samples", type=int, default=20)
     ap.add_argument("--max-cond", type=float, default=1e6)
     ap.add_argument(
+        "--max-clock-drift-pct",
+        type=float,
+        default=5.0,
+        help="how far the AI clock may move within a slot, and across the "
+        "session's slots, before the rows stop being differenceable (default 5)",
+    )
+    ap.add_argument(
         "--terms",
         help="comma-separated activity terms to fit, overriding the automatic "
         "selection. Naming more than the design supports is refused by the "
@@ -799,6 +1053,7 @@ def main(argv=None) -> int:
         min_repeats=args.min_repeats,
         min_samples=args.min_samples,
         max_cond=args.max_cond,
+        max_clock_drift_pct=args.max_clock_drift_pct,
         terms=[t.strip() for t in args.terms.split(",") if t.strip()]
         if args.terms
         else None,

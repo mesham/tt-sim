@@ -12,12 +12,22 @@
 // duration long enough that a ~1 Hz sampler collects tens of samples. The
 // quantity the pair (this program + the sampler) produces is therefore
 //
-//     STEADY-STATE REPEATED-KERNEL BOARD POWER, in watts,
+//     STEADY-STATE REPEATED-KERNEL BOARD POWER, in watts, UNDER SUSTAINED LOAD,
 //
 // which is emphatically NOT "the energy of one launch". It is the average power
 // of a board that is executing this kernel over and over, including the launch
 // machinery between every pair of executions, and including DRAM, PHYs, ARC,
 // PCIe and fans.
+//
+// THE SAMPLER RUNS WHILE THIS PROGRAM HOLDS THE DEVICE
+// ----------------------------------------------------
+// That works, and is measured: `tt-smi` 6.2.0 reads a busy chip at 69.0 W with
+// `--arm rv` running, and the workload is unperturbed (404.3 launches/s while
+// sampled against 407.5 and 418.8 unsampled). It needs tt-smi >= 4.0.0, where
+// the default backend changed from Luwen to tt-umd -- on 3.0.32 every in-slot
+// read panics in pyluwen ("Failed to map bar0_uc"), because BAR0's mapping is
+// exclusive on that path, and the harness banks a session of zeros. `run_card.sh`
+// refuses to start below 4.0.0 for exactly that reason; see ../README.md.
 //
 // Per-launch energy can only be recovered from that by DIVIDING BY THE MEASURED
 // LAUNCH RATE, which is why this program reports `launches` and `wall_s` in its

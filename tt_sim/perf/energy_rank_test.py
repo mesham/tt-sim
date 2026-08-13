@@ -22,10 +22,12 @@ from tt_sim.perf.energy_rank import (
     BASELINE_LABEL,
     CONTROL_SUFFIX,
     FITTED_PROVENANCE,
+    QUANTITY,
     analyse,
     check_destination,
     coefficients_document,
     design_condition,
+    load_measured,
     nnls,
     rankdata,
     render,
@@ -136,6 +138,23 @@ def true_energy(label: str) -> float:
     )
 
 
+#: A well-formed session row carries more than a power now. ``status``, the
+#: sysfs clock record and ``therm_trip_delta`` are what the ``telemetry``,
+#: ``clock`` and ``thermal`` gates read, and a row without them is refused --
+#: which is the point, so the fixture builds complete rows and the failing cases
+#: below take them away one at a time.
+def _health(aiclk=1350.0, drift=0.2, trip=0.0, status="ok"):
+    return {
+        "status": status,
+        "attempts": 40,
+        "aiclk_mean": aiclk,
+        "aiclk_drift_pct": drift,
+        "therm_trip_delta": trip,
+        "pre_idle_w": BASELINE_W,
+        "tt_smi_version": "6.2.0",
+    }
+
+
 def measured_rows(
     labels=None,
     cycles=4,
@@ -146,19 +165,29 @@ def measured_rows(
     include_baseline=True,
     scale=1.0,
     seed=7,
+    health=None,
 ):
     """Build a card-session power CSV in memory.
 
     ``scale`` compresses every workload's *delta* from the baseline towards
     zero, which is how the ``spread`` gate's failing case is made: the same
-    ordering, but inside the noise floor.
+    ordering, but inside the noise floor. ``health`` is a callable
+    ``(cycle, label) -> dict`` overriding that row's health columns, which is how
+    the telemetry, clock and thermal gates get their failing cases.
     """
     rng = np.random.default_rng(seed)
     labels = list(ACTIVITY) if labels is None else list(labels)
     rows = []
+
+    def _add(row):
+        row.update(_health())
+        if health is not None:
+            row.update(health(row["cycle"], row["label"]) or {})
+        rows.append(row)
+
     for cycle in range(cycles):
         if include_baseline:
-            rows.append(
+            _add(
                 {
                     "label": BASELINE_LABEL,
                     "cycle": cycle,
@@ -172,7 +201,7 @@ def measured_rows(
             )
         for slot, label in enumerate(labels, start=1):
             power = BASELINE_W + scale * RATES[label] * true_energy(label)
-            rows.append(
+            _add(
                 {
                     "label": label,
                     "cycle": cycle,
@@ -186,7 +215,7 @@ def measured_rows(
             )
         if control is not None and control in labels:
             power = BASELINE_W + scale * RATES[control] * true_energy(control)
-            rows.append(
+            _add(
                 {
                     "label": control + CONTROL_SUFFIX,
                     "cycle": cycle,
@@ -258,6 +287,16 @@ def test_the_report_names_the_coefficients_as_fitted_not_sourced():
     assert "leave-one-out" in text
 
 
+def test_every_report_states_which_quantity_was_measured():
+    """A refused session says it too, because a refusal is also a statement about
+    a measurement and the reader still has to know which one."""
+    assert "SUSTAINED LOAD" in QUANTITY
+    assert QUANTITY in render(analyse(activity_rows(), measured_rows()))
+    refused = analyse(activity_rows(), measured_rows(include_baseline=False))
+    assert QUANTITY in render(refused)
+    assert QUANTITY == analyse(activity_rows(), measured_rows()).to_dict()["quantity"]
+
+
 def test_a_shuffled_measurement_does_not_rank():
     """The instrument must be able to say no. Re-labelling the measured powers
     breaks the correspondence without changing anything else, and the
@@ -290,6 +329,176 @@ def test_baseline_gate_refuses_a_session_with_no_baseline():
     assert not report.ok
     assert not gate(report, "baseline").passed
     assert "REFUSED" in render(report)
+
+
+# ---------------------------------------------------------------------------
+# Gate: telemetry -- the 2026-08-13 failure, in both directions
+# ---------------------------------------------------------------------------
+
+
+def test_telemetry_gate_passes_when_every_slot_was_actually_measured():
+    assert gate(analyse(activity_rows(), measured_rows()), "telemetry").passed
+
+
+def test_telemetry_gate_refuses_a_slot_that_recorded_zero_samples():
+    """The whole reason this gate exists. On 2026-08-13 every arm slot of a
+    three-cycle card session came back ``samples=0, power_w=0`` -- tt-smi 3.0.32
+    panicked on a device held by tt-metal, the sampler swallowed the exception,
+    and ``mean([]) -> 0.0`` turned a refusal into a reading. The session ran to
+    completion and looked finished. It must now be impossible to mistake that for
+    success."""
+    rows = measured_rows()
+    for row in rows:
+        if row["label"] != BASELINE_LABEL:  # only the baselines got telemetry
+            row["samples"] = 0
+            row["power_w"] = 0.0
+    report = analyse(activity_rows(), rows)
+    assert not gate(report, "telemetry").passed
+    assert "0 telemetry samples" in gate(report, "telemetry").detail
+    assert not report.ok
+    assert "REFUSED" in render(report)
+
+
+def test_telemetry_gate_refuses_an_empty_power_cell_rather_than_reading_it_as_zero():
+    """``aggregate_power.py`` writes an empty cell for a reading never taken;
+    ``load_measured`` turns that into ``nan``. A ``nan`` must refuse, not
+    propagate into a mean."""
+    rows = measured_rows()
+    rows[3]["power_w"] = float("nan")
+    report = analyse(activity_rows(), rows)
+    assert not gate(report, "telemetry").passed
+    assert "no power reading" in gate(report, "telemetry").detail
+    assert not report.ok
+
+
+def test_telemetry_gate_refuses_a_status_the_runner_already_knew_was_bad():
+    rows = measured_rows(
+        health=lambda c, label: {"status": "run_failed"} if c == 1 else None
+    )
+    report = analyse(activity_rows(), rows)
+    assert not gate(report, "telemetry").passed
+    assert "run_failed" in gate(report, "telemetry").detail
+    assert not report.ok
+
+
+def test_an_empty_power_cell_loads_as_nan_and_not_as_zero(tmp_path):
+    """The contract between the aggregator and the analysis, at the seam. If an
+    empty cell parsed as 0.0 here, the gate above could never fire."""
+    csv_path = tmp_path / "power.csv"
+    csv_path.write_text(
+        "label,cycle,slot,power_w,samples,launches,wall_s,launches_per_s\n"
+        "baseline,0,0,,0,0,30,0\n"
+        "idle-0,0,1,41.5,40,1000,30,33.3\n"
+    )
+    rows = load_measured(csv_path)
+    assert math.isnan(rows[0]["power_w"])
+    assert rows[1]["power_w"] == pytest.approx(41.5)
+
+
+# ---------------------------------------------------------------------------
+# Gate: schedule -- cycle 2's missing slot
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_gate_passes_when_every_cycle_carries_every_label():
+    assert gate(analyse(activity_rows(), measured_rows()), "schedule").passed
+
+
+def test_schedule_gate_refuses_a_cycle_with_a_hole_in_it():
+    """Cycle 2 of the 2026-08-13 session was missing ``idle-0`` outright: the CSV
+    jumped slot 0 to slot 2, because the runner wrote a manifest row only for a
+    slot that succeeded, so a crash left no trace in either machine-readable
+    output. Nothing looked, and the gap was found by eye."""
+    rows = [
+        r for r in measured_rows() if not (r["cycle"] == 2 and r["label"] == "idle-0")
+    ]
+    report = analyse(activity_rows(), rows)
+    g = gate(report, "schedule")
+    assert not g.passed
+    assert "cycle 2 is missing idle-0" in g.detail
+    assert not report.ok
+
+
+# ---------------------------------------------------------------------------
+# Gate: thermal
+# ---------------------------------------------------------------------------
+
+
+def test_thermal_gate_passes_when_the_trip_counter_held_still():
+    assert gate(analyse(activity_rows(), measured_rows()), "thermal").passed
+
+
+def test_thermal_gate_refuses_a_session_where_the_part_throttled():
+    rows = measured_rows(
+        health=lambda c, label: (
+            {"therm_trip_delta": 1.0} if c == 3 and label == "mm-16384" else None
+        )
+    )
+    report = analyse(activity_rows(), rows)
+    assert not gate(report, "thermal").passed
+    assert "throttled" in gate(report, "thermal").detail
+    assert not report.ok
+
+
+def test_thermal_gate_refuses_a_session_with_no_thermal_record_at_all():
+    rows = measured_rows(health=lambda c, label: {"therm_trip_delta": None})
+    report = analyse(activity_rows(), rows)
+    assert not gate(report, "thermal").passed
+    assert "cannot show the part did not" in gate(report, "thermal").detail
+
+
+# ---------------------------------------------------------------------------
+# Gate: clock -- the 42% baseline swing
+# ---------------------------------------------------------------------------
+
+
+def test_clock_gate_passes_when_the_board_held_one_clock():
+    assert gate(analyse(activity_rows(), measured_rows()), "clock").passed
+
+
+def test_clock_gate_refuses_slots_measured_at_different_clocks():
+    """The 2026-08-13 baselines: 61.7 W at 1350 MHz in cycle 0, ~39 W at 800 MHz
+    in cycles 1 and 2. Each slot was steady; they were differenced against each
+    other anyway, and 42% of the reference moved."""
+    rows = measured_rows(
+        health=lambda c, label: {"aiclk_mean": 800.0} if c >= 1 else None
+    )
+    report = analyse(activity_rows(), rows)
+    g = gate(report, "clock")
+    assert not g.passed
+    assert "different clocks" in g.detail
+    assert not report.ok
+
+
+def test_clock_gate_refuses_a_clock_that_moved_inside_one_slot():
+    rows = measured_rows(
+        health=lambda c, label: (
+            {"aiclk_drift_pct": 31.0} if label == "rv-800000" else None
+        )
+    )
+    report = analyse(activity_rows(), rows)
+    assert not gate(report, "clock").passed
+    assert "moved inside" in gate(report, "clock").detail
+    assert not report.ok
+
+
+def test_clock_gate_refuses_a_session_with_no_clock_record():
+    rows = measured_rows(health=lambda c, label: {"aiclk_mean": None})
+    report = analyse(activity_rows(), rows)
+    assert not gate(report, "clock").passed
+    assert "no clock record" in gate(report, "clock").detail
+
+
+def test_clock_gate_tolerance_is_a_threshold_and_not_a_switch():
+    """Both sides of the same knob: a 4% spread passes a 5% cap and refuses a 2%
+    one. A gate whose threshold does nothing is not a threshold."""
+    rows = measured_rows(
+        health=lambda c, label: {"aiclk_mean": 1350.0 if c % 2 else 1296.0}
+    )
+    assert gate(analyse(activity_rows(), rows, max_clock_drift_pct=5.0), "clock").passed
+    assert not gate(
+        analyse(activity_rows(), rows, max_clock_drift_pct=2.0), "clock"
+    ).passed
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +698,9 @@ def _write_session(tmp_path, **kwargs):
     for row in activity_rows():
         write_row(activity, {k: row.get(k, 0) for k in CSV_COLUMNS}, append=True)
 
+    # The column names are `aggregate_power.py`'s, so this exercises the seam
+    # between the card-box aggregator and `load_measured` rather than a private
+    # shorthand: the health columns the new gates read have to survive the CSV.
     measured = tmp_path / "power.csv"
     rows = measured_rows(**kwargs)
     with open(measured, "w", newline="") as fh:
@@ -498,11 +710,18 @@ def _write_session(tmp_path, **kwargs):
                 "label",
                 "cycle",
                 "slot",
+                "status",
                 "power_w",
                 "samples",
+                "attempts",
                 "launches",
                 "wall_s",
                 "launches_per_s",
+                "pre_idle_w",
+                "sysfs_aiclk_mean",
+                "sysfs_aiclk_drift_pct",
+                "therm_trip_delta",
+                "tt_smi_version",
             ],
         )
         writer.writeheader()
@@ -512,11 +731,18 @@ def _write_session(tmp_path, **kwargs):
                     "label": row["label"],
                     "cycle": row["cycle"],
                     "slot": row["slot"],
+                    "status": row["status"],
                     "power_w": row["power_w"],
                     "samples": row["samples"],
+                    "attempts": row["attempts"],
                     "launches": row["launches"],
                     "wall_s": row["wall_s"],
                     "launches_per_s": row["rate"],
+                    "pre_idle_w": row["pre_idle_w"],
+                    "sysfs_aiclk_mean": row["aiclk_mean"],
+                    "sysfs_aiclk_drift_pct": row["aiclk_drift_pct"],
+                    "therm_trip_delta": row["therm_trip_delta"],
+                    "tt_smi_version": row["tt_smi_version"],
                 }
             )
     return activity, measured
