@@ -6,11 +6,17 @@ BRISC is out of reset. This mirrors how a tt-metal host drives the device: it
 writes the go signal, then polls the go-message mailbox, pumping cycles between
 polls until the firmware flips it to ``RUN_MSG_DONE``.
 
+That rule has one documented hole, and :meth:`Device.settle_profiler_flush`
+closes it — see its docstring: the device profiler's readback is the one host
+transaction whose answer is still being *written* at the moment the host asks
+for it.
+
 The underlying tt-sim device (Wormhole / Blackhole) and its coord map are
 injected by the driver, so nothing here is architecture-specific.
 """
 
 import os
+import sys
 
 from tt_sim.device.tt_device import DeviceTileDiagnostics
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
@@ -145,6 +151,27 @@ def link_contention_summary(device):
     )
 
 
+def profiler_flush_summary(device):
+    """One line about the device-profiler readback, or ``""`` when it never ran.
+
+    Says how many launches' profiler flushes the bridge had to wait for and
+    what that cost in simulated cycles, so a profiled run states the size of
+    the perturbation instead of leaving it to be inferred. A run with the
+    profiler off never arms the mechanism and answers ``""``.
+    """
+    if not isinstance(device, Device):
+        return ""
+    if not (device.profiler_flush_settles or device.profiler_flush_timeouts):
+        return ""
+    line = (
+        f"profiler flush: {device.profiler_flush_settles} settles, "
+        f"{device.profiler_flush_cycles} extra cycles"
+    )
+    if device.profiler_flush_timeouts:
+        line += f", {device.profiler_flush_timeouts} TIMED OUT"
+    return line
+
+
 class Device:
     """Wire-bridge wrapper around a tt-sim device (cycle pump + reset tracking).
 
@@ -168,6 +195,13 @@ class Device:
         BabyRISCVCoreType.TRISC2,
     )
 
+    #: ``go_msg_t`` is a 4-byte union whose ``signal`` is the top byte;
+    #: ``RUN_MSG_GO`` is a kernel launch (``hostdev/dev_msgs.h``). Same test the
+    #: fabric's cores use — a launch is the only run-state that arms a
+    #: profiler flush, because it is the only one that produces markers.
+    _GO_MSG_SIZE = 4
+    _RUN_MSG_GO = 0x80
+
     def __init__(
         self,
         device_factory,
@@ -186,6 +220,16 @@ class Device:
         self.launch_enables_offset = launch_enables_offset
         # unified_coord -> True if BRISC has been deasserted.
         self._brisc_running: dict[tuple[int, int], bool] = {}
+        # Device-profiler readback state (see settle_profiler_flush). All three
+        # stay empty for the whole of a run with the profiler off, which is what
+        # makes the mechanism structurally inert there rather than merely quiet.
+        self._profiler_ctrl_addr: dict[tuple[int, int], int] = {}
+        self._profiler_flush_pending: set[tuple[int, int]] = set()
+        self._profiler_flush_failed: set[tuple[int, int]] = set()
+        #: Diagnostics for ``profiler_flush_summary``.
+        self.profiler_flush_settles = 0
+        self.profiler_flush_cycles = 0
+        self.profiler_flush_timeouts = 0
 
     def ensure_tensix_tile(self, translated):
         """Lazily materialise the TensixTile addressed by a translated coord.
@@ -207,10 +251,17 @@ class Device:
         self._brisc_running.setdefault(unified, False)
 
     def write(self, unified, addr, data):
+        self._note_profiler_write(unified, addr, data)
         self.tt_device.write(unified, addr, data)
         self._maybe_pump()
 
     def read(self, unified, addr, size):
+        if (
+            size == Device._PROFILER_CTRL_BYTES
+            and unified in self._profiler_flush_pending
+            and self._profiler_ctrl_addr.get(unified) == addr
+        ):
+            self.settle_profiler_flush(unified, addr)
         result = bytes(self.tt_device.read(unified, addr, size))
         self._maybe_pump()
         return result
@@ -283,7 +334,185 @@ class Device:
         does not exist yet — and pumping there would re-enter the clock while
         a tile is mid-cycle.
         """
+        self._note_profiler_write(unified, addr, data)
         self.tt_device.write(unified, addr, data)
+
+    # ------------------------------------------------------------------
+    # The device profiler's readback
+    # ------------------------------------------------------------------
+    #
+    # tt-metal's kernel profiler keeps a per-RISC marker buffer in L1 and a
+    # 32-word control vector (``kernel_profiler::ControlBuffer``) beside it.
+    # BRISC's ``finish_profiler()`` publishes the run: it stamps each RISC's
+    # ``DEVICE_BUFFER_END_INDEX``, then for each RISC writes
+    # ``HOST_BUFFER_END_INDEX`` and NoC-pushes that RISC's markers to DRAM,
+    # then flushes and finally sets ``PROFILER_DONE``. **All of that happens
+    # after BRISC has already written ``RUN_MSG_DONE`` to the go mailbox** —
+    # in tt-metal 0.74, ``brisc.cc:575`` sets DONE inside the
+    # ``DeviceZoneScopedMainN("BRISC-FW")`` block whose destructor is what
+    # calls ``finish_profiler()``.
+    #
+    # The host stops driving the clock at DONE. Measured on Blackhole
+    # (``perfbench/mechbench``, ``elw`` at 8 tiles, cost model on): the host's
+    # last go-message poll and its first control-vector read are *adjacent*
+    # wire messages, so BRISC gets exactly ``cycles_per_poll`` (100) cycles of
+    # tail. It reaches ``risc_finished_profiling()`` — the L1 markers and the
+    # ``DEVICE_BUFFER_END_INDEX`` words are all there — and no further, so the
+    # host reads ``HOST_BUFFER_END_INDEX_BR_ER == 0 == ..._NC`` and
+    # ``DeviceProfiler::readRiscProfilerResults`` returns early for *both* the
+    # DRAM and the L1 source. The result is a ``profile_log_device.csv`` with
+    # nothing but its header: no counter samples and no zone markers either.
+    # Nothing is lost in transit; the answer is simply not written yet.
+    #
+    # The workaround was ``TT_SIM_CYCLES_PER_POLL=5000``, which paid the extra
+    # cycles on *every* wire message of the run. Worse, it hid how narrow the
+    # margin was: at 100 cycles with the cost model off the same run got
+    # through exactly one iteration of the publish loop, so it produced a log
+    # that looked fine while silently carrying only BRISC's markers.
+    #
+    # What is done instead: recognise the control vector when the host writes
+    # it, arm on a launch, and — at the one read that consumes it — run cycles
+    # until the firmware sets ``PROFILER_DONE``. Triggering on the *read*
+    # rather than on the DONE edge is deliberate: it is the moment the value
+    # is consumed, so a run that never reads a control vector never pumps a
+    # cycle, and a run that does pumps only up to what that read needs.
+
+    #: ``PROFILER_L1_CONTROL_VECTOR_SIZE`` (32) uint32s, and the two indices
+    #: into ``kernel_profiler::ControlBuffer`` this needs.
+    _PROFILER_CTRL_BYTES = 128
+    _PROFILER_CTRL_WORDS = 32
+    _PROFILER_DONE_WORD = 19
+    _PROFILER_CORE_COUNT_PER_DRAM_WORD = 17
+    #: Cycles per chunk while settling, and the cap. The cap is a safety valve
+    #: for a program whose firmware never publishes (a crashed BRISC, a build
+    #: with the profiler compiled out of the *firmware* but not the host): it
+    #: bounds the wait, says so, and gives up on that worker for the rest of
+    #: the run rather than paying again on every launch. Measured need on the
+    #: mechbench case is under 5 000 cycles, so this is ~40x headroom.
+    _PROFILER_FLUSH_CHUNK = 100
+    _PROFILER_FLUSH_CAP = 200_000
+
+    @staticmethod
+    def _looks_like_profiler_control_vector(data):
+        """Is ``data`` the control vector tt-metal writes before a launch?
+
+        Fingerprinted on the *shape* of ``kernel_profiler::ControlBuffer``, not
+        on an address, because the profiler's L1 offset is release-specific and
+        arrives over the wire like the rest of the layout. Three disjoint bands
+        must be zero — the five host and five device end indices plus
+        ``FW_RESET_{H,L}`` (0-11), ``PROFILER_DONE`` and
+        ``TRACE_REPLAY_STATUS`` (19-20), and the padding past the last enum
+        member (26-31) — leaving only the 12-18 window (DRAM address, run
+        counter, NoC x/y, flat id, cores-per-DRAM, dropped-zone mask) free.
+        ``CORE_COUNT_PER_DRAM`` must additionally be non-zero: the firmware
+        divides by it, so it never legitimately is, and requiring it stops an
+        all-zero 128-byte payload from matching.
+
+        Verified against the three control-vector writes a Blackhole
+        ``mechbench`` run makes (two at device init, one between launches).
+        If a future release reshapes the vector this stops matching, and the
+        readback reverts to the pre-fix behaviour rather than misfiring.
+        """
+        if len(data) != Device._PROFILER_CTRL_BYTES:
+            return False
+        words = [
+            conv_to_uint32(bytes(data[i * 4 : i * 4 + 4]))
+            for i in range(Device._PROFILER_CTRL_WORDS)
+        ]
+        if any(words[0:12]) or any(words[19:21]) or any(words[26:32]):
+            return False
+        return words[Device._PROFILER_CORE_COUNT_PER_DRAM_WORD] != 0
+
+    def _note_profiler_write(self, unified, addr, data):
+        """Learn the control vector's address, and arm on a launch.
+
+        Only Tensix coords are considered (``_brisc_running`` is the registry
+        of those), and arming needs an address already learnt, so the ordering
+        the host uses — control vector at device init, ``go=GO`` per launch —
+        is the only one that reaches :meth:`settle_profiler_flush`.
+        """
+        if unified not in self._brisc_running:
+            return
+        if len(data) == Device._PROFILER_CTRL_BYTES:
+            if Device._looks_like_profiler_control_vector(data):
+                self._profiler_ctrl_addr[unified] = addr
+            return
+        if (
+            len(data) == Device._GO_MSG_SIZE
+            and data[Device._GO_MSG_SIZE - 1] == Device._RUN_MSG_GO
+            and unified in self._profiler_ctrl_addr
+        ):
+            self._profiler_flush_pending.add(unified)
+
+    def _profiler_done(self, unified, addr):
+        word = self.tt_device.read(unified, addr + Device._PROFILER_DONE_WORD * 4, 4)
+        return conv_to_uint32(bytes(word)) != 0
+
+    def _profiler_writes_landed(self, unified):
+        """Have the marker pushes reached DRAM, not merely left the worker?
+
+        ``PROFILER_DONE`` is set one instruction after
+        ``profiler_noc_async_flush_posted_write()``, which waits for the NIU's
+        *sent* counter — so the last RISCs' payloads can still be in flight
+        when the host starts reading the DRAM buffer, and measurably were:
+        with the wait ending at ``PROFILER_DONE``, ``mechbench elw`` recovered
+        BRISC, NCRISC and TRISC 0 but dropped TRISC 1 and TRISC 2, whose
+        pushes are the last two the loop issues.
+
+        Scoped to the worker and the DRAM tiles — where a profiler payload is
+        sent from and lands — rather than the whole grid, so a peer still
+        running a kernel cannot hold the wait open.
+        """
+        tiles = list(self.tt_device.dram_tiles)
+        worker = self.tt_device.tile_directory.get(unified)
+        if worker is not None:
+            tiles.append(worker)
+        for tile in tiles:
+            if not (
+                tile.noc0_router.is_clock_idle() and tile.noc1_router.is_clock_idle()
+            ):
+                return False
+        return True
+
+    def settle_profiler_flush(self, unified, addr):
+        """Run cycles until the run is published *and* its pushes have landed.
+
+        Called from :meth:`read` at the host's control-vector read, once per
+        launch per worker. Returns the cycles spent (0 when the firmware had
+        already finished), or ``None`` on giving up.
+        """
+        self._profiler_flush_pending.discard(unified)
+        if unified in self._profiler_flush_failed:
+            return None
+        if not self._brisc_running.get(unified):
+            # Nothing can advance: the pump is gated on BRISC being out of
+            # reset, exactly as _maybe_pump is.
+            return 0
+        if self._profiler_done(unified, addr) and self._profiler_writes_landed(unified):
+            return 0
+        spent = 0
+        published = False
+        while spent < Device._PROFILER_FLUSH_CAP:
+            self.tt_device.run(Device._PROFILER_FLUSH_CHUNK)
+            spent += Device._PROFILER_FLUSH_CHUNK
+            published = published or self._profiler_done(unified, addr)
+            if published and self._profiler_writes_landed(unified):
+                self.profiler_flush_settles += 1
+                self.profiler_flush_cycles += spent
+                return spent
+        self._profiler_flush_failed.add(unified)
+        self.profiler_flush_timeouts += 1
+        self.profiler_flush_cycles += spent
+        print(
+            f"[server] WARNING: device-profiler flush on worker {unified} did "
+            f"not publish (PROFILER_DONE still 0) after "
+            f"{Device._PROFILER_FLUSH_CAP} cycles — the readback for this "
+            f"worker will be short or empty, and no further launch on it will "
+            f"be waited for.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
 
     def _maybe_pump(self):
         if any(self._brisc_running.values()):

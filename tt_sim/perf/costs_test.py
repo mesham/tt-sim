@@ -1057,6 +1057,11 @@ EXPECTED_CONSUMERS = {
     # ``estimated`` provenance they forbid, and ``energy_quarantine_test.py``
     # is the tripwire that keeps them out.
     "perfbench/energybench/aggregate_power.py",
+    # Not a cost consumer at all: the profiler-readback guard borrows five
+    # RV32I *encoders* from ``tt_sim.perf.noc_issue_loop`` to build the stand-in
+    # firmware tail it loads onto BRISC. It reads no table and imports no cost;
+    # it is here because the scan above is a text match on the package name.
+    "tt_sim/bridge/profiler_readback_test.py",
 }
 
 #: The Tensix backend units that are *not* wired to the tables, and why. Kept

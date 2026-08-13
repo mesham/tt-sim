@@ -15,6 +15,7 @@ from tt_sim.bridge import (
     Transport,
     host_not_stranded,
     link_contention_summary,
+    profiler_flush_summary,
 )
 
 
@@ -254,6 +255,9 @@ def main(argv=None):
     links = link_contention_summary(device)
     if links:
         extra += f", {links}"
+    flush = profiler_flush_summary(device)
+    if flush:
+        extra += f", {flush}"
     print(
         f"[server] shutdown after {transport.msg_count} messages{extra}",
         file=sys.stderr,

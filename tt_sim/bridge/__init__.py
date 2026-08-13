@@ -30,6 +30,7 @@ from tt_sim.bridge.device import (
     diagnostics_from_env,
     enabled_diagnostic_names,
     link_contention_summary,
+    profiler_flush_summary,
 )
 from tt_sim.bridge.fabric import Fabric, install_worker_guards
 from tt_sim.bridge.grid import compute_grid, fill_order
@@ -58,5 +59,6 @@ __all__ = [
     "install_worker_guards",
     "link_contention_summary",
     "parse_trace_line",
+    "profiler_flush_summary",
     "stop_host",
 ]
