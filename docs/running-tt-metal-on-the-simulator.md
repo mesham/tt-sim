@@ -321,13 +321,14 @@ source /home/nick/projects/riscv/venv/bin/activate
 cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
 
 ./metal_example_add_2_integers_in_compute        # single-tile: just works
+./metal_example_noc_tile_transfer               # 2 workers: also just works
+./metal_example_vecadd_multi_core               # 72 workers: also just works
 ```
 
-Multi-core example:
-
-```bash
-TT_SIM_TENSIX_COORDS=1-1,1-2 ./metal_example_noc_tile_transfer
-```
+**Set no grid variable.** Workers materialise on demand (§1.3), so a multi-core
+program needs nothing that a single-core one does not — and setting
+`TT_SIM_TENSIX_COORDS` at all switches materialisation *off*, which is a way to
+get a wrong answer rather than a way to help.
 
 **Always run under `timeout`** in an automated cycle — a wedged kernel or a
 crashed server manifests as a silent hang:
@@ -359,36 +360,41 @@ no deadlock fires and the server message count / DRAM upload is still advancing,
 it is merely slow (multi-tile matmul is the usual culprit — raise the timeout or
 reduce the tile set). See `TT_SIM_DEADLOCK*` below.
 
-Machine-readable recipe:
+Machine-readable recipe: **use the gate.**
+[`driver/tests/upstream_sweep.py`](../driver/tests/upstream_sweep.py) already
+encodes each upstream program's binary name, success line, timeout and expected
+verdict, runs them on both architectures with no grid variable set, and ends in
+`RESULT: PASS` / `RESULT: FAIL`:
 
 ```bash
-run_example() {           # usage: run_example <name> [coords] [timeout_s]
-  local name="$1" coords="${2:-1-1}" tmo="${3:-240}"
-  local log; log="$(mktemp)"
-  TT_SIM_TENSIX_COORDS="$coords" timeout "$tmo" \
-    "./metal_example_$name" >"$log" 2>&1
-  local rc=$?
-  if [ $rc -eq 0 ] && grep -qaE 'Success|Test Passed|matches expected|Result *=.*Expected|completed successfully' "$log"; then
-    echo "PASS  $name"
-  elif [ $rc -eq 124 ]; then
-    echo "TIMEOUT  $name"
-  else
-    echo "FAIL  $name :: $(grep -aoE "can not handle instruction '[^']*'|PCC not high enough[^)]*|Result mismatch[^\"]*" "$log" | head -1)"
-    echo "  (log: $log)"
-  fi
-}
+python3 -m driver.tests.upstream_sweep              # 17 programs x 2 arches, ~8 min
+python3 -m driver.tests.upstream_sweep --tier full  # + the four heavy programs
+python3 -m driver.tests.upstream_sweep --list       # what it runs, and what it excludes
 ```
+
+Add a program there rather than hand-rolling a loop; the results and the triage
+behind them are in
+[`docs/upstream-examples-status.md`](upstream-examples-status.md).
 
 ### 3.1 Clean up between runs
 
 When a run is killed or times out, the UMD-spawned simulator server can be
-orphaned. Reap stragglers before the next run so they don't accumulate and
-consume memory:
+orphaned. The test scripts and the gate handle their own: each stamps a per-run
+tag into the server's command line (`TT_SIM_RUN_TAG` → `--run-tag`, see
+`driver/sim_procs.sh`) and kills only servers carrying its tag, plus servers
+tagged by a run whose owner has since died. **A concurrent run in another
+terminal is never disturbed.**
+
+A *manual* run carries no tag, so nothing reaps it. Clear those by hand:
 
 ```bash
 pkill -9 -f 'driver.wormhole.server'
 pkill -9 -f 'metal_example_'
 ```
+
+Do **not** put that `pkill` in a script that may run beside a live one — that is
+exactly the mistake the run tags exist to prevent. The scripted opt-in for "kill
+every simulator on the machine" is `TT_SIM_KILL_ALL_SERVERS=1`.
 
 ---
 
@@ -402,7 +408,7 @@ All are read from the environment and work in this tt-metal-driven flow.
 | --- | --- |
 | `TT_SIM_LOG_PROTOCOL=1` | print every wire message (READ/WRITE/RESET) to stderr |
 | `TT_SIM_RECORD=<file>` | record every wire message **and READ reply data** to `<file>` (text) |
-| `TT_SIM_CYCLES_PER_POLL=N` | sim cycles to run after each wire message (default 100) — leave it alone; see below |
+| `TT_SIM_CYCLES_PER_POLL=N` | sim cycles to run after each wire message (default 100) — leave it alone, including when profiling; see below |
 | `TT_SIM_MOCK_TENSIX=1` | skip building the Wormhole; every core is a NullCore (fast, for wire-level debugging only) |
 | `TT_SIM_PUMP_STRIDE=0` | disable the pump's time-skipping (on by default) — see below |
 | `TT_SIM_COST_MODEL=1` | charge each op the cycle cost the ISA-doc tables give it (off by default) — see below |
@@ -425,6 +431,21 @@ only buys the device less time per message, which at the small end starts
 breaking runs outright — the simulator misses the window a kernel needed and
 the host reads a half-written buffer. Raise it if you want; that is only ever
 "the host waited longer".
+
+**You no longer need to raise it to profile.** The tt-metal device profiler
+used to be the one thing that did: BRISC writes `RUN_MSG_DONE` *before*
+`finish_profiler()` publishes the run, so the host's control-vector read — the
+very next wire message — landed mid-publish and `readRiscProfilerResults`
+returned early on a zero `HOST_BUFFER_END_INDEX`, giving a
+`profile_log_device.csv` with nothing in it but its header. The workaround was
+`TT_SIM_CYCLES_PER_POLL=5000`, which paid for it on every message of the run.
+The bridge now recognises the profiler's control vector, arms on a launch, and
+runs cycles at that one read until the firmware sets `PROFILER_DONE` *and* the
+pushes it issued have landed in DRAM (`Device.settle_profiler_flush`); a run
+with the profiler off never writes a control vector, so nothing is armed and
+not one extra cycle is run. The server prints what the wait cost on its
+shutdown line (`profiler flush: N settles, M extra cycles`) — measured at
+1 300–1 400 cycles per launch on `mechbench` and `examples/four`.
 
 `TT_SIM_PUMP_STRIDE=0` turns off the event-driven pump's ability to jump
 straight to the next cycle any tile actually needs, making it tick every cycle
@@ -603,8 +624,9 @@ that waits repeatedly but briefly never accumulates.
 - **Slow dispatch only.** Only `detail::LaunchProgram` is modelled; the
   command-queue/fast-dispatch path is not. `TT_METAL_SLOW_DISPATCH_MODE=1`
   (set by the venv) makes `EnqueueProgram` fall back to it.
-- **One tile by default** — see §1.3. Multi-core programs need
-  `TT_SIM_TENSIX_COORDS`.
+- **Not a limitation any more: the tile count.** Workers materialise on demand
+  (§1.3), so multi-core programs need no environment variable. `TT_SIM_TENSIX_*`
+  is now a *pin* for reproducibility, not a requirement.
 - **Throughput.** The simulator is functional, not fast. Full-tile matmuls and
   other heavy multi-tile compute can exceed a practical timeout even when
   correct. Prefer small inputs / minimal tile sets for a CI-style cycle.
@@ -626,15 +648,17 @@ that waits repeatedly but briefly never accumulates.
 #!/usr/bin/env bash
 set -u
 source /home/nick/projects/riscv/venv/bin/activate
-# TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE is NOT needed on 0.74 (see §1.2).
-cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
+cd ~/tt-sim
 
-# name                              coords          timeout
-run_example add_2_integers_in_compute  1-1            240
-run_example noc_tile_transfer          1-1,1-2        240
-run_example eltwise_sfpu               1-1            240
+# Both architectures, every quick upstream program, no grid variable, ~8 min.
+python3 -m driver.tests.upstream_sweep || exit 1
 
-pkill -9 -f 'driver.wormhole.server' 2>/dev/null || true
+# One program, one arch, while iterating on a fix:
+python3 -m driver.tests.upstream_sweep --arch wormhole eltwise_sfpu
 ```
 
-(with `run_example` from §3.)
+The gate sets `TT_METAL_SIMULATOR` itself and *removes* any inherited
+`TT_SIM_TENSIX_COORDS` / `TT_SIM_TENSIX_CORES` /
+`TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE`, so its verdict does not depend on the
+shell it was launched from. It cleans up only the simulator servers it started
+(§3.1).

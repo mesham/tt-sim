@@ -217,13 +217,15 @@ def _kill(pid):
         pass
 
 
-def _run_tag():
+def _run_tag(label="examples_test"):
     """This runner's tag: ttsim-run.<label>.<owner pid>.<owner start time>.
 
     The start time makes "did the run that started this server finish?" exact
-    instead of a pid-reuse guess.
+    instead of a pid-reuse guess. ``label`` names the runner, so another harness
+    reusing this cleanup machinery (``driver/tests/upstream_sweep.py``) reaps
+    only its own servers.
     """
-    return f"{_TAG_PREFIX}examples_test.{os.getpid()}.{_starttime(os.getpid())}"
+    return f"{_TAG_PREFIX}{label}.{os.getpid()}.{_starttime(os.getpid())}"
 
 
 def _reap_orphans():
@@ -253,8 +255,8 @@ def _reap_orphans():
         _kill(pid)
 
 
-def _kill_own_servers():
-    for pid in _server_pids(f"--run-tag {_run_tag()}"):
+def _kill_own_servers(label="examples_test"):
+    for pid in _server_pids(f"--run-tag {_run_tag(label)}"):
         _kill(pid)
 
 
