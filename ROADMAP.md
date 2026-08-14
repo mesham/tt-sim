@@ -217,52 +217,172 @@ caveat from that sentence or extends it.
 and workers materialise on demand with no environment variable. What
 is left is the credibility layer.
 
-1. **NoC link contention** — **not a blocker; most of it is already
-   done.** The cycle cost of sharing a link is sourced and wired
-   (2026-08-05, `NocLinkRegistry`, `isa_doc_derived`, ~98 % of the
-   measured effect). What is open:
-   * a **citation edit** — the arbitration order *is* published, in
-     tt-metal's `Saturating_DRAM_bandwidth` tech report ("first-come
-     first-serve strategy within the same VC") and
-     `memory_for_kernel_developers.rst`, both `vendor_source` and both
-     **confirming** what tt-sim implements, while `unit_costs.yaml`
-     still says "nothing publishes what the real order is". No number,
-     no cycle, no gate run. Cheapest correctness win in the tree.
-   * **validation**, which depends on nothing here: the term is inert
-     on every in-tree workload (3,960 link claims, **zero waits** on
-     `blackhole/six`), so it needs a workload that actually contends.
-   * **buffer back-pressure stays `unknown`** — ~2 % of the effect,
-     dynamics unpublished, and charging it would be `estimated` in the
-     over-charging direction. Refused, as PC-buffer write delays are.
-   `tenstorrent/tt-npe`, Tenstorrent's own NoC estimator, is cited
-   nowhere here. Its *shape* corroborates tt-sim's; its numbers are
-   **not importable** — every constant uncited, `getLinkBandwidth()`
-   30/60.9 against the docs' 32/64, `CYCLES_PER_HOP` 10/11 against the
-   docs' 9 and the 8.8/8.65 this project confirmed on a card, and a
-   multicast sink derate that is dead code. Cross-check shapes only,
-   normalising the hop constant out, and treat it as §3 treats ttsim:
-   **not an oracle**.
-2. **Rung-4, a matched cycle trace** (§4). Until totals are checked
-   instruction for instruction, "estimator" is the ceiling: the
-   interior can be wrong in compensating directions while the envelope
-   agrees. The bottleneck report's 79.8 % NoC split on nekbone is
-   exactly such an unverified interior.
+1. **NoC link contention — VALIDATED 2026-08-12.** The term fires, for
+   the first time, on both arches: **7,590 link claims / 45 waits** on
+   Blackhole and 6,580 / 69 on Wormhole, both `MEANINGFUL —
+   CONGESTION MEASURED`, against **zero waits** on every in-tree
+   workload before. It reproduces the card's step to **2.1–4.4 %** at
+   2/8/16 KiB with **nothing fitted** — the modelled step is
+   `bytes / flit_bytes` from two `isa_doc` entries that predate the
+   card campaign.
+   **Why it had never fired is a harness bug, not a model limit**:
+   `perfbench/run.sh` and `run_card_session.sh --sim` exported
+   `TT_SIM_TENSIX_COORDS` unconditionally, and setting that variable
+   *at all* pins the worker pool and switches off on-demand
+   materialisation. Two more behind it: `HAVE_TT_SIM` probed with the
+   system python3 before `--sim` put the venv on `PATH` (so both CSVs
+   were collected and then reported `DEFERRED`), and `probe_noc_epoch`
+   passed two CSVs to a `--measured` taking one. All three fixed.
+   **Wormhole's row is prediction, not corroboration** — twice
+   Blackhole's step from the 256- vs 512-bit flit, with no Wormhole
+   silicon to check it against.
+   The card's slopes read +2.55 / +10.98 / +22.47 at **r² 0.36** over
+   all eight shared-link counts. They are lines drawn through a *step*
+   and are **not coefficients**; the comparison that reproduces is
+   step-to-step. Earlier figures of +2.49 / +10.87 / +22.49 are the
+   same shape under a different aggregation — neither set is canonical.
+   The arbitration order is now cited (`tm_dram_saturation`,
+   `tm_memory_for_kernels`, both `vendor_source`, both **confirming**
+   the first-come mechanism already implemented), and the stale
+   "tt-sim models no link congestion" claim is retired from all eight
+   places it survived — including one compiled into `dramratebench`'s
+   operator-facing output.
+   **What remains unmodelled is buffer back-pressure and virtual
+   channels**, ~2 % of the effect, refused as `estimated` in the
+   over-charging direction.
+   Left open: the shipped `noc-plan-blackhole.csv` is a
+   **harvested-card** plan whose tile check verifies existence but not
+   *identity*, so it would bite a second harvested card; `--sim` now
+   always plans from the simulator's own grid dump. Blackhole `noc1`
+   shows 0 claims — nothing in tree exercises NoC 1's registry.
+
+2. **Rung-4** (§4) — **one of four legs built, 2026-08-13**, and the
+   only remaining substantial item. `perfbench/mechbench` plus
+   `tt_sim.perf.stall_attribution` partition a core's span by stall
+   mechanism on both sides and report `E_total`, `E_int` and the
+   compensation ratio behind five refusing gates. The synthetic
+   compensating case is the leg's argument in one file: **`E_total`
+   2.92 % — inside the envelope limit — against `E_int` 39.33 %, ratio
+   13.5x**, and all three of its *per-thread* comparisons pass. The
+   compensation is visible only where the Src conditions are
+   decomposed, which is exactly what an envelope or per-thread check
+   misses.
+   **Blocked on a measured question, not a missing instrument.** With
+   the profiler readback fixed (§5) the intended cost-model-on regime
+   is collectable, and in it **both arms report `srca_clear = 0` and
+   `srcb_clear = 0`** (`elw` span 3275, `srca_valid` 2989; `mm` span
+   3887, `srca_valid` 3572). The earlier explanation — "the regime
+   that could show the reversal cannot be collected" — is spent. This
+   is a question about tt-sim's Src-ownership modelling and **must not
+   be tuned before card data exists**, or the comparison becomes
+   circular. Written up in `perfbench/mechbench/README.md`.
+   **Trap for the next person**: `perfbench/mechbench/testdata/sim-*.csv`
+   was captured *before* the profiler fix and is silently truncated to
+   **BRISC only** — NCRISC and all three TRISCs were dropped. Not
+   recaptured, because that moves every pinned constant in
+   `stall_attribution_test.py`.
+   The other two legs still need: **RV-bound** — an instrument that
+   does not exist on Wormhole (§6); **NoC-bound** —
+   `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1`, a different artefact
+   needing its own parser, compared against `noc_flight_cycles` plus
+   queueing at ±25 %. That leg is what retires the bottleneck report's
+   unverified 79.8 % NoC split on nekbone.
 3. **A Wormhole card session.** Not code — a hardware booking, so it
    is lead time rather than effort and should be requested early. It
-   is the binding constraint on **three** items: the committed DRAM
-   sustained-rate prediction (Wormhole-only), the store-coalescing and
-   multiply pairs, and the `nocreadbench` half.
-4. **Upstream example coverage as a release gate.**
-   `docs/upstream-examples-status.md` exists; making the sweep
-   pass/fail turns "runs real programs" into a number a release note
-   can carry.
-5. **Energy, at ranking level.** The activity counters already exist
-   (`busy_cycles`, `instr_retired`, `noc_bytes_total`,
-   `noc_flight_cycles`, `dispatch_total`). Absolute Joules are out of
-   reach — board telemetry is ~1 Hz against microsecond kernels — but
-   *which kernel costs more* is tractable and useful to the compiler
-   team. Any coefficients would be **fitted**, so they must sit
-   outside the provenance ladder and be labelled as such.
+   now gates **five** items: the committed DRAM sustained-rate
+   prediction (Wormhole-only), the store-coalescing and multiply
+   pairs, the `nocreadbench` half, the NoC-contention row (currently
+   prediction with nothing to check it against), and any two-arch
+   claim for rung 4.
+4. **Upstream example coverage — DONE 2026-08-13.**
+   `driver/tests/upstream_sweep.py` runs 21 of tt-metal's own
+   `programming_examples` on both arches with **no grid environment
+   variable at all**, recording an all-green expectation that fails in
+   **both** directions. **42/42 PASS, no regressions** against the
+   2026-08-03 sweep — so a day of deep change (materialisation, the
+   contention term firing, BH DRAM cycles, ConfigUnit/MatrixUnit
+   residency, `STALLWAIT`, the host-stop path) broke nothing a real
+   program reaches. New coverage too: the grid-sized programs now run
+   at the **real** default grid (72 WH / 130 BH) rather than the old
+   4x5 = 20-worker sub-block, and `matmul_single_core` moved
+   TIMEOUT -> PASS. Two tiers: fast (~7.5 min) for every change, full
+   (~70 min) pre-release. Coverage is stated honestly by `--list`: 15
+   programs value-checked by themselves, 1 by the gate, **5
+   completion-only** because upstream ships no self-check.
+5. **Energy, at ranking level — FIRST RESULT 2026-08-13.** All
+   thirteen gates pass on a six-cycle Blackhole p150 session and
+   `perfbench/energybench` reports **leave-one-out Spearman 0.867**
+   (in-sample 0.950), with all four within-arm pairs ordering
+   correctly. All four designed activity terms are identified —
+   `noc_bytes_total` 1.03e-10, `matrix_arith_cycles` 2.97e-09,
+   `sfpu_busy_cycles` 9.07e-10, `instr_retired` 4.15e-10 J per unit,
+   over a fitted busy-state floor of 67.02 W. Sessions preserved at
+   `perfbench/card-sessions/2026-08-13-energybench{,-2}/`.
+   **The headline number went DOWN as the model got right, and 0.867 is
+   the one that stands.** It read 0.900 against a *contaminated* matrix
+   column, then 0.950 with that column *missing entirely* (a
+   three-term model in which the `mm` arm had no characteristic term at
+   all), and 0.867 once the corrected `matrix_arith_cycles` column
+   existed. The first two were artefacts of a wrong model and an
+   incomplete one; better numbers from a worse model is the trap this
+   entry exists to record. The LOO/in-sample gap widened with the
+   correct model too (0.867 against 0.950), so more of the apparent
+   agreement is fitting than the earlier figures suggested.
+   **What it does not support**: the ratios. Median `|log ratio error|`
+   0.68 (x1.98), worst 1.50 (x4.48) — worse than the contaminated
+   model's x1.77. This is an *ordering* claim; how much more is not
+   established. `c_launch` remains clamped at the NNLS boundary, the
+   predicted collinearity with the ~14,600 firmware instructions every
+   launch pays; `idle-0`'s measured energy is **negative** and dropping
+   it moved the earlier fit 0.900 -> 0.857, so it stays the least
+   trustworthy point in the set.
+   **The SFPU term was freed by separating matrix arithmetic from dest
+   bookkeeping**, and the diagnosis needed three wrong turns first. The
+   `sfpu` arm dispatches 41 Matrix Unit ops per `add_int_tile`
+   iteration — 32 `INCRWC` from sfpi's `dst_reg++`, 9 `SETRWC` from the
+   LLK's per-face dest walk, and **zero arithmetic ops** — so
+   `matrix_busy_cycles` absorbed the vector unit's energy and NNLS
+   clamped `sfpu_busy_cycles` to 0. Killed along the way: the README's
+   `copy_tile` explanation (it is called twice, *outside* the loop);
+   an instr/dispatch split (made it worse); and a test of mine that
+   removed the matrix column entirely and still saw 0 — which wrongly
+   exonerated it. The term needed the *clean* column **present**, not
+   absent. Counters now publish `bookkeeping_cycles` as a subset of
+   `busy_cycles`, and `matrix_arith_cycles` is the difference — an
+   **appended** term, so a stale CSV loudly drops it rather than
+   quietly refitting the old column.
+   **Getting there cost five analysis bugs, every one found by the
+   data**, and the sequence is the lesson: a clean session is what
+   exposes a modelling fault, and the 2026-08-13 `samples=0` disaster
+   hid all of them. (i) The idle **baseline sat at 800 MHz against arms
+   at 1350** — structural, not drift, since an idle board clocks down
+   and `tt-smi` 6.2.0 offers no pinning; the floor is now *fitted* from
+   the arm rows, because a busy-state floor is not measurable on a DVFS
+   board. (ii) The old target `(P - P_baseline)/rate` was **99.95%
+   reproducible from the launch rate alone** and no gate saw it; there
+   is now a `target_triviality` gate (this session: 0.23 against a 0.95
+   cap). (iii) The **noise floor included the baseline label**, whose
+   2.4 W DVFS swing inflated it 0.441 -> 0.838 W and made `control` —
+   the drift detector — twice as permissive; a constructed session with
+   real control drift passed every gate and reported LOO Spearman
+   1.0000 under the old arithmetic. (iv) The **term budget was
+   `n_workloads - 3`**, reaching six deep into eleven correlated
+   counters (51% of such subsets exceed the conditioning cap); it is
+   now the arms table's one-term-per-arm set, fixed a priori. (v) The
+   matrix/bookkeeping conflation above.
+   **A negative result worth not repeating**: adding a third scale does
+   *not* help identifiability. Interpolated sizes add rows, not
+   directions — at 13 workloads all 66 ten-term subsets land at
+   >= 2.9e16. Another *arm* would help; another scale never does.
+   **A process lesson, paid for**: the regenerated activity CSV was
+   written over the live fixture path, destroying the vectors behind
+   the 0.900 figure permanently (untracked, no git copy). And a test
+   pinned that large data artefact as a *stale* fixture, so it broke
+   the moment the file was correctly regenerated; it is now synthetic.
+   Fitted coefficients remain quarantined outside the provenance ladder
+   by three independently asserted barriers, and nothing from this
+   session may be quoted into a cost table.
+
 
 **A caution this list earned.** Three of its original premises were
 wrong, all the same way — read from the tree's prose rather than its
@@ -588,33 +708,141 @@ assertions must come from the ISA docs.
 
 ## 4. Rung-4 calibration
 
-The bar for claiming anything stronger than "first-order estimator":
-match a captured silicon cycle **trace** within X %, instruction for
-instruction. Needs golden traces — one per major unit (RV-only,
-Tensix-only, NoC-heavy) — checked in under
-`driver/wormhole/server/traces/`.
+**Restated 2026-08-13: an *interior* match by mechanism and by zone.**
+"Instruction for instruction" is **retired as unreachable**, not
+deferred, on three independently sufficient grounds:
 
-**"No in-tree cycle count has ever been compared to silicon" is
-retired as of 2026-08-12 — it is no longer true.** Three independent
-comparisons now exist. Component slopes: six `perfbench` probes
-against a Blackhole card, agreeing to ~1 % (the `divu` row's −82 % is
-a deliberate charge-the-floor policy outcome, not a miss). An
-application: `nekbone` (4 elements, 16³, single core) profiled on both
-this simulator and a p150, **all fifteen per-core zones within
-±10.2 %, mean absolute error 7.3 %, total −3.9 %**, host work
-excluded — and, as the control, **2.7–5.3× under-prediction with the
-cost model off**. A shape: `dramratebench`'s endpoint scaling, though
-its *level* is 26–35 % out (§2).
+- **No instrument.** The baby cores are RV32IM with **no Zicsr** — no
+  `mcycle`, no `minstret`. The finest report is a pair of
+  `DeviceZoneScoped*` timestamps off `RISCV_DEBUG_REG_WALL_CLOCK`.
+  tt-metal 0.74, UMD and the public ISA docs contain no PC sampler and
+  no instruction-trace buffer; the debug daisychain is documented "at
+  least five cycles stale" and every consumer of it is commented out.
+- **No budget.** `PROFILER_L1_OPTIONAL_MARKER_COUNT = 250` → **125
+  scopes per RISC per launch**, which tt-metal's own doc states and its
+  own `test_full_buffer` asserts (125 recovered from a kernel asking
+  150). `quick_push()` is compiled out on TRISC, so on the compute
+  cores 125 is **unflushable**.
+- **No fidelity.** A marker costs **≥ 28 device cycles** — measured
+  from `perfbench/card-sessions/2026-08-10/paper-1` (28 on NCRISC, 36
+  on TRISC), with tt-llk's CI asserting 30 on Blackhole. A baby core
+  retires ~1 instruction/cycle, so per-instruction instrumentation
+  dilates **≥ 28x** and destroys the overlap it was meant to measure.
 
-What that does **not** license is "cycle-accurate". A per-launch total
-matching to ±10 % is a much weaker claim than a matched trace: the
-totals could agree while the interior is wrong in compensating
-directions, and nothing yet checks the interior against hardware —
-that is exactly what this item is for. Say **"performance
-estimator, corroborated at the launch and slope level"**; do not say
-cycle-accurate, and do not say uncompared.
+**But the rung's purpose is reachable, by a better instrument.** Rung 4
+exists because the interior can be wrong in compensating directions
+while the envelope agrees. That is a question about **attribution**,
+not ordering — and Tensix **hardware performance counters** answer it
+at cycle resolution, per thread, per mechanism, with **no
+instrumentation inside the measured window** (start/stop on TRISC1
+wrap the kernel; readout on BRISC afterwards).
+`TT_METAL_PROFILE_PERF_COUNTERS`'s Blackhole INSTRN bank is tt-sim's
+own `STALL_REASONS` vocabulary in hardware: `THREAD_STALLS_{0,1,2}`,
+`WAITING_FOR_{SRCA,SRCB}_{CLEAR,VALID}`,
+`WAITING_FOR_{THCON,UNPACK,PACK,MATH,MOVE,SFPU}_IDLE_n`,
+`WAITING_FOR_{NONZERO,NONFULL}_SEM_n`, `THREAD_INSTRUCTIONS_n`.
+
+**What rung 4 now requires.** Three programs — RV-bound, Tensix-bound,
+NoC-bound — run unmodified on silicon and tt-sim under the same
+tt-metal build. **Every criterion is per core**: on the 2026-08-10 part
+the whole physical column x=11 keeps a wall-clock epoch 1.5e13 cycles
+from the rest, so no cross-core span is admissible.
+
+1. **Zone decomposition**, ≤ 60 zones per RISC (half the hard 125, so a
+   silent drop is impossible) and each ≥ 1000 cycles (so the ~56-cycle
+   two-marker cost is ≤ 6 %).
+2. **The interior criterion, stated so compensation cannot pass it.**
+   With mechanisms `m` partitioning the span, including an explicit
+   *unattributed* bucket on both sides so the denominators match:
+   `E_total = |Σc_sim − Σc_hw| / Σc_hw` and
+   **`E_int = Σ|c_m,sim − c_m,hw| / Σc_hw`**. Require **`E_int ≤ 25 %`**
+   *and* `E_total ≤ 10 %`. The triangle inequality gives
+   `E_total ≤ E_int` always, so **the ratio `E_int/E_total` is the
+   compensation, measured**. This is what a passing total cannot fake.
+3. **Mechanism attribution** from the perf counters above — the only
+   check that has ever touched the five wired Tensix backends, which
+   rungs 1 and 2 validate *not at all*.
+4. **The NoC split, checked directly.**
+   `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` needs **no kernel change**
+   and brackets every `noc_async_read_barrier` with timestamped
+   `READ_BARRIER_START/END`. Require agreement with `noc_flight_cycles`
+   plus queueing to ± 25 %. **This retires the bottleneck report's
+   unverified 79.8 % NoC split on nekbone.**
+
+Thresholds: `E_total ≤ 10 %` is what nekbone already achieved, kept as
+the control against envelope regression. `E_int ≤ 25 %` is 2.5x that —
+a decomposition has strictly more ways to be wrong, the model is a
+floor with a deliberate unattributed remainder, and it is still tighter
+than the one known open level error (`dramratebench`, 26–35 %). Silicon
+noise is not the limit: the two 2026-08-10 sessions reproduce device
+cycles to 0.1 %.
+
+**The tt-sim blocker closed 2026-08-13**: `RISCV_DEBUG_REG_PERF_CNT_*`
+is modelled for all five banks, sourcing the `INSTRN_THREAD` counters
+from the quantities tt-sim already tracks — per-thread stalls,
+semaphore empty/full, Src ownership, dispatches. Verified end to end on
+the wire with `TT_METAL_PROFILE_PERF_COUNTERS=32`. Three counter
+families were **declined rather than forced**, most importantly
+`WAITING_FOR_{UNIT}_IDLE_{n}`: the vendor tech report contradicts
+itself across two sections and the later one is right — those count
+cycles a *unit was busy*, not cycles a thread was stalled by it, and
+produce ">100 %" values. Worth raising upstream.
+`TensixTileControl` now raises on an unmodelled **status** register
+read instead of answering a plausible zero; `TT_SIM_PERMISSIVE_TILE_CTRL=1`
+restores the old behaviour. Note what depended on the old silent zero
+and legitimately still does: `_blackhole_reset_pc` reads
+`RESET_PC_OVERRIDE`, and **every Blackhole core boots because an
+unwritten override reads zero** — which is why the fix is a three-way
+register table, not a blanket raise.
+
+**Blackhole-only bonus leg.** `minstret`/`mcycle` are ISA-documented on
+Blackhole (`BabyRISCV/CSRs.md`) and would allow a per-instruction check
+with no in-kernel marker. Wormhole has **no CSR path at all**, so this
+is an extra leg Blackhole can clear, **not** the definition of the
+rung — a two-tier rung 4 with no common bar would be worse than one
+coarser bar that works everywhere. It also instruments the RV front end
+rather than the coprocessor, which is where most of the subject is.
+Prerequisite: `pe/rv/` implements no CSRs (§6).
+
+Golden artefacts check in under `perfbench/card-sessions/` as
+`corroboration` — the counter semantics come from a vendor tech report
+and RTL, not the ISA docs, which is fine for corroboration and
+**disqualifying for provenance**.
+
+**What clearing it licenses**: *"a performance estimator whose cycle
+attribution has been checked against silicon's own hardware stall
+counters, mechanism by mechanism, at ± 25 % of span"*. Not
+"cycle-accurate"; no ordering or per-instruction claim; nothing about
+backends the three programs do not exercise.
+
 
 ## 5. Tracing & observability follow-ups
+
+**The device-profiler readback starvation is fixed, 2026-08-13.** It had
+cost the project twice. tt-metal's `brisc.cc:575` sets `RUN_MSG_DONE`
+*inside* the `DeviceZoneScopedMainN("BRISC-FW")` block whose destructor
+calls `finish_profiler()`, and the host's go-poll and its control-vector
+read are **adjacent wire messages** — so BRISC got one `cycles_per_poll`
+(100) of tail for a ~1400-cycle publish. The markers were always in L1
+(`DEVICE_BUFFER_END_INDEX` non-zero); what had not run was the
+`HOST_BUFFER_END_INDEX` stores and the NoC pushes, and
+`readRiscProfilerResults` early-returns on those, giving a header-only
+file with no zone markers either.
+The bridge now fingerprints the profiler control vector on its *shape*
+(the L1 offset is release-specific and arrives over the wire), arms on
+`go=GO`, and at the readback runs cycles until `PROFILER_DONE` **and the
+DRAM pushes have landed** — the landing phase was found by measurement,
+since stopping at `PROFILER_DONE` alone dropped TRISC_1 and TRISC_2
+(`profiler_noc_async_flush_posted_write()` waits on *sent*, not landed).
+Capped at 200 000 cycles, then a warning and permanent give-up on that
+worker. Cost 500–1400 cycles per profiled launch; **nothing is armed
+with the profiler off** — `grep -c "size=128 "` over all 60+ traces is 0.
+`TT_SIM_CYCLES_PER_POLL=5000` is no longer needed anywhere.
+**What this retro-invalidates**: runs that appeared to work were also
+truncated. A cost-model-off capture read `HOST_END_BR=368` with NCRISC
+and all three TRISCs at **0** — one iteration of the publish loop, 63
+BRISC rows and nothing else. Any profiler CSV captured before this fix
+should be assumed BRISC-only.
 
 - **Perf-budget decision**: the ~30 % tracing overhead target is not
   met on RV-bound workloads (counters/Perfetto ~2×, JSONL ~4×) —
@@ -744,13 +972,46 @@ fails loudly today. Grep for `NotImplementedError` in the named files.
 - Ctrl-C on the *host* orphans the server — `uv_spawn` uses
   `UV_PROCESS_DETACHED`, so the simulator never sees the terminal's
   SIGINT. The mirror image of the hang above; `driver/sim_procs.sh`
-  exists to clean up after it.
+  exists to clean up after it, but only for servers it *tagged*
+  (`--run-tag`), deliberately, because a broad `pkill` kills concurrent
+  agents' runs and turns a vanished server into a plausible wrong
+  measurement rather than a loud failure. **Observed 2026-08-13**: five
+  untagged orphans, one 20 hours old, holding 0.4 GB between them. An
+  untagged server started by hand or by a tool that does not set the
+  tag is currently unreapable by anything but a manual `kill`.
 - ARC tile: nothing modelled; `arc_msg` returns 0.
 
 **Blackhole RV extensions** (all loud guards, none reached by any
-in-tree kernel): `mret`, F single-precision execution, the V vector
-unit (TRISC2), Zfh's BF16 CSR mode, the L1 cache tag search
-accelerator. Wormhole's RV32IM-only set is complete and correct.
+in-tree kernel). `BabyRISCV/README.md` states the set: *"the full
+RV32IM instruction set … plus all of Zicsr / Zaamo / Zba / Zbb, plus
+some (but not all) of Zicntr / F / Zfh. RISCV T2 additionally
+implements some (but not all) of V."* Corrected 2026-08-13:
+
+- **`mret` is RISCV B and NC only** — the TRISCs cannot execute it.
+  `PIC.md` also records a hardware bug: interrupt handlers may *read*
+  CSRs but cannot write them.
+- **The BF16 mode is a *custom* CSR bit, not a Zfh one** — `cfg0`
+  (`0x7c0`) bits 30 `EnBFloat` / 31 `EnBFloatRTNE`.
+- **The L1 cache tag search accelerator uses no CSRs** — it is
+  configured through Tensix backend `Config.L1_CACHE_TAG_SEARCH_ACCEL_*`
+  and triggered implicitly by a RISCV-B load. (`0x7c4`/`0x7c5` look
+  like its config and are documented as pure scratch — a red herring.)
+- **The counter CSRs exist on Blackhole**: `BabyRISCV/CSRs.md` gives
+  `0xb00 mcycle`, `0xb02 minstret`, their `h` halves, `mhpmcounter3/4`
+  (only 3 and 4, with `mhpmevent` encodings unpublished), and the
+  user-mode shadows `0xc00 cycle` / `0xc02 instret` — which are
+  **writable**, and `mcountinhibit` cannot stop either counter. `time`
+  is documented absent.
+
+**tt-sim implements no CSRs at all** in `pe/rv/`. Adding Zicsr plus
+those six registers is the prerequisite for rung 4's Blackhole-only
+per-instruction leg (§4), and is otherwise unreached by anything in
+tree.
+
+**Wormhole has no CSR path whatever** — the string `csr` appears zero
+times in the whole `WormholeB0/` doc tree, so "RV32IM-only, complete
+and correct" is confirmed. Its cycle source is MMIO
+(`RISCV_DEBUG_REG_WALL_CLOCK_L/H`).
 
 ## 7. Architectural clarity & quick wins
 
