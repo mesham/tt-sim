@@ -53,6 +53,63 @@ def test_counters_land_in_the_right_terms():
     assert v["mover_busy_cycles"] == 0
 
 
+def test_matrix_arithmetic_is_occupancy_minus_bookkeeping():
+    """The 2026-08-13 fix. ``SETRWC`` / ``INCRWC`` / ``CLEARDVALID`` /
+    ``GATESRCRST`` occupy the Matrix Unit for a cycle each and move no operand
+    data, so they belong in ``matrix_busy_cycles`` (occupancy) and not in the
+    column an energy coefficient for the matrix array is fitted against."""
+    v = reduce_counters(
+        {
+            ("2,1 MATRIX", "busy_cycles"): 401,
+            ("2,1 MATRIX", "bookkeeping_cycles"): 13,
+        }
+    )
+    # Occupancy is untouched: a performance reader still gets the full number.
+    assert v["matrix_busy_cycles"] == 401
+    assert v["matrix_arith_cycles"] == 388
+
+
+def test_an_all_bookkeeping_matrix_column_reduces_to_no_arithmetic():
+    """The shape the ``sfpu`` arm actually has. Measured on Blackhole at
+    ``inner=6``: 192 ``INCRWC`` + 56 ``SETRWC`` + 11 ``ZEROACC`` + 1 ``ZEROSRC``
+    = 260 cycles of Matrix Unit occupancy and not one arithmetic op, which is
+    what made ``matrix_busy_cycles`` a column both arms moved."""
+    v = reduce_counters(
+        {
+            ("2,1 MATRIX", "busy_cycles"): 248,
+            ("2,1 MATRIX", "bookkeeping_cycles"): 248,
+            ("2,1 SFPU", "busy_cycles"): 772,
+        }
+    )
+    assert v["matrix_arith_cycles"] == 0
+    assert v["sfpu_busy_cycles"] == 772
+
+
+def test_bookkeeping_from_another_unit_does_not_reach_the_matrix_column():
+    """The counter is emitted keyed by unit. Only the Matrix Unit's own
+    bookkeeping may be subtracted from the Matrix Unit's own occupancy."""
+    v = reduce_counters(
+        {
+            ("2,1 MATRIX", "busy_cycles"): 100,
+            ("2,1 SFPU", "bookkeeping_cycles"): 40,
+        }
+    )
+    assert v["matrix_arith_cycles"] == 100
+
+
+def test_the_arithmetic_column_never_goes_negative():
+    """It cannot from a real dataset -- both counters come off the same
+    ``ComputeEvent.duration`` -- but a hand-assembled one would be fitted rather
+    than noticed."""
+    v = reduce_counters(
+        {
+            ("2,1 MATRIX", "busy_cycles"): 10,
+            ("2,1 MATRIX", "bookkeeping_cycles"): 999,
+        }
+    )
+    assert v["matrix_arith_cycles"] == 0
+
+
 def test_a_counter_the_schema_has_no_opinion_about_is_dropped_not_guessed():
     v = reduce_counters({("2,1 BRISC", "mem_read_l1"): 1234})
     assert set(v) == set(ACTIVITY_TERMS)

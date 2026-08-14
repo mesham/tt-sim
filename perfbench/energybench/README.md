@@ -1,9 +1,15 @@
 # energybench — ranking-level energy estimation
 
 The apparatus and the protocol for asking **which workload costs more energy,
-and roughly by how much**. It fits no coefficients today, because no data
-exists yet; what is here is the harness, the card protocol, the simulator-side
-activity vector, and the analysis that will consume the data when it comes back.
+and roughly by how much**: the harness, the card protocol, the simulator-side
+activity vector, and the analysis that consumes the data.
+
+It fits no coefficients today. One card session has now been collected — a
+Blackhole p150, 2026-08-13, preserved in `perfbench/card-sessions/` — and it is
+a **sound measurement that the analysis refuses**, for a reason it names and an
+operator can act on. What it taught is written up in [what the first collected
+session changed](#what-the-first-collected-session-changed-2026-08-13), and it
+changed the arithmetic, not just the guards.
 
 ## What is achievable, stated up front
 
@@ -43,8 +49,8 @@ calls `detail::LaunchProgram` back to back for tens of seconds while telemetry i
 sampled **in slot, while the kernel is running**. What that produces is
 
 > **steady-state repeated-kernel board power under sustained load**, in watts,
-> against an idle baseline **measured in the same session** and against each
-> slot's **own idle reading taken seconds before it**
+> with an idle baseline and a per-slot pre-idle reading **measured in the same
+> session as diagnostics**
 
 and **not** the energy of one launch, and **not** a post-exit decaying edge.
 That phrase appears verbatim in the runner's banner, the session log's handover
@@ -57,11 +63,23 @@ them. The simulator has to predict that same quantity:
 
 ```
 E_launch(w) = c_launch + Σ_j c_j · a_j(w)              [joules per launch]
-P_board(w)  = P_baseline + rate(w) · E_launch(w)       [watts]
+P_board(w)  = P_floor + rate(w) · E_launch(w)          [watts]
 ```
 
-`a(w)` is the activity vector `tt_sim.perf.energy_activity` emits; `rate(w)` and
-`P_baseline` are measured; `c` is fitted.
+`a(w)` is the activity vector `tt_sim.perf.energy_activity` emits; `rate(w)` is
+measured; **`P_floor` and every `c` are fitted**, from the arm rows, by
+non-negative least squares on measured power directly. The design matrix is
+`[1, rate(w), rate(w)·a_j(w)]`.
+
+**`P_floor` is fitted rather than subtracted, and that is not a refinement.**
+The board's busy-state floor is not measurable on a DVFS part: an idle slot
+launches nothing by definition, so the board drops to its idle clock state —
+measured, 800 MHz against the arms' 1350 — and an idle board is not the busy
+board minus the kernel. There is no measurement of the busy floor to subtract,
+so it has to be extrapolated from the arms. The measured baseline stays, as a
+completeness check and as the recorded idle-state diagnostic; nothing is
+differenced against it. The earlier parameterisation, which fitted
+`(P − P_baseline)/rate`, is [why](#the-arithmetic-changed-and-why).
 
 ## The arms, and why these
 
@@ -73,10 +91,28 @@ activity mixes rather than differing in size:
 | `idle` | a kernel that returns immediately | nothing — the launch machinery alone |
 | `rv` | a dependent integer chain (one MUL + three ALU ops per iteration) on BRISC | `instr_retired`, and essentially nothing else |
 | `noc` | barriered DRAM→L1 reads on BRISC | `noc_bytes_total`, `noc_flight_cycles`, flat compute |
-| `mm` | `matmul_tiles` on two **resident** tiles | `matrix_busy_cycles`, flat NoC |
+| `mm` | `matmul_tiles` on two **resident** tiles | `matrix_arith_cycles`, flat NoC |
 | `sfpu` | Int32 tile add on the same two resident tiles | `sfpu_busy_cycles`, flat NoC |
 
-Two design decisions in that table are load-bearing.
+`matrix_arith_cycles`, not `matrix_busy_cycles`. The Matrix Unit also executes
+the dest-register bookkeeping every compute kernel pays, and the `sfpu` arm pays
+**41 cycles of it per iteration against zero matrix arithmetic ops** — so
+occupancy is a column both compute arms move and it is not a statement of what
+one arm isolates. The measurement, and what it cost the first fit, is
+[below](#the-sfpu-arm-was-not-running-on-the-matrix-unit-2026-08-13).
+
+**That table IS the term set.** The right-hand column is not a description of
+what was observed afterwards; it is what each arm was *built* to move, written
+down before any board was plugged in, and it is transcribed verbatim into
+`DESIGNED_ARM_TERMS` in `tt_sim/perf/energy_rank.py`. The fit's default terms are
+exactly those — one per non-idle arm — which is why the design can be honoured
+**without searching for a term set that works**. See [the term budget is set by
+the arms, not the rows](#the-term-budget-is-set-by-the-arms-not-the-rows). If an
+arm is added or changed here, that constant has to be edited by hand in the same
+commit; the analysis refuses an arm it does not know rather than fitting a
+smaller model than it reports.
+
+Three design decisions in that table are load-bearing.
 
 **The compute arms hold their tiles resident.** The reader pushes exactly two
 tiles once; the inner loop never pops or refills. So a compute arm's NoC traffic
@@ -88,12 +124,90 @@ which backend unit their inner loop occupies. Without that pair a single
 "compute" coefficient would absorb both units and neither number would mean
 anything.
 
-**Every arm runs at two inner counts.** The fit spends one coefficient per
-activity term plus one for the launch machinery, and leave-one-out needs a
-degree of freedom spared, so it can identify `workloads − 2` terms. Five arms
-would buy three terms. Two scales buys **nine workloads and seven terms** — and
-the within-arm ratio (the same arm, 4× the work) is the sharpest ranking test in
-the set, because its two points differ in exactly one thing.
+**Every arm runs at two inner counts.** Not to buy more terms — see the section
+below, they buy none — but because the within-arm ratio (the same arm, 4× the
+work) is the sharpest ranking test in the *design*, its two points differing in
+exactly one thing. Two scales is also what gives leave-one-out a degree of
+freedom to spare: four terms plus launch plus floor is six coefficients, and
+five workloads would not carry them.
+
+**In the design. Not, on the evidence so far, in the instrument.** The first
+collected session resolved the arms in the mean but moved none of the four
+within-arm ratios by the 3 noise floors the set as a whole clears, and one of
+the four sat inside the floor entirely —
+the numbers are [below](#what-board-power-did-and-did-not-resolve). That is a
+measured limit of ~1 Hz board telemetry over three interleave cycles, not a
+reason to change the design, and more cycles is the only lever that moves it.
+
+### The term budget is set by the arms, not the rows
+
+The first collected session was refused by `identifiability` — 8 coefficients
+against 9 workloads, condition number **2.34e+07** against a 1e6 cap. The
+arithmetic was right and the cause was the **term budget**, not the measurement.
+
+The budget used to be `n_workloads − 3` and nothing else. That is a
+degrees-of-freedom bound and it is still correct as one, but it grows with the
+number of *rows*, so more workloads let the spread-ranked selector reach further
+into eleven mutually-correlated counters. Measured on this session's own design
+matrix, over all 11 spread-carrying columns:
+
+| budget | subsets over the 1e6 cap | worst condition number |
+| --- | --- | --- |
+| 3 | 0 / 165 (0 %) | 4.4e+05 |
+| 4 | 2 / 330 (1 %) | 2.8e+16 |
+| 5 | 19 / 462 (4 %) | 1.2e+17 |
+| **6** — the session's budget | **237 / 462 (51 %)** | 4.0e+17 |
+
+Fitted with the four terms the arms were *designed* to separate —
+`instr_retired`, `noc_bytes_total`, `matrix_busy_cycles`, `sfpu_busy_cycles`
+(the `mm` term has since become `matrix_arith_cycles`; these numbers are the
+ones the session was refused against, and conditioning is a property of the
+columns and the rates) — plus launch and floor:
+
+```
+as run,       2 scales,  9 workloads:  6 coefficients, cond = 6.16e+02   PASSES
+with scale 2, 3 scales, 13 workloads:  6 coefficients, cond = 7.14e+02   PASSES
+```
+
+So the budget is now **`min(designed terms present, n_workloads − 3)`**. The
+degrees-of-freedom rule still applies unchanged; it is simply no longer the only
+bound. The number of independent activity *directions* is set by the number of
+distinct arms — currently five — and no amount of extra rows changes it.
+
+**Adding a third scale does not help, and costs card time for nothing.** This is
+the tempting next move and it is a dead end, so it is recorded here rather than
+left to be proposed again. Merging the intermediate-scale activity CSV in gives
+13 workloads and, on the old rule, a budget of **10**; **all eleven** possible
+ten-term subsets condition at **≥ 3.26e+16**. An extra scale is a row that
+interpolates between rows already present. It buys repeat count and it buys
+within-arm ratio resolution — which is a real reason to want it, see [what board
+power did and did not
+resolve](#what-board-power-did-and-did-not-resolve) — but it buys **no new
+activity direction**, and it is not a route to identifying more terms. Another
+arm would be; another scale never is.
+
+**Why this is not laundering.** Restricting to these terms is legitimate for one
+reason only: *they were fixed a priori*. The arms table above predates every
+measurement, each arm was built to move exactly one term, and the code path is
+built so that the restriction cannot come from anywhere else —
+`designed_terms()` is handed **arm names and nothing else**: no design matrix, no
+target, no condition number, no gate verdict. Choosing a term set by which one
+conditions best, fits best, or passes `identifiability` would be exactly the
+laundering this whole apparatus exists to prevent, and the difference has to be
+structural rather than asserted, because a comment claiming good intentions is
+worth nothing in a year. A term *outside* the designed set gets in by one route:
+a human names it with `--terms`, before the run, and every report and coefficient
+file of that fit is stamped `operator-specified` rather than `designed` so the
+two models can never be confused. A designed term that cannot be fitted — no
+spread across the workloads, an exact linear duplicate, or outside the degrees of
+freedom — is **dropped and named in the report**, never dropped silently.
+
+**And the gate can still fail.** 2 of the 330 four-term subsets on this session
+still blow the cap, and a session refused by `identifiability` *with the designed
+terms* is reporting something real: that the arms did not separate in that
+measurement. `energy_rank_test.py` builds exactly that case — the `sfpu` column
+made a near-multiple of the `mm` column — and asserts the refusal, alongside the
+passing case.
 
 ## The card protocol
 
@@ -137,10 +251,14 @@ echo "exit=$?"
 grep -E 'NO TELEMETRY|RUN FAILED|DID NOT PRODUCE' ~/tt_traces/energybench-session/session.log
 column -s, -t ~/tt_traces/energybench-session/power.csv | less -S
 #    Look for: every `status` is ok; `samples` is not 0 anywhere; `samples` and
-#    `attempts` agree; `sysfs_aiclk_mean` is the same in every row; every
-#    `therm_trip_delta` is 0; the control agrees with its twin; the arms
-#    separate. If they do not, say so in the handover -- do not re-run and keep
-#    the better session.
+#    `attempts` agree; every `therm_trip_delta` is 0; the control agrees with its
+#    twin; the arms separate. On the clock, look at `sysfs_aiclk_drift_pct`
+#    rather than at `sysfs_aiclk_mean`: the baselines WILL read ~800 MHz against
+#    the arms' 1350 (an idle slot is in the idle DVFS state and no option pins
+#    it), which is expected and handled, but any ARM row with a drift of a few
+#    percent or more straddled a transition and will be excluded from the fit --
+#    which costs that label a repeat. If they do not, say so in the handover --
+#    do not re-run and keep the better session.
 
 # 7. Send the WHOLE directory home. Analysis needs tt_sim/ and numpy and is not
 #    time-critical; being at the card is.
@@ -174,9 +292,9 @@ At the defaults, per cycle:
 and `--seconds` change it; `--list` recomputes the estimate.
 
 **Every slot is preceded by its own idle reading** (`--pre-samples`, default 2),
-taken with the device free in the gap before the arm starts. That is the fix for
-an unstable baseline: see [the baseline is
-paired](#the-baseline-is-paired-not-assumed-stationary).
+taken with the device free in the gap before the arm starts. It is a
+**diagnostic**, and a fallible one — see [the baseline is a
+diagnostic](#the-baseline-is-a-diagnostic-and-is-measured-like-one).
 
 **The control is the point of the last slot.** `noc-4096__control` is the *same
 workload* as `noc-4096`, run in a different slot of the same cycle, so its true
@@ -250,6 +368,25 @@ This runs each arm against tt-sim with `TT_SIM_TRACE_COUNTERS` and
 activity vector (`tt_sim.perf.energy_activity`). The terms are a **fixed, ordered,
 append-only** schema so that a term added later shifts no existing column.
 
+**Run it with an interpreter that has the trace dependencies.** The reduction
+step imports `tt_sim.trace.report` → `tt_sim.trace.dwarf` → `pyelftools`, and
+pyarrow behind it; on this box that is the venv at
+`/home/nick/projects/riscv/venv/bin/python3`, and a bare system `python3` has
+neither. Pass it as `TT_SIM_PYTHON=/path/to/venv/bin/python3`.
+
+The script now **proves those imports before any arm runs** and exits 4 with the
+missing module named, because the failure mode it had was the simulator-side
+version of the card's silent slots: the import is deferred to reduction time, so
+every arm booted the simulator, produced counters, threw `ModuleNotFoundError`,
+printed the traceback, and the loop carried on to the next arm — finishing
+"successfully", exit 0, with an activity CSV that was empty or short. A reduction
+that fails now **fails that arm loudly**, the run exits non-zero, the CSV is
+checked against the schedule afterwards, and any label missing from it is named
+in a `THIS ACTIVITY MATRIX IS INCOMPLETE` handover block. A hole here is exactly
+as dangerous as a hole in `slots.csv`, because `energy_rank` drops an unmatched
+label *with a note* and then fits a smaller design than the operator thinks.
+Both directions are asserted in `run_card_stub_test.sh`.
+
 **Keep the cost model on.** Every `*_busy_cycles` and `*_stall_cycles` counter is
 *absent, not zero*, without it — the aggregator emits a counter only when
 something incremented it — so a cost-model-off activity matrix has whole columns
@@ -266,24 +403,31 @@ pinned.
 
 The checked-in `activity-sim-blackhole.csv` was collected at **smoke** inner
 counts, which are the right size for showing the apparatus works and the wrong
-size for fitting against a card.
+size for fitting against a card. `activity-sim-blackhole-card.csv` is the one at
+the *card's* inner counts and is the file that joins with the collected session;
+`activity-sim-blackhole-card-scale2.csv` is the intermediate scale (rv-400000,
+noc-8192, mm-8192, sfpu-8192), collected to answer whether a third scale would
+buy anything. [It does not.](#the-term-budget-is-set-by-the-arms-not-the-rows)
 
 ### What it produced, 2026-08-13, Blackhole, cost model on
 
 Per launch, one launch per run, `--scales "1 4"`:
 
 ```
-    label    cycles     instr      disp      nocB       txn       MAT      SFPU      PACK       THC   rvstall   txstall    flight
-   idle-0      7499     14610        27         0         0         1         3         0         0      9602         0         0
-    rv-64      8099     16144        27         0         0         1         3         0         0     11074         0         0
-   rv-256      9399     19624        27         0         0         1         3         0         0     14100         0         0
-    noc-8     11499     22451        27     16384        16         1         3         0         0     21767         0      3600
-   noc-32     23199     45356        27     65536        64         1         3         0         0     57368         0     14400
-     mm-8     10499     23207      1262      6144         6       533         3        16        52     16017      3198      1338
-    mm-32     12099     28620      3590      6144         6      2117         3        16       124     18591      6078      1338
-   sfpu-8     11699     26328      4719     12288         6       342      1028        16        29     18888      4313      1456
-  sfpu-32     16199     40865     17031     12288         6      1326      4100        16        29     26854      8801      1456
+    label    cycles     instr      disp      nocB       txn       MAT   MATarith      SFPU      PACK       THC   rvstall   txstall    flight
+   idle-0      7499     14610        27         0         0         1         1         3         0         0      9602         0         0
+    rv-64      8099     16144        27         0         0         1         1         3         0         0     11074         0         0
+   rv-256      9399     19624        27         0         0         1         1         3         0         0     14100         0         0
+    noc-8     11499     22451        27     16384        16         1         1         3         0         0     21767         0      3600
+   noc-32     23199     45356        27     65536        64         1         1         3         0         0     57368         0     14400
+     mm-8     10499     23207      1262      6144         6       533       516         3        16        52     16017      3198      1338
+    mm-32     12099     28620      3590      6144         6      2117      2052         3        16       124     18591      6078      1338
+   sfpu-8     11699     26328      4719     12288         6       342        12      1028        16        29     18888      4313      1456
+  sfpu-32     16199     40865     17031     12288         6      1326        12      4100        16        29     26854      8801      1456
 ```
+
+(`MAT` is `matrix_busy_cycles`, the Matrix Unit's full occupancy; `MATarith` is
+`matrix_arith_cycles`, the part of it that moved operand data.)
 
 Read it as a design matrix and the separation is the thing to check, because it
 is what decides whether any coefficient is identifiable:
@@ -293,20 +437,82 @@ is what decides whether any coefficient is identifiable:
 * **`noc` moves bytes and flight alone** — 16,384 → 65,536 B and 3,600 → 14,400
   cycles, with `instr_retired` rising only because the issue loop is longer, and
   no Tensix dispatch at all beyond the 27 the firmware itself issues.
-* **`mm` moves `MAT` 533 → 2,117 with `nocB` pinned at 6,144.** That flat NoC
-  column is the resident-tile design working: 4× the matmul work, byte-identical
-  traffic.
-* **`sfpu` moves `SFPU` 1,028 → 4,100 with `nocB` pinned at 12,288**, likewise.
+* **`mm` moves `MATarith` 516 → 2,052 with `nocB` pinned at 6,144.** That flat
+  NoC column is the resident-tile design working: 4× the matmul work,
+  byte-identical traffic.
+* **`sfpu` moves `SFPU` 1,028 → 4,100 with `nocB` pinned at 12,288**, likewise —
+  and with `MATarith` pinned at **12**, which is what makes the pair separable.
+  Its `MAT` column moves 342 → 1,326 all the same, which is the whole of the
+  next section.
 * **`idle` is not zero**, and should not be: 14,610 instructions and 9,602 stall
   cycles are the launch machinery and the firmware it runs. Every other arm pays
   that too, which is what the launch column is for.
 
-One correlate is worth naming because it will show up in any fit: `mm` and
-`sfpu` both raise `MAT` (the SFPU arm's `copy_tile` runs on the matrix path), so
-`matrix_busy_cycles` is not a pure `mm` column. The two arms still separate —
-`mm` at inner 32 has `MAT` 2,117 and `SFPU` 3, `sfpu` at inner 32 has `MAT`
-1,326 and `SFPU` 4,100 — but a fit that reports a `matrix_busy_cycles`
-coefficient is reporting one that both arms contributed to.
+One correlate is worth naming because it showed up in the fit: `mm` and `sfpu`
+**both** raise `MAT`, so `matrix_busy_cycles` is not a pure `mm` column — `mm`
+at inner 32 has `MAT` 2,117 and `SFPU` 3, `sfpu` at inner 32 has `MAT` 1,326 and
+`SFPU` 4,100.
+
+> This paragraph used to attribute the `sfpu` arm's `MAT` column to `copy_tile`
+> "running on the matrix path". **That was wrong.** `copy_tile` is called twice,
+> outside the inner loop, and cannot produce a column that scales with `inner`
+> at all — and on this arm it issues no Matrix Unit op whatever, because an
+> Int32 tile is unpacked straight to Dest. The real cause, and the fix, is
+> [below](#the-sfpu-arm-was-not-running-on-the-matrix-unit-2026-08-13). Since
+> that fix the `mm` arm is fitted against `matrix_arith_cycles`, which the
+> `sfpu` arm does not move.
+
+### The `sfpu` arm was not running on the Matrix Unit (2026-08-13)
+
+The first fitted session put **`sfpu_busy_cycles` at exactly 0** — clamped on the
+NNLS non-negativity boundary, because the unconstrained fit wanted it negative —
+and mispredicted `sfpu-16384` by 2.21×, predicting it almost entirely through
+`matrix_busy_cycles`. That is not a collinearity artefact: across the nine
+workloads `corr(rate·MAT, rate·SFPU)` is 0.147 and the design conditions at
+1.18e3. The `sfpu` arm really was feeding the matrix column.
+
+Running the arm under `TT_SIM_DIAG_CO_ISSUED=1` says exactly what with. Per
+`add_int_tile<DataFormat::Int32>` iteration, on Blackhole:
+
+| unit | opcode | per iteration | what it is |
+| --- | --- | --- | --- |
+| MATH | `INCRWC` | 32 | sfpi's `dst_reg++`, 8 per `_add_int_` call × 4 faces |
+| MATH | `SETRWC` | 9 | 2 per face from the LLK's dest-address walk, + 1 `clear_dst_reg_addr` |
+| SFPU | `SFPLOAD` | 64 | two operands × 8 unrolled iterations × 4 faces |
+| SFPU | `SFPIADD` | 32 | the add |
+| SFPU | `SFPSTORE` | 32 | the result |
+
+**41 Matrix Unit ops per iteration and not one arithmetic op**: no `MVMUL`, no
+`ELWADD`, no `MOV*`. The whole arm's matrix column is `41·inner + 14`, where the
+14 is one-off `ZEROACC`/`ZEROSRC`/`SETRWC` at kernel start. The `mm` arm for
+comparison is `66·inner + 5` — 64 `MVMUL` and 2 `SETRWC` per iteration.
+
+So the arm was fine and the **attribution** was wrong. `SETRWC` / `INCRWC` /
+`CLEARDVALID` / `GATESRCRST` are dispatched to the Matrix Unit (FPU) by the ISA
+documentation and the cost tables charge them a cycle each, both correctly —
+they really do take an issue slot. But they update the RWC counters, the dvalid
+flags and the SrcB operand cache and move **no operand data**, and an energy
+coefficient against that column is being asked for joules per cycle of the
+matrix array. Every compute kernel tt-metal builds pays them; a vector kernel
+pays 41 per iteration.
+
+The fix is `tt_sim.trace.counters` publishing `bookkeeping_cycles` — a *subset*
+of `busy_cycles`, cut by whether the opcode moved any operand data — and
+`tt_sim.perf.energy_activity` deriving `matrix_arith_cycles` from the
+difference. `matrix_busy_cycles` is unchanged and still the full occupancy,
+because that is the right number for a performance reader; the term was
+**added**, not redefined, so a fit cannot silently keep using the old column.
+`tt_sim/trace/events.py` carries the opcode taxonomy, and a test asserts it
+partitions `MatrixUnit.OPCODE_TO_HANDLER` exactly — a Matrix opcode added later
+fails until somebody has said which kind it is.
+
+**Both card activity CSVs predate this and carry no `matrix_arith_cycles`
+column.** They read back with it at zero, so the designed fit drops it and names
+it in a note rather than quietly refitting the old column. Refitting the
+2026-08-13 session needs its activity vectors re-reduced, which means re-running
+the arms at the card's inner counts — about 22M simulator cycles, roughly seven
+hours at the ~900 cycles/s these arms run at. Until then that session has no
+`mm` direction.
 
 ## The analysis
 
@@ -315,47 +521,87 @@ python3 -m tt_sim.perf.energy_rank \
     --activity perfbench/energybench/activity-sim-blackhole.csv \
     --measured ~/energybench-session/power.csv \
     --report report.txt --json report.json
+# ...and on the session that has actually been collected, joined to the activity
+# vectors at the SAME inner counts (the smoke CSV above joins with nothing here):
+python3 -m tt_sim.perf.energy_rank \
+    --activity perfbench/energybench/activity-sim-blackhole-card.csv \
+    --measured perfbench/card-sessions/2026-08-13-energybench/power.csv
+# -> identifiability PASSES (6 coefficients, cond 616); repeats REFUSES
+#    ('rv-800000' has 2 usable cycles of 3); exit status 1.
 ```
 
 ### The gates
 
-Eleven gates run before any ranking is reported, and a failure is a **refusal**,
-not a warning. A fit is only meaningful if the measurement it is fitted to
-actually said something.
+Thirteen checks run before any ranking is reported. Twelve are **refusals**, not
+warnings. A fit is only meaningful if the measurement it is fitted to actually
+said something.
 
 | gate | passes when | refuses when |
 | --- | --- | --- |
-| `telemetry` | every row has a status of `ok`, ≥ 1 successful sample and a finite power | any row was never measured — **this is the 2026-08-13 gate** |
-| `baseline` | the session measured its own idle floor | no `baseline` rows |
+| `telemetry` | every row has a status of `ok`, ≥ 1 successful sample and a finite power | any row was never measured |
+| `baseline` | the session measured its own idle floor | no `baseline` rows. It is a **completeness check and a diagnostic**, not the fit reference |
 | `schedule` | every interleave cycle carries every label | a cycle has a hole in it |
 | `thermal` | `tt_therm_trip_count` did not move | the part throttled, or there is no thermal record |
-| `clock` | no slot's AI clock drifted past `--max-clock-drift-pct`, and the slots agree on it | the clock moved within a slot, slots ran at different clocks, or there is no clock record |
-| `repeats` | every label has ≥ `--min-repeats` interleave cycles | any label has fewer |
+| `clock` | the surviving arm slots agree on their clock to `--max-clock-drift-pct` | slots ran at different clocks, or there is no clock record. A slot whose clock moved **within itself** is *excluded and named*, not refused |
+| `baseline_clock` | the baseline ran at the arms' clock | **never refuses.** A DVFS split is reported as a finding: *baseline subtraction is invalid for this session* |
+| `repeats` | every label has ≥ `--min-repeats` **surviving** cycles | any label has fewer, after exclusions |
 | `samples` | every row kept ≥ `--min-samples` telemetry samples | any row was under-sampled |
 | `control` | the control agrees with its twin inside `--sigma` × noise | it does not, or there is no control at all |
 | `spread` | the workloads span more than `--sigma` × noise | they sit inside the noise floor |
-| `identifiability` | coefficients ≤ workloads − 1 and condition number ≤ `--max-cond` | either bound is broken |
+| `identifiability` | coefficients ≤ workloads − 1 and condition number ≤ `--max-cond` | either bound is broken. What it is *offered* is the **designed** term set — one per non-idle arm, budget `min(designed, workloads − 3)`, [fixed a priori](#the-term-budget-is-set-by-the-arms-not-the-rows) — never a set chosen because it passes this gate. It is also where "are `P_floor` and `c_launch` separable in *this* session?" is answered |
+| `target_triviality` | the floor-and-launch-rate model alone explains less than `--max-triviality-r2` of the target | a model that knows **no activity at all** already reproduces the ranking |
 | `rankable` | ≥ 3 workloads have both a vector and a rate | fewer |
 
 `--max-clock-drift-pct` defaults to **5 %**, which is 67 MHz at 1350 MHz: tight
-enough to catch the 1350 → 800 MHz transition that broke the 2026-08-13
-baselines, loose enough for ordinary DVFS ripple. It is a first guess, and the
-first real session should set it from the observed `sysfs_aiclk_drift_pct`
-column rather than leaving it at a number nobody has calibrated.
+enough to catch a 1350 → 800 MHz transition, loose enough for ordinary DVFS
+ripple. The first collected session bears that out — every row's within-slot
+drift is 0.000 % or 0.519 % except one at 41.398 %, so 5 % separates them with
+a factor of eight in hand either way.
+
+**Two of these are new because of that session, and one of them is not a
+refusal.** `baseline_clock` cannot refuse: the confound it detects is
+structural, since a slot that launches nothing is in the idle DVFS state by
+definition, and `tt-smi` 6.2.0 offers no way to pin the clock — so a refusal
+there would be a gate that can never pass, which is as damaging as one that can
+never fail. It is wired to the **arithmetic** instead: the finding is precisely
+the reason `P_floor` is fitted rather than subtracted.
+
+**One row can be excluded without discarding the session, and only one thing
+does it.** A slot whose clock moved *during* it has a mean over two DVFS states
+and is not a measurement of either; it is cut from the fit and printed under
+`## Rows excluded from the fit (still part of the record)`. Whether what
+survives is still a session is then decided independently by `repeats`, counting
+survivors — so the exclusion can still cost the session, which is what keeps it
+honest. On the first collected session it does exactly that.
 
 **A guard that cannot fail is as damaging as one that cannot pass**, and that is
-not a slogan here. The term selector deliberately does **not** filter on the
-identifiability gate's own threshold: it excludes only columns with no spread and
-columns that are exact linear duplicates — both arithmetic, not judgement — so a
-merely ill-conditioned set reaches the gate and is refused there. A selector that
-avoided what the gate checks would make the gate incapable of failing.
-`tt_sim/perf/energy_rank_test.py` builds a passing session and a failing one for
-every gate in the table, and asserts both.
+not a slogan here — `target_triviality` exists because the old arithmetic had a
+hole no gate could see, and `baseline_clock` reports rather than refuses because
+refusing would have been the other failure. The term selector likewise does
+**not** filter on the identifiability gate's own threshold: within the candidate
+set it is given it excludes only columns with no spread and columns that are
+exact linear duplicates — both arithmetic, not judgement — so a merely
+ill-conditioned set reaches the gate and is refused there. A selector that
+avoided what the gate checks would make the gate incapable of failing. What that
+candidate set *is* comes from the design and not from the data — the arms table's
+own terms, [see above](#the-term-budget-is-set-by-the-arms-not-the-rows) — which
+is a narrowing on a-priori grounds and is stamped as such in every report;
+`energy_rank_test.py` asserts that a degenerate design is still refused with
+those terms in place. It builds a passing session and a failing one for every
+gate in the table, and asserts both.
 
 The noise floor is derived from **this session's own repeats** (the RMS of each
 label's across-cycle standard deviation), never carried over from another
 session — a floor from another session is exactly the drift the control exists
-to catch.
+to catch. It is derived from the **arm** repeats specifically, after the
+within-slot drift exclusion, and the **baseline is not in it**: an idle-state
+label's variance is not the noise of the busy-state measurements it would be
+used to judge. On this session that is the difference between 0.441 W and
+0.838 W, because the baselines sat at 800 MHz and swung 4.3 W between cycles
+while no arm moved by more than 1.2 W. The control label *is* counted — it is a
+genuine arm measurement, and including it lowers the floor here (0.441 W against
+0.463 W without it), so it makes its own gate stricter rather than more
+permissive.
 
 ## What the card taught this harness (2026-08-13)
 
@@ -404,33 +650,208 @@ handover block and exits non-zero, and the `schedule` gate independently checks
 that every cycle carries every label. Both nets are asserted in
 `run_card_stub_test.sh`.
 
-## The baseline is paired, not assumed stationary
+## What the first collected session changed (2026-08-13)
 
-A reference that swings 42 % between cycles is not a reference. Three changes,
-and the reasoning for each:
+Same day, same board, after the tool upgrade: a three-cycle session on a
+Blackhole p150 with `tt-smi` 6.2.0 that **collected cleanly**. The whole
+directory is preserved at `perfbench/card-sessions/2026-08-13-energybench/` —
+`power.csv`, `slots.csv`, `launches.csv`, `session.log` and 99 files under
+`raw/` — and the regression tests read it rather than a transcription of it.
+
+**Collection is now sound.** 33/33 slots `status=ok`; 29–37 telemetry samples
+per slot with `attempts == samples` and **zero** `sample_failures`;
+`therm_trip_delta` 0 everywhere; launch rates reproducible across the three
+interleave cycles to ~1 %. Every net added after the first session held, and
+none of them fired. What the session produced, means over its three cycles:
+
+```
+label                 meanP(W)   sd     rate(/s)   aiclk(MHz)
+baseline               37.736   2.36        0        800
+idle-0                 66.003   1.149    701.9      1350
+rv-200000              67.341   0.553    406.1      1350
+noc-4096               67.872   0.319    339.7      1350
+mm-4096                68.070   0.345    604.5      1350
+sfpu-4096              68.086   0.177    491.8      1350
+rv-800000              68.271   0.118    179.3     ~1329   <- see below
+noc-16384              68.369   0.106    133.4      1350
+sfpu-16384             68.442   0.094    263.1      1350
+mm-16384               68.927   0.130    445.1      1350
+noc-4096__control      68.386   0.106    340.4      1350
+
+noise floor (RMS of per-label across-cycle SD, ARM rows)  0.441 W
+arm spread                        2.924 W  =  6.63 x floor   -> `spread` PASSES
+control vs its twin               0.513 W  =  1.16 x floor   -> `control` PASSES
+```
+
+**That floor is over the arm rows only, and the baseline's 2.40 W across-cycle
+SD is not in it.** It is the same 800-versus-1350 MHz confound as everywhere
+else on this page: the baseline is a diagnostic in the idle DVFS state, so its
+swing is that state wandering rather than the repeatability of the arms.
+Including it read 0.838 W — a factor of 1.9 on the yardstick that `control` and
+`spread` are measured against, in a session whose own `baseline_clock` finding
+says baseline subtraction is invalid. No verdict here flips either way (control
+0.513 W against 3 × 0.441 = 1.32 W), but `control` passes when the disagreement
+is *below* the floor, so the inflated version made the session's drift detector
+roughly twice as permissive as intended.
+
+The arms are in the right order and separate in the mean. Two things then went
+wrong with the clock, and they are **different problems with different fixes**.
+
+### The baseline is in a different DVFS state, and always will be
+
+Every baseline slot ran at **800 MHz** and every arm at **1350 MHz**. Over all 33
+rows that is a 42.33 % clock spread; over the arm rows alone, 1.59 %.
+
+This is not drift. A baseline slot launches nothing *by definition*, so the board
+drops to its idle DVFS state for it, and no scheduling change alters that.
+**`tt-smi` 6.2.0 offers no clock-pinning option** — `--help` lists only
+`-l/-v/-s/-ls/-f/-c/--offline/-r/--snapshot_no_tty/-glx_*/--no_reinit/
+--use_luwen/--eth_train_skip` — so the confound cannot be removed at the source
+either.
+
+A gate that refuses on it therefore refuses *every session anyone can ever run*,
+which is the "guard that cannot pass" failure. So:
+
+* the `clock` gate's across-session check now runs over the **arm rows only**,
+  at the same cap (1.59 % against 5 %, and 0.007 % over the rows it actually
+  fits);
+* a separate `baseline_clock` check reports the baseline-versus-arm gap as a
+  **named finding**: *baseline subtraction is invalid for this session*;
+* and that finding is wired to the arithmetic rather than to a refusal.
+
+### The arithmetic changed, and why
+
+The old target was `y(w) = (P(w) − P_baseline) / rate(w)`. On this session the
+numerator is ~30 W of DVFS step plus **2.9 W** of actual workload difference, and
+the denominator varies 5.3× — so the target is very nearly the launch period.
+Measured: regressed on `1/rate` alone, **with no activity term whatsoever, R² =
+0.9995**.
+
+A fit on that would have reported an excellent leave-one-out Spearman for a
+ranking that is 99.95 % *"whichever workload launches slowest costs most"*. It
+passes `spread`. It passes `control`. It passes `identifiability`, which inspects
+the design matrix and not the target. The hole was in the arithmetic, not in the
+guards, and no guard could see it.
+
+Two changes, and they are the same change:
+
+1. **The floor is fitted, not subtracted.** `P(w) = P_floor + rate(w)·(c_launch +
+   Σ c_j a_j(w))`, `P_floor ≥ 0` free and estimated from the arm rows. There is
+   no measurement of the busy-state floor to subtract — an idle board is not the
+   busy board minus the kernel — so it is extrapolated. The same session's target
+   under the new parameterisation scores **R² = 0.36** against rate alone.
+2. **A `target_triviality` gate**, defaulting to 0.95 and exposed as
+   `--max-triviality-r2`, refuses when the floor-and-launch-rate model already
+   explains the target. A model that reproduces the ranking without knowing any
+   activity is not evidence about activity.
+
+`P_floor` and `c_launch` are distinguishable here in principle because the launch
+rates vary 5.3×, and empirically because that design's condition number is 4.7 —
+**616** for the full six-coefficient design against this session's own activity
+vectors — against a 1e6 cap, checked by `identifiability`, not assumed, and not
+worked around.
+
+### One slot genuinely was contaminated
+
+Independently of all that, `sysfs_aiclk_drift_pct` shows **cycle 1's `rv-800000`
+drifted 41.398 % within the slot** — `sysfs_aiclk_min` 800, `max` 1350: it
+straddled a DVFS transition. The same row carries `power_sd_w` **5.14** against
+0.1–0.9 everywhere else, `pre_idle_w` 75.0 and `delta_w` −6.81. Every other row
+in the session drifted 0.000 % or 0.519 %.
+
+That row's mean is a mean over two clock states and is not a measurement of
+either. But one contaminated slot must not discard 32 sound ones, so it is
+**excluded from the fit and named in the report**, and `repeats` then decides
+independently whether what survives is a session. It is not: `rv-800000` drops to
+two repeats against a `--min-repeats` of 3, and **the session is refused there**.
+
+That is the right refusal reached through the right gate. It says what to do —
+run more cycles — rather than merely that a clock moved.
+
+### What board power did and did not resolve
+
+The honest half, and it qualifies a claim this file used to make flatly. The arms
+separate in the **mean**: 2.924 W, 6.63 noise floors, correct ordering with
+`mm-16384` highest and `idle-0` lowest. The **within-arm 4× scalings**, billed
+above as the sharpest ranking test in the set, do far less well:
+
+| arm | lo → hi (W) | delta | vs noise floor |
+| --- | --- | --- | --- |
+| `rv` | 67.341 → 68.271 | 0.930 | 2.11× |
+| `mm` | 68.070 → 68.927 | 0.858 | 1.94× |
+| `noc` | 67.872 → 68.369 | 0.497 | 1.13× |
+| `sfpu` | 68.086 → 68.442 | 0.356 | 0.81× |
+
+(`rv`'s becomes 0.971 W, 2.20×, once the contaminated row above is excluded.)
+
+All four have the right sign. Three clear the noise floor and `sfpu` is
+**inside** it — but **not one of the four reaches the 3 floors that `spread`
+holds the set as a whole to**, and 1.1× is not a margin worth claiming. **Board
+power resolves these arms in the mean but does not resolve the within-arm ratio
+to the bar the rest of this analysis is held to**, at three interleave cycles.
+That is a statement about these four numbers and this session, and it should not
+be generalised further.
+
+> These ratios were previously quoted as 1.11× / 1.02× / 0.59× / 0.42× against a
+> floor of 0.837 W. That floor included the baseline's DVFS swing and was the
+> wrong yardstick; the deltas themselves are unchanged. Correcting it moves
+> `noc` from inside the floor to just outside it, which is a correction to the
+> scale and **not** new evidence that `noc`'s scaling was resolved.
+
+The floor is the RMS of each **arm** label's across-cycle SD, so more cycles
+shrink it: `--cycles 6` is about 46 minutes and is the only lever here that
+moves it.
+
+## The baseline is a diagnostic, and is measured like one
+
+A reference that swings 42 % between cycles is not a reference — and the first
+collected session showed that on a DVFS board it *cannot* be one, because the
+idle slot and the arms are in different clock states by construction. The
+baseline is therefore no longer differenced against anything; the fit
+extrapolates the busy-state floor from the arms. What it is still for is
+completeness (a session without one did not run this schedule) and diagnosis
+(how far the fitted floor sits above the idle state).
+
+Three things were done to it while it was still a reference, and all three are
+worth keeping for that diagnostic role:
 
 **Every slot gets its own idle reading, seconds before it** (`pre_idle_w`, and
 `delta_w = power_w - pre_idle_w`). The device is free in the gap between slots,
-so this costs two telemetry calls and no schedule change. It is the change that
-actually helps: a drift that takes a cycle to develop cannot get between a slot
-and a reading taken seconds earlier, whereas it sits squarely between a slot and
-a per-cycle baseline.
+so this costs two telemetry calls and no schedule change. A drift that takes a
+cycle to develop cannot get between a slot and a reading taken seconds earlier,
+whereas it sits squarely between a slot and a per-cycle baseline.
+
+**But the probe has no way to make the board clock down or cool first**, and the
+first collected session caught it twice: cycle 1's slot 6 read **75.0 W** — above
+every arm in the session — for a `delta_w` of −6.81, and its slot 9 read
+**62.0 W** against a 37.7 W idle baseline. Neither is an idle board; both caught
+one still coming down from the slot before. That is why `delta_w` stayed a
+**diagnostic and never became a fit input**, and why nothing gates on it —
+refusing a session over a column nothing is computed from would be theatre. What
+the analysis does instead is **flag the implausible cells by name** (above the
+arm floor, negative `delta_w` on a slot that launched, or nearer the busy state
+than the measured idle floor) so a reader scanning the column is not misled by
+it.
 
 **The baseline slot is measured identically** — same samplers, same settle trim,
 same pre-idle probe, same duration — rather than being a bare `sleep` with a
 different sampling path. If the baseline and the arms are not the same quantity
 measured the same way, their difference is partly an instrument artefact.
 
-**The clock is recorded on every row and gated**, so baselines taken at
-different clocks are *refused* rather than averaged. This is the honest part: the
-paired reference reduces the exposure, but nothing in this apparatus can rescue a
-board that changed DVFS state mid-session, and pretending otherwise would be
-worse than refusing.
+**The clock is recorded on every row**, per slot, with a min, a max and a drift
+percentage. That record is what makes all three of the clock findings above
+possible, and it costs nothing: sysfs, no device handle, unperturbed by the
+workload.
 
-`delta_w` is reported per row and is the right column to eyeball at the card.
-The fit still uses the session baseline, unchanged — `energy_rank`'s arithmetic
-was not touched, and the paired reading is a diagnostic and a cross-check rather
-than a second, silently different, definition of the same number.
+`delta_w` is reported per row and is still the right column to eyeball at the
+card — with the flagging above in mind.
+
+> **Correction.** An earlier version of this file said "the fit still uses the
+> session baseline, unchanged — `energy_rank`'s arithmetic was not touched".
+> That is **no longer true, and the sentence was wrong to keep**. The arithmetic
+> was touched, deliberately and for a measured reason: the baseline is not
+> subtracted at all any more. See [the arithmetic
+> changed](#the-arithmetic-changed-and-why).
 
 ### The ranking metric
 
@@ -448,17 +869,34 @@ Coefficients are constrained non-negative (Lawson–Hanson NNLS). A negative ene
 per instruction is not a finding, it is a fit artefact, and allowing one lets the
 model buy accuracy with nonsense.
 
-**One collinearity is known and will not go away**: the launch constant and the
-`idle` arm's fixed instruction count (~14,600 instructions of firmware per
-launch, whatever the kernel does) move together, because every arm pays both. On
-synthetic data with a known truth the four activity coefficients come back to
-within 0.2% while `c_launch` comes back at 57% of its true value, with the
-difference absorbed into `instr_retired` — and the worst pairwise ratio error in
-the whole set is the one involving `idle-0`. That is a real limit of this design,
-not a bug: separating them needs an arm that launches without executing firmware,
-which does not exist. Read `c_launch` as "launch machinery *plus* the firmware
+**One collinearity is known, will not go away, and the new parameterisation made
+it worse rather than better.** The launch constant and the `idle` arm's fixed
+instruction count (~14,600 instructions of firmware per launch, whatever the
+kernel does) move together, because every arm pays both; fitting the floor adds
+a third near-degenerate way to pay a per-launch constant. Measured on synthetic
+data with a known truth (`energy_rank_test.py`): noise-free, everything comes
+back exactly — `P_floor` to the watt, `c_launch` and all four activity
+coefficients to 6 digits. Add 0.05 W of per-row noise and the activity
+coefficients still come back within 0.7 %, but `c_launch` is driven to **zero**,
+the non-negativity boundary, with the deficit absorbed into `instr_retired`.
+Under the old parameterisation the same data gave 57 % of its true value.
+
+So: `c_launch` is **not identifiable at this noise level** and must not be quoted
+as a number. The ranking is unaffected — leave-one-out Spearman stays 1.0 on
+that data, because the sum the model needs is recovered even when its split is
+not. Read `c_launch` as a lower bound on "launch machinery *plus* the firmware
 instructions it always runs", and treat `idle-0`'s predicted energy as the least
-trustworthy point in any fit.
+trustworthy point in any fit. Separating them needs an arm that launches without
+executing firmware, which does not exist.
+
+`P_floor` and `c_launch` are a different pair and they *are* separable in
+principle, because the launch rate varies 5.3× across the arms. Empirically, on
+the first collected session's rates, the floor-and-launch design alone has a
+condition number of **4.7** and the full six-coefficient design — the four
+designed terms plus launch and floor, against that session's own activity vectors
+— **616**, against a `--max-cond` of 1e6. That is a fact about that session's
+rates, checked by the `identifiability` gate rather than assumed, and a session
+whose arms all launched at the same rate would be refused there.
 
 ## The coefficients are quarantined, on purpose
 
@@ -502,7 +940,8 @@ no values in it.
 
 ## What this will and will not be able to claim
 
-**Will**, once a card session exists and the gates pass:
+**Will**, once a card session **passes the gates** — one has now been collected
+and it does not, for a reason it names:
 
 * that tt-sim orders these workloads by energy the way the board does, with a
   stated leave-one-out rank correlation;
@@ -524,11 +963,18 @@ no values in it.
   extrapolate;
 * a claim from a session whose control moved, whose arms sat inside the noise
   floor, or whose repeats were too few. Those are refusals, and the refusal is
-  the output.
+  the output;
+* a value for `c_launch`. It is collinear with the firmware instruction count
+  and with the fitted floor, and at 0.05 W of noise on synthetic data it goes to
+  the non-negativity boundary. Read it as a lower bound, never as a number;
+* on the evidence of the one session collected, the **within-arm 4× ratio** for
+  every arm: one of the four moved less than the noise floor and none of the
+  four moved by the 3 floors the set as a whole clears. More interleave cycles
+  is the only lever, and it has not been pulled yet.
 
 One more, worth stating because it is the most tempting mistake: the coefficients
 are fitted to **steady-state repeated-kernel board power under sustained load**,
 sampled in slot. Using them to predict
 a single cold launch is using them outside the quantity they were fitted to, and
 the launch machinery term (`c_launch`) is the only part of the model that has
-anything to say about it.
+anything to say about it — and it is the least identifiable term in the set.

@@ -19,14 +19,23 @@
 #     anywhere under tt_sim/;
 #   * tt_sim/perf/energy_quarantine_test.py asserts both, in both directions.
 #
-# What these predict is STEADY-STATE REPEATED-KERNEL BOARD POWER against an
-# idle baseline measured in the same session -- not the energy of a single
-# launch -- and they are validated on ORDERING and RATIOS, never on absolute
-# joules. See ./README.md.
+# What these predict is STEADY-STATE REPEATED-KERNEL BOARD POWER UNDER SUSTAINED
+# LOAD -- not the energy of a single launch -- and they are validated on ORDERING
+# and RATIOS, never on absolute joules. See ./README.md.
+#
+# The model is
+#
+#     P_board(w) = p_floor_w + rate(w) * (launch + sum_j c_j * a_j(w))
+#
+# and `p_floor_w` is FITTED from the arm rows and is in WATTS. It is NOT the
+# measured idle baseline and the two are not interchangeable: on a DVFS board the
+# idle slot sits in a different clock state, so there is no idle measurement of
+# the busy state to subtract.
 
 not_a_cost_table: true
 provenance: fitted
-units: joules per unit of activity, per launch
+units: joules per unit of activity, per launch (p_floor_w is watts)
+model: null              # the model form, stamped by --write-coefficients
 fitted_on: null          # the session date, stamped by --write-coefficients
 
 fitting_record:
@@ -34,15 +43,20 @@ fitting_record:
   measured_csv: null     # which card session
   spearman_loo: null     # the claim: leave-one-out rank correlation
   spearman_in_sample: null
-  baseline_w: null       # the in-session idle floor every delta is against
-  noise_floor_w: null    # RMS of each label's across-cycle standard deviation
+  target_triviality_r2: null  # how much of the target the launch RATE alone explains
+  p_floor_w: null        # the FITTED busy-state floor, watts, from the arm rows
+  baseline_w: null       # the MEASURED idle floor -- a diagnostic, not subtracted
+  noise_floor_w: null    # RMS of each ARM label's across-cycle SD (no baseline)
   workloads: []          # every label that survived the gates
+  excluded_rows: []      # rows cut from the fit, each with the reason
   gates: {}              # each gate's verdict text, verbatim
 
 coefficients: {}
   # launch:               <J per launch, the launch machinery itself>
   # instr_retired:        <J per retired baby-RISC-V instruction>
   # noc_bytes_total:      <J per byte moved over the NoC>
-  # matrix_busy_cycles:   <J per cycle of Matrix-unit occupancy>
+  # matrix_arith_cycles:  <J per cycle of Matrix-unit DATAPATH occupancy --
+  #                        not matrix_busy_cycles, which also counts the RWC
+  #                        bookkeeping every compute kernel pays>
   # sfpu_busy_cycles:     <J per cycle of Vector-unit occupancy>
   # ... one per term the identifiability gate allowed

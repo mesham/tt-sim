@@ -31,6 +31,7 @@ from tt_sim.trace.writers.perfetto import PerfettoWriter
 
 CORE = (0, 18, 18, "TRISC1")
 UNIT = (0, 18, 18, "THCON")
+MATRIX = (0, 18, 18, "MATRIX")
 NIU = (0, 18, 18, "NOC0")
 
 
@@ -386,6 +387,86 @@ def test_backend_unit_busy_cycles_come_only_from_modelled_ops():
     )
     assert counters[(UNIT, "compute_ops")] == 2
     assert counters[(UNIT, "busy_cycles")] == 15
+
+
+# ---------------------------------------------------------------------------
+# Matrix Unit occupancy, cut by whether any operand data moved
+# ---------------------------------------------------------------------------
+
+
+def test_matrix_bookkeeping_cycles_are_a_subset_of_busy_cycles():
+    """``INCRWC`` occupies the Matrix Unit and moves no operand data; ``MVMUL``
+    does both. The bookkeeping counter re-cuts the same cycles rather than
+    adding any, which is why ``tt_sim.trace.report`` ranks it as redundant."""
+    counters = _counters(
+        [
+            ComputeEvent(
+                cycle=1, unit_id=MATRIX, op="MVMUL", target_unit="Matrix", duration=1
+            ),
+            ComputeEvent(
+                cycle=2, unit_id=MATRIX, op="INCRWC", target_unit="Matrix", duration=1
+            ),
+            ComputeEvent(
+                cycle=3, unit_id=MATRIX, op="SETRWC", target_unit="Matrix", duration=1
+            ),
+        ]
+    )
+    assert counters[(MATRIX, "busy_cycles")] == 3
+    assert counters[(MATRIX, "bookkeeping_cycles")] == 2
+
+
+def test_a_matrix_run_with_no_bookkeeping_emits_no_bookkeeping_row():
+    """Absent, not zero — the same rule every other modelled counter follows."""
+    counters = _counters(
+        [
+            ComputeEvent(
+                cycle=1, unit_id=MATRIX, op="MVMUL", target_unit="Matrix", duration=1
+            )
+        ]
+    )
+    assert (MATRIX, "busy_cycles") in counters
+    assert (MATRIX, "bookkeeping_cycles") not in counters
+
+
+def test_bookkeeping_cycles_are_absent_without_the_cost_model():
+    """``duration=0`` is "no claim", so neither counter appears — a bookkeeping
+    row of 0 alongside no ``busy_cycles`` row would read as "no bookkeeping"."""
+    counters = _counters(
+        [ComputeEvent(cycle=1, unit_id=MATRIX, op="INCRWC", target_unit="Matrix")]
+    )
+    assert (MATRIX, "busy_cycles") not in counters
+    assert (MATRIX, "bookkeeping_cycles") not in counters
+
+
+def test_bookkeeping_cycles_are_redundant_against_busy_cycles():
+    """The attribution report partitions cycles. Ranking a subset beside the set
+    it came from double-counts every cycle in it."""
+    from tt_sim.trace import report
+
+    assert report.is_redundant("bookkeeping_cycles")
+    assert not report.is_redundant("busy_cycles")
+
+
+def test_every_matrix_unit_opcode_is_classified_as_bookkeeping_or_datapath():
+    """The completeness guard. ``TensixBackendUnit`` raises
+    ``NotImplementedError`` for a Matrix opcode it has no handler for, so
+    ``MatrixUnit.OPCODE_TO_HANDLER`` is exactly the set that can reach a
+    ``ComputeEvent`` — and every member of it has to have been called either
+    work or bookkeeping by somebody, rather than defaulting to work because
+    nobody looked."""
+    from tt_sim.pe.tensix.backends.matrix import MatrixUnit
+    from tt_sim.trace.events import MATRIX_BOOKKEEPING_OPS, MATRIX_DATAPATH_OPS
+
+    handled = set(MatrixUnit.OPCODE_TO_HANDLER)
+    assert not (MATRIX_BOOKKEEPING_OPS & MATRIX_DATAPATH_OPS)
+    assert MATRIX_BOOKKEEPING_OPS | MATRIX_DATAPATH_OPS == handled, (
+        "a Matrix Unit opcode is unclassified (or classified but unhandled). "
+        "Say whether it moves operand data, in tt_sim/trace/events.py."
+    )
+    # The two that must never swap sides, named so the guard reads as a claim
+    # about the machine rather than about set arithmetic.
+    assert "MVMUL" in MATRIX_DATAPATH_OPS
+    assert "INCRWC" in MATRIX_BOOKKEEPING_OPS
 
 
 def test_noc_flight_cycles_are_counted_when_timed():

@@ -320,6 +320,7 @@ one you wanted.
 | `stall_<reason>` | cycles | baby RV core | Cycles the RV cost model held an instruction, by reason. **Cost-model only.** |
 | `stall_cycles` | cycles | baby RV core | **Redundant** — the sum of `stall_<reason>`. See §4.4. |
 | `busy_cycles` | cycles | Tensix backend unit | Modelled occupancy charged by the cost tables. **Cost-model only.** |
+| `bookkeeping_cycles` | cycles | Tensix backend unit | **Redundant subset** of `busy_cycles`: the part spent on Matrix Unit opcodes that move no operand data (`SETRWC`, `INCRWC`, `CLEARDVALID`, `GATESRCRST` — see `tt_sim.trace.events.MATRIX_BOOKKEEPING_OPS`). Occupancy minus this is datapath work. **Cost-model only.** |
 | `compute_ops` | count | Tensix backend unit | Instructions completed by that unit. |
 | `dispatch_total` | count | Tensix thread | Instructions issued to any backend. |
 | `dispatch_to_<ex_resource>` | count | Tensix thread | …split by target (§3.3 right column, plus `NONE`). |
@@ -384,7 +385,7 @@ So:
 
 ### 4.4 Do not sum a total with its parts
 
-Three counters restate cycles that another row already carries. Ranking
+Four counters restate cycles that another row already carries. Ranking
 or summing them alongside the partition they restate double-counts:
 
 | Counter | Restates | Verified |
@@ -392,6 +393,13 @@ or summing them alongside the partition they restate double-counts:
 | `stall_cycles` | `Σ stall_<reason>` | 41,163 = 41,050 + 99 + 10 + 4 — exact |
 | `tensix_stall_cycles` | `Σ tensix_stall_<reason>` | 10,793 = 6,072 + 3,913 + 703 + 84 + 16 + 3 + 2 — exact |
 | `tensix_stall_on_<unit>` | the same cycles, re-cut by blame | 4,721 ≤ 10,793 — **partial** |
+| `bookkeeping_cycles` | part of the same unit's `busy_cycles` | energybench `mm` at inner 6: 13 ≤ 401 — **subset** |
+
+`bookkeeping_cycles` is the other shape of the same trap: a *subset* rather
+than a total, charged off the same `ComputeEvent.duration` as the
+`busy_cycles` it sits inside. It answers "how much of this unit's occupancy
+moved any operand data", which is the question an energy model asks and an
+occupancy reader does not. Query it directly; never add it to `busy_cycles`.
 
 `tensix_stall_on_<unit>` is a genuinely useful second view — it answers
 "which unit held this thread up", which is the actionable half — but it

@@ -200,6 +200,7 @@ attribution — same long format, no consumer changes:
 |---|---|
 | `stall_cycles`, `stall_load_use`, `stall_store_rate`, `stall_integer_unit` | per baby core, cycles the RV cost model held an instruction, split by reason |
 | `busy_cycles` | per Tensix backend unit, the occupancy the cost tables charged |
+| `bookkeeping_cycles` | a **subset** of the same cycles: Matrix Unit opcodes that move no operand data (RWC counters, dvalid flags, SrcB operand cache). `busy_cycles - bookkeeping_cycles` is datapath work, which is what an energy model wants and an occupancy reader does not |
 | `noc_flight_cycles`, `noc_txns_timed` | per NIU, issue→arrival summed over timed transactions |
 
 The stall and busy counters are **absent, not zero**, with

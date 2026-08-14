@@ -46,7 +46,12 @@ _EXTRA_CYCLE_COUNTERS = {"instr_retired"}
 #: ``stall_cycles`` is the sum of the ``stall_<reason>`` rows and
 #: ``tensix_stall_cycles`` the sum of the ``tensix_stall_<reason>`` rows, so
 #: ranking either alongside its parts doubles every stall it names.
-_REDUNDANT = {"stall_cycles", "tensix_stall_cycles"}
+#: ``bookkeeping_cycles`` is the same shape from the other end -- a *subset* of
+#: one unit's ``busy_cycles``, cut by whether the opcode moved any operand
+#: data -- so ranking it beside ``busy_cycles`` double-counts every cycle it
+#: names. It is published for the energy activity vector, which asks about
+#: work rather than occupancy; query it directly.
+_REDUNDANT = {"stall_cycles", "tensix_stall_cycles", "bookkeeping_cycles"}
 #: Counts, not cycles, despite sitting under a stall prefix.
 _STALL_VOLUMES = {"tensix_stall_episodes"}
 

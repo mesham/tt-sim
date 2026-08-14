@@ -92,9 +92,18 @@ ORDER   BY cycles DESC;
 --    length of the run. `busy_cycles` counts only opcodes the cost tables
 --    have an opinion about, so a unit the tables leave uncosted (the
 --    unpacker, the config unit, the mover) reports 0 rather than a guess.
+--
+--    `bookkeeping` is a SUBSET of `busy`, not extra time: the part of the
+--    Matrix Unit's occupancy spent on opcodes that move no operand data
+--    (SETRWC, INCRWC, CLEARDVALID, GATESRCRST). `busy - bookkeeping` is
+--    datapath work. Every SFPU kernel tt-metal builds pays tens of these
+--    per tile op, so on a vector workload the two columns are far apart.
+--    Never add them.
 -- -----------------------------------------------------------------------
 SELECT  unit,
         SUM(value) FILTER (WHERE counter_name = 'busy_cycles') AS busy,
+        SUM(value) FILTER (WHERE counter_name = 'bookkeeping_cycles')
+                                                               AS bookkeeping,
         SUM(value) FILTER (WHERE counter_name = 'compute_ops') AS ops,
         ROUND(100.0 * SUM(value) FILTER (WHERE counter_name = 'busy_cycles')
               / MAX(cycle), 2)                                 AS pct_of_run

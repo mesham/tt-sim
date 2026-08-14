@@ -29,12 +29,21 @@ module never fits it.
 WHAT A SESSION HAS TO CARRY
 ---------------------------
 
-The 2026-08-13 card session recorded ``samples=0, power_w=0`` for every arm slot
-of a three-cycle run and still looked like a finished measurement. Three of the
-gates below exist because of that session and refuse the shapes it had: a row
-with no telemetry (``telemetry``), a cycle missing a slot (``schedule``), and a
-clock that moved under the measurement (``clock`` -- its baselines read 61.7 W at
-1350 MHz and ~39 W at 800 MHz in consecutive cycles).
+Two card sessions have been run, both on 2026-08-13, and both are why this module
+looks the way it does.
+
+The **first** recorded ``samples=0, power_w=0`` for every arm slot of a
+three-cycle run and still looked like a finished measurement (``tt-smi`` 3.0.32
+panicked on a device held by tt-metal and the sampler swallowed it). Three gates
+refuse the shapes it had: a row with no telemetry (``telemetry``), a cycle
+missing a slot (``schedule``), and a clock that moved under the measurement
+(``clock``).
+
+The **second**, after the tool upgrade, collected cleanly -- 33/33 slots ok, zero
+sample failures, no thermal trips -- and is preserved at
+``perfbench/card-sessions/2026-08-13-energybench/``. It is a sound measurement
+that this module refuses, and it changed the arithmetic rather than only the
+guards: see ``baseline_clock`` and ``target_triviality`` below, and THE MODEL.
 
 WHERE THE COEFFICIENTS LIVE, AND WHY NOT HERE
 ---------------------------------------------
@@ -68,8 +77,10 @@ THE GATES
 ---------
 
 A fit is only meaningful if the measurement it is fitted to actually said
-something. Eleven gates run before any ranking is reported, and a failure is a
-**refusal**, not a warning:
+something. Thirteen checks run before any ranking is reported. Twelve of them
+are **refusals**, not warnings; the thirteenth (``baseline_clock``) is a
+**reported finding** that changes what the arithmetic is allowed to do rather
+than a refusal, because the thing it detects cannot be fixed by re-running:
 
 ``telemetry``
     Every row must carry at least one **successful** power sample and a finite
@@ -86,13 +97,34 @@ something. Eleven gates run before any ranking is reported, and a failure is a
     ``tt_therm_trip_count`` must not move. A part that throttled was not running
     the workload the activity vector describes.
 ``clock``
-    No slot's AI clock may drift more than ``--max-clock-drift-pct`` within
-    itself, and the session's slots must agree on it to the same tolerance. This
-    is the confound that made the 2026-08-13 baselines swing 42%: 1350 MHz in one
-    cycle, 800 MHz in the next, differenced against each other.
+    The session's **arm** slots must agree on their clock to within
+    ``--max-clock-drift-pct``, and there must be a clock record at all. A slot
+    whose clock moved *within itself* past the same cap is **excluded from the
+    fit and named in the report** instead of refusing the session -- one
+    contaminated slot must not discard 32 sound ones, and what decides whether
+    the survivors are still a session is ``repeats``, counting surviving rows.
+    The 2026-08-13 session has exactly one such row (cycle 1's ``rv-800000``,
+    41.4% drift, 800-1350 MHz within the slot) and it takes that arm down to two
+    repeats, so ``repeats`` refuses -- which tells the operator to run more
+    cycles rather than merely that a clock moved. The across-session half
+    deliberately excludes the baseline rows: see ``baseline_clock``.
+``baseline_clock`` (a finding, not a refusal)
+    The baseline slot launches nothing **by definition**, so a DVFS board drops
+    to its idle clock state for it: the 2026-08-13 card session measured every
+    baseline at 800 MHz and every arm at 1350 MHz. That is not drift and it is
+    not fixable at the source -- ``tt-smi`` 6.2.0 offers no clock-pinning option
+    -- so refusing the session on it would be a gate that can never pass. What it
+    actually means is narrower and worth naming: **baseline subtraction is
+    invalid for this session**, because the two rows are two DVFS states rather
+    than one board with and without a workload. The fit therefore does not
+    subtract it (see THE MODEL: ``P_floor`` is fitted from the arm rows), the
+    baseline stays a session-completeness check and a recorded diagnostic, and
+    this check reports the finding instead of refusing.
 ``repeats``
-    Every label needs at least ``--min-repeats`` interleave cycles. One
-    observation has no spread and so no noise floor.
+    Every label needs at least ``--min-repeats`` **surviving** interleave cycles.
+    One observation has no spread and so no noise floor. Counting survivors is
+    what keeps the ``clock`` exclusion honest: cutting a contaminated row out has
+    to be able to cost the session, and this is where it does.
 ``samples``
     Every measured row needs at least ``--min-samples`` telemetry samples. At
     ~1 Hz that is a floor on how long the arm ran.
@@ -100,17 +132,32 @@ something. Eleven gates run before any ranking is reported, and a failure is a
     A designated workload is run **twice per interleave cycle** under two
     labels. The two must agree within the noise floor. This is the verified-zero
     control: if the same workload measured twice in the same session disagrees,
-    the session drifted and every other difference in it is suspect.
+    the session drifted and every other difference in it is suspect. The floor
+    it is measured against is the **arm** rows' own repeatability and excludes
+    the baseline (see :func:`noise_floor`) -- this gate passes when the
+    disagreement is *below* the floor, so a floor inflated by an idle-state
+    label's DVFS swing would make the session's drift detector permissive.
 ``spread``
     The workloads' measured per-launch energies must span more than
     ``--sigma`` noise floors. Inside the noise floor there is nothing to rank,
     and a ranking reported anyway is a ranking of noise.
 ``identifiability``
     The number of fitted coefficients (activity terms plus the per-launch
-    constant) must not exceed ``n_workloads - 1``, and the design matrix's
-    condition number must be under ``--max-cond``. The first bound is what
-    leaves a degree of freedom for leave-one-out; the second is what stops two
-    collinear columns being reported as two independent findings.
+    constant plus the fitted floor) must not exceed ``n_workloads - 1``, and the
+    design matrix's condition number must be under ``--max-cond``. The first
+    bound is what leaves a degree of freedom for leave-one-out; the second is
+    what stops two collinear columns being reported as two independent findings,
+    and it is also what decides whether ``P_floor`` and ``c_launch`` are
+    separable at all in a given session's spread of launch rates. What is
+    *offered* to it is the design's own term set -- see THE TERM SET -- and that
+    restriction is a statement about the experiment, never about this gate's
+    verdict.
+``target_triviality``
+    The fit target must not be reproducible **without any activity term**. The
+    same design with only the floor and the launch column is fitted to the
+    target, and its R² must be under ``--max-triviality-r2``. A model that
+    reaches the measured ordering knowing nothing but how often each workload
+    launched is not evidence about activity, however good its Spearman looks.
 
 Every one of those is proven to fire in **both** directions in
 ``tt_sim/perf/energy_rank_test.py`` -- a gate that cannot fail is as damaging as
@@ -121,14 +168,104 @@ THE MODEL
 
 ::
 
-    E_launch(w)  =  c0  +  Σ_j c_j · a_j(w)                      [joules/launch]
-    P_board(w)   =  P_baseline  +  rate(w) · E_launch(w)         [watts]
+    E_launch(w)  =  c_launch  +  Σ_j c_j · a_j(w)                [joules/launch]
+    P_board(w)   =  P_floor  +  rate(w) · E_launch(w)            [watts]
 
-so the regression target is ``y(w) = (P(w) - P_baseline) / rate(w)``, per-launch
-energy, and the design matrix is the activity vector with a leading column of
-ones for the launch machinery. Coefficients are constrained non-negative
-(Lawson-Hanson NNLS): a negative energy per instruction is not a finding, it is
-a fit artefact, and allowing one lets the model buy accuracy with nonsense.
+The regression target is **measured power itself**, ``y(w) = P(w)``, and the
+design matrix is ``[1, rate(w), rate(w)·a_j(w)]`` -- a column of ones for
+``P_floor``, a bare rate column for the launch machinery, and the activity terms
+scaled by the rate they were paid at. ``P_floor`` is a **free, non-negative
+fitted coefficient estimated from the arm rows alone**.
+
+That is a change from the original parameterisation, which subtracted the
+measured baseline and fitted ``y(w) = (P(w) - P_baseline)/rate(w)``. Two things
+killed it, and the 2026-08-13 card session showed both:
+
+* **The busy-state floor is not measurable on a DVFS board.** An idle board is
+  not the busy board minus the kernel; it is in a different clock state (800 MHz
+  against the arms' 1350 MHz, measured). There is no idle measurement of the busy
+  state to subtract, so the floor has to be **extrapolated from the arms** --
+  which is exactly what a free coefficient does.
+* **Subtracting it made the target trivial.** With the baseline 30 W below every
+  arm and the arms within 2.9 W of each other, ``(P - P_baseline)`` was ~91% a
+  fixed DVFS step, and dividing that by a rate varying 5.3x left a target that is
+  essentially the launch period. Regressed on ``1/rate`` alone, with no activity
+  term at all, it scored **R² = 0.9995**. Fitting the floor removes the constant
+  from the numerator instead of stamping it on every point; the
+  ``target_triviality`` gate is what checks the result.
+
+``rate(w)`` varies 5.3x across the arms, which is what makes ``P_floor`` and
+``c_launch`` distinguishable *in principle*; whether they are distinguishable in
+a given session is an empirical question about that session's design matrix, and
+the ``identifiability`` gate is where it is answered. Nothing here special-cases
+around it.
+
+Coefficients are constrained non-negative (Lawson-Hanson NNLS): a negative energy
+per instruction is not a finding, it is a fit artefact, and allowing one lets the
+model buy accuracy with nonsense. A negative floor is likewise not a board.
+
+THE TERM SET
+------------
+
+Which activity terms are fitted is decided by :data:`DESIGNED_ARM_TERMS` -- a
+transcription of the arms table in ``perfbench/energybench/README.md``, one
+non-idle arm to the one term that arm was **built** to move. It is a constant in
+this file, and :func:`designed_terms` is handed **arm names and nothing else**:
+no matrix, no condition number, no target, no fit. That is the point, and it is
+structural rather than asserted. The term set is a property of the experiment,
+fixed before any board was plugged in, and a reader in a year has to be able to
+see that it could not have been chosen by looking at the data, because the
+function that chooses it is not given any.
+
+The alternative -- deriving each arm's term from whichever activity column that
+arm's rows dominate -- was rejected. It would adapt automatically when the arms
+change, which is its only advantage, and in exchange it would make the fitted
+model a function of the collected matrix: a search over the data, differing from
+the laundering this module exists to prevent only in which statistic it searched
+on. A constant has to be edited by a person, in the same commit as the README's
+arms table, which is exactly the friction wanted.
+
+Two bounds apply, and the smaller wins::
+
+    budget = min(len(designed terms present), n_workloads - 3)
+
+The degrees-of-freedom bound (two coefficients spent before any activity term,
+one spared for leave-one-out) still holds and is unchanged. What changed is that
+it is **no longer the only bound**. It grows with the number of measured rows,
+and rows are not directions: the 2026-08-13 session's five arms at two scales
+give nine workloads and, at the old budget of six, the selector reached six deep
+into eleven mutually-correlated counters and the design's condition number came
+back at 2.34e7 against a 1e6 cap. Adding a third scale makes it worse, not
+better -- thirteen workloads, a budget of ten, and **all eleven** possible
+ten-term subsets land past 3.2e16 -- because an extra scale interpolates between
+existing rows and adds no new activity direction. The same session fitted with
+the four terms its arms were designed to separate conditions at 616 (713 with
+the third scale added).
+
+Three rules keep this from becoming a back door:
+
+* **A term outside the designed set is admitted only by ``--terms``**, which is a
+  human writing the term set down before the run. The report and the coefficient
+  file stamp such a fit ``operator-specified`` rather than ``designed``, so a
+  reader can always tell which model was fitted. It is never admitted because it
+  improved the conditioning, the fit or a gate's verdict -- an override still
+  faces ``identifiability`` unchanged, and naming more terms than the design
+  supports is refused there rather than fitted.
+* **An arm the mapping does not know is a hard error.** :func:`designed_terms`
+  raises ``ValueError`` naming the arm rather than silently fitting whatever
+  terms it did recognise, because a model quietly smaller than the one reported
+  is the failure this whole file is built around.
+* **A designed term that cannot be fitted is named in the report.** If it has no
+  spread across these workloads (a cost-model-off column of zeros), is an exact
+  linear duplicate of another designed column, or falls outside the
+  degrees-of-freedom bound, it is dropped and said so. When the DoF bound bites,
+  the drop order is :func:`select_terms`' relative spread -- deliberately a
+  criterion the ``identifiability`` gate does not use.
+
+The gate stays able to fail, which was the requirement: on this session's rates
+2 of the 330 four-term subsets still blow the cap, and a session that fails
+``identifiability`` with the *designed* terms is reporting something real about
+the measurement -- that the arms did not separate -- and must be refused.
 
 RANKING QUALITY
 ---------------
@@ -167,7 +304,10 @@ import numpy as np
 from tt_sim.perf.energy_activity import ACTIVITY_TERMS, load_activity
 
 #: The label of the measured idle baseline: the board with the device open and
-#: no kernel launching. It is P_static, not a workload, and is never fitted.
+#: no kernel launching. It is a **session-completeness check and a recorded
+#: diagnostic** -- the board's idle-state floor -- and is neither a workload nor
+#: the fit's reference. See ``baseline_clock`` and THE MODEL: on a DVFS board the
+#: idle state is not the busy state, so ``P_floor`` is fitted from the arms.
 BASELINE_LABEL = "baseline"
 
 #: A control row's label is the workload's with this suffix. Exactly one
@@ -181,6 +321,91 @@ FITTED_PROVENANCE = "fitted"
 
 #: Refuse to write coefficients anywhere under this directory name.
 QUARANTINE_FORBIDDEN_ROOT = "tt_sim"
+
+#: **The experiment's design, transcribed.** One entry per energybench arm, giving
+#: the single activity term that arm was *constructed* to move -- the "what it
+#: moves in the activity vector" column of the arms table in
+#: ``perfbench/energybench/README.md``, which predates every measurement this
+#: module has ever seen. ``idle`` maps to ``None``: it moves nothing by design,
+#: which is what the launch column is for.
+#:
+#: This is a hand-written constant and not a derivation, on purpose. The number of
+#: independent activity directions in a session is set by the number of distinct
+#: **arms**, not by the number of rows, and the arms table is where that number
+#: was decided -- a priori, on paper. Restricting the fit to these terms is
+#: therefore honouring the design. Choosing terms by which set conditions best,
+#: fits best or passes ``identifiability`` would be laundering, and the structural
+#: difference is that :func:`designed_terms` is handed arm **names** and is never
+#: given the design matrix, the target or any gate's threshold.
+#:
+#: Changing an arm means editing this table by hand, in the same commit as the
+#: README's arms table. That friction is the feature.
+DESIGNED_ARM_TERMS: dict[str, str | None] = {
+    "idle": None,  # a kernel that returns immediately: the launch machinery alone
+    "rv": "instr_retired",  # a dependent integer chain on BRISC
+    "noc": "noc_bytes_total",  # barriered DRAM->L1 reads on BRISC
+    # matmul_tiles on two RESIDENT tiles. **arith, not busy**: the Matrix Unit
+    # also executes the RWC/dvalid bookkeeping every compute kernel pays, and
+    # the `sfpu` arm pays 41 of those per iteration against zero matrix
+    # arithmetic ops -- so `matrix_busy_cycles` is a column BOTH arms move and
+    # is not the thing an arm was built to isolate. See the "Matrix arithmetic
+    # is not matrix occupancy" section of tt_sim.perf.energy_activity.
+    "mm": "matrix_arith_cycles",
+    "sfpu": "sfpu_busy_cycles",  # Int32 tile add on the same two resident tiles
+}
+
+
+def arm_of(activity_row: dict) -> str:
+    """Which arm an activity row belongs to.
+
+    The ``arm`` column, written by :mod:`tt_sim.perf.energy_activity`. A row from
+    an older CSV that lacks it falls back to the label prefix, since a label is
+    ``<arm>-<inner>`` by the contract both scripts join on.
+    """
+    arm = str(activity_row.get("arm") or "").strip()
+    if arm:
+        return arm
+    return str(activity_row.get("label", "")).split("-")[0]
+
+
+def designed_terms(arms) -> list[str]:
+    """The terms the arms that ran were **built** to separate, in schema order.
+
+    Takes arm **names** -- metadata about which workloads were scheduled -- and
+    nothing else. It is never handed the activity matrix, the measured power, a
+    condition number or a gate threshold, and that is the whole argument for why
+    restricting the fit to what it returns is not a search over the data. Every
+    value it can return was written down in :data:`DESIGNED_ARM_TERMS` before any
+    board was plugged in.
+
+    An arm with no entry raises. It is tempting to skip it and fit the terms that
+    *were* recognised, and that is precisely the failure this module is built
+    against: the fit would then be of a smaller model than the report describes,
+    silently. A new arm is a change to the design, so it needs a line in the
+    table and a line in the README's arms table, by hand.
+    """
+    seen = list(dict.fromkeys(arms))
+    unknown = [a for a in seen if a not in DESIGNED_ARM_TERMS]
+    if unknown:
+        raise ValueError(
+            f"activity CSV carries arm(s) {unknown} that are not in "
+            "DESIGNED_ARM_TERMS, so there is no a-priori statement of which term "
+            "they were built to move. Add them to that table (and to the arms "
+            "table in perfbench/energybench/README.md), or name the term set "
+            "explicitly with --terms. Refusing to fit a model smaller than the "
+            f"one being reported. Known arms: {sorted(DESIGNED_ARM_TERMS)}"
+        )
+    wanted = {DESIGNED_ARM_TERMS[a] for a in seen} - {None}
+    off_schema = sorted(t for t in wanted if t not in ACTIVITY_TERMS)
+    if off_schema:
+        raise ValueError(
+            f"DESIGNED_ARM_TERMS names term(s) {off_schema} that are not in "
+            "tt_sim.perf.energy_activity.ACTIVITY_TERMS -- the design and the "
+            "activity schema have drifted apart"
+        )
+    # Schema order, so the reported column order never depends on which arm was
+    # listed first anywhere.
+    return [t for t in ACTIVITY_TERMS if t in wanted]
 
 
 # ---------------------------------------------------------------------------
@@ -257,12 +482,32 @@ def nnls(A: np.ndarray, y: np.ndarray, max_iter: int = 200) -> np.ndarray:
 
 @dataclass
 class GateResult:
+    """One check's verdict.
+
+    ``advisory`` marks a check whose failure is a **named finding rather than a
+    refusal**: it is reported, it is recorded in the coefficient file, and it
+    changes what the arithmetic is allowed to do, but it does not throw the
+    session away. Exactly one check is advisory (``baseline_clock``) and the
+    reason is written out at its definition -- refusing on a confound that no
+    setting of the instrument can remove would be a gate that can never pass,
+    which this module treats as being as bad as one that can never fail.
+    """
+
     name: str
     passed: bool
     detail: str
+    advisory: bool = False
+
+    @property
+    def refuses(self) -> bool:
+        return not self.passed and not self.advisory
 
     def line(self) -> str:
-        return f"  [{'PASS' if self.passed else 'REFUSE'}] {self.name}: {self.detail}"
+        if self.passed:
+            tag = "PASS"
+        else:
+            tag = "FINDING" if self.advisory else "REFUSE"
+        return f"  [{tag}] {self.name}: {self.detail}"
 
 
 @dataclass
@@ -271,6 +516,12 @@ class RankReport:
     refused: bool = False
     labels: list[str] = field(default_factory=list)
     terms: list[str] = field(default_factory=list)
+    #: Where :attr:`terms` came from: ``"designed"`` when it is the arms table's
+    #: own term set (:data:`DESIGNED_ARM_TERMS`, fixed a priori), or
+    #: ``"operator-specified"`` when a human pre-registered it with ``--terms``.
+    #: It is reported, and stamped into the coefficient file, because which model
+    #: was fitted is not something a later reader should have to reconstruct.
+    term_source: str = "designed"
     coefficients: dict[str, float] = field(default_factory=dict)
     measured_energy: dict[str, float] = field(default_factory=dict)
     predicted_energy: dict[str, float] = field(default_factory=dict)
@@ -278,8 +529,22 @@ class RankReport:
     spearman_in_sample: float = float("nan")
     spearman_loo: float = float("nan")
     ratio_errors: dict[str, float] = field(default_factory=dict)
+    #: The RMS of each label's across-cycle SD over the **arm** rows that
+    #: entered the fit. The baseline is not in it: see :func:`noise_floor`.
     noise_floor_w: float = 0.0
+    #: The board's idle-state floor as *measured* by the baseline slot. A
+    #: diagnostic: on a DVFS board it is a different clock state from the arms
+    #: and nothing is differenced against it.
     baseline_w: float = 0.0
+    #: The busy-state floor as *fitted* from the arm rows -- the model's
+    #: reference, and the number the per-launch energies are taken against.
+    p_floor_w: float = float("nan")
+    #: R² of the target against the floor-plus-launch model alone, i.e. how much
+    #: of the ranking is reproducible without knowing any activity at all.
+    target_triviality_r2: float = float("nan")
+    #: Rows cut out of the fit, one line each, saying which row and why. A row
+    #: that is not fitted must never be silently absent.
+    excluded_rows: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -291,11 +556,18 @@ class RankReport:
             "quantity": QUANTITY,
             "refused": self.refused,
             "gates": [
-                {"name": g.name, "passed": g.passed, "detail": g.detail}
+                {
+                    "name": g.name,
+                    "passed": g.passed,
+                    "advisory": g.advisory,
+                    "detail": g.detail,
+                }
                 for g in self.gates
             ],
+            "model": MODEL_FORM,
             "labels": self.labels,
             "terms": self.terms,
+            "term_source": self.term_source,
             "coefficients": self.coefficients,
             "measured_energy_j": self.measured_energy,
             "predicted_energy_j": self.predicted_energy,
@@ -305,6 +577,9 @@ class RankReport:
             "ratio_errors": self.ratio_errors,
             "noise_floor_w": self.noise_floor_w,
             "baseline_w": self.baseline_w,
+            "p_floor_w": self.p_floor_w,
+            "target_triviality_r2": self.target_triviality_r2,
+            "excluded_rows": self.excluded_rows,
             "notes": self.notes,
         }
 
@@ -357,6 +632,8 @@ def load_measured(path: Path | str) -> list[dict]:
                 "launches": float(raw.get("launches", 0) or 0),
                 "wall_s": float(raw.get("wall_s", 0) or 0),
                 "aiclk_mean": _optional_float(raw, "sysfs_aiclk_mean"),
+                "aiclk_min": _optional_float(raw, "sysfs_aiclk_min"),
+                "aiclk_max": _optional_float(raw, "sysfs_aiclk_max"),
                 "aiclk_drift_pct": _optional_float(raw, "sysfs_aiclk_drift_pct"),
                 "therm_trip_delta": _optional_float(raw, "therm_trip_delta"),
                 "pre_idle_w": _optional_float(raw, "pre_idle_w"),
@@ -378,16 +655,46 @@ def _by_label(rows: list[dict]) -> dict[str, list[dict]]:
 
 
 def noise_floor(grouped: dict[str, list[dict]]) -> float:
-    """The session's own noise floor, in watts.
+    """The session's own noise floor, in watts, over the **arm rows only**.
 
-    Defined as the RMS of each label's across-cycle standard deviation. It is
-    derived from this session's repeats rather than assumed, because a floor
-    carried over from another session is exactly the drift the control exists to
-    catch.
+    Defined as the RMS of each label's across-cycle standard deviation, taken
+    over the rows that actually enter the fit: the caller passes rows that have
+    already survived the within-slot clock exclusion, and the baseline label is
+    dropped here.
+
+    It is derived from **this session's** repeats rather than assumed, because a
+    floor carried over from another session is exactly the drift the control
+    exists to catch. And it is derived from this session's **arm** repeats
+    specifically, because an idle-state label's variance is not the noise of the
+    busy-state measurements it would be used to judge. The baseline slot
+    launches nothing by definition, so on a DVFS board it sits in the idle clock
+    state (see ``_baseline_clock_gate``) and its across-cycle swing measures how
+    that state wandered, not how repeatable the arms are. The 2026-08-13 session
+    puts a size on the mistake: its three baselines read 34.97, 39.28 and
+    38.97 W -- an SD of 2.40 W against 0.09-1.15 W for every arm -- and letting
+    that one label in inflates the floor from 0.441 W to 0.838 W, a factor of
+    1.9. The gates are then measured against the wrong yardstick, and
+    ``control`` in particular passes when the twin disagreement is *below*
+    ``sigma * floor``, so an inflated floor makes the session's own drift
+    detector roughly twice as permissive as intended -- in the same session
+    whose ``baseline_clock`` finding says baseline subtraction is invalid.
+
+    The **control** label is counted, deliberately. It is a genuine arm
+    measurement in the busy clock state and its across-cycle spread is as
+    legitimate a repeat as any other label's. The circularity worry -- that the
+    ``control`` gate would then be judged partly against its own variance --
+    does not survive being looked at: that gate compares the control's *mean*
+    against its twin's, while the floor is built from within-label across-cycle
+    spread, and any session-level wander that inflated the control's spread
+    inflated its twin's identically. The twin is in the floor whatever is done
+    with the control, so dropping the control alone breaks no loop; it only
+    discards one repeat out of ten. Nor is keeping it self-serving: on the
+    2026-08-13 session including the control *lowers* the floor (0.441 W against
+    0.463 W without it) and so makes its own gate stricter.
     """
     sds = []
-    for rows in grouped.values():
-        if len(rows) < 2:
+    for label, rows in grouped.items():
+        if label == BASELINE_LABEL or len(rows) < 2:
             continue
         sds.append(float(np.std([r["power_w"] for r in rows], ddof=1)))
     if not sds:
@@ -418,8 +725,18 @@ def design_condition(design: np.ndarray) -> float:
     return float(np.linalg.cond(design / norms))
 
 
-def select_terms(matrix: np.ndarray, term_names: list[str], budget: int) -> list[int]:
+def select_terms(
+    matrix: np.ndarray,
+    term_names: list[str],
+    budget: int,
+    base: np.ndarray | None = None,
+) -> list[int]:
     """Pick at most ``budget`` activity columns, greedily by relative spread.
+
+    ``base`` is the part of the design that is there whatever is selected -- the
+    floor and launch columns. It matters: a column that duplicates *the rate*
+    is as degenerate as one that duplicates another activity term, and a
+    duplicate check run against a bare column of ones would not see it.
 
     Two exclusions, and only two, both of them arithmetic:
 
@@ -434,7 +751,20 @@ def select_terms(matrix: np.ndarray, term_names: list[str], budget: int) -> list
     quietly avoided here. That split is deliberate: a selector that filtered on
     the gate's own threshold would make the gate incapable of failing, which is
     as bad as one incapable of passing.
+
+    Note what this function is *given*, because that is where the restriction to
+    the design lives. :func:`analyse` offers it only the columns in
+    :func:`designed_terms` -- fixed a priori by the arms table, and computed from
+    arm names alone. That narrowing happens **outside** here and for a reason
+    that has nothing to do with conditioning. Inside, nothing has changed: no
+    ``max_cond``, no target, no gate verdict is visible to this code, and the
+    relative-spread ordering it ranks by is deliberately not the criterion the
+    gate applies. It only decides which designed terms go first when the
+    degrees-of-freedom bound cannot afford all of them.
     """
+    if base is None:
+        base = np.ones((matrix.shape[0], 1))
+    base = np.asarray(base, dtype=float).reshape(matrix.shape[0], -1)
     spreads = []
     for j, name in enumerate(term_names):
         col = matrix[:, j]
@@ -452,9 +782,7 @@ def select_terms(matrix: np.ndarray, term_names: list[str], budget: int) -> list
         if len(chosen) >= budget:
             break
         trial = chosen + [j]
-        design = np.column_stack(
-            [np.ones(matrix.shape[0])] + [matrix[:, k] for k in trial]
-        )
+        design = np.column_stack([base] + [matrix[:, k] for k in trial])
         if design_condition(design) > DEGENERATE_COND:
             continue
         chosen = trial
@@ -462,7 +790,46 @@ def select_terms(matrix: np.ndarray, term_names: list[str], budget: int) -> list
 
 
 def _fit(design: np.ndarray, y: np.ndarray) -> np.ndarray:
-    return nnls(design, y)
+    """NNLS on a column-normalised design, rescaled back.
+
+    The design now mixes a column of ones, a launch rate in the hundreds and
+    activity-times-rate products in the millions, and an unscaled least squares
+    over that loses digits for no reason. Scaling columns by a positive number
+    leaves the non-negative solution unchanged, so this is arithmetic hygiene and
+    not a modelling choice -- the conditioning *question* is still asked, and
+    answered by the ``identifiability`` gate on the same normalised basis.
+    """
+    design = np.asarray(design, dtype=float)
+    norms = np.linalg.norm(design, axis=0)
+    norms[norms == 0] = 1.0
+    return nnls(design / norms, y) / norms
+
+
+def reduced_model_r2(design: np.ndarray, y: np.ndarray) -> float:
+    """R² of ``y`` against ``design``, by **unconstrained** least squares.
+
+    Used by the ``target_triviality`` gate with the activity columns stripped
+    off, so what comes back is "how much of the target the floor and the launch
+    rate alone already explain". ``nan`` when ``y`` has no variance to explain.
+
+    Deliberately OLS and not the model's NNLS. The question here is how much of
+    the target a launch rate can reproduce, not how much it can reproduce while
+    obeying a sign constraint that the trivial model has no need of: clamping a
+    reduced fit at the non-negativity boundary would report R² = 0 for a target
+    a rate explains perfectly with the opposite sign. Unconstrained is the
+    strictly more conservative measurement, and a gate that errs should err
+    towards refusing.
+    """
+    y = np.asarray(y, dtype=float)
+    design = np.asarray(design, dtype=float)
+    if len(y) < 2:
+        return float("nan")
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    if ss_tot <= 0:
+        return float("nan")
+    coeff, *_ = np.linalg.lstsq(design, y, rcond=None)
+    resid = y - design @ coeff
+    return float(1.0 - float(np.sum(resid**2)) / ss_tot)
 
 
 def _describe(row: dict) -> str:
@@ -565,15 +932,54 @@ def _thermal_gate(rows: list[dict]) -> GateResult:
     )
 
 
-def _clock_gate(rows: list[dict], max_drift_pct: float) -> GateResult:
-    """The AI clock must hold still within a slot and across the session.
+def _spread_pct(clocks: list[float]) -> float:
+    mean_clock = float(np.mean(clocks)) if clocks else 0.0
+    return 100.0 * (max(clocks) - min(clocks)) / mean_clock if mean_clock else 0.0
+
+
+def within_slot_drifted(rows: list[dict], max_drift_pct: float) -> list[dict]:
+    """The rows whose AI clock moved **during** the slot, past the cap.
+
+    Such a row's mean is a mean over two DVFS states and is not a measurement of
+    either. The 2026-08-13 session has exactly one: cycle 1's ``rv-800000``
+    straddled a transition -- ``sysfs_aiclk_min`` 800, ``sysfs_aiclk_max`` 1350,
+    41.4% drift -- and it shows in every other column too (``power_sd_w`` 5.14
+    against 0.1-0.9 everywhere else, a 75.0 W pre-idle probe, ``delta_w`` -6.81).
+    Every other row in that session drifted negligibly.
+
+    It is **excluded from the fit and named**, not made grounds for refusing the
+    session: one contaminated slot must not discard 32 sound ones. What decides
+    whether the survivors are still a session is the ``repeats`` gate, counting
+    surviving rows only -- which is the refusal an operator can act on ("run more
+    cycles") rather than one that just says the clock moved.
+    """
+    return [r for r in rows if (r.get("aiclk_drift_pct") or 0.0) > max_drift_pct]
+
+
+def _clock_gate(
+    rows: list[dict], kept: list[dict], excluded: list[dict], max_drift_pct: float
+) -> GateResult:
+    """The AI clock must hold still within a slot, and the **arms** must agree.
 
     The 2026-08-13 session read a baseline of 61.7 W at 1350 MHz in one cycle and
     ~39 W at 800 MHz in the next, and differenced them: a 42% swing in the
     reference, driven by a clock nothing was recording. Two checks, because there
     are two ways for it to bite -- a clock that moved *during* a slot makes that
-    slot's mean meaningless, and slots at *different* clocks cannot be
-    differenced against each other however steady each one was.
+    slot's mean meaningless, and slots at *different* clocks cannot be compared
+    against each other however steady each one was.
+
+    The across-session half runs over the **arm rows only**, and only over those
+    that survived the within-slot exclusion. The baseline is left out not to be
+    kind to it but because including it made this gate unsatisfiable: a slot that
+    launches nothing sits in the board's idle DVFS state by definition, so
+    baseline-versus-arm is always two clock states and never drift. That
+    comparison is real and is made -- by ``_baseline_clock_gate``, which reports
+    it as a finding and changes the arithmetic.
+
+    What is left here can still fail, and that is the point: a session with no
+    clock record at all, or one whose arm slots each held a *different* steady
+    clock, is refused. Only the within-slot case became an exclusion, because
+    there the damage is confined to one row and can be cut out.
     """
     missing = [_describe(r) for r in rows if r.get("aiclk_mean") is None]
     if missing:
@@ -583,32 +989,171 @@ def _clock_gate(rows: list[dict], max_drift_pct: float) -> GateResult:
             f"{len(missing)} row(s) have no clock record ({missing[0]}...): a "
             "session that cannot show its clock held still cannot be differenced",
         )
-    within = [
-        f"{_describe(r)}: {r['aiclk_drift_pct']:.2f}%"
-        for r in rows
-        if (r.get("aiclk_drift_pct") or 0.0) > max_drift_pct
-    ]
-    clocks = [r["aiclk_mean"] for r in rows]
-    mean_clock = float(np.mean(clocks))
-    across = 100.0 * (max(clocks) - min(clocks)) / mean_clock if mean_clock else 0.0
-    ok = not within and across <= max_drift_pct
-    detail = (
-        f"within-slot drift <= {max_drift_pct:g}%, across-session spread "
-        f"{across:.2f}% ({min(clocks):.0f}-{max(clocks):.0f} MHz)"
-    )
-    if within:
-        detail = (
-            "the clock moved inside "
-            + "; ".join(within[:6])
-            + f" (cap {max_drift_pct:g}%)"
+    arms = [r["aiclk_mean"] for r in kept if r["label"] != BASELINE_LABEL]
+    if not arms:  # a session of nothing but baselines; the baseline gate owns it
+        arms = [r["aiclk_mean"] for r in kept] or [r["aiclk_mean"] for r in rows]
+    across = _spread_pct(arms)
+    dropped = (
+        "; ".join(
+            f"{_describe(r)}: {r['aiclk_drift_pct']:.2f}% "
+            f"({r.get('aiclk_min', float('nan')):.0f}-"
+            f"{r.get('aiclk_max', float('nan')):.0f} MHz)"
+            if r.get("aiclk_min") is not None
+            else f"{_describe(r)}: {r['aiclk_drift_pct']:.2f}%"
+            for r in excluded[:6]
         )
-    elif across > max_drift_pct:
+        if excluded
+        else ""
+    )
+    detail = (
+        (
+            f"EXCLUDED {len(excluded)} row(s) whose clock moved inside the slot "
+            f"past {max_drift_pct:g}% -- {dropped} -- their mean is a mean over "
+            "two DVFS states; the survivors carry on and `repeats` decides "
+            "whether enough is left. "
+        )
+        if excluded
+        else f"within-slot drift <= {max_drift_pct:g}% on all {len(rows)} rows; "
+    ) + (
+        f"across-session spread over the {len(arms)} surviving arm rows "
+        f"{across:.2f}% ({min(arms):.1f}-{max(arms):.1f} MHz)"
+    )
+    ok = across <= max_drift_pct
+    if not ok:
         detail = (
-            f"slots ran at different clocks: {min(clocks):.0f}-{max(clocks):.0f} MHz "
+            f"arm slots ran at different clocks: {min(arms):.1f}-{max(arms):.1f} MHz "
             f"is a {across:.2f}% spread against a {max_drift_pct:g}% cap, so these "
-            "rows are not differenceable"
+            "rows are not comparable"
         )
     return GateResult("clock", ok, detail)
+
+
+def _baseline_clock_gate(rows: list[dict], max_drift_pct: float) -> GateResult:
+    """Did the baseline run at the arms' clock? A **finding**, not a refusal.
+
+    The baseline slot launches nothing by definition, so on a DVFS board it is
+    measured in the idle clock state while every arm is in the busy one. The
+    2026-08-13 Blackhole p150 session is the case in point: 800 MHz for every
+    baseline, 1350 MHz for every arm, a 42% gap that is not drift and cannot be
+    closed -- ``tt-smi`` 6.2.0 has no clock-pinning option (checked: only
+    ``-l/-v/-s/-ls/-f/-c/--offline/-r/--snapshot_no_tty/-glx_*/--no_reinit/
+    --use_luwen/--eth_train_skip``), so no way of running the session removes it.
+
+    Refusing on it would therefore be a check that can never pass, which this
+    module treats as being exactly as damaging as one that can never fail. So it
+    reports, and what it reports is specific: **baseline subtraction is invalid
+    for this session**. That is wired to the arithmetic rather than to a refusal
+    -- ``P_floor`` is fitted from the arm rows (see THE MODEL) and the baseline is
+    kept as a session-completeness check and a recorded diagnostic.
+    """
+    base = [
+        r["aiclk_mean"]
+        for r in rows
+        if r["label"] == BASELINE_LABEL and r.get("aiclk_mean") is not None
+    ]
+    arms = [
+        r["aiclk_mean"]
+        for r in rows
+        if r["label"] != BASELINE_LABEL and r.get("aiclk_mean") is not None
+    ]
+    if not base or not arms:
+        return GateResult(
+            "baseline_clock",
+            False,
+            "no clock record on the baseline or on the arms, so it cannot be "
+            "shown that the baseline is even in the same DVFS state as the arms",
+            advisory=True,
+        )
+    b, a = float(np.mean(base)), float(np.mean(arms))
+    gap = _spread_pct([b, a])
+    if gap <= max_drift_pct:
+        return GateResult(
+            "baseline_clock",
+            True,
+            f"baseline {b:.0f} MHz against arms {a:.0f} MHz ({gap:.2f}% apart, "
+            f"cap {max_drift_pct:g}%): the same DVFS state, so the measured "
+            "baseline is at least a like-for-like floor",
+            advisory=True,
+        )
+    return GateResult(
+        "baseline_clock",
+        False,
+        f"baseline {b:.0f} MHz against arms {a:.0f} MHz ({gap:.2f}% apart, cap "
+        f"{max_drift_pct:g}%) -- two DVFS states, not drift: BASELINE SUBTRACTION "
+        "IS INVALID for this session. Not a refusal and not fixable at the source "
+        "(tt-smi offers no clock pinning); the fit does not subtract the baseline, "
+        "it fits P_floor from the arm rows, and the baseline stays a "
+        "session-completeness check and a recorded diagnostic",
+        advisory=True,
+    )
+
+
+def _pre_idle_notes(
+    rows: list[dict], baseline_w: float, arm_floor_w: float
+) -> list[str]:
+    """Flag pre-idle readings that cannot be what they claim to be.
+
+    ``pre_idle_w`` is taken in the gap before a slot, with the device free, and
+    there is **no guarantee the board has clocked down or cooled** by then. The
+    2026-08-13 session shows what that looks like: cycle 1's slot 6 probe read
+    75.0 W -- above every arm in the session -- for a ``delta_w`` of -6.8, and
+    its slot 9 probe read 62.0 W against a measured idle baseline of 37.7 W.
+    Neither is an idle board; both caught one still coming down from the slot
+    before.
+
+    Three shapes are named, in the language of what went wrong:
+
+    * a probe **above every arm** cannot be an idle reading of anything;
+    * a **negative** ``delta_w`` on a slot that actually launched says the slot
+      drew less under load than its own "idle" reference, which is a statement
+      about the reference. (Not applied to the baseline slot, whose ``delta_w``
+      is idle minus idle and is negative as often as not: the 2026-08-13
+      baselines sit at -0.03, -0.53 and -1.22 W and none of those is a fault.)
+    * a probe **nearer the busy state than the measured idle floor** has not
+      clocked down, even when it stays below the arms -- cycle 1's slot 9 read
+      62.0 W against a 37.7 W idle baseline and a 66.0 W arm floor.
+
+    ``delta_w`` is a diagnostic column and never a fit input, so this is
+    deliberately **not** a gate: refusing a session over a column nothing is
+    computed from would be theatre. But a reader looking down that column has to
+    be told which cells are not idle readings, or the column misleads.
+    """
+    notes = []
+    suspicious = []
+    midpoint = (
+        0.5 * (baseline_w + arm_floor_w)
+        if math.isfinite(baseline_w) and math.isfinite(arm_floor_w)
+        else float("inf")
+    )
+    for row in rows:
+        pre = row.get("pre_idle_w")
+        if pre is None:
+            continue
+        power = row.get("power_w", float("nan"))
+        why = []
+        if math.isfinite(arm_floor_w) and pre > arm_floor_w:
+            why.append(
+                f"{pre:.1f} W is above the session's arm floor {arm_floor_w:.1f} W"
+            )
+        elif pre > midpoint:
+            why.append(
+                f"{pre:.1f} W is nearer the busy state than the measured idle "
+                f"floor {baseline_w:.1f} W, so the board had not clocked down"
+            )
+        if math.isfinite(power) and power - pre < 0 and row.get("rate", 0.0) > 0:
+            why.append(f"delta_w = {power - pre:.2f} W is negative")
+        if why:
+            suspicious.append(f"{_describe(row)}: " + " and ".join(why))
+    if suspicious:
+        notes.append(
+            f"{len(suspicious)} pre-idle probe(s) cannot be idle readings -- the "
+            "probe has no way to make the board clock down or cool first, so "
+            "delta_w is unusable on those rows (it is a diagnostic, not a fit "
+            "input, and nothing here is computed from it): "
+            + "; ".join(suspicious[:6])
+            + ("; ..." if len(suspicious) > 6 else "")
+        )
+    return notes
 
 
 def analyse(
@@ -619,10 +1164,10 @@ def analyse(
     min_samples: int = 20,
     max_cond: float = 1e6,
     max_clock_drift_pct: float = 5.0,
+    max_triviality_r2: float = 0.95,
     terms: list[str] | None = None,
 ) -> RankReport:
     report = RankReport()
-    grouped = _by_label(measured_rows)
 
     # -- G0 telemetry -----------------------------------------------------
     # First, and an early return: every other gate averages these numbers, and
@@ -634,15 +1179,40 @@ def analyse(
         report.refused = True
         return report
 
+    # -- row exclusion ----------------------------------------------------
+    # A row whose clock moved *during* the slot is cut out here and nowhere else;
+    # everything downstream that averages, differences or fits sees only the
+    # survivors. `schedule`, `thermal`, `telemetry` and `baseline_clock` still
+    # see every row, because those are statements about the session as it ran
+    # rather than about the numbers being fitted.
+    excluded = within_slot_drifted(measured_rows, max_clock_drift_pct)
+    dropped_ids = {id(r) for r in excluded}
+    kept = [r for r in measured_rows if id(r) not in dropped_ids]
+    report.excluded_rows = [
+        f"{_describe(r)}: AI clock drifted {r['aiclk_drift_pct']:.2f}% within the "
+        f"slot (cap {max_clock_drift_pct:g}%), so its mean is a mean over two "
+        "clock states -- excluded from the fit, not from the record"
+        for r in excluded
+    ]
+    grouped = _by_label(kept)
+
     # -- baseline ---------------------------------------------------------
+    # The baseline is no longer the fit's reference -- see THE MODEL and
+    # ``_baseline_clock_gate``: on a DVFS board an idle slot is a different clock
+    # state, not the busy state minus the kernel. It is still required, for two
+    # reasons that are worth keeping apart from each other. A session without one
+    # did not run the schedule it claims to have run (completeness), and the
+    # measured idle floor is the diagnostic that shows how far the *fitted*
+    # busy-state floor sits above it. Neither of those survives deleting the gate.
     if BASELINE_LABEL not in grouped:
         report.refused = True
         report.gates.append(
             GateResult(
                 "baseline",
                 False,
-                f"no {BASELINE_LABEL!r} rows: an idle baseline measured in the "
-                "same session is what every delta is taken against",
+                f"no usable {BASELINE_LABEL!r} rows: a session that never measured its "
+                "own idle floor did not run this schedule, and has no diagnostic "
+                "to put the fitted busy-state floor against",
             )
         )
         return report
@@ -652,36 +1222,55 @@ def analyse(
         GateResult(
             "baseline",
             True,
-            f"{baseline_w:.2f} W over {len(grouped[BASELINE_LABEL])} in-session repeats",
+            f"idle floor {baseline_w:.2f} W over "
+            f"{len(grouped[BASELINE_LABEL])} in-session repeats -- a completeness "
+            "check and a recorded diagnostic, NOT the fit reference (P_floor is "
+            "fitted from the arm rows)",
         )
     )
 
+    # The scale the `control` and `spread` gates are measured against, from the
+    # rows that enter the fit: `grouped` is already post-exclusion, and
+    # `noise_floor` drops the baseline label itself -- an idle-state repeat is
+    # not the noise of the busy-state rows it would be judging.
     floor = noise_floor(grouped)
     report.noise_floor_w = floor
 
     # -- G1 schedule, thermal, clock: was this a session at all ------------
     report.gates.append(_schedule_gate(measured_rows))
     report.gates.append(_thermal_gate(measured_rows))
-    report.gates.append(_clock_gate(measured_rows, max_clock_drift_pct))
+    report.gates.append(_clock_gate(measured_rows, kept, excluded, max_clock_drift_pct))
+    report.gates.append(_baseline_clock_gate(measured_rows, max_clock_drift_pct))
 
     # -- G2 repeats -------------------------------------------------------
+    # Counted over SURVIVING rows, which is what makes exclusion honest: cutting
+    # a contaminated row out has to be able to cost the session, and this is
+    # where it does. A label whose every row was excluded still appears here,
+    # with a count of zero, rather than vanishing into "no such label".
+    scheduled = {row["label"] for row in measured_rows}
     thin = {
-        label: len(rows) for label, rows in grouped.items() if len(rows) < min_repeats
+        label: len(grouped.get(label, []))
+        for label in sorted(scheduled)
+        if len(grouped.get(label, [])) < min_repeats
     }
     report.gates.append(
         GateResult(
             "repeats",
             not thin,
-            f"every label has >= {min_repeats} interleave cycles"
+            f"every label has >= {min_repeats} usable interleave cycles"
             if not thin
-            else f"too few repeats: {thin} (need {min_repeats})",
+            else f"too few usable repeats: {thin} (need {min_repeats})"
+            + (
+                " -- after the within-slot clock exclusions above; more "
+                "interleave cycles is the fix"
+                if excluded
+                else ""
+            ),
         )
     )
 
     # -- G3 samples -------------------------------------------------------
-    starved = sorted(
-        {row["label"] for row in measured_rows if row["samples"] < min_samples}
-    )
+    starved = sorted({row["label"] for row in kept if row["samples"] < min_samples})
     report.gates.append(
         GateResult(
             "samples",
@@ -751,28 +1340,24 @@ def analyse(
         )
     report.labels = labels
 
-    energy = {}
+    # A workload is usable when it has a vector, a rate and a power: the fit is
+    # in POWER space now (see THE MODEL), so the rate is a design column rather
+    # than a divisor, but a workload with no rate still has no row to contribute.
+    usable, rates, powers_by_label = [], {}, {}
     for label in labels:
         rows = grouped[label]
         rate = float(np.mean([r["rate"] for r in rows if r["rate"] > 0] or [0.0]))
-        power = float(np.mean([r["power_w"] for r in rows]))
         if rate <= 0:
             report.notes.append(
-                f"{label}: no launch rate, cannot convert W to J/launch"
+                f"{label}: no launch rate, so it has no place in a per-launch model"
             )
             continue
-        energy[label] = (power - baseline_w) / rate
-    report.measured_energy = energy
+        usable.append(label)
+        rates[label] = rate
+        powers_by_label[label] = float(np.mean([r["power_w"] for r in rows]))
 
     # -- G5 spread --------------------------------------------------------
-    # Only workloads that made it as far as a per-launch energy count towards the
-    # spread: one whose launch rate never arrived is not a point on the axis the
-    # gate is about.
-    powers = [
-        float(np.mean([r["power_w"] for r in grouped[label]]))
-        for label in labels
-        if label in energy
-    ]
+    powers = [powers_by_label[label] for label in usable]
     spread = (max(powers) - min(powers)) if powers else 0.0
     limit = sigma * floor
     spread_ok = bool(powers) and spread > limit
@@ -784,9 +1369,18 @@ def analyse(
             + ("" if spread_ok else " -- inside the noise floor, nothing to rank"),
         )
     )
+    # Over EVERY row, not just the fitted ones: this is a note about the record a
+    # reader is looking at, and an excluded row's columns are still in the CSV.
+    report.notes.extend(
+        _pre_idle_notes(
+            measured_rows, baseline_w, min(powers) if powers else float("nan")
+        )
+    )
 
-    # -- G6 identifiability -----------------------------------------------
-    usable = [label for label in labels if label in energy]
+    # -- the design -------------------------------------------------------
+    # [1, rate, rate*a_j]: a column of ones for the fitted busy-state floor, a
+    # bare rate column for the launch machinery, and each activity term scaled by
+    # the rate it was paid at.
     matrix = np.array(
         [
             [float(activity_by_label[label][t]) for t in ACTIVITY_TERMS]
@@ -794,36 +1388,109 @@ def analyse(
         ],
         dtype=float,
     ).reshape(len(usable), len(ACTIVITY_TERMS))
+    rate_col = np.array([rates[label] for label in usable], dtype=float)
+    base = np.column_stack([np.ones(len(usable)), rate_col])
+    scaled = matrix * rate_col[:, None]
     if terms is not None:
+        # The pre-registered override: a human named the term set, before the
+        # run, and the report says so. It is not vetted against the design --
+        # that is what makes it an override -- but it is stamped, and it still
+        # faces `identifiability` unchanged.
         unknown = [t for t in terms if t not in ACTIVITY_TERMS]
         if unknown:
             raise ValueError(f"unknown activity terms: {unknown}")
         chosen = [ACTIVITY_TERMS.index(t) for t in terms]
+        report.term_source = "operator-specified"
+    elif usable:
+        # The term set comes from THE DESIGN (see THE TERM SET): one term per
+        # non-idle arm, fixed by the arms table before any measurement existed,
+        # and computed here from arm NAMES only -- `designed_terms` is never
+        # shown the matrix, the target or a condition number.
+        design_set = designed_terms(
+            arm_of(activity_by_label[label]) for label in usable
+        )
+        design_cols = [ACTIVITY_TERMS.index(t) for t in design_set]
+        # Both bounds apply and the smaller wins. The degrees-of-freedom rule is
+        # unchanged -- two coefficients before any activity term, one spared for
+        # leave-one-out -- it is simply no longer the only bound. Rows are not
+        # directions: more workloads at more scales buy neither.
+        budget = min(len(design_set), max(0, len(usable) - 3))
+        picked = select_terms(scaled[:, design_cols], design_set, budget, base=base)
+        chosen = [design_cols[k] for k in picked]
+        report.term_source = "designed"
+        dropped = [t for t in design_set if ACTIVITY_TERMS.index(t) not in chosen]
+        if dropped:
+            report.notes.append(
+                f"designed term(s) not in the fit: {', '.join(dropped)} -- either "
+                "no spread across these workloads (an occupancy term needs "
+                "TT_SIM_COST_MODEL=1), an exact linear duplicate of another "
+                f"designed column, or beyond what {len(usable)} workloads can "
+                f"afford ({budget} term(s)). The model reported is the model "
+                "fitted; this is the arm whose direction it no longer separates"
+            )
     else:
-        # One column for the launch constant, and one degree of freedom spared
-        # so leave-one-out has something left to predict with.
-        budget = max(0, len(usable) - 2)
-        chosen = select_terms(matrix, list(ACTIVITY_TERMS), budget) if usable else []
+        chosen = []
     design_full = (
-        np.column_stack([np.ones(len(usable))] + [matrix[:, j] for j in chosen])
+        np.column_stack([base] + [scaled[:, j] for j in chosen])
         if usable
-        else np.zeros((0, 1))
+        else np.zeros((0, 2))
     )
+    report.terms = [ACTIVITY_TERMS[j] for j in chosen]
+    y = np.array([powers_by_label[label] for label in usable], dtype=float)
+
+    # -- G6 identifiability -----------------------------------------------
+    # This is also where "are P_floor and c_launch separable in this session?"
+    # gets answered. They are separable in principle when the launch rates
+    # spread; whether they are separable HERE is a fact about this design matrix,
+    # and it is checked rather than assumed or worked around.
     cond = design_condition(design_full) if usable else 0.0
-    n_coeff = len(chosen) + 1
+    n_coeff = len(chosen) + 2
     ident_ok = bool(usable) and n_coeff <= max(1, len(usable) - 1) and cond <= max_cond
     report.gates.append(
         GateResult(
             "identifiability",
             ident_ok,
-            f"{n_coeff} coefficients ({len(chosen)} terms + launch) against "
-            f"{len(usable)} workloads, condition number {cond:.3g} "
-            f"(cap {max_cond:.3g})",
+            f"{n_coeff} coefficients ({len(chosen)} {report.term_source} terms + "
+            f"launch + floor) against {len(usable)} workloads, condition number "
+            f"{cond:.3g} (cap {max_cond:.3g})"
+            + (
+                " -- the term set is the arms table's, fixed before the data "
+                "existed, so this gate is judging the design and not a search "
+                "over it"
+                if report.term_source == "designed"
+                else ""
+            ),
         )
     )
-    report.terms = [ACTIVITY_TERMS[j] for j in chosen]
 
-    # -- G7 enough points to rank -----------------------------------------
+    # -- G7 target triviality ---------------------------------------------
+    # The 2026-08-13 session's OLD target -- (P - P_baseline)/rate, with a 30 W
+    # DVFS step in the numerator and 2.9 W of actual workload difference --
+    # scored R^2 = 0.9995 against 1/rate with no activity term at all. It passed
+    # `spread`, it passed `control`, and `identifiability` looks at the design
+    # matrix rather than the target, so nothing in the set could see it. A fit
+    # would have reported an excellent leave-one-out Spearman for a ranking that
+    # was 99.95% "whichever workload launches slowest costs most". Hence this.
+    triviality = reduced_model_r2(design_full[:, :2], y) if usable else float("nan")
+    report.target_triviality_r2 = triviality
+    trivial_ok = bool(usable) and not (triviality > max_triviality_r2)
+    report.gates.append(
+        GateResult(
+            "target_triviality",
+            trivial_ok,
+            f"the floor-and-launch-only model explains R^2 = {triviality:.4f} of "
+            f"the target (cap {max_triviality_r2:g})"
+            + (
+                ""
+                if trivial_ok
+                else " -- the ranking is reproducible without knowing any "
+                "activity at all, so this session is evidence about launch rates "
+                "and not about activity"
+            ),
+        )
+    )
+
+    # -- G8 enough points to rank -----------------------------------------
     rank_ok = len(usable) >= 3
     report.gates.append(
         GateResult(
@@ -834,35 +1501,58 @@ def analyse(
         )
     )
 
-    report.refused = any(not g.passed for g in report.gates)
+    report.refused = any(g.refuses for g in report.gates)
     if report.refused:
         return report
 
     # -- fit ---------------------------------------------------------------
-    y = np.array([energy[label] for label in usable], dtype=float)
-    design = design_full
-    coeff = _fit(design, y)
+    coeff = _fit(design_full, y)
+    p_floor = float(coeff[0])
+    report.p_floor_w = p_floor
+    # The reported coefficients are the ENERGY ones, in joules per unit of
+    # activity per launch; P_floor is watts and is reported separately so the two
+    # units cannot be read off the same list.
     names = ["launch"] + report.terms
-    report.coefficients = {n: float(c) for n, c in zip(names, coeff)}
-    pred = design @ coeff
+    report.coefficients = {n: float(c) for n, c in zip(names, coeff[1:])}
+
+    # Per-launch energies, recomputed consistently from the new parameterisation:
+    # measured is what the board drew above the FITTED floor, per launch, and
+    # predicted is the model's energy sum. The floor is a single session-level
+    # constant on both sides, so the axis does not move under the point being
+    # predicted.
+    energy = {
+        label: (powers_by_label[label] - p_floor) / rates[label] for label in usable
+    }
+    report.measured_energy = energy
+    y_energy = np.array([energy[label] for label in usable], dtype=float)
+    pred = (design_full @ coeff - p_floor) / rate_col
     report.predicted_energy = {label: float(p) for label, p in zip(usable, pred)}
+    if any(v <= 0 for v in energy.values()):
+        report.notes.append(
+            "at least one workload measured below the fitted floor, so its "
+            "per-launch energy came out non-positive and it is excluded from the "
+            "ratio errors"
+        )
 
     # -- leave-one-out -----------------------------------------------------
+    # Each held-out workload is predicted by a model refitted without it --
+    # including that model's own floor, because the floor is part of what the
+    # reduced session claims to know.
     loo = {}
     for i, label in enumerate(usable):
         keep = [k for k in range(len(usable)) if k != i]
-        c = _fit(design[keep], y[keep])
-        loo[label] = float(design[i] @ c)
+        c = _fit(design_full[keep], y[keep])
+        loo[label] = float((design_full[i] @ c - c[0]) / rate_col[i])
     report.loo_predicted = loo
 
-    report.spearman_in_sample = spearman(y, pred)
-    report.spearman_loo = spearman(y, [loo[label] for label in usable])
+    report.spearman_in_sample = spearman(y_energy, pred)
+    report.spearman_loo = spearman(y_energy, [loo[label] for label in usable])
 
     # -- ratio errors ------------------------------------------------------
     errors = {}
     for i, a in enumerate(usable):
         for b in usable[i + 1 :]:
-            ya, yb = y[i], y[usable.index(b)]
+            ya, yb = y_energy[i], y_energy[usable.index(b)]
             pa, pb = loo[a], loo[b]
             if ya <= 0 or yb <= 0 or pa <= 0 or pb <= 0:
                 continue
@@ -885,15 +1575,49 @@ QUANTITY = (
     "included). Not the energy of one launch, and not a post-exit decaying edge."
 )
 
+#: The fitted model, in one line, for the same reason :data:`QUANTITY` is here:
+#: the report, the JSON and the YAML must not be able to disagree about what was
+#: fitted. The floor is FITTED from the arm rows, not subtracted from a measured
+#: idle slot -- see THE MODEL.
+MODEL_FORM = (
+    "FITTED MODEL: P_board(w) = P_floor + rate(w) * (c_launch + sum_j c_j*a_j(w)). "
+    "P_floor is a free non-negative coefficient estimated from the ARM rows: the "
+    "busy-state floor is not measurable on a DVFS board, because an idle board is "
+    "not in the busy state, so it is extrapolated rather than subtracted."
+)
+
 
 def render(report: RankReport) -> str:
-    lines = ["# energybench ranking report", "", QUANTITY, ""]
-    lines.append(f"baseline (idle, in session): {report.baseline_w:.3f} W")
-    lines.append(f"noise floor (RMS of per-label SDs): {report.noise_floor_w:.3f} W")
+    lines = ["# energybench ranking report", "", QUANTITY, "", MODEL_FORM, ""]
+    lines.append(
+        f"measured idle baseline (diagnostic, NOT subtracted): "
+        f"{report.baseline_w:.3f} W"
+    )
+    if math.isfinite(report.p_floor_w):
+        lines.append(f"fitted busy-state floor P_floor: {report.p_floor_w:.3f} W")
+    lines.append(
+        f"noise floor (RMS of per-label across-cycle SDs, ARM rows only): "
+        f"{report.noise_floor_w:.3f} W"
+    )
+    if report.terms:
+        origin = (
+            "fixed a priori by the energybench arms table -- one term per "
+            "non-idle arm, chosen before any measurement existed"
+            if report.term_source == "designed"
+            else "pre-registered by the operator with --terms"
+        )
+        lines.append(
+            f"fitted terms ({report.term_source}): {', '.join(report.terms)}\n"
+            f"  {origin}"
+        )
     lines.append("")
     lines.append("## Gates")
     lines.extend(g.line() for g in report.gates)
     lines.append("")
+    if report.excluded_rows:
+        lines.append("## Rows excluded from the fit (still part of the record)")
+        lines.extend(f"  - {line}" for line in report.excluded_rows)
+        lines.append("")
     if report.refused:
         lines.append("REFUSED: the measurement does not support a ranking claim.")
         lines.append(
@@ -908,6 +1632,7 @@ def render(report: RankReport) -> str:
     )
     for name, value in report.coefficients.items():
         lines.append(f"  {name:<24} {value:.6g}")
+    lines.append(f"  {'P_floor (W, not J)':<24} {report.p_floor_w:.6g}")
     lines.append("")
     lines.append("## Ranking quality")
     lines.append(
@@ -915,6 +1640,10 @@ def render(report: RankReport) -> str:
     )
     lines.append(
         f"  Spearman (in sample)     : {report.spearman_in_sample:.4f}   (fit, not prediction)"
+    )
+    lines.append(
+        f"  target triviality R^2    : {report.target_triviality_r2:.4f}   "
+        "(floor + launch rate alone, no activity)"
     )
     if report.ratio_errors:
         vals = sorted(report.ratio_errors.values())
@@ -984,15 +1713,26 @@ def coefficients_document(report: RankReport, sources: dict) -> str:
         "# deliberate, and tt_sim/perf/energy_quarantine_test.py asserts it.",
         "#",
         "# What these predict is STEADY-STATE REPEATED-KERNEL BOARD POWER UNDER",
-        "# SUSTAINED LOAD, sampled in slot, against a measured in-session idle",
-        "# baseline -- not the energy of a single launch, and not a post-exit",
-        "# decaying edge. They are validated on ORDERING and RATIOS, never on",
-        "# absolute joules.",
+        "# SUSTAINED LOAD, sampled in slot -- not the energy of a single launch,",
+        "# and not a post-exit decaying edge. They are validated on ORDERING and",
+        "# RATIOS, never on absolute joules.",
+        "#",
+        "# The board's busy-state floor `p_floor_w` below is FITTED from the arm",
+        "# rows and is in WATTS, not joules. It is not the measured idle baseline",
+        "# and the two are not interchangeable: on a DVFS board the idle slot is a",
+        "# different clock state, which is why nothing here subtracts it.",
+        "#",
+        "# `term_source` below says where the fitted term set came from.",
+        "# `designed` means it is the energybench arms table's own -- one term per",
+        "# non-idle arm, fixed before any board was plugged in. `operator-specified`",
+        "# means a human named it with --terms. Neither is ever chosen by which set",
+        "# conditions best or passes a gate.",
         "",
         "not_a_cost_table: true",
         f"quantity: {json.dumps(QUANTITY)}",
+        f"model: {json.dumps(MODEL_FORM)}",
         f"provenance: {FITTED_PROVENANCE}",
-        "units: joules per unit of activity, per launch",
+        "units: joules per unit of activity, per launch (p_floor_w is watts)",
         f"fitted_on: {stamp}",
         "fitting_record:",
     ]
@@ -1000,14 +1740,26 @@ def coefficients_document(report: RankReport, sources: dict) -> str:
         lines.append(f"  {key}: {json.dumps(value)}")
     lines.append(f"  spearman_loo: {report.spearman_loo:.6f}")
     lines.append(f"  spearman_in_sample: {report.spearman_in_sample:.6f}")
-    lines.append(f"  baseline_w: {report.baseline_w:.6f}")
-    lines.append(f"  noise_floor_w: {report.noise_floor_w:.6f}")
+    lines.append(f"  target_triviality_r2: {report.target_triviality_r2:.6f}")
+    lines.append(f"  p_floor_w: {report.p_floor_w:.6f}")
+    lines.append(f"  baseline_w: {report.baseline_w:.6f}  # measured idle, diagnostic")
+    lines.append(
+        f"  noise_floor_w: {report.noise_floor_w:.6f}  # arm rows only, post-exclusion"
+    )
+    lines.append(f"  term_source: {report.term_source}")
+    lines.append("  terms:")
+    for term in report.terms:
+        lines.append(f"    - {term}")
     lines.append("  workloads:")
     for label in report.labels:
         lines.append(f"    - {label}")
+    lines.append("  excluded_rows:")
+    for line in report.excluded_rows:
+        lines.append(f"    - {json.dumps(line)}")
     lines.append("  gates:")
     for gate in report.gates:
-        lines.append(f"    {gate.name}: {json.dumps(gate.detail)}")
+        verdict = "PASS" if gate.passed else ("FINDING" if gate.advisory else "REFUSE")
+        lines.append(f"    {gate.name}: {json.dumps(verdict + ': ' + gate.detail)}")
     lines.append("")
     lines.append("coefficients:")
     for name, value in report.coefficients.items():
@@ -1028,13 +1780,27 @@ def main(argv=None) -> int:
         type=float,
         default=5.0,
         help="how far the AI clock may move within a slot, and across the "
-        "session's slots, before the rows stop being differenceable (default 5)",
+        "session's ARM slots, before the rows stop being comparable (default 5). "
+        "The baseline-versus-arm gap is reported against the same cap as a "
+        "finding rather than a refusal -- see the baseline_clock gate",
+    )
+    ap.add_argument(
+        "--max-triviality-r2",
+        type=float,
+        default=0.95,
+        help="refuse when the floor-and-launch-rate model alone, with no activity "
+        "term, already explains this much of the fit target (default 0.95). A "
+        "ranking a model can reproduce without knowing any activity is not "
+        "evidence about activity",
     )
     ap.add_argument(
         "--terms",
-        help="comma-separated activity terms to fit, overriding the automatic "
-        "selection. Naming more than the design supports is refused by the "
-        "identifiability gate rather than fitted.",
+        help="comma-separated activity terms to fit, overriding the DESIGNED set "
+        "(one term per non-idle arm, from DESIGNED_ARM_TERMS). This is a "
+        "pre-registration: name the terms before the run, not after seeing which "
+        "set conditions best. The fit is stamped `operator-specified` wherever it "
+        "is reported, and naming more terms than the design supports is refused by "
+        "the identifiability gate rather than fitted.",
     )
     ap.add_argument("--report", help="write the text report here as well as stdout")
     ap.add_argument("--json", help="write the machine-readable report here")
@@ -1054,6 +1820,7 @@ def main(argv=None) -> int:
         min_samples=args.min_samples,
         max_cond=args.max_cond,
         max_clock_drift_pct=args.max_clock_drift_pct,
+        max_triviality_r2=args.max_triviality_r2,
         terms=[t.strip() for t in args.terms.split(",") if t.strip()]
         if args.terms
         else None,

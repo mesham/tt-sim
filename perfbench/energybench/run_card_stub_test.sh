@@ -470,6 +470,58 @@ import csv
 rows=list(csv.DictReader(open('$WORK/brk/power.csv')))
 print(all(r['power_w'] and r['power_bracket_w'] for r in rows))")" "True"
 
+# --- 9. the SIMULATOR half refuses an interpreter that cannot reduce -----
+# Same disease, other half of the harness. `run_sim_activity.sh` used to run a
+# full simulator boot per arm and then throw ModuleNotFoundError in the reduction
+# step, print the traceback, carry on to the next arm and finish "successfully"
+# with a short activity CSV -- a hole in the design matrix, which is exactly what
+# section 5 above stops on the card side. The prerequisite check has to fire
+# BEFORE any arm runs, and it has to let a working interpreter through.
+#
+# Both directions are made hermetic with a shadowing `elftools` on PYTHONPATH, so
+# this proves the check rather than the box's site-packages.
+echo ""
+echo "== the simulator half's prerequisite check =="
+mkdir -p "$WORK/noelftools/elftools" "$WORK/okelftools/elftools/elf"
+echo 'raise ImportError("No module named '"'"'elftools'"'"'")' \
+  > "$WORK/noelftools/elftools/__init__.py"
+: > "$WORK/okelftools/elftools/__init__.py"
+: > "$WORK/okelftools/elftools/elf/__init__.py"
+echo 'class ELFFile:  # enough for the import chain
+    pass' > "$WORK/okelftools/elftools/elf/elffile.py"
+
+PYTHONPATH="$WORK/noelftools" TT_METAL_HOME="$WORK" \
+  "$HERE/run_sim_activity.sh" --arms "" --out "$WORK/activity-bad.csv" \
+  > "$WORK/prereq-bad.log" 2>&1
+check "run_sim_activity.sh refuses an interpreter with no pyelftools" "$?" "4"
+check "...and names the module that is missing" \
+  "$(grep -c "elftools.elf.elffile: No module named" "$WORK/prereq-bad.log")" "1"
+check "...and names the deferred import that used to fail one boot too late" \
+  "$(grep -c "tt_sim.trace.report" "$WORK/prereq-bad.log")" "1"
+check "...and refuses BEFORE running an arm" \
+  "$(grep -c '^=== ' "$WORK/prereq-bad.log")" "0"
+
+# The other direction is the guard's control flow: when the imports are there,
+# the run proceeds. The interpreter is stubbed rather than hunted for, because
+# "does THIS box have pyarrow and pyelftools" is a fact about the box and would
+# make this test pass or fail for a reason that is not the harness. What is
+# asserted is that a satisfied check does not stop the run.
+cat > "$WORK/stubpy.sh" <<'EOF'
+#!/usr/bin/env bash
+cat > /dev/null            # swallow the probe script on stdin
+echo "reduction prerequisites ok (stub interpreter)"
+exit 0
+EOF
+chmod +x "$WORK/stubpy.sh"
+TT_SIM_PYTHON="$WORK/stubpy.sh" TT_METAL_HOME="$WORK" \
+  "$HERE/run_sim_activity.sh" --arms "" --out "$WORK/activity-ok.csv" \
+  > "$WORK/prereq-ok.log" 2>&1
+check "...and a satisfied check does not stop the run" "$?" "0"
+check "...which then gets as far as writing the activity CSV path" \
+  "$(grep -c 'activity vectors ->' "$WORK/prereq-ok.log")" "1"
+check "...and does not claim an incomplete matrix when nothing failed" \
+  "$(grep -c 'INCOMPLETE' "$WORK/prereq-ok.log")" "0"
+
 echo ""
 if [ "$fails" = 0 ]; then
   echo "run_card_stub_test: PASS"

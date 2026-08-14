@@ -51,6 +51,36 @@ in the CSV, :mod:`tt_sim.perf.energy_rank` drops a zero-spread column from the
 design entirely, and one named explicitly with ``--terms`` is refused by the
 identifiability gate rather than fitted.
 
+Matrix arithmetic is not matrix occupancy
+-----------------------------------------
+
+``matrix_busy_cycles`` is the Matrix Unit's **occupancy**, and it is right: the
+ISA documentation dispatches ``SETRWC`` / ``INCRWC`` / ``CLEARDVALID`` /
+``GATESRCRST`` to the Matrix Unit (FPU) and they really do take an issue slot
+each. But they move no operand data -- they update the RWC counters, the dvalid
+flags and the SrcB operand cache -- and an energy coefficient against that
+column is being asked for joules per cycle of the *matrix array*.
+
+The gap is not small. Measured on Blackhole, one ``add_int_tile<Int32>``
+iteration in the energybench ``sfpu`` arm issues **41** Matrix Unit ops (32
+``INCRWC`` from sfpi's ``dst_reg++``, 9 ``SETRWC`` from the LLK's per-face dest
+walk) and **zero** matrix arithmetic ops of any kind; one ``matmul_tiles``
+iteration in the ``mm`` arm issues 64 ``MVMUL`` and 2 ``SETRWC``. Fitted against
+``matrix_busy_cycles``, the arm built to isolate the vector unit looks like 62 %
+of a matmul arm's matrix column, and in the 2026-08-13 card session the fit
+answered by putting ``sfpu_busy_cycles`` on the non-negativity boundary at
+exactly 0 and predicting the SFPU workloads through the matrix term instead.
+
+So ``matrix_arith_cycles`` -- ``busy_cycles`` minus ``bookkeeping_cycles``, both
+published per unit by :mod:`tt_sim.trace.counters` -- is the term the ``mm`` arm
+is fitted against (:data:`tt_sim.perf.energy_rank.DESIGNED_ARM_TERMS`).
+``matrix_busy_cycles`` is left alone, still the full occupancy, because a
+performance reader wants exactly that and because a column that quietly changed
+meaning is worse than a column that was added. A CSV written before this term
+existed reads back with it at 0 in every row, which ``energy_rank`` drops as a
+zero-spread column with a note rather than fitting -- loudly wrong, which is the
+point.
+
 Usage
 -----
 
@@ -97,6 +127,8 @@ ACTIVITY_TERMS = (
     "rv_stall_cycles",
     "tensix_stall_cycles",
     "noc_flight_cycles",
+    # -- appended 2026-08-13, see MATRIX ARITHMETIC below -------------------
+    "matrix_arith_cycles",
 )
 
 #: The columns that identify a row, ahead of the terms.
@@ -120,6 +152,7 @@ def reduce_counters(
     thousand costs, to the resolution this instrument can ever reach.
     """
     out = dict.fromkeys(ACTIVITY_TERMS, 0)
+    bookkeeping = 0
     for (unit_key, counter), value in totals.items():
         unit = _unit_of(unit_key)
         if counter == "instr_retired" and unit in _RV_UNITS:
@@ -138,6 +171,13 @@ def reduce_counters(
             out["noc_flight_cycles"] += value
         elif counter == "busy_cycles" and unit in _BUSY_UNITS:
             out[f"{unit.lower()}_busy_cycles"] += value
+        elif counter == "bookkeeping_cycles" and unit == "MATRIX":
+            bookkeeping += value
+    # A subset by construction (``tt_sim.trace.counters`` charges both off the
+    # same ``ComputeEvent.duration``), so the difference cannot go negative --
+    # but a dataset assembled by hand could, and a negative activity term would
+    # be fitted rather than noticed.
+    out["matrix_arith_cycles"] = max(0, out["matrix_busy_cycles"] - bookkeeping)
     return out
 
 

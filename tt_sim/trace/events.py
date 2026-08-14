@@ -75,6 +75,67 @@ BACKEND_UNIT_ALIASES = {
 }
 
 
+#: Matrix Unit (FPU) opcodes that move **no operand data**: they update the
+#: RWC counters, the Src dvalid flags or the SrcB operand cache and nothing
+#: else. The ISA documentation dispatches them to the Matrix Unit and the cost
+#: tables charge them one cycle of it, both of which are correct -- they really
+#: do take an issue slot -- so they are counted in ``busy_cycles`` exactly as
+#: before. They are named here because *occupancy* and *work* are different
+#: questions, and one consumer (the energy activity vector in
+#: :mod:`tt_sim.perf.energy_activity`) needs the second.
+#:
+#: The distinction is not cosmetic. Every SFPU kernel tt-metal compiles pays
+#: 41 of these per ``add_int_tile`` -- 32 ``INCRWC`` from sfpi's ``dst_reg++``
+#: and 9 ``SETRWC`` from the LLK's per-face dest-address walk -- with no MVMUL
+#: anywhere in the kernel. Reading that as Matrix-Unit *work* attributes a
+#: vector workload's energy to the matrix array.
+#:
+#: Sources (tt-isa-documentation, ``WormholeB0/TensixTile/TensixCoprocessor/``):
+#: ``SETRWC.md`` and ``INCRWC.md`` ("configures counter states within the
+#: read-write counter (RWC) system"), ``CLEARDVALID.md`` (clears the Src
+#: dvalid flags), ``GATESRCRST.md`` (invalidates the one-slot SrcB operand
+#: cache, "should only be required if there are hardware bugs in the cache
+#: invalidation logic").
+MATRIX_BOOKKEEPING_OPS = frozenset(
+    {
+        "SETRWC",
+        "INCRWC",
+        "CLEARDVALID",
+        "GATESRCRST",
+    }
+)
+
+#: The complement: Matrix Unit opcodes that read or write Src/Dst rows, and so
+#: light up the datapath. ``ZEROACC`` and ``ZEROSRC`` are in here on purpose --
+#: writing zeros over a Dst bank is still writing over a Dst bank.
+#:
+#: The union of the two sets must be exactly
+#: ``MatrixUnit.OPCODE_TO_HANDLER``, which
+#: ``tt_sim/trace/observability_test.py`` asserts. The backend raises
+#: ``NotImplementedError`` for any Matrix opcode it has no handler for, so no
+#: third category can reach a ``ComputeEvent``, and a Matrix opcode added
+#: tomorrow fails that test until somebody has said which kind it is.
+MATRIX_DATAPATH_OPS = frozenset(
+    {
+        "ZEROACC",
+        "ZEROSRC",
+        "ELWADD",
+        "ELWSUB",
+        "ELWMUL",
+        "TRNSPSRCB",
+        "MOVA2D",
+        "MOVB2A",
+        "MOVB2D",
+        "MOVD2A",
+        "MOVD2B",
+        "MVMUL",
+        "DOTPV",
+        "GAPOOL",
+        "GMPOOL",
+    }
+)
+
+
 #: Every reason a :class:`StallEvent` may carry, frozen so a consumer can
 #: switch on the set exhaustively and a typo cannot silently mint a new one.
 #:

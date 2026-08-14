@@ -61,6 +61,50 @@ done
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
 
+# --- the reduction's imports, BEFORE any arm runs ------------------------
+# `tt_sim.perf.energy_activity` pulls in `tt_sim.trace.report` -> `tt_sim.trace.dwarf`
+# -> `elftools`, and an interpreter without pyelftools throws only when the FIRST
+# ARM HAS ALREADY RUN -- a full simulator boot per arm, thrown away, with the
+# traceback printed and the loop carrying on to the next arm. That is the same
+# disease as the card side's silent slots: the run "finishes", exits 0 and leaves
+# a short activity CSV that `energy_rank` then fits fewer workloads from than the
+# operator thinks it did. So the imports are proved first, and cost nothing.
+PY="${TT_SIM_PYTHON:-python3}"
+if ! PYTHONPATH="$REPO:${PYTHONPATH:-}" "$PY" - <<'EOF'
+import importlib
+import sys
+
+missing = []
+# `tt_sim.perf.energy_activity` imports at the top level and would pass on its
+# own: the chain that actually breaks is deferred to reduction time, inside
+# main(), which is precisely why the failure used to arrive one simulator boot
+# too late. So the deferred import is named here explicitly.
+for module in (
+    "numpy",
+    "elftools.elf.elffile",
+    "tt_sim.perf.energy_activity",
+    "tt_sim.trace.report",
+):
+    try:
+        importlib.import_module(module)
+    except ImportError as exc:
+        missing.append(f"  {module}: {exc}")
+if missing:
+    print("the activity reduction cannot import what it needs:", file=sys.stderr)
+    print("\n".join(missing), file=sys.stderr)
+    sys.exit(1)
+print(f"reduction prerequisites ok ({sys.executable})")
+EOF
+then
+  echo "" >&2
+  echo "REFUSING TO START: $PY cannot run the reduction step, so every arm would" >&2
+  echo "boot the simulator, produce counters and then fail to reduce them." >&2
+  echo "pyelftools is the usual one missing (tt_sim/trace/dwarf.py needs it)." >&2
+  echo "Use an interpreter that has the trace dependencies, e.g." >&2
+  echo "  TT_SIM_PYTHON=/path/to/venv/bin/python3 $0 ..." >&2
+  exit 4
+fi
+
 WORK="$(mktemp -d)"
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
@@ -71,6 +115,8 @@ echo "# counters under $WORK"
 
 status=0
 seen=" "
+expected=""
+failed=""
 for scale in $SCALES; do
 for arm in $ARMS; do
   base="${INNER[$arm]:-0}"
@@ -81,6 +127,7 @@ for arm in $ARMS; do
   # the fit has not earned.
   case "$seen" in *" $label "*) continue ;; esac
   seen="$seen$label "
+  expected="$expected$label "
   cdir="$WORK/$label"
   log="$WORK/$label.log"
   echo ""
@@ -93,21 +140,52 @@ for arm in $ARMS; do
         > "$log" 2>&1
   rc=$?
   if [ "$rc" != 0 ] || ! grep -q "Completed successfully on the device" "$log"; then
-    echo "FAILED (rc=$rc); tail of $log:"
+    echo "*** $label FAILED TO RUN (rc=$rc); tail of $log:"
     tail -n 20 "$log"
     status=1
+    failed="$failed$label "
     continue
   fi
   grep -h "^ENERGYBENCH " "$log"
 
-  PYTHONPATH="$REPO:${PYTHONPATH:-}" "${TT_SIM_PYTHON:-python3}" \
-    -m tt_sim.perf.energy_activity \
-      --counters "$cdir" --label "$label" --arm "$arm" --arch "$ARCH" \
-      --inner "$inner" --launches "$ITERS" --cost-model "$COST_MODEL" \
-      --out "$OUT" --append || status=1
+  # A reduction that throws leaves this label out of the CSV entirely, and
+  # `energy_rank` drops an unmatched label "with a note" -- so a hole here is a
+  # design matrix quietly one workload shorter than the operator believes. Say so
+  # at the time, name it again in the summary, and exit non-zero.
+  if ! PYTHONPATH="$REPO:${PYTHONPATH:-}" "$PY" \
+      -m tt_sim.perf.energy_activity \
+        --counters "$cdir" --label "$label" --arm "$arm" --arch "$ARCH" \
+        --inner "$inner" --launches "$ITERS" --cost-model "$COST_MODEL" \
+        --out "$OUT" --append; then
+    echo "*** $label REDUCTION FAILED: it ran, and produced NO ACTIVITY VECTOR."
+    status=1
+    failed="$failed$label "
+  fi
 done
+done
+
+# The activity CSV is checked against the schedule rather than trusted, for the
+# same reason `run_card.sh` writes a manifest row for a slot that crashed: a
+# missing label must not be indistinguishable from a schedule that never had it.
+missing=""
+for label in $expected; do
+  if ! grep -q "^$label," "$OUT" 2>/dev/null; then
+    missing="$missing$label "
+  fi
 done
 
 echo ""
 echo "activity vectors -> $OUT"
+if [ -n "$failed" ] || [ -n "$missing" ]; then
+  status=1
+  echo ""
+  echo "=== HANDOVER: THIS ACTIVITY MATRIX IS INCOMPLETE ==================="
+  [ -n "$failed" ] && echo "arms that failed:   $failed"
+  [ -n "$missing" ] && echo "labels not in CSV:  $missing"
+  echo "Every arm is a column of the design matrix. Do not fit this against a"
+  echo "card session and do not 'just use what came back' -- energy_rank will"
+  echo "drop the unmatched labels with a note and fit a smaller design than the"
+  echo "schedule claims. Fix the failure and re-run the missing arms."
+  echo "==================================================================="
+fi
 exit $status

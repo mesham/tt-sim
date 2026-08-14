@@ -1,0 +1,6 @@
+label,arch,arm,inner,launches,cost_model,sim_cycles,instr_retired,tensix_dispatch,noc_bytes_total,noc_txns,matrix_busy_cycles,sfpu_busy_cycles,packer_busy_cycles,unpacker_busy_cycles,thcon_busy_cycles,mover_busy_cycles,rv_stall_cycles,tensix_stall_cycles,noc_flight_cycles,matrix_arith_cycles
+idle-0,blackhole,idle,0,1,1,7499,14610.0,27.0,0.0,0.0,1.0,3.0,0.0,0.0,0.0,0.0,9602.0,0.0,0.0,1.0
+rv-400000,blackhole,rv,400000,1,1,2807599,7495845.0,27.0,0.0,0.0,1.0,3.0,0.0,0.0,0.0,0.0,6528877.0,0.0,0.0,1.0
+noc-8192,blackhole,noc,8192,1,1,3988999,7801472.0,27.0,16777216.0,16384.0,1.0,3.0,0.0,0.0,0.0,0.0,12130252.0,0.0,3686400.0,1.0
+mm-8192,blackhole,mm,8192,1,1,558899,1873768.0,795110.0,6144.0,6.0,540677.0,3.0,16.0,0.0,24604.0,0.0,907451.0,985278.0,1338.0,524292.0
+sfpu-8192,blackhole,sfpu,8192,1,1,1542199,4969905.0,4203111.0,12288.0,6.0,335886.0,1048580.0,16.0,0.0,29.0,0.0,2727813.0,1534721.0,1456.0,12.0

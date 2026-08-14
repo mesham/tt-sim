@@ -19,6 +19,14 @@ cost model supplies the state, cycle-attributing ones:
 - ``busy_cycles`` per Tensix backend unit, from
   ``ComputeEvent.duration`` — the occupancy the cost tables charged,
   which against the run length is the unit's utilisation.
+- ``bookkeeping_cycles``, a **subset** of the same ``busy_cycles``:
+  the part spent on Matrix Unit opcodes that move no operand data
+  (``tt_sim.trace.events.MATRIX_BOOKKEEPING_OPS`` — the RWC counters,
+  the dvalid flags, the SrcB operand cache). It is *not* extra time,
+  and ``tt_sim.trace.report`` treats it as redundant for exactly that
+  reason; it exists because occupancy and work are different questions
+  and an energy model needs the second. ``busy_cycles -
+  bookkeeping_cycles`` is the Matrix Unit's datapath occupancy.
 - ``noc_flight_cycles`` and ``noc_txns_timed`` per NIU, from
   ``NoCEvent.issue_cycle`` against the event's own cycle.
 - ``tensix_stall_cycles`` per Tensix thread, split by
@@ -40,6 +48,7 @@ from collections import defaultdict
 
 from tt_sim.trace.bus import get_bus
 from tt_sim.trace.events import (
+    MATRIX_BOOKKEEPING_OPS,
     ComputeEvent,
     CounterSnapshot,
     DispatchEvent,
@@ -93,6 +102,11 @@ class CounterAggregator:
             # rather than a presumed 1, so ``busy_cycles`` is never inflated by
             # ops the tables have no opinion about.
             self._counters[(e.unit_id, "busy_cycles")] += e.duration
+            if e.op in MATRIX_BOOKKEEPING_OPS:
+                # The same cycles again, cut by whether any operand data moved.
+                # Charged off the same ``duration`` so the subset relation holds
+                # by construction rather than by two tables agreeing.
+                self._counters[(e.unit_id, "bookkeeping_cycles")] += e.duration
         self._maybe_flush(e.cycle)
 
     def _on_noc(self, e: NoCEvent):
