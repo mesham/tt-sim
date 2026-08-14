@@ -182,7 +182,8 @@ class LazyTensixPool:
         the canonical SoC-physical coord — the same key the wire uses — so it
         needs no translation.
 
-        NoC 1 is keyed in **two conventions at once**: a tile claims both its
+        NoC 1 is keyed in **two conventions at once** on an architecture whose
+        workers carry mirror aliases (Wormhole): a tile claims both its
         canonical coord and its ``(GRID-1-x, GRID-1-y)`` mirror, the latter
         being what tt-metal's bank-to-noc table emits. Where the two collide
         the mirror registration wins, because it is a plain assignment and the
@@ -194,10 +195,35 @@ class LazyTensixPool:
         tile a coordinate resolves to, only when it comes into existence. The
         canonical reading is the fallback, for the keys no mirror claims (a
         Wormhole worker at ``x=9`` mirrors onto an empty column, for instance).
+
+        **When ``coord`` is itself a functional worker this is a misdelivery**,
+        and one on-demand materialisation *creates* rather than inherits: the
+        packet lands on ``mirror(coord)`` — a worker the program may never have
+        launched on — and the worker that really lives at ``coord`` is shadowed
+        from the moment it is built. Statically, a device that built only these
+        two workers would resolve ``coord`` correctly, so this is strictly worse
+        than the construction-time hazard rather than a faithful copy of it. It
+        is reported for exactly that reason (``TT_SIM_NOC1_SHADOW``); the
+        behaviour is unchanged, because matching the all-workers-built device is
+        still the least surprising answer available while the directory carries
+        two conventions.
+
+        **On Blackhole the mirror reading is skipped entirely**, because there
+        is no second convention to reconcile: no Tensix mirror alias is ever
+        registered there (``ArchProfile.noc1_tensix_mirror_aliases``), and
+        nothing tt-metal emits addresses a Blackhole worker by its mirror. Left
+        in, the inference would build a worker the program never launched on
+        *and* deliver the packet to it, and then — the aliases being gone —
+        fall through and build the real ``coord`` as well. DRAM is untouched by
+        this: its mirrors are still registered, so a DRAM key never misses.
         """
-        if noc_number == 1:
+        if noc_number == 1 and self.device.tt_device.profile.noc1_tensix_mirror_aliases:
             mirrored = self.device.tt_device.noc1_mirror(coord)
             if mirrored in self.coord_map:
+                if coord in self.coord_map:
+                    self.device.tt_device.shadow_reporter.report_materialised_mirror(
+                        coord, mirrored
+                    )
                 self.materialise(mirrored, reason="noc")
                 if coord in self.device.tt_device.noc_1_directory:
                     return

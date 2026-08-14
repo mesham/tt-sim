@@ -1,3 +1,4 @@
+import sys
 import threading
 from enum import IntEnum
 
@@ -244,6 +245,16 @@ class NullEndpoint:
     transaction the way the requester expects — reads come back zero-filled,
     marked writes get acknowledged, posted writes are silently dropped — so
     the simulated NoC doesn't deadlock the calling kernel.
+
+    **Acknowledging is deliberate, including for a coord the caller got
+    wrong.** This stands for *a tile tt-sim does not model*, not *a tile that
+    is not there*: eth, pcie, arc, router-only and the DRAM channels outside
+    the profile are all real NIUs on silicon, and they all ACK. Staying silent
+    instead would make a multicast whose rectangle overruns the worker columns
+    — which over-ACKs and hangs on hardware too — pass in the simulator with
+    two destinations never written, trading a hang for a wrong answer. The
+    diagnosability complaint is real and is answered where it belongs, in
+    :meth:`NUI.report_multicast_gaps`, which names the offending cells.
     """
 
     def __init__(self, coord):
@@ -811,6 +822,9 @@ class NUI(MemMapable, Clockable):
             # one resource further along. First-appearance order is kept so the
             # tree is walked outwards from this NIU, as the packet does.
             endpoints = [self.nui.resolve_destination(c) for c in destinations]
+            self.nui.report_multicast_gaps(
+                (x_start, y_start, x_end, y_end), destinations, endpoints
+            )
             tree = dict.fromkeys(
                 link
                 for destination in endpoints
@@ -1125,6 +1139,9 @@ class NUI(MemMapable, Clockable):
         #: and every non-bridge caller) keeps the historical behaviour and
         #: costs the resolve path nothing: it is reached only on a miss.
         self.directory_miss_hook = None
+        #: Multicast rectangles already reported as spanning cells with no
+        #: modelled tile — one line per distinct rectangle, not per packet.
+        self._reported_multicast_gaps = set()
         self.attached_memory = attached_memory
         #: ``{trid: {seq: state}}`` — what this NIU saved when it issued each
         #: request that is still awaiting a response. See
@@ -1853,6 +1870,46 @@ class NUI(MemMapable, Clockable):
 
     def set_noc_directory(self, noc_directory):
         self.noc_directory = noc_directory
+
+    def report_multicast_gaps(self, rectangle, destinations, endpoints):
+        """Warn when a multicast rectangle spans cells with no modelled tile.
+
+        The kernel tells its own software counter how many ACKs to expect
+        (``num_dests``, the argument to ``noc_async_write_multicast``); the NIU
+        counts the ACKs that actually arrive. tt-sim never sees ``num_dests`` —
+        it is not written to any command register — so the mismatch cannot be
+        diagnosed directly. What *can* be: a rectangle that covers cells no tile
+        answers for, which is how the mismatch arises in practice. Blackhole's
+        worker columns are ``1..7`` and ``10..16``, so a rectangle written as
+        ``(2,2)..(10,2)`` is 9 cells wide while the caller counted 7 workers.
+        Every cell is ACKed, the sender's expected count is 7, and
+        ``noc_async_write_barrier`` spins on an equality that never holds.
+
+        Naming the offending cells turns that unbounded hang into one line
+        pointing at the caller. Always on, and deduplicated per rectangle: it
+        fires only on a rectangle that is already outside what the caller can
+        have counted, which is always a bug worth reporting.
+        """
+        if rectangle in self._reported_multicast_gaps:
+            return
+        unknown = [
+            coord
+            for coord, endpoint in zip(destinations, endpoints)
+            if isinstance(endpoint, NullEndpoint)
+        ]
+        if not unknown:
+            return
+        self._reported_multicast_gaps.add(rectangle)
+        x_start, y_start, x_end, y_end = rectangle
+        print(
+            f"[NoC{self.noc_number} {self.id_pair}]: multicast rectangle "
+            f"({x_start}, {y_start})..({x_end}, {y_end}) covers "
+            f"{len(destinations)} cells, {len(unknown)} of which have no "
+            f"modelled tile: {unknown}. Every cell is ACKed, so if the kernel's "
+            f"num_dests counted only the real destinations its "
+            f"noc_async_write_barrier will never see its ACK count match.",
+            file=sys.stderr,
+        )
 
     def resolve_destination(self, coord):
         """Look up the endpoint a *request* is addressed to.

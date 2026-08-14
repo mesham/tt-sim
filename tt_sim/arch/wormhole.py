@@ -64,4 +64,10 @@ WORMHOLE_PROFILE = ArchProfile(
     # Wormhole packs the destination coord into the MID address register.
     noc_coord_strategy=WormholeNocCoords(),
     noc_blackhole_cmd_buf_layout=False,
+    # Tensix NoC 1 mirror aliases are REQUIRED here (unlike Blackhole, which
+    # sets this False). tt-metal's `l1_bank_to_noc_xy` really does emit mirrored
+    # worker coords on Wormhole's NoC 1 — measured off the wire, the NoC 1 half
+    # of the table is `mirror(NoC 0)` — so dropping them breaks every L1-sharded
+    # buffer program. See `ArchProfile.noc1_tensix_mirror_aliases`.
+    noc1_tensix_mirror_aliases=True,
 )

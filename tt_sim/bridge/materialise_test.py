@@ -27,6 +27,7 @@ from tt_sim.bridge.cores import DeferredTensixCore
 from tt_sim.bridge.device import Device
 from tt_sim.bridge.fabric import Fabric
 from tt_sim.bridge.materialise import LazyTensixPool, _CatchUpTensixCore
+from tt_sim.device.blackhole import Blackhole
 from tt_sim.device.wormhole import Wormhole
 
 #: Physical NoC 0 worker coord -> tt-sim unified tile coord, as a server's
@@ -43,6 +44,17 @@ TENSIX_COORD_MAP = {
 PEER = (1, 1)
 #: A worker the host has said things to but not yet launched on.
 LATE = (2, 1)
+
+#: Blackhole keys tiles by their physical NoC 0 coord, so its coord map is the
+#: identity over the 140 functional workers (columns 1-7 / 10-16, rows 2-11).
+BH_COORD_MAP = {
+    (x, y): (x, y)
+    for x in list(range(1, 8)) + list(range(10, 17))
+    for y in range(2, 12)
+}
+#: A Blackhole pair that mirror onto each other: ``(16-1, 11-2) == (15, 9)``.
+BH_PEER = (1, 2)
+BH_LATE = (15, 9)
 
 SRC_ADDR = 0x20000
 DST_ADDR = 0x30000
@@ -314,6 +326,31 @@ def test_materialising_twice_is_a_no_op():
     assert first == second
     assert fabric.cores[LATE] is core
     assert _l1(fabric, LATE, FIRMWARE_ADDR, len(FIRMWARE)) == FIRMWARE
+
+
+def test_a_blackhole_noc1_miss_is_read_canonically_not_as_a_mirror():
+    """The mirror inference is Wormhole-only, and must not fire on Blackhole.
+
+    Blackhole registers no Tensix mirror alias
+    (``ArchProfile.noc1_tensix_mirror_aliases``), because nothing tt-metal
+    emits addresses a Blackhole worker by its mirror. Reading a NoC 1 miss as a
+    possible mirror there would be wrong twice over: it builds a worker the
+    program never launched on *and* delivers the packet to it, and then — the
+    alias no longer existing — falls through and builds the real coord as
+    well. So the hook must materialise exactly the coord it was handed.
+    """
+    device = Device(Blackhole, BH_COORD_MAP, cycles_per_poll=100)
+    fabric = Fabric()
+    pool = LazyTensixPool(fabric, device, BH_COORD_MAP, eager=[BH_PEER])
+    # The pair that would have been confused: each is the other's mirror.
+    assert device.tt_device.noc1_mirror(BH_LATE) in BH_COORD_MAP
+
+    pool.on_directory_miss(1, BH_LATE)
+
+    assert pool.materialised == {BH_PEER, BH_LATE}
+    assert device.tt_device.noc_1_directory[BH_LATE] is (
+        device.tt_device.tile_directory[BH_LATE].noc1_router
+    )
 
 
 def test_a_pinned_pool_installs_neither_trigger():

@@ -413,6 +413,7 @@ All are read from the environment and work in this tt-metal-driven flow.
 | `TT_SIM_PUMP_STRIDE=0` | disable the pump's time-skipping (on by default) — see below |
 | `TT_SIM_COST_MODEL=1` | charge each op the cycle cost the ISA-doc tables give it (off by default) — see below |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS=1` | accept NoC transfers whose source and destination addresses are not congruent, which hardware treats as undefined behaviour |
+| `TT_SIM_NOC1_SHADOW=warn\|error\|off` | what to do when a live Tensix worker is unreachable on NoC 1 because a mirror registration took its canonical coord (default `warn`, one line per coordinate on stderr) — see below |
 | `TT_SIM_NUMBA=0` / `=1` | never / always use the optional compiled FPU kernel, overriding the call threshold — see below |
 | `TT_SIM_NUMBA_THRESHOLD=N` | MVMULs to run before compiling the FPU kernel (default 512) |
 
@@ -616,6 +617,71 @@ is 3,528 cycles (Wormhole `sfpumath`, unpacker 1 waiting for the SFPU to hand
 SrcB back). Raise it if you are running a deliberately deep cross-core pipeline
 and do not want the hint; the count is of *consecutive* blocked cycles, so a unit
 that waits repeatedly but briefly never accumulates.
+
+### 4.6 `[NoC1-SHADOW]` — a worker that is unreachable on NoC 1
+
+NoC 1's destination directory is keyed in **two coordinate conventions at
+once**, and this is not a modelling choice tt-sim is free to make: a real
+kernel emits both in the same run. Verified on the captured
+`noc_tile_transfer` trace, replayed offline:
+
+```
+noc1 from (1, 2) -> (9, 0) [DRAM]     # DRAM channel 0 is at (0, 11); (9, 0) is its grid mirror
+noc1 from (1, 1) -> (1, 2) [Tensix]   # a peer worker, addressed by its canonical coord
+```
+
+tt-metal's `dram_bank_to_noc_xy` mirrors its NoC 1 half (`hal_.noc_coordinate`,
+`risc_firmware_initializer.cpp`), while `get_noc_addr` does not mirror at all
+(`NOC_0_X` is the identity on both architectures). So the directory has to hold
+mirror keys for DRAM and canonical keys for workers, the two spaces overlap on
+a 10×12 (Wormhole) or 17×12 (Blackhole) grid, and mirror registrations win
+contested cells.
+
+Where a mirror takes a cell a live Tensix worker owns canonically, **that
+worker is unreachable on NoC 1**. The impostor accepts the write and ACKs it,
+so `noc_async_write_barrier()` returns normally: a program that synchronises on
+delivery hangs somewhere else entirely, and one that does not computes on stale
+data.
+
+**Tensix mirror keys are per-architecture, and the two arches genuinely
+differ.** The worker half of the collision comes from `l1_bank_to_noc_xy`,
+built through `RiscFirmwareInitializer::virtual_noc0_coordinate`, which
+early-outs on `|| cluster_.arch() == ARCH::BLACKHOLE` — unconditionally, and
+regardless of translation. So Wormhole's NoC 1 half of that table is
+`mirror(NoC 0)` and Blackhole's is byte-identical to NoC 0: Blackhole has never
+emitted a mirrored worker coord at all. tt-sim therefore registers Tensix
+mirror aliases on Wormhole only (`ArchProfile.noc1_tensix_mirror_aliases`), and
+the census with every functional worker built is **56 of Wormhole's 80** worker
+coords (48 behind another worker, 8 behind DRAM) and **6 of Blackhole's 140**
+(all behind DRAM, whose bank table *is* mirrored on both arches). Which ones a
+given run hits depends on the workers it materialises.
+
+Do not "simplify" this by giving both architectures the same answer: dropping
+Wormhole's Tensix mirrors breaks every L1-sharded-buffer program there, and
+`tt_sim/network/noc_routing_test.py` asserts both values so that change fails
+loudly.
+
+Every such coordinate is now named as it is created:
+
+```
+[NoC1-SHADOW] (4, 2) is the canonical coord of TensixTile(4, 2), but NoC 1
+resolves it to DRAMTile(5, 2), which claimed the cell as its mirror.
+```
+
+| Env var | Effect |
+| --- | --- |
+| `TT_SIM_NOC1_SHADOW` | `warn` (default) — one line per coordinate on stderr; `error` — raise `NoC1ShadowError` at registration instead; `off` — silent. |
+
+Warn is the default because a shadowed cell is only *wrong* once something
+addresses it, and configurations that are correct today do carry an untouched
+one: `programming_examples/vecadd_multi_core` under
+`TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4` passes its own value check while
+shadowing `(4, 2)`, `(4, 3)` and `(4, 4)`, because it never writes to those
+workers over NoC 1. Erroring at *resolve* time instead of registration is no
+safer — the same key is the mirror by which the DRAM bank table legitimately
+reaches DRAM. Use `error` when a run must not silently misdeliver, or to
+bisect a hang. `tt_sim/network/noc_routing_test.py` pins the affected sets on
+both architectures.
 
 ---
 

@@ -141,6 +141,40 @@ class ArchProfile:
     #: same physical endpoint, e.g. Wormhole's captured single-NoC flows).
     dram_channel_physical_noc1_coords: tuple[tuple[int, int], ...] | None = None
 
+    #: Whether NoC 1's destination directory must carry a *mirror* alias
+    #: ``(noc_grid_x-1-x, noc_grid_y-1-y)`` for each **Tensix** tile, in
+    #: addition to its canonical coord. DRAM's mirror aliases are unconditional
+    #: and are not covered by this flag.
+    #:
+    #: This exists because the two architectures genuinely differ, and the
+    #: difference is not obvious from either one alone:
+    #:
+    #: * **Wormhole — ``True``, and load-bearing.** tt-metal builds
+    #:   ``l1_bank_to_noc_xy`` through ``RiscFirmwareInitializer::
+    #:   virtual_noc0_coordinate``, which mirrors worker coords into NoC 1's
+    #:   half of the table whenever the coord is inside the grid and
+    #:   translation is off — which is how tt-sim runs. Measured on the wire:
+    #:   Wormhole's NoC 1 half of that table is ``mirror(NoC 0)``. Drop the
+    #:   aliases here and every L1-sharded / interleaved-L1 buffer program
+    #:   (``vecadd_sharding``, ``shard_data_rm``, ...) addresses an empty grid
+    #:   cell.
+    #: * **Blackhole — ``False``.** The same function early-outs on
+    #:   ``|| cluster_.arch() == ARCH::BLACKHOLE``
+    #:   (``risc_firmware_initializer.cpp:493-502``), unconditionally and
+    #:   regardless of translation, so it has **never** emitted a mirrored
+    #:   worker coordinate on Blackhole. Measured: Blackhole's
+    #:   ``l1_bank_to_noc_xy`` NoC 1 half is byte-identical to its NoC 0 half,
+    #:   and instrumented replays see only canonical worker coords on NoC 1.
+    #:   The aliases were therefore dead weight that displaced 96 live workers
+    #:   from their own canonical NoC 1 cells (see
+    #:   ``docs/plans/noc1-translation-feasibility.md``).
+    #:
+    #: **Do not "unify" this across architectures.** Copying Blackhole's value
+    #: to Wormhole breaks the DRAM/L1 bank-table flow there;
+    #: ``tt_sim/network/noc_routing_test.py`` asserts both values so that a
+    #: change which generalises one arch's answer to the other fails loudly.
+    noc1_tensix_mirror_aliases: bool = True
+
     #: Bytes of a ``DRAMTile``'s address space served by one **physical** GDDR6
     #: channel, or ``None`` when the split is not published. This is not the
     #: same thing as :attr:`dram_channel_size`, which is the whole flat range a

@@ -111,6 +111,15 @@ BLACKHOLE_PROFILE = ArchProfile(
     # Blackhole holds the destination coord in the dedicated HI register.
     noc_coord_strategy=BlackholeNocCoords(),
     noc_blackhole_cmd_buf_layout=True,
+    # No Tensix mirror aliases on NoC 1. `RiscFirmwareInitializer::
+    # virtual_noc0_coordinate` early-outs on `|| cluster_.arch() ==
+    # ARCH::BLACKHOLE`, so `l1_bank_to_noc_xy`'s NoC 1 half is byte-identical to
+    # its NoC 0 half here (measured off the wire) and nothing on Blackhole ever
+    # addresses a worker by its mirror. Registering the aliases anyway displaced
+    # 96 of the 140 live workers from their own canonical NoC 1 cell. DRAM's
+    # mirrors are unaffected — that table *is* mirrored. Wormhole must keep
+    # them; see `ArchProfile.noc1_tensix_mirror_aliases`.
+    noc1_tensix_mirror_aliases=False,
     # Baby-core firmware bases (blackhole/dev_mem_map.h): with no IRAM
     # constraints every core boots from L1. Computed from the mailbox/zeros/LLK
     # chain: BRISC 0x39E0, then NCRISC 0x5BE0, TRISC0/1/2 0x65E0/0x6FE0/0x79E0.

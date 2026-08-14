@@ -8,6 +8,7 @@ from tt_sim.device.deadlock import (
 )
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
+from tt_sim.network.noc_shadow import ShadowReporter
 from tt_sim.network.tt_noc import NocLinkRegistry
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.trace import enable_from_env
@@ -150,6 +151,15 @@ class TT_Device(Device):
         # ``add_tensix_tile`` extend them post-construction.
         self.noc_0_directory = {}
         self.noc_1_directory = {}
+        #: ``id(nui) -> tile``, so a directory entry can name the tile behind
+        #: it. Only the shadow check reads it; nothing on the NoC hot path does.
+        self._tile_of_nui = {}
+        #: Canonical (SoC-physical NoC 0) coord -> live Tensix tile. The set the
+        #: shadow check protects: a NoC 1 mirror landing on one of these cells
+        #: makes a real worker unreachable.
+        self._tensix_by_canonical = {}
+        #: Records (and warns / raises on) NoC 1 directory shadowing.
+        self.shadow_reporter = ShadowReporter()
         # One free-cycle watermark per router-to-router link, per NoC. Shared
         # by reference across every NUI on that NoC, for the same reason the
         # directories are and one stronger: an injection port belongs to one
@@ -244,6 +254,13 @@ class TT_Device(Device):
         (single-chip kernels like ``hello_world_datatypes_kernel`` read eth by
         its canonical ``(1, 0)``).
 
+        **Tensix mirrors are per-architecture** — see
+        ``ArchProfile.noc1_tensix_mirror_aliases``. Wormhole registers them
+        because its ``l1_bank_to_noc_xy`` genuinely emits mirrored worker
+        coords on NoC 1; Blackhole does not, because tt-metal's
+        ``virtual_noc0_coordinate`` early-outs on that architecture and so has
+        never emitted one. Do not generalise either answer to the other arch.
+
         **NoC 1's table is therefore ambiguous by construction**: it holds two
         coordinate conventions in one ``(x, y)``-keyed dict, and where they
         collide only one tile is reachable. That is tolerable for *requests*,
@@ -254,15 +271,31 @@ class TT_Device(Device):
         re-resolving a coordinate; doing the latter delivered ACKs and read
         responses to whichever tile happened to own the shadowed cell. See
         ``tt_sim/network/noc_routing_test.py``.
+
+        **The ambiguity is reported, not silently tolerated.** Where a mirror
+        takes a cell a live Tensix worker owns canonically — or a worker is
+        built into a cell a mirror already holds — that worker is unreachable
+        on NoC 1 and its traffic is ACKed by the impostor, so neither end can
+        tell. Every such cell goes to :attr:`shadow_reporter`, which names the
+        coordinate and both tiles (see ``tt_sim/network/noc_shadow.py``; set
+        ``TT_SIM_NOC1_SHADOW=error`` to make it fatal).
         """
         coord = tile.get_coord_pair()
         assert coord not in self.tile_directory, f"tile already registered at {coord}"
         self.tile_directory[coord] = tile
         nui0 = tile.get_noc_nui(0)
         nui1 = tile.get_noc_nui(1)
+        self._tile_of_nui[id(nui0)] = tile
+        self._tile_of_nui[id(nui1)] = tile
         primary = nui0.get_id_pair()
         self.noc_0_directory[primary] = nui0
         register_mirror = getattr(tile, "register_noc1_mirror", True)
+        # ...and Tensix mirrors are per-architecture: Blackhole's bank-to-noc
+        # table never emits one, so registering them there only displaces live
+        # workers. Wormhole's does, so there they must stay. See
+        # ``ArchProfile.noc1_tensix_mirror_aliases``.
+        if tile.is_tensix and not self.profile.noc1_tensix_mirror_aliases:
+            register_mirror = False
         # A tile whose NoC 1 endpoint is a different SoC-physical coord than its
         # NoC 0 endpoint (Blackhole DRAM: NoC 0 (0,11), NoC 1 (0,1)) mirrors that
         # NoC 1 coord instead of the primary — otherwise kernels addressing the
@@ -277,6 +310,7 @@ class TT_Device(Device):
             self.noc_1_directory.setdefault(alias, nui1)
             if register_mirror:
                 self.noc_1_directory[self._noc1_mirror(alias)] = nui1
+        self._check_noc1_shadowing(tile, nui1, primary, noc1_source, register_mirror)
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
         nui0.directory_miss_hook = self._directory_miss_hook
@@ -292,6 +326,41 @@ class TT_Device(Device):
         tile._bind_clock(tile_clock)
         self.clocks[0].add_tile_clock(tile_clock, heavy=tile.is_tensix)
         self.resets[0].add_resetables(tile.get_resets())
+
+    def _check_noc1_shadowing(self, tile, nui1, primary, noc1_source, register_mirror):
+        """Report any live Tensix worker this registration made unreachable.
+
+        Two directions, because a collision can be created from either end and
+        the order tiles are built in is not fixed (the wire bridge materialises
+        workers on demand):
+
+        1. **This tile is the victim.** Its canonical coord was already claimed
+           by somebody else's mirror, so the ``setdefault`` above did nothing.
+        2. **This tile is the impostor.** Its mirror landed on a cell a live
+           Tensix already owned canonically, and mirrors are authoritative.
+
+        Only Tensix victims are reported. A DRAM tile losing its *canonical*
+        NoC 1 cell is not a fault: tt-metal's ``dram_bank_to_noc_xy`` addresses
+        DRAM on NoC 1 by mirror, and the canonical key is only an
+        accommodation for the hand-written ``driver/`` kernels.
+        """
+        if tile.is_tensix:
+            self._tensix_by_canonical[primary] = tile
+            holder = self.noc_1_directory.get(primary)
+            if holder is not nui1:
+                # ``holder`` is usually another tile's NUI, but a cached
+                # ``NullEndpoint`` from an earlier miss shadows just as hard.
+                self.shadow_reporter.report_displaced(
+                    primary, tile, self._tile_of_nui.get(id(holder), holder)
+                )
+        if not register_mirror:
+            return
+        sources = (noc1_source,) + tuple(getattr(tile, "noc_aliases", ()))
+        for source in sources:
+            cell = self._noc1_mirror(source)
+            victim = self._tensix_by_canonical.get(cell)
+            if victim is not None and victim is not tile:
+                self.shadow_reporter.report_displaced(cell, victim, tile)
 
     def noc1_mirror(self, canonical):
         """Mirror a canonical (NoC 0 physical) coord to NoC 1's coord space.
