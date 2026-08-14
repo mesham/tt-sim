@@ -120,6 +120,16 @@ BLACKHOLE_PROFILE = ArchProfile(
     # mirrors are unaffected — that table *is* mirrored. Wormhole must keep
     # them; see `ArchProfile.noc1_tensix_mirror_aliases`.
     noc1_tensix_mirror_aliases=False,
+    # ...and the self-address side of the same fact. `NOC_ID_LOGICAL` is
+    # `NOC_CFG(0x12)` here, not Wormhole's `NOC_CFG(0xE)` — Blackhole's ID
+    # translation tables are six entries per axis, so 0xE is
+    # NOC_Y_ID_TRANSLATE_TABLE_2 and reading the Wormhole offset answered 0 for
+    # every core, which is what tt-metal's firmware fills `my_x[]`/`my_y[]`
+    # from. And it reports the canonical coord on *both* NoCs, because
+    # Blackhole's L1 bank table is not mirrored on NoC 1 and its NoC 1 directory
+    # has no Tensix mirror keys.
+    noc_id_logical_cfg_index=0x12,
+    noc_id_logical_mirrored_on_noc1=False,
     # Baby-core firmware bases (blackhole/dev_mem_map.h): with no IRAM
     # constraints every core boots from L1. Computed from the mailbox/zeros/LLK
     # chain: BRISC 0x39E0, then NCRISC 0x5BE0, TRISC0/1/2 0x65E0/0x6FE0/0x79E0.

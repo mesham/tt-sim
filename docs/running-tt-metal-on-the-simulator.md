@@ -683,6 +683,27 @@ reaches DRAM. Use `error` when a run must not silently misdeliver, or to
 bisect a hang. `tt_sim/network/noc_routing_test.py` pins the affected sets on
 both architectures.
 
+**The same collision has a self-address face.** A core reads its own coordinate
+out of `NOC_CFG(NOC_ID_LOGICAL)`; tt-metal's firmware fills `my_x[]` / `my_y[]`
+from it (`risc_init`), and kernels then both compare it against that NoC's bank
+table (`is_local_bank`) and *emit* it as a destination — the single-argument
+`get_noc_addr(addr)`. So the self-coordinate must follow the same per-arch
+convention as the mirror aliases, and it does:
+`ArchProfile.noc_id_logical_mirrored_on_noc1` is `True` on Wormhole (whose L1
+bank table and NoC 1 directory are both mirrored) and `False` on Blackhole
+(whose are not). The register's `NOC_CFG` index is architecture-specific too —
+`0xE` on Wormhole, `0x12` on Blackhole, because Blackhole has six
+ID-translation-table entries per axis rather than four.
+
+With that, every tile on both architectures addresses itself back to itself,
+except **Wormhole's 16 eth cores on NoC 1**: eth alone skips mirror
+registration (an eth mirror would steal a DRAM tile's own canonical cell), so
+its mirrored self-coordinate names a worker instead. Nothing hits it — the
+slow-dispatch flow tt-sim supports launches no eth kernel — and the fix is the
+translation port (`docs/plans/noc1-translation-feasibility.md`), not more
+aliases. On Blackhole the self-coordinate census is *exactly* the six
+DRAM-shadowed workers above: same six cells, seen from the sending core.
+
 ---
 
 ## 5. Limitations to expect

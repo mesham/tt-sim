@@ -1070,6 +1070,8 @@ class NUI(MemMapable, Clockable):
         noc_coord_strategy=None,
         noc_blackhole_cmd_buf_layout=False,
         noc_dram_read_congruence=32,
+        noc_id_logical_cfg_index=0xE,
+        noc_id_logical_mirrored_on_noc1=True,
         tile_kind="T",
         arch=None,
     ):
@@ -1113,6 +1115,12 @@ class NUI(MemMapable, Clockable):
         # and this endpoint's memory kind ('D' DRAM, 'T' Tensix L1, 'E' Eth L1),
         # both used by the alignment checks in ``RequestInitiator``.
         self.noc_dram_read_congruence = noc_dram_read_congruence
+        # NIU offset of NOC_ID_LOGICAL within the NOC_CFG(cnt) block, and
+        # whether that register mirrors on NoC 1. Both are per-architecture;
+        # see ``ArchProfile.noc_id_logical_cfg_index`` /
+        # ``ArchProfile.noc_id_logical_mirrored_on_noc1``.
+        self.noc_id_logical_offset = 0x100 + 4 * noc_id_logical_cfg_index
+        self.noc_id_logical_mirrored_on_noc1 = noc_id_logical_mirrored_on_noc1
         self.tile_kind = tile_kind
         if noc_number == 0:
             self.x_coord = x_coord
@@ -1963,8 +1971,19 @@ class NUI(MemMapable, Clockable):
         self.router_cfg_3 = 0
         self.router_cfg_4 = 0
 
-        self.noc_id_logical = replace_bits(0, self.x_coord, 0, 6)
-        self.noc_id_logical = replace_bits(self.noc_id_logical, self.y_coord, 6, 6)
+        # The coordinate a *core* reports as its own: tt-metal's firmware fills
+        # ``my_x[noc]`` / ``my_y[noc]`` from this register and then both
+        # compares it against that NoC's bank table (``is_local_bank``) and
+        # emits it as a destination (single-argument ``get_noc_addr``). So it
+        # follows the same per-arch convention as NoC 1's directory keys:
+        # mirrored on Wormhole, canonical on Blackhole. ``NOC_NODE_ID`` below
+        # is the physical node ID and stays per-NoC on both.
+        if self.noc_id_logical_mirrored_on_noc1:
+            logical_x, logical_y = self.x_coord, self.y_coord
+        else:
+            logical_x, logical_y = self.id_pair
+        self.noc_id_logical = replace_bits(0, logical_x, 0, 6)
+        self.noc_id_logical = replace_bits(self.noc_id_logical, logical_y, 6, 6)
 
         # Backing store for the NOC_CFG(cnt) register block (0x100 + cnt*4)
         # that isn't modelled with dedicated semantics — e.g. the NoC ID
@@ -2034,7 +2053,7 @@ class NUI(MemMapable, Clockable):
         addr = canonical
         if self.snoop:
             print(f"NoC read {hex(addr)}")
-        if addr == 0x0138:
+        if addr == self.noc_id_logical_offset:
             return conv_to_bytes(self.noc_id_logical)
         elif addr == 0x100:
             return conv_to_bytes(self.niu_cfg_0)
@@ -2178,7 +2197,7 @@ class NUI(MemMapable, Clockable):
         addr = canonical
         if self.snoop:
             print(f"NoC write {hex(addr)}")
-        if addr == 0x0138:
+        if addr == self.noc_id_logical_offset:
             self.noc_id_logical = conv_to_uint32(value)
         elif addr == 0x100:
             self.niu_cfg_0 = conv_to_uint32(value)

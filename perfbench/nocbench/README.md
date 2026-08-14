@@ -591,8 +591,12 @@ TT_SIM_COST_MODEL=1 ../../run_card_session.sh --sim --arch blackhole noc noc-epo
   made a flat shared-link reading on the simulator a null rather than a
   non-reading back when that reading was forced.
 
-One incidental finding for anyone porting this: tt-sim answers 0 for
-`NOC_CFG(NOC_ID_LOGICAL)`, which is what tt-metal's firmware fills `my_x[]` /
-`my_y[]` from, so those read (0, 0) on the simulator. The kernel therefore reads
-`NOC_NODE_ID` instead, and an all-zero self-report is treated as "this device
-does not answer that register" rather than as "every kernel ran on core (0, 0)".
+One incidental finding for anyone porting this: tt-sim *used to* answer 0 for
+`NOC_CFG(NOC_ID_LOGICAL)` on Blackhole — it decoded Wormhole's index (`0xE`,
+offset `0x138`) where Blackhole numbers the register `0x12` (offset `0x148`) —
+which is what tt-metal's firmware fills `my_x[]` / `my_y[]` from, so those read
+(0, 0) on the simulator. That is fixed
+(`ArchProfile.noc_id_logical_cfg_index`), but the kernel still reads
+`NOC_NODE_ID` instead, and an all-zero self-report is still treated as "this
+device does not answer that register" rather than as "every kernel ran on core
+(0, 0)" — which keeps the harness working against an older tt-sim.

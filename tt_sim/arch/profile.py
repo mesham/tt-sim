@@ -175,6 +175,46 @@ class ArchProfile:
     #: change which generalises one arch's answer to the other fails loudly.
     noc1_tensix_mirror_aliases: bool = True
 
+    #: ``cnt`` index of ``NOC_ID_LOGICAL`` within the ``NOC_CFG(cnt)`` register
+    #: block at NIU offset ``0x100 + cnt*4``. **Architecture-specific and not
+    #: interchangeable**: Wormhole numbers it ``0xE`` (offset ``0x138``) and
+    #: Blackhole ``0x12`` (offset ``0x148``), because Blackhole's X/Y ID
+    #: translation tables are six entries each rather than four
+    #: (``hw/inc/internal/tt-1xx/{wormhole,blackhole}/noc/noc_parameters.h``).
+    #: Getting it wrong is silent in both directions: the self-coordinate reads
+    #: 0, *and* ``0x138`` — a Y translation table on Blackhole — aliases onto
+    #: it.
+    noc_id_logical_cfg_index: int = 0xE
+
+    #: Whether ``NOC_ID_LOGICAL`` reports the **NoC 1 grid mirror** of the
+    #: tile's coordinate on NoC 1, or the canonical (SoC-physical NoC 0) coord
+    #: on both NoCs.
+    #:
+    #: This is the self-address counterpart of
+    #: :attr:`noc1_tensix_mirror_aliases` and takes the same per-arch answer for
+    #: the same reason. tt-metal firmware fills ``my_x[noc]`` / ``my_y[noc]``
+    #: from this register (``risc_init``, ``risc_common.h:194-200``) and then
+    #: compares them against the *bank table's* coordinate for that NoC in
+    #: ``Noc::is_local_bank`` / ``TensorAccessor::is_local_bank``, and emits
+    #: them as a destination in the single-argument ``get_noc_addr(addr)``
+    #: (``dataflow_api_addrgen.h:281``). So the value has to agree with
+    #: whatever convention that NoC's bank table uses:
+    #:
+    #: * **Wormhole — ``True``.** ``l1_bank_to_noc_xy``'s NoC 1 half is
+    #:   ``mirror(NoC 0)``, and NoC 1's directory carries the matching Tensix
+    #:   mirror aliases, so the mirror is both what the kernel compares against
+    #:   and a key that resolves back to this tile.
+    #: * **Blackhole — ``False``.** Its ``l1_bank_to_noc_xy`` NoC 1 half is
+    #:   byte-identical to NoC 0 and nothing there registers a Tensix mirror,
+    #:   so the mirror would be a coordinate no kernel expects and no directory
+    #:   key resolves. This also matches silicon: Blackhole's *translated*
+    #:   Tensix coordinate is a NOC0 Tensix coordinate
+    #:   (``blackhole_coordinate_manager.cpp:100-148``), the same on both NoCs.
+    #:
+    #: ``NOC_NODE_ID`` is unaffected and stays the per-NoC physical node ID
+    #: (mirrored on NoC 1) on both architectures — that is what the register is.
+    noc_id_logical_mirrored_on_noc1: bool = True
+
     #: Bytes of a ``DRAMTile``'s address space served by one **physical** GDDR6
     #: channel, or ``None`` when the split is not published. This is not the
     #: same thing as :attr:`dram_channel_size`, which is the whole flat range a
@@ -212,4 +252,6 @@ class ArchProfile:
             "noc_coord_strategy": self.noc_coord_strategy,
             "noc_blackhole_cmd_buf_layout": self.noc_blackhole_cmd_buf_layout,
             "noc_dram_read_congruence": self.noc_dram_read_congruence,
+            "noc_id_logical_cfg_index": self.noc_id_logical_cfg_index,
+            "noc_id_logical_mirrored_on_noc1": self.noc_id_logical_mirrored_on_noc1,
         }

@@ -33,6 +33,15 @@ would break every Wormhole L1-sharded-buffer program, whose ``l1_bank_to_noc_xy`
 really is mirrored on NoC 1. ``test_the_tensix_mirror_alias_policy_is_per_arch``
 and its two neighbours exist so that change fails loudly rather than silently.
 
+The third section measures the same collision from the **sending core**: the
+coordinate a core reports as its own, and whether the directory routes it back.
+That is a different question from the shadow census — which asks about
+*canonical* reachability — and it is the one that survived the gates when
+Blackhole's Tensix mirrors were dropped. It has its own answer per register
+(``NOC_CFG(NOC_ID_LOGICAL)`` is what kernels see; ``NOC_NODE_ID`` is the
+physical node ID) and per arch, and the tests there pin which of those a real
+kernel can actually reach.
+
 No tt-metal, no socket, no oracle — the cheapest guard available for this.
 """
 
@@ -44,6 +53,7 @@ from tt_sim.device.wormhole import Wormhole
 from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.network.noc_shadow import POLICY_ENV, NoC1ShadowError
 from tt_sim.network.tt_noc import NUI
+from tt_sim.util.conversion import conv_to_uint32
 
 _OUTSTANDING_ID_0 = NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
 
@@ -432,6 +442,206 @@ def test_blackhole_workers_are_never_reachable_by_a_mirror_key():
 
 
 # ---------------------------------------------------------------------------
+# The self-coordinate: what a core answers when asked where it is.
+#
+# tt-metal's firmware fills ``my_x[noc]`` / ``my_y[noc]`` from
+# ``NOC_CFG(NOC_ID_LOGICAL)`` (``risc_init``, ``risc_common.h:194-200``) and
+# kernels then use them two ways: compared against that NoC's bank-table coord
+# in ``Noc::is_local_bank`` / ``TensorAccessor::is_local_bank``, and emitted as
+# a *destination* by the single-argument ``get_noc_addr(addr)``
+# (``dataflow_api_addrgen.h:281``). The second makes the self-coordinate a
+# directory key like any other, so it has to follow the same per-arch
+# convention as ``noc1_tensix_mirror_aliases`` — which is why these live next
+# to those tests rather than in a register-decode file.
+#
+# ``NOC_NODE_ID`` is a different register and keeps a different answer: the
+# per-NoC *physical* node ID, mirrored on NoC 1 on both architectures.
+# ---------------------------------------------------------------------------
+
+#: Where ``NOC_ID_LOGICAL`` lives in the ``NOC_CFG(cnt)`` block, per arch. The
+#: two indices differ because Blackhole has six ID-translation-table entries
+#: per axis to Wormhole's four, so ``0x138`` is ``NOC_Y_ID_TRANSLATE_TABLE_2``
+#: there rather than the self-coordinate.
+_WH_ID_LOGICAL_OFFSET = 0x100 + 4 * 0xE  # 0x138
+_BH_ID_LOGICAL_OFFSET = 0x100 + 4 * 0x12  # 0x148
+_WH_NODE_ID_OFFSET = 0x2C
+_BH_NODE_ID_OFFSET = 0x44
+
+
+def _decode_coord(nui, offset):
+    """``(x, y)`` out of a ``{y[5:0], x[5:0]}`` register read at ``offset``."""
+    value = conv_to_uint32(nui.read(offset, 4))
+    return (value & 0x3F, (value >> 6) & 0x3F)
+
+
+def test_the_noc_id_logical_register_index_is_per_arch():
+    """Reading Wormhole's index on Blackhole answered 0 for every core.
+
+    Silent in both directions: ``my_x``/``my_y`` became ``(0, 0)`` everywhere,
+    and ``0x138`` — a Y translation table on Blackhole — aliased onto the
+    self-coordinate register.
+    """
+    assert WORMHOLE_PROFILE.noc_id_logical_cfg_index == 0xE
+    assert BLACKHOLE_PROFILE.noc_id_logical_cfg_index == 0x12
+
+    wh = Wormhole().tensix_tiles[0].get_noc_nui(0)
+    bh = Blackhole().tensix_tiles[0].get_noc_nui(0)
+    # Each arch answers its own offset with a real coordinate, and the *other*
+    # arch's offset as a plain read-what-you-wrote config register (0).
+    assert _decode_coord(wh, _WH_ID_LOGICAL_OFFSET) == wh.get_id_pair()
+    assert conv_to_uint32(wh.read(_BH_ID_LOGICAL_OFFSET, 4)) == 0
+    assert _decode_coord(bh, _BH_ID_LOGICAL_OFFSET) == bh.get_id_pair()
+    assert conv_to_uint32(bh.read(_WH_ID_LOGICAL_OFFSET, 4)) == 0
+
+
+def test_the_self_coordinate_mirrors_on_noc_1_only_where_the_bank_table_does():
+    """Wormhole mirrors its NoC 1 self-coordinate; Blackhole must not.
+
+    Same asymmetry, same evidence, as ``noc1_tensix_mirror_aliases``: Wormhole's
+    ``l1_bank_to_noc_xy`` NoC 1 half is ``mirror(NoC 0)`` and NoC 1 carries the
+    matching Tensix mirror keys, so a mirrored ``my_x``/``my_y`` is both what
+    ``is_local_bank`` compares against and a key that resolves back here.
+    Blackhole's two halves are byte-identical and it registers no Tensix
+    mirror, so the mirror would match nothing and resolve nowhere.
+    """
+    assert WORMHOLE_PROFILE.noc_id_logical_mirrored_on_noc1 is True
+    assert BLACKHOLE_PROFILE.noc_id_logical_mirrored_on_noc1 is False
+
+    wh_device = Wormhole()
+    wh = wh_device.tensix_tiles[0]
+    wh_canonical = wh.noc0_router.get_id_pair()
+    wh_mirror = wh_device.noc1_mirror(wh_canonical)
+    assert _decode_coord(wh.get_noc_nui(0), _WH_ID_LOGICAL_OFFSET) == wh_canonical
+    assert _decode_coord(wh.get_noc_nui(1), _WH_ID_LOGICAL_OFFSET) == wh_mirror
+
+    bh_device = Blackhole()
+    bh = bh_device.tensix_tiles[0]
+    bh_canonical = bh.noc0_router.get_id_pair()
+    assert _decode_coord(bh.get_noc_nui(0), _BH_ID_LOGICAL_OFFSET) == bh_canonical
+    assert _decode_coord(bh.get_noc_nui(1), _BH_ID_LOGICAL_OFFSET) == bh_canonical
+
+    # NOC_NODE_ID is the physical node ID and stays mirrored on both arches.
+    assert _decode_coord(wh.get_noc_nui(1), _WH_NODE_ID_OFFSET) == wh_mirror
+    assert _decode_coord(
+        bh.get_noc_nui(1), _BH_NODE_ID_OFFSET
+    ) == bh_device.noc1_mirror(bh_canonical)
+
+
+def test_the_noc_node_id_mirror_is_only_load_bearing_on_wormhole():
+    """Why dropping Blackhole's Tensix mirrors did not strand its cores.
+
+    ``NOC_NODE_ID`` is the *other* self-coordinate register, and it is mirrored
+    on NoC 1 on both architectures. Dropping Blackhole's Tensix mirror aliases
+    (``90ec8f1``) therefore left all 140 of its workers with a NOC_NODE_ID
+    coordinate that is **not** a NoC 1 directory key — 102 resolve to some
+    other worker, 38 to nothing. That reads like a stranding regression and is
+    not one, for two independent reasons, either of which alone suffices:
+
+    1. **Blackhole firmware never puts it in a coordinate register.** Its
+       ``noc_init`` presets come from ``NOC_ID_LOGICAL``, not ``NOC_NODE_ID``
+       (``blackhole/noc_nonblocking_api.h:692``), and the only two device-side
+       readers of ``NOC_NODE_ID`` there — ``noc_fast_atomic_increment`` and
+       ``noc_fast_multicast_atomic_increment``, both behind
+       ``DM_DYNAMIC_NOC``/``program_ret_addr`` — build an ``atomic_ret_addr``
+       and then write only ``NOC_RET_ADDR_LO``, i.e. ``& 0xFFFFFFFF``. The
+       coordinate bits are computed and thrown away.
+    2. **tt-sim resolves neither register a preset lands in.** A read or atomic
+       resolves its *target* coord; a write resolves its *ret* coord; a
+       response goes to ``reply_to``. ``noc_init`` presets the write buffers'
+       *target* coord and the read/atomic buffers' *ret* coord — the two that
+       are never looked up. Every real transaction overwrites the one that is.
+
+    Wormhole is the arch where the mirror is genuinely reached, because
+    ``l1_bank_to_noc_xy`` addresses workers by it, so this pins that all 80
+    resolve. If that assertion ever fails, Wormhole's sharded programs are
+    writing into the wrong tile; the Blackhole half is pinned as the *absence*
+    it is, so a future "let's mirror both arches again" reads as a deliberate
+    reversal rather than a fix.
+    """
+    wh = _wormhole_with_workers(sorted(_WH_UNIFIED_TO_PHYSICAL.values()))
+    for tile in wh.tensix_tiles:
+        nui = tile.get_noc_nui(1)
+        assert wh.noc_1_directory.get(_decode_coord(nui, _WH_NODE_ID_OFFSET)) is nui
+
+    bh = Blackhole(tensix_coords=_BH_WORKERS)
+    stranded = [
+        tile
+        for tile in bh.tensix_tiles
+        if bh.noc_1_directory.get(
+            _decode_coord(tile.get_noc_nui(1), _BH_NODE_ID_OFFSET)
+        )
+        is not tile.get_noc_nui(1)
+    ]
+    assert len(stranded) == 140
+
+
+def _self_coord_census(device, offset):
+    """``{tile: owner}`` for every tile the directory does not route back to.
+
+    A core that emits its own coordinate — ``get_noc_addr(addr)`` — must land
+    on itself. This asks that of every tile on both NoCs.
+    """
+    by_nui = {}
+    for tile in device.tile_directory.values():
+        for noc in (0, 1):
+            by_nui[id(tile.get_noc_nui(noc))] = tile
+    census = {}
+    for noc in (0, 1):
+        directory = device.noc_0_directory if noc == 0 else device.noc_1_directory
+        for tile in device.tile_directory.values():
+            nui = tile.get_noc_nui(noc)
+            entry = directory.get(_decode_coord(nui, offset))
+            if entry is not nui:
+                census[(noc, nui.get_id_pair())] = by_nui.get(id(entry))
+    return census
+
+
+def test_wormhole_only_eth_cores_cannot_address_themselves():
+    """80 workers and 6 DRAM tiles route back to themselves; 16 eth do not.
+
+    Eth tiles alone skip NoC 1 mirror registration (an eth mirror lands on a
+    DRAM canonical coord and would steal that DRAM's own cell), so their
+    mirrored self-coordinate is the one NoC 1 key that names somebody else —
+    14 of them a live worker, 2 a DRAM tile. It is the same two-conventions-in-
+    one-dict collision the shadow census measures from the other side, and it
+    is unreachable in practice because tt-metal launches no eth kernel under
+    the slow-dispatch flow tt-sim supports. Enabling NoC coordinate translation
+    (``docs/plans/noc1-translation-feasibility.md``) is what would clear it;
+    registering eth mirrors here is not, and would break DRAM.
+    """
+    device = _wormhole_with_workers(sorted(_WH_UNIFIED_TO_PHYSICAL.values()))
+    census = _self_coord_census(device, _WH_ID_LOGICAL_OFFSET)
+
+    assert all(noc == 1 for noc, _ in census)
+    assert len(census) == 16
+    # Eth rows 0 and 6, every worker column: Wormhole's whole eth complement.
+    assert {coord for _, coord in census} == {
+        (x, y) for x in (1, 2, 3, 4, 6, 7, 8, 9) for y in (0, 6)
+    }
+    # ...and every one of them lands on a real, wrong tile rather than an empty
+    # cell, which is what makes it silent misdelivery rather than a null route.
+    kinds = sorted(_kind(tile) for tile in census.values())
+    assert kinds == ["D"] * 4 + ["T"] * 12
+
+
+def test_blackhole_self_coordinates_collapse_onto_the_known_dram_shadows():
+    """Every Blackhole tile addresses itself except the 6 already-known coords.
+
+    With ``NOC_ID_LOGICAL`` canonical on both NoCs, the self-coordinate census
+    is *exactly* ``test_blackhole_full_worker_grid_shadow_census``' set — the
+    workers a DRAM tile's NoC 1 mirror sits on. So Blackhole has no separate
+    self-coordinate problem: it is the same six cells, seen from the sending
+    core rather than from the directory.
+    """
+    device = Blackhole(tensix_coords=_BH_WORKERS)
+    census = _self_coord_census(device, _BH_ID_LOGICAL_OFFSET)
+
+    assert {coord for _, coord in census} == _BH_DRAM_SHADOWED
+    assert all(noc == 1 for noc, _ in census)
+    assert all(_kind(tile) == "D" for tile in census.values())
+
+
+# ---------------------------------------------------------------------------
 # Failing loudly: the shadow is reported at the moment it is created.
 # ---------------------------------------------------------------------------
 
@@ -696,6 +906,11 @@ def main():
     test_the_tensix_mirror_alias_policy_is_per_arch()
     test_wormhole_workers_stay_reachable_by_their_mirror_key()
     test_blackhole_workers_are_never_reachable_by_a_mirror_key()
+    test_the_noc_id_logical_register_index_is_per_arch()
+    test_the_self_coordinate_mirrors_on_noc_1_only_where_the_bank_table_does()
+    test_wormhole_only_eth_cores_cannot_address_themselves()
+    test_the_noc_node_id_mirror_is_only_load_bearing_on_wormhole()
+    test_blackhole_self_coordinates_collapse_onto_the_known_dram_shadows()
     test_the_shadow_report_names_both_tiles()
     test_on_demand_materialisation_creates_a_shadow_construction_would_not()
     for build, channel in _ARCH_CASES:
@@ -706,7 +921,9 @@ def main():
         "(56 of 80 workers shadowed, DRAM over the x=4 column and workers over "
         "each other) and every instance is named at registration; Blackhole "
         "registers no Tensix mirror at all, so only its 6 DRAM shadows remain; "
-        "and every NoC 1 response still lands on its requester"
+        "every core reports a self-coordinate that routes back to it except "
+        "Wormhole's 16 eth cores on NoC 1; and every NoC 1 response still lands "
+        "on its requester"
     )
 
 
