@@ -224,38 +224,32 @@ def test_noc_node_id_stays_the_physical_node_id(
             assert _decode(nui.noc_node_id) == (nui.x_coord, nui.y_coord)
 
 
-def test_wormhole_translation_displaces_nothing(wormhole_translated):
-    """Wormhole's translated bands sit entirely off the 10x12 physical grid, so
-    no legacy NoC 1 mirror can be in the way."""
-    assert wormhole_translated.translated_displacements == {}
+@pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
+def test_translation_displaces_nothing_on_either_architecture(
+    arch, wormhole_translated, blackhole_translated
+):
+    """Nothing a translated key lands on was still registered.
 
-
-def test_blackhole_translation_displaces_only_noc1_mirrors(blackhole_translated):
-    """Blackhole's translated Tensix coord *is* its physical coord, so the
-    translated key does land on cells legacy NoC 1 mirrors hold. Every one of
-    them is a mirror, on NoC 1, and taking it is correct: under translation
-    nothing addresses a Blackhole tile by its mirror."""
-    device = blackhole_translated
-    assert device.translated_displacements
-    assert all(noc == 1 for noc, _ in device.translated_displacements)
-    for (_, coord), (displaced, claimer) in device.translated_displacements.items():
-        # The displaced entry never owned this cell canonically — it only ever
-        # held it as a mirror of one of its own coords.
-        mirrors = {device.noc1_mirror(displaced.get_id_pair())}
-        owner = device.tile_directory.get(displaced.get_id_pair())
-        if owner is not None:
-            mirrors |= {device.noc1_mirror(a) for a in owner.noc_aliases}
-            noc1_endpoint = getattr(owner, "noc1_endpoint_coord", None)
-            if noc1_endpoint is not None:
-                mirrors.add(device.noc1_mirror(noc1_endpoint))
-        assert coord in mirrors, (coord, displaced.get_id_pair())
-        assert claimer.translated_coord == coord
+    Wormhole's translated bands sit entirely off the 10x12 physical grid, so no
+    key of any convention can be in the way. Blackhole's *are* physical coords,
+    and its NoC 1 mirrors used to be overwritten here — six of them, one per
+    DRAM sub-endpoint whose mirror parks on a live worker. Those mirrors are no
+    longer registered at all under translation, which is the stronger form of
+    the same answer: a key that is never written cannot displace anything, and
+    cannot be resurrected by a registration order this test does not control.
+    """
+    device = wormhole_translated if arch == "wormhole" else blackhole_translated
+    assert device.translated_displacements == {}
 
 
 @pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
-def test_physical_keys_survive_translation(arch):
-    """Translation is *additive*: the physical coordinate space is still there,
-    exactly as on silicon, which is what lets the mode be opt-in."""
+def test_noc0_physical_keys_survive_translation(arch):
+    """On NoC 0 translation is purely *additive*, exactly as on silicon.
+
+    NoC 0 has one convention and its keys are the cells they name, so nothing
+    there has to give way. NoC 1 is the opposite case and has its own test
+    below.
+    """
     plain = (
         Wormhole(tensix_coords=WH_WORKERS[:4], noc_translation=False)
         if arch == "wormhole"
@@ -268,6 +262,122 @@ def test_physical_keys_survive_translation(arch):
     )
     for coord in plain.noc_0_directory:
         assert coord in translated.noc_0_directory, coord
+
+
+# ---------------------------------------------------------------------------
+# NoC 1 carries one convention under translation, and which one is geometry.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
+def test_the_off_grid_claim_holds_of_the_device_it_is_declared_for(
+    arch, wormhole_translated, blackhole_translated
+):
+    """``ArchProfile.translated_coords_off_physical_grid`` against the tiles.
+
+    The flag decides whether NoC 1 keeps its mirror keys under translation, so
+    it is checked rather than trusted. Where it claims disjointness, *every*
+    translated coordinate must be off the grid — one on it would be enough to
+    make some mirror ambiguous, which is exactly the case the other branch
+    covers.
+    """
+    device = wormhole_translated if arch == "wormhole" else blackhole_translated
+    grid_x, grid_y = device.profile.noc_grid_x, device.profile.noc_grid_y
+    coords = [c for t in device.tile_directory.values() for c in t.translated_coords]
+    assert coords
+    on_grid = [c for c in coords if 0 <= c[0] < grid_x and 0 <= c[1] < grid_y]
+    if device.profile.translated_coords_off_physical_grid:
+        assert on_grid == []
+    else:
+        # One on-grid translated coordinate is enough to make every mirror key
+        # ambiguous, and Blackhole has 140 of them — its DRAM is off-grid at
+        # ``{17,18} x {12..23}``, its workers are the physical grid itself.
+        assert on_grid
+
+
+@pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
+def test_noc1_carries_no_unmirrored_key_under_translation(
+    arch, wormhole_translated, blackhole_translated
+):
+    """The change this module's siblings measure: the second convention is gone.
+
+    A tile's canonical (SoC-physical NoC 0) coord is not a NoC 1 coordinate —
+    on NoC 1 the same tile stands at the grid mirror. Untranslated, NoC 1 holds
+    both anyway, because ``get_noc_addr`` emits the canonical form while the
+    bank-to-noc table emits the mirror; under translation the kernel emits a
+    translated coord instead and the canonical key is dead weight that shadows
+    live workers. So every key that resolves to a tile must be one of that
+    tile's translated coords or one of its mirrors — never a canonical coord,
+    unless (Blackhole) the two are the same tuple.
+    """
+    device = wormhole_translated if arch == "wormhole" else blackhole_translated
+    stray = []
+    for tile in device.tile_directory.values():
+        nui1 = tile.get_noc_nui(1)
+        allowed = set(tile.translated_coords) | {
+            device.noc1_mirror(coord)
+            for coord in (
+                getattr(tile, "noc1_endpoint_coord", None)
+                or tile.get_noc_nui(0).id_pair,
+                *tile.noc_aliases,
+            )
+        }
+        stray += [
+            (key, tile.get_coord_pair())
+            for key, entry in device.noc_1_directory.items()
+            if resolved_nui(entry) is nui1 and key not in allowed
+        ]
+    assert stray == []
+
+
+def test_wormhole_keeps_its_physical_noc1_keys(wormhole_translated):
+    """Where they are unambiguous they stay, and the self-address needs them.
+
+    Wormhole's translated bands are off the grid, so a physical NoC 1
+    coordinate still names exactly one tile — which is also what its ID
+    translation table does on silicon, being the identity everywhere the
+    physical grid lives. Concretely: Wormhole DRAM is never translated and goes
+    on being addressed by its mirror, and every tile's ``NOC_NODE_ID`` — the
+    per-NoC *physical* node ID, which is that mirror on NoC 1 — goes on
+    resolving to itself.
+    """
+    device = wormhole_translated
+    for tile in device.tile_directory.values():
+        if not getattr(tile, "register_noc1_mirror", True):
+            continue  # eth, which has never had a mirror key
+        nui1 = tile.get_noc_nui(1)
+        mirror = device.noc1_mirror(
+            getattr(tile, "noc1_endpoint_coord", None) or tile.get_noc_nui(0).id_pair
+        )
+        assert resolved_nui(device.noc_1_directory[mirror]) is nui1, mirror
+
+
+def test_blackhole_drops_its_physical_noc1_keys(blackhole_translated):
+    """Where they are ambiguous they go, and nothing is left holding one.
+
+    ``(16-x, 11-y)`` of one Blackhole worker is the translated coordinate of
+    another, so a mirror key there is not dead weight but a live misroute. The
+    only mirrors Blackhole ever registered were DRAM's; under translation its
+    bank table emits translated DRAM coords instead, so they are gone.
+    """
+    device = blackhole_translated
+    mirrors = {
+        device.noc1_mirror(coord)
+        for tile in device.tile_directory.values()
+        for coord in (
+            (getattr(tile, "noc1_endpoint_coord", None) or tile.get_noc_nui(0).id_pair),
+            *tile.noc_aliases,
+        )
+    }
+    # A mirror cell may still be a key — as some *other* tile's translated
+    # coord. What must not happen is a key resolving to the tile it mirrors.
+    for cell in mirrors:
+        entry = device.noc_1_directory.get(cell)
+        if entry is None:
+            continue
+        owner = device.tile_directory.get(cell)
+        assert owner is not None, cell
+        assert resolved_nui(entry) is owner.get_noc_nui(1), cell
 
 
 # ---------------------------------------------------------------------------

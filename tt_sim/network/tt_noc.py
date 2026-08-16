@@ -272,23 +272,28 @@ def _endpoint_noc_coord(endpoint):
     A :class:`NUI` knows its own per-NoC coord. An :class:`AliasedEndpoint`
     carries the coord of the *cell the packet was addressed to*, which is the
     whole reason it exists. A :class:`NullEndpoint` has only the directory key
-    it was looked up under, which is assumed to be in this NoC's space because
-    it came straight out of the initiator's command registers.
+    it was looked up under — so it is the one endpoint whose grid position has
+    to be *derived* from a key, and it is told the answer at construction
+    (:attr:`NUI.keys_mirror_grid_cells`) rather than assuming the key is
+    already a cell.
 
-    **That assumption is exactly true on NoC 0 and only partly true on NoC 1.**
-    NoC 1's directory is keyed in two conventions at once (see
-    ``TT_Device._register_tile_internals``): a tile's canonical SoC-physical
-    coord, and the ``(GRID-1-x, GRID-1-y)`` mirror tt-metal's bank-to-noc table
-    emits. Only the mirror is a NoC 1 coordinate, so a ``NullEndpoint`` built
-    from a canonically keyed cell holds a coord in the *other* space and is
-    costed a flight that is not the one it makes. That is a real defect; it is
-    the two-convention keying itself, and it goes away when that keying does,
-    not by patching the coordinate here. It is measured rather than left to
-    this docstring — see ``tt_sim/network/noc_endpoint_consistency_test.py``,
-    which pins how many entries are affected on each architecture.
+    **That assumption was exactly true on NoC 0 and only partly true on
+    NoC 1.** In the default untranslated mode NoC 1's directory is keyed in two
+    conventions at once (see ``TT_Device._register_tile_internals``): a tile's
+    canonical SoC-physical coord, and the ``(GRID-1-x, GRID-1-y)`` mirror
+    tt-metal's bank-to-noc table emits. Only the mirror is a NoC 1 coordinate,
+    so a ``NullEndpoint`` built from a canonically keyed cell holds a coord in
+    the *other* space and is costed a flight that is not the one it makes.
+    There is no fix available while both conventions are live — no rule can
+    place a key that means two things — which is why the residual is pinned
+    rather than patched (``tt_sim/network/noc_endpoint_consistency_test.py``).
+    Under translation NoC 1 carries one convention and the derivation is
+    well defined, which is what takes that residual to zero.
     """
-    coord = getattr(endpoint, "coord", None)
-    return coord if coord is not None else (endpoint.x_coord, endpoint.y_coord)
+    cell = getattr(endpoint, "grid_cell", None)
+    if cell is not None:
+        return cell
+    return (endpoint.x_coord, endpoint.y_coord)
 
 
 class AliasedEndpoint:
@@ -319,11 +324,15 @@ class AliasedEndpoint:
     error in one direction — it is a round trip that does not close.
     """
 
-    __slots__ = ("endpoint", "coord")
+    __slots__ = ("endpoint", "coord", "grid_cell")
 
     def __init__(self, endpoint, coord):
         self.endpoint = endpoint
         self.coord = coord
+        #: Where this view stands on the grid — the cell itself. Named the same
+        #: as :attr:`NullEndpoint.grid_cell` so :func:`_endpoint_noc_coord` is
+        #: one attribute read for every endpoint that has a position of its own.
+        self.grid_cell = coord
 
     def transmit(self, request, delay=None):
         request.arrived_at = self.coord
@@ -366,10 +375,20 @@ class NullEndpoint:
     two destinations never written, trading a hang for a wrong answer. The
     diagnosability complaint is real and is answered where it belongs, in
     :meth:`NUI.report_multicast_gaps`, which names the offending cells.
+
+    **``coord`` is a directory key; ``grid_cell`` is a position.** They are the
+    same tuple on NoC 0 and wherever NoC 1's keys are the mirrored physical
+    coords the grid is laid out in, and they differ on a NoC whose keys are
+    translated identities — a Blackhole core's translated coord is a NoC 0
+    coord, so the cell it names on NoC 1 is that coord's grid mirror. The
+    distinction exists because every *other* endpoint knows where it stands and
+    this one has to be told: keeping the key as well means the transaction it
+    answers still reports the coordinate the caller asked for.
     """
 
-    def __init__(self, coord):
+    def __init__(self, coord, grid_cell=None):
         self.coord = coord
+        self.grid_cell = coord if grid_cell is None else grid_cell
 
     def transmit(self, request, delay=None):
         if request.action == NUI.NoCDataRequest.DataRequestAction.READ:
@@ -423,7 +442,7 @@ class NullEndpoint:
         # dims) from this endpoint's coord, so a null-routed transaction costs
         # the same as a real one at the same distance.
         source = request.reply_to
-        back = source.flight_cycles_from(self.coord)
+        back = source.flight_cycles_from(self.grid_cell)
         if back is not None:
             # This endpoint has no clock, so it cannot hold the request for its
             # outbound flight the way a real NIU does. Both legs are charged to
@@ -1251,6 +1270,19 @@ class NUI(MemMapable, Clockable):
         #: at registration; see :meth:`set_translated_coord` for what it
         #: changes and, pointedly, what it does not.
         self.translated_coord = None
+        #: Whether a directory key on this NoC is the grid mirror of the cell
+        #: it names, rather than the cell itself. ``False`` everywhere except a
+        #: NoC 1 whose keys are *all* translated identities (Blackhole under
+        #: translation, where a core's translated coord is its NoC 0 coord and
+        #: so names the cell whose NoC 1 position is its mirror); set by
+        #: ``TT_Device._register_tile_internals``.
+        #:
+        #: Consulted only when a key has to be turned back into a position,
+        #: which happens for exactly one endpoint kind — a
+        #: :class:`NullEndpoint`, the only one with no position of its own.
+        #: Untranslated NoC 1 deliberately leaves it ``False``: there the keys
+        #: are two conventions at once and no single rule is right for both.
+        self.keys_mirror_grid_cells = False
         self.generate_NIU_and_NoC_config()
         self.generate_NoC_node_id()
         self.request_initiators = [
@@ -1343,12 +1375,24 @@ class NUI(MemMapable, Clockable):
         **``NOC_NODE_ID`` is deliberately left alone**, and that is a change of
         mind worth recording. It reports where this interface physically sits,
         which translation does not move; firmware installs it as the
-        return-address coordinate for reads and atomics, and on a real part
-        that still routes because the NIU keeps accepting physical coordinates
-        alongside translated ones. tt-sim models the same thing — translated
-        keys are *added* to the directory, never substituted for the physical
-        ones — so the physical self-address stays resolvable and the register
-        can stay honest.
+        return-address coordinate for reads and atomics, and as the default
+        target coordinate in two command buffers. Neither use needs a directory
+        key here: a response is routed to the endpoint that issued the request
+        (:meth:`send_response`), never by coordinate, and a write API programs
+        ``NOC_TARG_ADDR_COORDINATE`` from the destination address before
+        issuing — directly, or in the ``set_state`` call the ``with_state``
+        family requires — so the default is overwritten before it can address
+        anything.
+
+        Where a physical self-address *is* resolvable, it resolves through the
+        NoC 1 **mirror** key — which is what this register reports on NoC 1 —
+        and not through the unmirrored one. Dropping the unmirrored NoC 1 keys
+        under translation therefore leaves this register exactly as
+        resolvable as it was: on Wormhole, whose mirrors stay, every tile still
+        answers to its own node ID except the eth cores, which have never had a
+        mirror key; on Blackhole, whose mirrors go, no NoC 1 node ID resolved
+        in the first place — none has, in the default untranslated mode, for
+        that architecture's whole life, and its programs pass regardless.
 
         Also deliberately unchanged: :attr:`x_coord` / :attr:`y_coord`, this
         endpoint's position in the physical NoC mesh, which the cost model
@@ -2114,6 +2158,17 @@ class NUI(MemMapable, Clockable):
             file=sys.stderr,
         )
 
+    def grid_cell_of_key(self, coord):
+        """The grid position a directory key on this NoC names.
+
+        The identity unless :attr:`keys_mirror_grid_cells` says otherwise, in
+        which case it is the grid mirror — the same involution the directory
+        itself is built with, so a key and its cell cannot drift apart.
+        """
+        if not self.keys_mirror_grid_cells:
+            return coord
+        return (self.noc_grid_x - 1 - coord[0], self.noc_grid_y - 1 - coord[1])
+
     def resolve_destination(self, coord):
         """Look up the endpoint a *request* is addressed to.
 
@@ -2134,6 +2189,13 @@ class NUI(MemMapable, Clockable):
         packet proceeds to a real L1. Only a coord nothing can materialise
         (off-grid, or a tile kind the simulator does not model) reaches the
         NullEndpoint, and that answer is then cached as before.
+
+        The null route is built with the *cell* the key names as well as the
+        key, because this is the one place that knows how to get from one to
+        the other (:attr:`keys_mirror_grid_cells`): a modelled endpoint carries
+        its own position and a null one has nothing else to go on. An off-grid
+        key stays off-grid either way, so a coordinate with no honest distance
+        still raises rather than being given a plausible one.
         """
         dest = self.noc_directory.get(coord)
         if dest is None:
@@ -2141,7 +2203,7 @@ class NUI(MemMapable, Clockable):
                 self.directory_miss_hook(self.noc_number, coord)
                 dest = self.noc_directory.get(coord)
             if dest is None:
-                dest = NullEndpoint(coord)
+                dest = NullEndpoint(coord, self.grid_cell_of_key(coord))
                 self.noc_directory[coord] = dest
                 if self.snoop:
                     print(
@@ -2212,11 +2274,13 @@ class NUI(MemMapable, Clockable):
         Deliberately *not* translated, and deliberately not following
         :meth:`generate_NoC_id_logical`: this register reports where the
         interface physically sits, which is a fact about the silicon that
-        enabling coordinate translation does not change. On a real part the
-        firmware's self-address derived from it still routes, because the NIU
-        keeps accepting physical coordinates alongside translated ones — and
-        tt-sim models that too, by keeping every physical directory key when
-        it adds the translated ones.
+        enabling coordinate translation does not change. On Wormhole the
+        firmware's self-address derived from it still routes under translation,
+        because that part's translated bands are off the physical grid and its
+        NoC 1 mirror keys — which is what this register holds on NoC 1 — stay.
+        On Blackhole they do not, there or in the default mode, and nothing has
+        ever noticed: see :meth:`set_translated_coord` for why neither of the
+        firmware's two uses of this register needs a coordinate to resolve.
         """
         x, y = self.x_coord, self.y_coord
         self.noc_node_id = replace_bits(0, x, 0, 6)

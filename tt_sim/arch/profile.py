@@ -214,6 +214,34 @@ class ArchProfile:
     #: (mirrored on NoC 1) on both architectures — that is what the register is.
     noc_id_logical_mirrored_on_noc1: bool = True
 
+    #: Whether this architecture's translated coordinates fall entirely
+    #: *outside* the SoC-physical grid. One geometric fact with two
+    #: consequences, both about NoC 1 under translation.
+    #:
+    #: * **Wormhole — ``True``.** Workers translate to ``(18..25, 18..27)`` and
+    #:   ethernet to ``(18..25, {16,17})``, none of which is a cell of the
+    #:   10x12 grid. So a physical coordinate still names exactly one tile and
+    #:   the NoC 1 mirror keys stay: the ID translation table is the identity
+    #:   everywhere the physical grid lives, which is the same reason Wormhole
+    #:   DRAM — never translated at all — goes on being addressed by its mirror
+    #:   under translation. A tile's ``NOC_NODE_ID`` self-coordinate is that
+    #:   mirror, and it goes on resolving.
+    #: * **Blackhole — ``False``.** A Blackhole core's translated coord *is* a
+    #:   NoC 0 Tensix coord (``blackhole_coordinate_manager.cpp``), so the two
+    #:   ranges are numerically the same one and every coordinate is read as
+    #:   translated. There is no second space to keep, and a leftover mirror
+    #:   key would not be merely dead — ``(GRID-1-x, GRID-1-y)`` of one worker
+    #:   is the translated coordinate of another, so it would misroute live
+    #:   traffic. Its mirror keys therefore go under translation.
+    #:
+    #: The second consequence is that a NoC 1 directory key is a grid cell
+    #: where this is ``True`` and a translated identity — whose cell is the
+    #: key's mirror — where it is ``False``; the null-route path needs the
+    #: difference (:attr:`~tt_sim.network.tt_noc.NUI.keys_mirror_grid_cells`).
+    #: Asserted against the built device rather than trusted, in
+    #: ``tt_sim/device/noc_translation_test.py``.
+    translated_coords_off_physical_grid: bool = True
+
     #: Per-channel **translated** coords of the DRAM tile's worker-visible
     #: endpoints — element 0 the NoC 0 sub-endpoint's, element 1 the NoC 1
     #: sub-endpoint's — parallel to :attr:`dram_channel_unified_coords`. Empty

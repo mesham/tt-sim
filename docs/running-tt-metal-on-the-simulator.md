@@ -388,12 +388,25 @@ virtualised core types are `{TENSIX, ETH}` and Blackhole's are
 `{TENSIX, ETH, PCIE, DRAM}`, so Wormhole's DRAM bank table stays mirrored on
 NoC 1 under translation and Blackhole's stops being mirrored at all.
 
-**Limits of the current support.** Translated mode is accepted and correct, but
-tt-sim still registers its legacy NoC 1 mirror aliases alongside the translated
-keys — translation is *additive* here exactly as it is on silicon, which is why
-turning it on cannot disturb the default path. Removing those aliases is a
-separate change. The committed wire traces under `driver/*/server/traces/` are
-all recordings of untranslated traffic and replay unchanged.
+**What NoC 1 carries in each mode.** Untranslated, its directory holds two
+coordinate conventions at once — each tile's canonical (SoC-physical NoC 0)
+coord, which is what `get_noc_addr` emits, *and* the grid mirror the
+bank-to-noc table emits — and where they collide a live worker is unreachable
+(§4.6). Under translation the kernel emits a translated coord instead, so the
+unmirrored key is dead weight that only shadows workers, and it is not
+registered at all. What survives beside the translated keys is per-architecture
+geometry rather than preference:
+
+| | Wormhole | Blackhole |
+| --- | --- | --- |
+| translated coords vs the physical grid | entirely outside it (`18..25`) | *are* physical coords |
+| NoC 1 mirror keys under translation | **kept** — unambiguous, and DRAM is never translated so its bank table still emits them | **dropped** — `(16-x, 11-y)` of one worker is another worker's translated coord, so a mirror would misroute |
+| physical `NOC_NODE_ID` self-coord resolves | yes, as before (eth excepted) | no — and never has, in either mode |
+
+On NoC 0 nothing changes in either mode: it has one convention, and translation
+there is purely additive. The committed wire traces under
+`driver/*/server/traces/` are all recordings of untranslated traffic and replay
+unchanged.
 
 ---
 
@@ -789,9 +802,25 @@ With that, every tile on both architectures addresses itself back to itself,
 except **Wormhole's 16 eth cores on NoC 1**: eth alone skips mirror
 registration (an eth mirror would steal a DRAM tile's own canonical cell), so
 its mirrored self-coordinate names a worker instead. Nothing hits it — the
-slow-dispatch flow tt-sim supports launches no eth kernel — and the fix is the
-translation port, not more aliases. On Blackhole the self-coordinate census is *exactly* the six
-DRAM-shadowed workers above: same six cells, seen from the sending core.
+slow-dispatch flow tt-sim supports launches no eth kernel. On Blackhole the
+self-coordinate census is *exactly* the six DRAM-shadowed workers above: same
+six cells, seen from the sending core. Turning translation on clears both, on
+both architectures, because the register then reports a translated coord and
+the translated keys are unambiguous.
+
+**`NOC_NODE_ID` is a different register and is not part of that**, which is
+worth stating because the two are easy to conflate. It reports where the
+interface physically sits — the grid *mirror* on NoC 1 — and translation does
+not move it. Firmware's two uses of it need no directory key: a read or atomic
+response is routed to the endpoint that issued the request, never by
+coordinate, and a write API programs `NOC_TARG_ADDR_COORDINATE` from the
+destination address before issuing — directly, or in the `set_state` call the
+`*_with_state` family requires — so the self-address `noc_init` leaves in two
+command buffers is always overwritten. Measured: on Wormhole 16 of 216 NoC-1 self-coordinates fail to
+resolve (the eth cores) in *both* modes; on Blackhole 148 of 148 fail in both,
+and always have. Every Blackhole example and replay guard passes regardless,
+which is what makes it safe for Wormhole's canonical NoC 1 keys to go under
+translation while its mirrors — the ones this register actually names — stay.
 
 ---
 

@@ -152,6 +152,13 @@ BLACKHOLE_PROFILE = ArchProfile(
     # has no Tensix mirror keys.
     noc_id_logical_cfg_index=0x12,
     noc_id_logical_mirrored_on_noc1=False,
+    # A Blackhole core's *translated* coord is a NoC 0 Tensix coord, so the
+    # translated and physical ranges are one numeric range and there is no
+    # second space for NoC 1 to keep. Under translation its mirror keys go
+    # entirely: `(16-x, 11-y)` of one worker is another worker's translated
+    # coordinate, so a leftover mirror is a misroute rather than dead weight.
+    # See `ArchProfile.translated_coords_off_physical_grid`.
+    translated_coords_off_physical_grid=False,
     # Baby-core firmware bases (blackhole/dev_mem_map.h): with no IRAM
     # constraints every core boots from L1. Computed from the mailbox/zeros/LLK
     # chain: BRISC 0x39E0, then NCRISC 0x5BE0, TRISC0/1/2 0x65E0/0x6FE0/0x79E0.

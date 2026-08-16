@@ -37,26 +37,25 @@ guards resolve.
 The residual, which is expected and is pinned rather than waived
 ------------------------------------------------------------------
 
-NoC 1's directory is keyed in **two conventions at once** (see
-``TT_Device._register_tile_internals``): a tile's canonical (SoC-physical
-NoC 0) coord, *and* the ``(GRID-1-x, GRID-1-y)`` mirror that tt-metal's
-bank-to-noc table emits. Only the second is a NoC 1 coordinate. A
-``NullEndpoint`` built from a canonically keyed cell therefore holds a coord in
-the *other* space, and disagrees with the NUI — whose coord is the mirror, and
-is the correct one. That is a real defect and it is **not** what these tests
-fix: it is the two-convention keying itself, and it is cleared by removing that
-keying rather than by patching a coordinate at the point of use.
+In the default untranslated mode NoC 1's directory is keyed in **two
+conventions at once** (see ``TT_Device._register_tile_internals``): a tile's
+canonical (SoC-physical NoC 0) coord, *and* the ``(GRID-1-x, GRID-1-y)`` mirror
+that tt-metal's bank-to-noc table emits. Only the second is a NoC 1 coordinate.
+A ``NullEndpoint`` built from a canonically keyed cell therefore holds a coord
+in the *other* space, and disagrees with the NUI — whose coord is the mirror,
+and is the correct one. That is a real defect and it is **not** what these
+tests fix. It cannot be fixed at the point of use either: no rule can place a
+key that means two things, so as long as both conventions are live the residual
+is pinned rather than patched.
 
-**Enabling NoC coordinate translation does not, by itself, clear it** — a
-correction to what this note first claimed, made after measuring rather than
-reasoning. Translation is *additive*: it gives every tile an unambiguous key in
-a disjoint space, which is what finally makes the canonical/mirror pair safe to
-delete, but it adds those keys and leaves the canonical NoC 1 entries exactly
-where they were. Measured on the full grid with translation on, these counts
-are **unchanged on Wormhole** (28 keys / 24 mis-costed) and **six higher on
-Blackhole** (148 / 142) — the six DRAM channels whose NoC 1 mirror cell a
-translated worker key takes over. Removing the dual keying is a separate
-change, and it is the one that moves these numbers to zero.
+**Enabling NoC coordinate translation does not, by itself, clear it.**
+Translation is *additive*: it gives every tile an unambiguous key in a disjoint
+space, which is what finally makes the canonical entries safe to delete, but on
+its own it adds those keys and leaves the canonical NoC 1 ones where they were.
+Removing them is what takes the count to zero, and that is asserted below on a
+translated device — every key, both NoCs, both architectures, no exclusions.
+The untranslated counts stay exactly where they were, which is the point: the
+default path is untouched.
 
 So the invariant is asserted in full on NoC 0, and on NoC 1 for every key that
 is in NoC 1's own space; every remaining key must miss by *exactly* the mirror
@@ -124,16 +123,16 @@ def _model_on():
 _DEVICES = {}
 
 
-def _device(arch):
+def _device(arch, translated=False):
     """A fully populated device of ``arch``, built once per session."""
-    if arch not in _DEVICES:
+    if (arch, translated) not in _DEVICES:
         with _model_on():
-            _DEVICES[arch] = (
-                Wormhole(tensix_coords=_WH_WORKERS)
+            _DEVICES[(arch, translated)] = (
+                Wormhole(tensix_coords=_WH_WORKERS, noc_translation=translated)
                 if arch == "wormhole"
-                else Blackhole(tensix_coords=_BH_WORKERS)
+                else Blackhole(tensix_coords=_BH_WORKERS, noc_translation=translated)
             )
-    return _DEVICES[arch]
+    return _DEVICES[(arch, translated)]
 
 
 def _initiator(device, coord, noc):
@@ -340,6 +339,96 @@ def test_the_two_convention_residual_is_confined_to_noc1_and_does_not_grow(arch)
 
 def _initiator_coord(arch):
     return _WH_INITIATOR if arch == "wormhole" else _BH_INITIATOR
+
+
+# ---------------------------------------------------------------------------
+# 3. Under translation there is no residual, because there is one convention.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
+@pytest.mark.parametrize("noc", [0, 1])
+def test_translation_leaves_no_key_costed_in_the_wrong_space(arch, noc):
+    """The same invariant as above, with **nothing excluded**.
+
+    Untranslated, NoC 1 has to exempt its canonically keyed entries because a
+    key that names two cells cannot be placed on one. Under translation it has
+    one convention and every key can be placed, so every key is checked — and
+    the count that was 24 on Wormhole and 136 on Blackhole is zero.
+
+    The null endpoint is built the way :meth:`NUI.resolve_destination` builds
+    one, from the key *and* the cell it names, because that is the object a
+    real miss produces. On Wormhole the two are the same tuple (its NoC 1 keys
+    are the mirrored physical coords the grid is laid out in); on Blackhole
+    they are not (its keys are translated identities, numerically NoC 0
+    coords), and asking for the key's cell is the whole difference.
+    """
+    device = _device(arch, translated=True)
+    src, directory, _, _, _ = _audit(device, _initiator_coord(arch), noc)
+    disagreements = []
+    for key in sorted(directory):
+        null = NullEndpoint(key, src.grid_cell_of_key(key))
+        try:
+            costs = (src.flight_cycles_to(directory[key]), src.flight_cycles_to(null))
+        except NoCCoordinateError:
+            # A translated identity with no cell on the grid — Wormhole's
+            # worker band, Blackhole's DRAM. The directory entry carries the
+            # physical cell and the null one cannot, so there is nothing to
+            # compare; refusing to invent a distance is the pinned behaviour
+            # (``tt_sim/device/noc_translation_test.py``).
+            continue
+        if costs[0] != costs[1]:
+            disagreements.append((key, *costs))
+    assert disagreements == [], (
+        f"{arch} NoC{noc} translated: {len(disagreements)} keys are timed "
+        f"differently depending on whether the cell happens to be modelled: "
+        f"{disagreements[:6]}"
+    )
+
+
+@pytest.mark.parametrize("arch", ["wormhole", "blackhole"])
+def test_a_missed_noc1_key_is_null_routed_to_the_cell_it_names(arch):
+    """The placement itself, through ``resolve_destination``.
+
+    A miss is where a key becomes an endpoint, so it is where the key has to be
+    turned back into a position — a modelled endpoint knows where it stands and
+    a null one has to be told. Blackhole is the case that matters: its NoC 1
+    keys are translated identities, so the cell is the key's mirror and a null
+    route that kept the key would be timed to the opposite corner of the grid.
+
+    Both legs are checked. The outbound one is what the hop model reads; the
+    return one is what :meth:`NullEndpoint._respond` charges, and the two have
+    to be measured between the same pair of points or a round trip does not
+    close.
+    """
+    device = _device(arch, translated=True)
+    src = _initiator(device, _initiator_coord(arch), 1)
+    grid_x, grid_y = device.profile.noc_grid_x, device.profile.noc_grid_y
+    unclaimed = next(
+        (x, y)
+        for x in range(grid_x)
+        for y in range(grid_y)
+        if (x, y) not in device.noc_1_directory
+    )
+    try:
+        endpoint = src.resolve_destination(unclaimed)
+    finally:
+        # ``resolve_destination`` caches its answer in the directory, and the
+        # device is shared with the audits above — so put the table back.
+        device.noc_1_directory.pop(unclaimed, None)
+    assert isinstance(endpoint, NullEndpoint)
+    assert endpoint.coord == unclaimed, "the key it answers under is unchanged"
+    mirrored = (grid_x - 1 - unclaimed[0], grid_y - 1 - unclaimed[1])
+    expected = (
+        unclaimed if device.profile.translated_coords_off_physical_grid else mirrored
+    )
+    assert _endpoint_noc_coord(endpoint) == expected
+    assert src.flight_cycles_to(endpoint) == src.flight_cycles_to(
+        NullEndpoint(expected)
+    )
+    assert src.flight_cycles_from(endpoint.grid_cell) == src.flight_cycles_from(
+        expected
+    )
 
 
 if __name__ == "__main__":

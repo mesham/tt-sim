@@ -217,6 +217,69 @@ caveat from that sentence or extends it.
 and workers materialise on demand with no environment variable. What
 is left is the credibility layer.
 
+0. **NoC 1 coordinate correctness — five commits, 2026-08-13/16.**
+   Not on the original list; it arrived as a bug report from the
+   compiler team and turned out to be the largest correctness defect
+   found this cycle. **NoC 1's destination directory was keyed in two
+   coordinate conventions at once** — a kernel emits canonical worker
+   coords and mirrored bank-table coords on the *same* NoC, both
+   observed in one replayed trace — so mirror registrations displaced
+   live workers. **56 of Wormhole's 80 workers and 102 of Blackhole's
+   140 resolved to the wrong tile**, and because the impostor ACKs, a
+   sender's `noc_async_write_barrier()` returned normally: silent
+   misdelivery, not a fault. It had been live for months behind a test
+   suite that *asserted the shadowing as correct behaviour* in three
+   places, including one requiring all 140 Blackhole workers to be
+   reachable at their mirror coord.
+   What landed, in order: `90ec8f1` names every shadow at registration,
+   at `add_tensix_tile` and at the directory-miss hook
+   (`TT_SIM_NOC1_SHADOW`, warn by default because configurations that
+   pass today carry an untouched shadow) and drops Blackhole's mirror
+   aliases, which `virtual_noc0_coordinate`'s unconditional
+   `|| arch == BLACKHOLE` early-out means were never addressed
+   (census 102 -> 6). `93e68fb` fixes a second defect found chasing the
+   first: tt-sim decoded **Wormhole's `NOC_ID_LOGICAL` index on both
+   arches**, so every Blackhole core read 0 for its own coordinate and
+   `my_x`/`my_y` were `(0,0)` — which had already cost `perfbench/
+   nocbench` a documented workaround nobody had traced to a cause.
+   `73ad018` fixes packet *timing*: a DRAM channel answers to several
+   NoC cells and tt-sim billed every packet to its tile's primary NUI —
+   wrong for **all 480** Wormhole worker/endpoint pairs on each NoC and
+   for **every** Blackhole NoC 1 DRAM flight (65% of its destination
+   resolutions), plus a grid guard so an out-of-grid coord raises
+   instead of spinning forever in `noc_route_links`. `e1016bb` makes
+   **NoC coordinate translation** work, which puts every tile in a
+   disjoint key space and takes both censuses to **0**.
+   **Reachable today with no upstream change**, and that was the
+   session's biggest wrong turn corrected: UMD's `.so` extension test
+   looked like a hard blocker, but `ClusterOptions::cluster_descriptor`
+   bypasses it entirely and tt-metal already plumbs it for a Simulator
+   target via `TT_METAL_MOCK_CLUSTER_DESC_PATH`. Descriptors are
+   checked in per arch; see runbook §1.4.
+   Translation on its own is *additive*, though, so the second
+   convention was still carried and the endpoint-consistency residual
+   survived it — measured, and contradicting the reason first pinned
+   for it. Dropping the unmirrored NoC 1 keys under translation is what
+   takes that residual to **0** on both arches, with the untranslated
+   path byte-for-byte unchanged and every flight a kernel can actually
+   address timed identically before and after. What survives beside the
+   translated keys is geometry, not preference: Wormhole keeps its
+   mirrors (its translated bands are off the physical grid, so a
+   physical coord is still unambiguous — and its DRAM is never
+   translated) and Blackhole drops them (its translated coords *are*
+   physical coords, so one worker's mirror is another's translated
+   key).
+   **The method lesson, which is the transferable part**: every one of
+   these was found by an instrument, not by reading. The static
+   directory probe predicted the runtime failure set exactly before any
+   simulation ran; the endpoint-consistency invariant
+   (`flight_cycles_to(directory[key])` vs
+   `flight_cycles_to(NullEndpoint(key))`, ~2 s, no kernel) found the
+   DRAM timing bug and a Blackhole case a design note had recorded as
+   clean; and the shadow census is blind to *self*-coordinate
+   reachability, which is why a regression in `90ec8f1` needed a
+   different probe to see. Write the census before the fix.
+
 1. **NoC link contention — VALIDATED 2026-08-12.** The term fires, for
    the first time, on both arches: **7,590 link claims / 45 waits** on
    Blackhole and 6,580 / 69 on Wormhole, both `MEANINGFUL —

@@ -268,12 +268,11 @@ class TT_Device(Device):
         reachable from every existing NUI on the same NoC.
 
         Both NoC directories key by the tile's canonical (SoC-physical
-        NoC 0) coord — kernels supply that coord on either NoC when
-        translation is enabled (which is how tt-metal kernels under our
-        ``driver/wormhole/<n>/`` tree address tiles). Real tt-metal's
-        bank-to-noc table (consulted by ``TensorAccessor`` and friends in
-        the canonical ``programming_examples/``) instead writes per-NoC
-        *mirror* coords directly into NoC 1's half of the table — so on
+        NoC 0) coord — kernels supply that coord on either NoC, because
+        ``NOC_0_X`` / ``NOC_0_Y`` are the identity on both architectures. Real
+        tt-metal's bank-to-noc table (consulted by ``TensorAccessor`` and
+        friends in the canonical ``programming_examples/``) instead writes
+        per-NoC *mirror* coords directly into NoC 1's half of the table — so on
         NoC 1 the kernel actually emits the noc1-mirror of the canonical
         coord. For DRAM (and Tensix) we register both forms as keys:
         canonical on both NoCs, plus the noc1-mirror as an additional
@@ -281,6 +280,28 @@ class TT_Device(Device):
         Extra sub-endpoint aliases (e.g. DRAM channels with two
         worker-visible endpoints) get the same canonical + noc1-mirror
         pair of keys.
+
+        **Under translation NoC 1 keeps one convention, not two**, and that is
+        what makes the ambiguity described below stop existing rather than stop
+        being reported. The unmirrored key goes on *both* architectures: a
+        kernel under translation emits a translated coord for every core type
+        the architecture translates, and for the one it does not (Wormhole
+        DRAM) it emits the mirror the bank table holds — so nothing addresses a
+        tile by an unmirrored NoC 1 coordinate any more, and keeping the key
+        only leaves live workers shadowed. What survives alongside the
+        translated keys is per-architecture geometry, not preference:
+
+        - **Wormhole keeps its mirrors.** Its translated bands sit off the
+          10x12 grid entirely, so a physical NoC 1 coordinate still names one
+          tile — which is also what the ID translation table does on silicon,
+          being the identity everywhere the physical grid lives. That is why
+          untranslated Wormhole DRAM goes on working under translation, and it
+          keeps every tile's ``NOC_NODE_ID`` self-coordinate resolvable.
+        - **Blackhole drops them.** Its translated coords *are* NoC 0 coords,
+          so ``(GRID-1-x, GRID-1-y)`` of one worker is the translated
+          coordinate of another and a leftover mirror is a live misroute, not
+          dead weight. See ``ArchProfile.translated_coords_off_physical_grid``,
+          which is one fact with both consequences.
 
         **A key naming a cell the tile's NUI does not stand on is registered
         through an** :class:`~tt_sim.network.tt_noc.AliasedEndpoint`
@@ -294,9 +315,10 @@ class TT_Device(Device):
         catches a recurrence lives in
         ``tt_sim/network/noc_endpoint_consistency_test.py``.
 
-        **NoC 1 precedence.** On NoC 1 a tile is *physically* reachable at its
-        mirror coord ``(GRID-1-x, GRID-1-y)``; the canonical (primary) coord is
-        only a convention-1 accommodation for the ``driver/wormhole/<n>/`` tree.
+        **NoC 1 precedence** — untranslated, where both conventions are live.
+        On NoC 1 a tile is *physically* reachable at its mirror coord
+        ``(GRID-1-x, GRID-1-y)``; the canonical (primary) coord is there only
+        because ``get_noc_addr`` emits it unmirrored on both NoCs.
         The mirror formula maps coords across the DRAM / worker / eth bands, so
         the two conventions collide on some cells — e.g. with the truncated 4×5
         worker grid, Tensix ``(4, y)`` mirrors onto the DRAM column ``x = 5``
@@ -324,9 +346,10 @@ class TT_Device(Device):
         ``virtual_noc0_coordinate`` early-outs on that architecture and so has
         never emitted one. Do not generalise either answer to the other arch.
 
-        **NoC 1's table is therefore ambiguous by construction**: it holds two
-        coordinate conventions in one ``(x, y)``-keyed dict, and where they
-        collide only one tile is reachable. That is tolerable for *requests*,
+        **Untranslated, NoC 1's table is therefore ambiguous by
+        construction**: it holds two coordinate conventions in one
+        ``(x, y)``-keyed dict, and where they collide only one tile is
+        reachable. That is tolerable for *requests*,
         whose destination coord arrives from the kernel already in one known
         convention — and it is why nothing else may look a tile up here. A
         response is routed by the requesting endpoint itself
@@ -364,22 +387,39 @@ class TT_Device(Device):
         # NoC 1 coord instead of the primary — otherwise kernels addressing the
         # channel over NoC 1 route to an empty grid cell.
         noc1_source = getattr(tile, "noc1_endpoint_coord", None) or primary
-        # Primary is non-authoritative on NoC 1: never clobber a mirror.
-        self.noc_1_directory.setdefault(primary, nui1)
+        translated_pairs = (
+            self.translated_coords_for(tile) if self.noc_translation else ()
+        )
+        if not self.noc_translation:
+            # Primary is non-authoritative on NoC 1: never clobber a mirror.
+            self.noc_1_directory.setdefault(primary, nui1)
+        elif not self.profile.translated_coords_off_physical_grid:
+            # Under translation NoC 1 drops the *unmirrored* key on both
+            # architectures; on one whose translated coords are numerically
+            # physical coords it drops the mirrors as well, because there a
+            # mirror is another tile's translated key rather than dead weight.
+            register_mirror = False
         if register_mirror:
             self._register_noc1_mirror(self._noc1_mirror(noc1_source), nui1)
         for alias in getattr(tile, "noc_aliases", ()):
             self.noc_0_directory[alias] = _endpoint_at(nui0, alias)
-            self.noc_1_directory.setdefault(
-                alias, _endpoint_at(nui1, self._noc1_mirror(alias))
-            )
+            if not self.noc_translation:
+                self.noc_1_directory.setdefault(
+                    alias, _endpoint_at(nui1, self._noc1_mirror(alias))
+                )
             if register_mirror:
                 self._register_noc1_mirror(self._noc1_mirror(alias), nui1)
         # Before the shadow check, deliberately: a translated key makes its
         # tile reachable on NoC 1, so a check run first would report workers as
         # shadowed that translation has already rescued.
         if self.noc_translation:
-            self._register_translated(tile, nui0, nui1)
+            self._register_translated(tile, nui0, nui1, translated_pairs)
+            # With the unmirrored keys gone, whether a NoC 1 key *is* a grid
+            # cell has one answer per architecture, and the null-route path
+            # needs it: see :attr:`NUI.keys_mirror_grid_cells`.
+            nui1.keys_mirror_grid_cells = (
+                not self.profile.translated_coords_off_physical_grid
+            )
         self._check_noc1_shadowing(tile, nui1, primary, noc1_source, register_mirror)
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
@@ -460,18 +500,22 @@ class TT_Device(Device):
         Mirror registrations are authoritative among themselves (see
         :meth:`_register_tile_internals`), but a *translated* coordinate
         outranks them, and this is where that is enforced rather than left to
-        registration order. It matters on Blackhole, where a Tensix core's
-        translated coord is its physical coord and every worker's mirror
-        ``(16-x, 11-y)`` is some other worker's coord: without this rule the
-        last worker registered would take the translated key of the worker it
-        mirrors onto, which is the very shadowing translation exists to remove.
+        registration order.
 
-        Correct because the only thing that ever addresses a tile by its NoC 1
-        mirror is tt-metal's bank-to-noc table, and the table emits mirrors only
-        for core types this architecture does *not* translate — Wormhole DRAM,
-        and nothing else. Wherever a translated key exists, the table for that
-        core type is emitting translated coords instead, so the mirror it would
-        overwrite is dead.
+        **A backstop that can no longer fire**, kept because it is one
+        membership test and because what makes it unreachable is a property of
+        two architectures rather than of this function. Blackhole was the case
+        it was written for — a Tensix core's translated coord is its physical
+        coord, so every worker's mirror ``(16-x, 11-y)`` is some other worker's
+        translated key — and Blackhole now registers no NoC 1 mirrors at all
+        under translation. Wormhole registers them, but its translated coords
+        are off the physical grid that every mirror lands in, so the two can
+        never contend. Should a third architecture put a translated coord where
+        a mirror wants to be, this keeps the translated one, which is right for
+        the reason those mirrors are dropped elsewhere: the only flow that
+        addresses a tile by mirror is tt-metal's bank-to-noc table, and
+        wherever a translated coord exists that table emits translated coords
+        instead.
 
         A no-op outside translated mode: :attr:`_translated_noc1_keys` is empty
         and this is one membership test on an empty set.
@@ -549,26 +593,28 @@ class TT_Device(Device):
         physical_noc1 = physical_noc0 if noc1_coords is None else noc1_coords[index]
         return ((translated_noc0, physical_noc0), (translated_noc1, physical_noc1))
 
-    def _register_translated(self, tile, nui0, nui1):
+    def _register_translated(self, tile, nui0, nui1, pairs=None):
         """Add ``tile``'s translated coords to both NoC directories.
 
-        **Additive, and authoritative.** Additive because translation does not
-        replace the physical coordinate space — on silicon the NIU recognises
-        both, and here the physical keys stay exactly as they were, which is
-        what lets translated mode be opt-in without disturbing anything.
-        Authoritative because a translated coordinate is unambiguous by
-        construction and a legacy NoC 1 mirror sitting on one is dead weight:
-        the only flow that addresses a tile by mirror is the bank-to-noc table,
-        and wherever a translated coord exists that table is emitting translated
-        coords instead.
+        **Additive on NoC 0, and the whole of the story on NoC 1.** NoC 0 keeps
+        every physical key exactly as it was — one convention, keys that are
+        the cells they name, nothing to give way — which is what lets
+        translated mode be opt-in without disturbing anything. On NoC 1 the
+        unmirrored key is not carried at all under translation and the mirror
+        survives only where it is unambiguous, so what this method registers is
+        most of that NoC's table rather than an addition to it (see
+        :meth:`_register_tile_internals`).
 
-        On Wormhole nothing is displaced at all — translated workers live at
-        ``{18..25} x {18..27}`` and eth at ``{18..25} x {16,17}``, both entirely
-        outside the 10x12 physical grid every mirror lands in. On Blackhole,
-        where a Tensix core's translated coord *is* its physical coord, this
-        does displace the handful of DRAM mirrors that legacy NoC 1 aliasing
-        parks on live worker coords. That is the point. Every displacement is
-        recorded in :attr:`translated_displacements` so it can be asserted on.
+        **Nothing is displaced on either architecture**, and that is now true
+        by construction rather than by arithmetic. Wormhole's translated bands
+        — workers at ``{18..25} x {18..27}``, eth at ``{18..25} x {16,17}`` —
+        are entirely outside the 10x12 grid every mirror lands in. Blackhole's
+        translated coords *are* physical coords and used to overwrite six DRAM
+        mirrors here; those mirrors are no longer registered, which is the
+        stronger form of the same answer, since a key that is never written
+        cannot be resurrected by a change in registration order.
+        :attr:`translated_displacements` is kept, and asserted empty, so that a
+        change which reintroduces one has to say so.
 
         **Every entry goes in through** :func:`_endpoint_at`, on the *physical*
         cell the translated coord names — never on the translated coord itself.
@@ -580,7 +626,7 @@ class TT_Device(Device):
         the packet actually makes — so translated mode is not merely
         non-fatal under ``TT_SIM_COST_MODEL``, it is timed correctly.
         """
-        pairs = self.translated_coords_for(tile)
+        pairs = self.translated_coords_for(tile) if pairs is None else pairs
         if not pairs:
             return
         tile.set_translated_coords([translated for translated, _ in pairs])
