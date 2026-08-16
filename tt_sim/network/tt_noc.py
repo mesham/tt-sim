@@ -50,7 +50,42 @@ class NoCOverlay(MemMapable):
         return 0x3FFFF
 
 
-def noc_hop_count(src, dst, grid_x, grid_y):
+class NoCCoordinateError(ValueError):
+    """A coordinate handed to the hop model names no cell on the grid.
+
+    Both distance functions below walk a torus of ``grid_x`` x ``grid_y``
+    routers, so a coordinate outside it is not a longer journey — it is not a
+    journey at all. :func:`noc_hop_count` would return a modular fiction and
+    :func:`noc_route_links` would never terminate (its walk steps
+    ``x = (x + 1) % grid_x``, which can never equal an out-of-grid ``dst[0]``),
+    spinning in pure Python with the device clock stopped and no deadlock
+    detector able to fire. There is no legitimate caller with an out-of-grid
+    coordinate, so both refuse instead — the same choice
+    :class:`~tt_sim.network.alignment.NoCAlignmentError` and
+    :class:`NoCResponseError` make, and for the same reason.
+
+    The message names the coordinate, the grid and which end of the journey it
+    came from. Which *endpoint object* it came from is added by
+    :meth:`NUI.flight_cycles_to` and :meth:`NUI.route_links_to`, in an
+    ``except`` clause rather than as an argument: both are per-packet calls, so
+    the description must cost nothing on the path where nothing is wrong.
+    """
+
+
+def _check_in_grid(coord, grid_x, grid_y, role):
+    """Raise :class:`NoCCoordinateError` unless ``coord`` is a cell of the grid."""
+    x, y = coord
+    if 0 <= x < grid_x and 0 <= y < grid_y:
+        return
+    raise NoCCoordinateError(
+        f"NoC {role} coordinate {(x, y)} is outside the {grid_x}x{grid_y} grid "
+        "this NoC routes on, so the distance to it is undefined"
+    )
+
+
+def noc_hop_count(
+    src, dst, grid_x, grid_y, *, src_role="source", dst_role="destination"
+):
     """Router-to-router hops from ``src`` to ``dst``, **in one NoC's own space**.
 
     Each NoC is a torus: every row is a ring and every column is a ring, and a
@@ -79,12 +114,17 @@ def noc_hop_count(src, dst, grid_x, grid_y):
 
     Callers must pass coords in the same space, which on this NoC means
     ``NUI.x_coord`` / ``NUI.y_coord`` (per-NoC) and **never** ``id_pair``
-    (canonical NoC 0 on both NoCs).
+    (canonical NoC 0 on both NoCs). ``src_role`` / ``dst_role`` name the
+    endpoint each coord came from, for :class:`NoCCoordinateError`'s message.
     """
+    _check_in_grid(src, grid_x, grid_y, src_role)
+    _check_in_grid(dst, grid_x, grid_y, dst_role)
     return (dst[0] - src[0]) % grid_x + (dst[1] - src[1]) % grid_y
 
 
-def noc_route_links(src, dst, grid_x, grid_y):
+def noc_route_links(
+    src, dst, grid_x, grid_y, *, src_role="source", dst_role="destination"
+):
     """The router-to-router links a packet crosses, **in order**.
 
     :func:`noc_hop_count` is this function's length, and for a long time the
@@ -108,6 +148,8 @@ def noc_route_links(src, dst, grid_x, grid_y):
     measured shared-link count describes a different machine from the modelled
     one.
     """
+    _check_in_grid(src, grid_x, grid_y, src_role)
+    _check_in_grid(dst, grid_x, grid_y, dst_role)
     links = []
     x, y = src
     while x != dst[0]:
@@ -227,12 +269,81 @@ def _payload_bytes(packet):
 def _endpoint_noc_coord(endpoint):
     """An endpoint's coordinate in the coordinate space of its own NoC.
 
-    A :class:`NUI` knows its own per-NoC coord; a :class:`NullEndpoint` only
-    knows the key it was looked up under, which is already in this NoC's space
-    because it came straight out of the initiator's command registers.
+    A :class:`NUI` knows its own per-NoC coord. An :class:`AliasedEndpoint`
+    carries the coord of the *cell the packet was addressed to*, which is the
+    whole reason it exists. A :class:`NullEndpoint` has only the directory key
+    it was looked up under, which is assumed to be in this NoC's space because
+    it came straight out of the initiator's command registers.
+
+    **That assumption is exactly true on NoC 0 and only partly true on NoC 1.**
+    NoC 1's directory is keyed in two conventions at once (see
+    ``TT_Device._register_tile_internals``): a tile's canonical SoC-physical
+    coord, and the ``(GRID-1-x, GRID-1-y)`` mirror tt-metal's bank-to-noc table
+    emits. Only the mirror is a NoC 1 coordinate, so a ``NullEndpoint`` built
+    from a canonically keyed cell holds a coord in the *other* space and is
+    costed a flight that is not the one it makes. That is a real defect; it is
+    the two-convention keying itself, and it goes away when that keying does,
+    not by patching the coordinate here. It is measured rather than left to
+    this docstring — see ``tt_sim/network/noc_endpoint_consistency_test.py``,
+    which pins how many entries are affected on each architecture.
     """
     coord = getattr(endpoint, "coord", None)
     return coord if coord is not None else (endpoint.x_coord, endpoint.y_coord)
+
+
+class AliasedEndpoint:
+    """A NIU addressed at a NoC cell that is not the one its NUI sits on.
+
+    A DRAM channel is one controller behind *several* NoC interfaces, at
+    genuinely different grid cells. Wormhole exposes each of its six channels
+    at two worker-visible endpoints on opposite ends of a column —
+    ``(0, 11)`` and ``(0, 1)`` are the same channel — and Blackhole's NoC 1
+    view of a channel is a different subchannel from its NoC 0 one. tt-sim
+    models the controller once, with one NUI per NoC standing at the *primary*
+    endpoint, and registers the other cells as extra directory keys. Timing a
+    packet from the NUI's own coord therefore charged it the flight to a
+    different physical NIU: on Wormhole, wrong for **all 480** worker/endpoint
+    pairs on each NoC, mean 34 cycles, worst 90.
+
+    So a directory key that names a cell the NUI does not stand on gets one of
+    these instead, holding that cell's coord *in this NoC's own space* (the
+    grid mirror of the canonical coord on NoC 1, exactly as
+    :attr:`NUI.x_coord` is). Everything else delegates: the endpoint is the NUI
+    for every purpose except where it stands on the grid.
+
+    The stamp in :meth:`transmit` is the other half. A response leaves from the
+    interface the request arrived at, not from the controller's primary one, so
+    the arrival cell rides on the request and :meth:`NUI.send_response` times
+    the return leg from it. Without that the two legs would be measured between
+    different pairs of points, which on a directional torus is not a small
+    error in one direction — it is a round trip that does not close.
+    """
+
+    __slots__ = ("endpoint", "coord")
+
+    def __init__(self, endpoint, coord):
+        self.endpoint = endpoint
+        self.coord = coord
+
+    def transmit(self, request, delay=None):
+        request.arrived_at = self.coord
+        self.endpoint.transmit(request, delay)
+
+    def __getattr__(self, name):
+        return getattr(self.endpoint, name)
+
+    def __repr__(self):
+        return f"<AliasedEndpoint {self.coord} -> {self.endpoint!r}>"
+
+
+def resolved_nui(endpoint):
+    """The NUI behind ``endpoint`` — itself, unless it is an alias view.
+
+    For callers that key off endpoint *identity* (the device's
+    ``_tile_of_nui`` map, the NoC 1 shadow census) rather than off where the
+    endpoint sits.
+    """
+    return endpoint.endpoint if isinstance(endpoint, AliasedEndpoint) else endpoint
 
 
 class NullEndpoint:
@@ -415,6 +526,12 @@ class NUI(MemMapable, Clockable):
             # routes or schedules on it. -1 until transmitted, and for a NIU
             # with no owning tile clock, which cannot know the absolute cycle.
             self.issue_cycle = -1
+            # The NoC cell this request entered its destination tile at, in
+            # that NoC's own space — set only when the tile answers to more
+            # than one cell (see ``AliasedEndpoint``), so that its response
+            # leaves from the same interface. ``None`` means "the destination
+            # NIU's own coord", which is every ordinary tile.
+            self.arrived_at = None
 
     class RequestInitiator:
         def __init__(self, nui):
@@ -1642,7 +1759,9 @@ class NUI(MemMapable, Clockable):
                 self.noc_requests_to_handle.extend(self.delayed_arrivals.pop(c))
             self.next_arrival = min(self.delayed_arrivals, default=None)
 
-    def send_to(self, destination, packet, queued=None, link_wait=None):
+    def send_to(
+        self, destination, packet, queued=None, link_wait=None, *, sent_from=None
+    ):
         """Send ``packet`` from this NIU to ``destination``, timing the flight.
 
         The one place a NoC packet's latency is decided, for requests and
@@ -1655,6 +1774,11 @@ class NUI(MemMapable, Clockable):
         from the distance: see :meth:`_bandwidth_delay`. ``queued`` and
         ``link_wait`` are pre-claimed occupancies, for the multicast fan-out —
         see :meth:`claim_injection_port` and :meth:`claim_route_links`.
+
+        ``sent_from`` overrides *this* end of the journey, for the one tile
+        kind that answers to more than one NoC cell: a DRAM controller replies
+        from the interface the request arrived at, not from its primary one.
+        See :class:`AliasedEndpoint` and :meth:`send_response`.
         """
         model = self.noc_latency
         if model is None:
@@ -1665,16 +1789,19 @@ class NUI(MemMapable, Clockable):
             queued = self.claim_injection_port(payload)
         if link_wait is None:
             link_wait = self.claim_route_links(
-                self.route_links_to(destination), payload, queued
+                self.route_links_to(destination, sent_from=sent_from), payload, queued
             )
         destination.transmit(
             packet,
             self._bandwidth_delay(
-                packet, self.flight_cycles_to(destination), queued, link_wait
+                packet,
+                self.flight_cycles_to(destination, sent_from=sent_from),
+                queued,
+                link_wait,
             ),
         )
 
-    def route_links_to(self, destination):
+    def route_links_to(self, destination, *, sent_from=None):
         """The router-to-router links a packet from here to ``destination``
         crosses, in order — or ``()`` when nothing shares links.
 
@@ -1684,12 +1811,15 @@ class NUI(MemMapable, Clockable):
         """
         if self.noc_link_registry is None or self.noc_latency is None:
             return ()
-        return noc_route_links(
-            (self.x_coord, self.y_coord),
-            _endpoint_noc_coord(destination),
-            self.noc_grid_x,
-            self.noc_grid_y,
-        )
+        try:
+            return noc_route_links(
+                (self.x_coord, self.y_coord) if sent_from is None else sent_from,
+                _endpoint_noc_coord(destination),
+                self.noc_grid_x,
+                self.noc_grid_y,
+            )
+        except NoCCoordinateError as exc:
+            raise self._off_grid(exc, destination) from None
 
     def claim_route_links(self, links, payload_bytes, queued=0):
         """Hold each of ``links`` long enough to carry ``payload_bytes``.
@@ -1809,18 +1939,35 @@ class NUI(MemMapable, Clockable):
         tail = model.tail_cycles(_payload_bytes(packet))
         return 0 if tail is None else tail
 
-    def flight_cycles_to(self, destination):
-        """Modelled cycles for a packet from here to ``destination``, or ``None``."""
+    def flight_cycles_to(self, destination, *, sent_from=None):
+        """Modelled cycles for a packet from here to ``destination``, or ``None``.
+
+        ``sent_from`` replaces this NIU's own coord — see :meth:`send_to`.
+        """
         model = self.noc_latency
         if model is None:
             return None
-        return model.flight_cycles(
-            noc_hop_count(
-                (self.x_coord, self.y_coord),
+        try:
+            hops = noc_hop_count(
+                (self.x_coord, self.y_coord) if sent_from is None else sent_from,
                 _endpoint_noc_coord(destination),
                 self.noc_grid_x,
                 self.noc_grid_y,
             )
+        except NoCCoordinateError as exc:
+            raise self._off_grid(exc, destination) from None
+        return model.flight_cycles(hops)
+
+    def _off_grid(self, exc, destination):
+        """``exc`` again, saying which two endpoints the journey was between.
+
+        Built here rather than passed into the distance functions because
+        those are called once per packet and this is called once per bug.
+        """
+        return NoCCoordinateError(
+            f"{exc} — NoC{self.noc_number} {self.id_pair} to "
+            f"{type(destination).__name__} "
+            f"{_endpoint_noc_coord(destination)}"
         )
 
     def flight_cycles_from(self, coord):
@@ -1839,6 +1986,7 @@ class NUI(MemMapable, Clockable):
                 (self.x_coord, self.y_coord),
                 self.noc_grid_x,
                 self.noc_grid_y,
+                src_role="source NullEndpoint",
             )
         )
 
@@ -1867,14 +2015,16 @@ class NUI(MemMapable, Clockable):
         The per-hop latency model landed here exactly as that suggests: the
         return flight is timed by :meth:`send_to`, which delays the
         ``transmit`` and reads both coords off the endpoint objects. No lookup
-        was reintroduced.
+        was reintroduced — ``arrived_at`` is stamped on the request by the
+        endpoint it arrived at (:class:`AliasedEndpoint`), not looked up, and
+        is ``None`` for every tile that answers to a single cell.
         """
         assert noc_request.reply_to is not None, (
             f"NoC{self.noc_number} request {noc_request.request_id} from "
             f"{noc_request.source_coord} needs a response but carries no "
             f"reply_to endpoint"
         )
-        self.send_to(noc_request.reply_to, response)
+        self.send_to(noc_request.reply_to, response, sent_from=noc_request.arrived_at)
 
     def set_noc_directory(self, noc_directory):
         self.noc_directory = noc_directory

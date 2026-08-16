@@ -700,8 +700,7 @@ except **Wormhole's 16 eth cores on NoC 1**: eth alone skips mirror
 registration (an eth mirror would steal a DRAM tile's own canonical cell), so
 its mirrored self-coordinate names a worker instead. Nothing hits it — the
 slow-dispatch flow tt-sim supports launches no eth kernel — and the fix is the
-translation port (`docs/plans/noc1-translation-feasibility.md`), not more
-aliases. On Blackhole the self-coordinate census is *exactly* the six
+translation port, not more aliases. On Blackhole the self-coordinate census is *exactly* the six
 DRAM-shadowed workers above: same six cells, seen from the sending core.
 
 ---

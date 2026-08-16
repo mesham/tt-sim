@@ -33,7 +33,7 @@ from .coords import TENSIX_COORD_MAP
 #: are the six shadows that legitimately survive: ``dram_bank_to_noc_xy`` *is*
 #: mirrored on NoC 1 on Blackhole, so DRAM's aliases are load-bearing and there
 #: is no lookup order that serves both. Fixed only by NoC coordinate
-#: translation — see ``docs/plans/noc1-translation-feasibility.md``.
+#: translation.
 DRAM_SHADOWED = {(7, 4), (7, 7), (7, 10), (16, 4), (16, 7), (16, 10)}
 
 

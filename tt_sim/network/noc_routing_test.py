@@ -52,7 +52,7 @@ from tt_sim.device.blackhole import Blackhole
 from tt_sim.device.wormhole import Wormhole
 from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.network.noc_shadow import POLICY_ENV, NoC1ShadowError
-from tt_sim.network.tt_noc import NUI
+from tt_sim.network.tt_noc import NUI, resolved_nui
 from tt_sim.util.conversion import conv_to_uint32
 
 _OUTSTANDING_ID_0 = NUI.NUICounters.CounterNames.NIU_MST_REQS_OUTSTANDING_ID_0
@@ -142,7 +142,10 @@ def _shadow_census(device, physical_to_tile):
     for physical, tile in physical_to_tile.items():
         entry = device.noc_1_directory.get(physical)
         if entry is not tile.get_noc_nui(1):
-            census[physical] = by_nui[id(entry)]
+            # A DRAM sub-endpoint is registered through an ``AliasedEndpoint``
+            # so the hop model times it to the cell it stands on; the tile
+            # behind it is the one that answers, and is what a shadow names.
+            census[physical] = by_nui[id(resolved_nui(entry))]
     return census
 
 
@@ -592,7 +595,13 @@ def _self_coord_census(device, offset):
             nui = tile.get_noc_nui(noc)
             entry = directory.get(_decode_coord(nui, offset))
             if entry is not nui:
-                census[(noc, nui.get_id_pair())] = by_nui.get(id(entry))
+                # A DRAM sub-endpoint cell is registered through an
+                # ``AliasedEndpoint`` so the hop model times a packet to the
+                # cell it stands on rather than to the controller's primary
+                # interface. Routing is unaffected — the same NUI answers —
+                # but the identity lookup has to see through the view, or a
+                # tile that really does own the cell reads as ``None``.
+                census[(noc, nui.get_id_pair())] = by_nui.get(id(resolved_nui(entry)))
     return census
 
 
@@ -606,8 +615,8 @@ def test_wormhole_only_eth_cores_cannot_address_themselves():
     one-dict collision the shadow census measures from the other side, and it
     is unreachable in practice because tt-metal launches no eth kernel under
     the slow-dispatch flow tt-sim supports. Enabling NoC coordinate translation
-    (``docs/plans/noc1-translation-feasibility.md``) is what would clear it;
-    registering eth mirrors here is not, and would break DRAM.
+    is what would clear it; registering eth mirrors here is not, and would
+    break DRAM.
     """
     device = _wormhole_with_workers(sorted(_WH_UNIFIED_TO_PHYSICAL.values()))
     census = _self_coord_census(device, _WH_ID_LOGICAL_OFFSET)

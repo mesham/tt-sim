@@ -166,8 +166,7 @@ class ArchProfile:
     #:   ``l1_bank_to_noc_xy`` NoC 1 half is byte-identical to its NoC 0 half,
     #:   and instrumented replays see only canonical worker coords on NoC 1.
     #:   The aliases were therefore dead weight that displaced 96 live workers
-    #:   from their own canonical NoC 1 cells (see
-    #:   ``docs/plans/noc1-translation-feasibility.md``).
+    #:   from their own canonical NoC 1 cells.
     #:
     #: **Do not "unify" this across architectures.** Copying Blackhole's value
     #: to Wormhole breaks the DRAM/L1 bank-table flow there;

@@ -1022,6 +1022,11 @@ EXPECTED_CONSUMERS = {
     # ``noc_hop_count``; the table only supplies the two constants.
     "tt_sim/network/tt_noc.py",
     "tt_sim/network/noc_cost_model_test.py",
+    # Not a cost consumer either: the endpoint-consistency audit names
+    # ``tt_sim.perf.noc_congestion_plan`` only to assert that its
+    # ``route_links`` *is* ``noc_route_links``, so the planner inherits the
+    # simulator's out-of-grid guard. It reads no table and charges nothing.
+    "tt_sim/network/noc_endpoint_consistency_test.py",
     # DRAM, and the first cost charged at an *endpoint* rather than to a unit
     # or to a flight: ``DRAMEndpointNUI`` holds an arriving request for the
     # device's own service time before the channel answers it. Separate from

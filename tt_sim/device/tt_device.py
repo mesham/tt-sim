@@ -9,7 +9,7 @@ from tt_sim.device.deadlock import (
 from tt_sim.device.device import Device, DeviceTile
 from tt_sim.device.reset import Reset
 from tt_sim.network.noc_shadow import ShadowReporter
-from tt_sim.network.tt_noc import NocLinkRegistry
+from tt_sim.network.tt_noc import AliasedEndpoint, NocLinkRegistry, resolved_nui
 from tt_sim.pe.rv.babyriscv import BabyRISCVCoreType
 from tt_sim.trace import enable_from_env
 from tt_sim.util.bits import clear_bit, set_bit
@@ -17,6 +17,22 @@ from tt_sim.util.conversion import (
     conv_to_bytes,
     conv_to_uint32,
 )
+
+
+def _endpoint_at(nui, cell):
+    """The directory entry for ``cell``: ``nui`` itself, or a view standing there.
+
+    A tile answers to more than one NoC cell whenever its channel has several
+    worker-visible endpoints (Wormhole's two-ended DRAM columns) or a different
+    NoC 1 subchannel from its NoC 0 one (Blackhole DRAM). Its NUI stands on
+    exactly one of them, so every other cell needs an
+    :class:`~tt_sim.network.tt_noc.AliasedEndpoint` carrying that cell's own
+    coord — otherwise the hop model charges the packet a flight to a different
+    physical NIU, which on Wormhole was wrong for every one of the 480
+    worker/DRAM-endpoint pairs on each NoC (mean 34 cycles, worst 90) and on
+    Blackhole for every NoC 1 DRAM flight.
+    """
+    return nui if cell == (nui.x_coord, nui.y_coord) else AliasedEndpoint(nui, cell)
 
 
 class TT_Device(Device):
@@ -231,6 +247,18 @@ class TT_Device(Device):
         worker-visible endpoints) get the same canonical + noc1-mirror
         pair of keys.
 
+        **A key naming a cell the tile's NUI does not stand on is registered
+        through an** :class:`~tt_sim.network.tt_noc.AliasedEndpoint`
+        (:func:`_endpoint_at`), carrying that cell's own coord in this NoC's
+        space. Routing is unchanged — the same NUI answers — but the hop model
+        then times the packet to where it is actually going rather than to the
+        controller's primary interface, which on Wormhole was wrong for every
+        one of the 480 worker/DRAM-endpoint pairs on each NoC (mean 34 cycles,
+        worst 90) and on Blackhole for every NoC 1 DRAM flight — 65 % of every
+        destination its committed replay guards resolve. The invariant that
+        catches a recurrence lives in
+        ``tt_sim/network/noc_endpoint_consistency_test.py``.
+
         **NoC 1 precedence.** On NoC 1 a tile is *physically* reachable at its
         mirror coord ``(GRID-1-x, GRID-1-y)``; the canonical (primary) coord is
         only a convention-1 accommodation for the ``driver/wormhole/<n>/`` tree.
@@ -304,12 +332,16 @@ class TT_Device(Device):
         # Primary is non-authoritative on NoC 1: never clobber a mirror.
         self.noc_1_directory.setdefault(primary, nui1)
         if register_mirror:
-            self.noc_1_directory[self._noc1_mirror(noc1_source)] = nui1
+            cell = self._noc1_mirror(noc1_source)
+            self.noc_1_directory[cell] = _endpoint_at(nui1, cell)
         for alias in getattr(tile, "noc_aliases", ()):
-            self.noc_0_directory[alias] = nui0
-            self.noc_1_directory.setdefault(alias, nui1)
+            self.noc_0_directory[alias] = _endpoint_at(nui0, alias)
+            self.noc_1_directory.setdefault(
+                alias, _endpoint_at(nui1, self._noc1_mirror(alias))
+            )
             if register_mirror:
-                self.noc_1_directory[self._noc1_mirror(alias)] = nui1
+                cell = self._noc1_mirror(alias)
+                self.noc_1_directory[cell] = _endpoint_at(nui1, cell)
         self._check_noc1_shadowing(tile, nui1, primary, noc1_source, register_mirror)
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
@@ -348,10 +380,14 @@ class TT_Device(Device):
             self._tensix_by_canonical[primary] = tile
             holder = self.noc_1_directory.get(primary)
             if holder is not nui1:
-                # ``holder`` is usually another tile's NUI, but a cached
-                # ``NullEndpoint`` from an earlier miss shadows just as hard.
+                # ``holder`` is usually another tile's NUI — possibly seen
+                # through an ``AliasedEndpoint``, which is why it is unwrapped
+                # before the identity lookup — but a cached ``NullEndpoint``
+                # from an earlier miss shadows just as hard.
                 self.shadow_reporter.report_displaced(
-                    primary, tile, self._tile_of_nui.get(id(holder), holder)
+                    primary,
+                    tile,
+                    self._tile_of_nui.get(id(resolved_nui(holder)), holder),
                 )
         if not register_mirror:
             return
