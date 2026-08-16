@@ -362,7 +362,7 @@ def skip_reason():
     return None
 
 
-def _env(arch, home):
+def _env(arch, home, translated=False):
     env = dict(os.environ)
     env["TT_METAL_RUNTIME_ROOT"] = str(home)
     env["TT_METAL_HOME"] = str(home)
@@ -373,17 +373,31 @@ def _env(arch, home):
     # The whole point of the 2026-08-12 rerun: set NO grid variable. Setting
     # either of these at all pins the worker pool and switches off on-demand
     # materialisation, so an inherited one would silently change what is tested.
+    #
+    # The cluster-descriptor path is dropped for the same reason and it matters
+    # more: it decides which *coordinate convention* the host puts on the wire,
+    # so an inherited one would change what is being tested without saying so.
+    # ``--translated`` sets it deliberately, per arch, from this repo.
     for var in (
         "TT_SIM_TENSIX_COORDS",
         "TT_SIM_TENSIX_CORES",
         "TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE",
+        "TT_METAL_MOCK_CLUSTER_DESC_PATH",
+        "TT_SIM_NOC_TRANSLATION",
     ):
         env.pop(var, None)
+    if translated:
+        # The server inherits this through UMD's uv_spawn and derives its own
+        # mode from it, so one variable configures both ends. See
+        # ``tt_sim/network/noc_translation.py``.
+        env["TT_METAL_MOCK_CLUSTER_DESC_PATH"] = str(
+            REPO / "driver" / arch / "cluster_descriptor.yaml"
+        )
     env.setdefault("TT_LOGGER_LEVEL", "error")
     return env
 
 
-def run_one(arch, prog, home):
+def run_one(arch, prog, home, translated=False):
     """Run one program on one arch; return (verdict, seconds, detail)."""
     bin_dir = Path(home) / "build" / "programming_examples"
     exe = bin_dir / prog.binary
@@ -395,7 +409,7 @@ def run_one(arch, prog, home):
         proc = subprocess.run(
             [str(exe), *prog.args],
             cwd=bin_dir,
-            env=_env(arch, home),
+            env=_env(arch, home, translated),
             timeout=prog.timeout,
             capture_output=True,
             text=True,
@@ -474,6 +488,15 @@ def main(argv=None):
         action="store_true",
         help="print the EXPECTED table the run would need, instead of a verdict",
     )
+    ap.add_argument(
+        "--translated",
+        action="store_true",
+        help=(
+            "run with NoC coordinate translation on, by pointing the host at "
+            "driver/<arch>/cluster_descriptor.yaml (the simulator inherits it "
+            "and configures itself to match)"
+        ),
+    )
     args = ap.parse_args(argv)
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -492,7 +515,8 @@ def main(argv=None):
     print(
         f"upstream-example gate — tt-metal {BASELINE_TT_METAL} at {home}\n"
         f"{len(progs)} programs x {len(arches)} arch = {len(progs) * len(arches)} runs, "
-        f"tier={args.tier}, NO grid environment variable set\n"
+        f"tier={args.tier}, NO grid environment variable set, "
+        f"noc_translation={'on' if args.translated else 'off'}\n"
         f"expectations recorded at tree {BASELINE_TREE} ({BASELINE_DATE})"
     )
     _reap_orphans()
@@ -501,7 +525,7 @@ def main(argv=None):
     for arch in arches:
         print(f"\n[{arch}]")
         for prog in progs:
-            verdict, secs, detail = run_one(arch, prog, home)
+            verdict, secs, detail = run_one(arch, prog, home, args.translated)
             results[(arch, prog.name)] = verdict
             want = expected(arch, prog)
             mark = "ok  " if verdict == want else "BAD "

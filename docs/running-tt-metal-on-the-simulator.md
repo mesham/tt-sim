@@ -305,6 +305,96 @@ uses, no more and no fewer.
 Timings are single runs on a machine with other work on it — read them as
 shape, not as a benchmark.
 
+### 1.4 NoC coordinate translation (opt-in)
+
+Real Wormhole and Blackhole cards ship with **NoC coordinate translation**
+enabled: the NIU recognises a second, *translated* coordinate range on top of
+the SoC-physical one, and tt-metal addresses workers, ethernet and (on
+Blackhole) DRAM in that range. tt-sim's default is the other configuration —
+translation off — and that is the one in which a "physical" NoC coordinate is
+*NoC-dependent*, because NoC 1's origin is the opposite corner of the grid.
+Since tt-metal's kernel codegen assumes worker coordinates are NoC-independent
+(`NOC_0_X` / `NOC_0_Y` are the identity in
+`hw/inc/internal/tt-1xx/*/noc_nonblocking_api.h`) while its DRAM bank table
+mirrors them, NoC 1 genuinely carries two conventions at once and some live
+workers become unreachable on it. Turning translation on makes the two spaces
+disjoint and the collision impossible: measured across the full worker grid,
+the 56 Wormhole and 102 Blackhole workers that resolve to a foreign tile on
+NoC 1 all resolve correctly under translation.
+
+**Two variables, and only the first is normally yours to set:**
+
+| Variable | Set by | Meaning |
+| --- | --- | --- |
+| `TT_METAL_MOCK_CLUSTER_DESC_PATH` | you, in the shell that runs the **host binary** | the cluster descriptor UMD reads; its `noc_translation` flag decides which coordinates go on the wire |
+| `TT_SIM_NOC_TRANSLATION` | rarely — tests, and driving the sim with no host | overrides tt-sim's own mode. `1/true/yes/on` or `0/false/no/off` |
+
+```bash
+# Wormhole
+export TT_METAL_MOCK_CLUSTER_DESC_PATH=~/tt-sim/driver/wormhole/cluster_descriptor.yaml
+# Blackhole
+export TT_METAL_MOCK_CLUSTER_DESC_PATH=~/tt-sim/driver/blackhole/cluster_descriptor.yaml
+```
+
+Both descriptors are checked in, declare `noc_translation: true` with nothing
+harvested, and describe one chip. Supplying a descriptor at all is what makes
+this work with no upstream change: `ClusterOptions::cluster_descriptor` is
+honoured for `SIMULATION` chips, and UMD short-circuits its `.so`-extension
+heuristic — which would otherwise force translation off — as soon as the
+pointer is non-null.
+
+**You do not set anything on the server side, and that is deliberate.** UMD
+spawns `run.sh` with `uv_spawn` and a NULL `env`, which libuv documents as "the
+parent's environment is used", so the simulator inherits
+`TT_METAL_MOCK_CLUSTER_DESC_PATH` from the host exactly as it already inherits
+`NNG_SOCKET_ADDR`. tt-sim reads *the same file the host read* and keys its NoC
+directories the same way. Deriving the mode from the host's own variable rather
+than from a second tt-sim-specific one removes the whole class of failure where
+the two ends disagree. The server says which way it went:
+
+```
+[server] tt-sim Wormhole ready (… noc_translation=on (noc_translation: true in …/cluster_descriptor.yaml), …)
+```
+
+**If the variable is missing, you get an error, not a wrong answer.** The
+server checks the first coordinates on the wire against the convention it chose
+and stops the run — host included — the moment it sees one that can only belong
+to the other convention:
+
+```
+[server] ERROR: NoC coordinate-convention mismatch.
+[server]   tt-sim is keyed for translated coordinates (noc_translation: true in …),
+[server]   but the host addressed 1-1, which is a untranslated (SoC-physical) coordinate.
+[server]   The host program is not exporting TT_METAL_MOCK_CLUSTER_DESC_PATH=… — export it
+[server]   in the same shell that runs the tt-metal binary.
+```
+
+It fires in both directions, and early: on Wormhole every worker coordinate
+differs between the conventions, so firmware upload trips it; on Blackhole
+worker coordinates are *identical* in both (a Blackhole core's translated coord
+is its NoC 0 coord), so the discriminator is DRAM and ethernet and the first
+buffer write trips it.
+
+**What moves, per architecture** — measured on the wire, not derived:
+
+| | Wormhole | Blackhole |
+| --- | --- | --- |
+| workers | `(1..9, 1..11)` → **`(18..25, 18..27)`** | unchanged, `(1..7, 2..11)` and `(10..16, 2..11)` |
+| ethernet | `(1..9, {0,6})` → **`(18..25, {16,17})`** | → **`(20..31, 25)`** (no eth tile modelled) |
+| DRAM | **unchanged** — Wormhole does not translate DRAM | → **`{17,18} × {12..23}`** |
+
+That asymmetry is not a simplification waiting to be made: Wormhole's
+virtualised core types are `{TENSIX, ETH}` and Blackhole's are
+`{TENSIX, ETH, PCIE, DRAM}`, so Wormhole's DRAM bank table stays mirrored on
+NoC 1 under translation and Blackhole's stops being mirrored at all.
+
+**Limits of the current support.** Translated mode is accepted and correct, but
+tt-sim still registers its legacy NoC 1 mirror aliases alongside the translated
+keys — translation is *additive* here exactly as it is on silicon, which is why
+turning it on cannot disturb the default path. Removing those aliases is a
+separate change. The committed wire traces under `driver/*/server/traces/` are
+all recordings of untranslated traffic and replay unchanged.
+
 ---
 
 ## 2. Running a program
@@ -741,10 +831,16 @@ python3 -m driver.tests.upstream_sweep || exit 1
 
 # One program, one arch, while iterating on a fix:
 python3 -m driver.tests.upstream_sweep --arch wormhole eltwise_sfpu
+
+# The same programs with NoC coordinate translation on (§1.4):
+python3 -m driver.tests.upstream_sweep --translated
 ```
 
 The gate sets `TT_METAL_SIMULATOR` itself and *removes* any inherited
 `TT_SIM_TENSIX_COORDS` / `TT_SIM_TENSIX_CORES` /
-`TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE`, so its verdict does not depend on the
-shell it was launched from. It cleans up only the simulator servers it started
-(§3.1).
+`TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE` /
+`TT_METAL_MOCK_CLUSTER_DESC_PATH` / `TT_SIM_NOC_TRANSLATION`, so its verdict
+does not depend on the shell it was launched from — `--translated` is the only
+way to get the translated configuration, and it points the host at
+`driver/<arch>/cluster_descriptor.yaml` from this repo. It cleans up only the
+simulator servers it started (§3.1).

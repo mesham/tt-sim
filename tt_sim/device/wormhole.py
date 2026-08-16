@@ -99,11 +99,54 @@ class Wormhole(TT_Device):
             cls._TENSIX_PHYSICAL_Y_VALUES[y_idx],
         )
 
-    def __init__(self, diagnostics=None, tensix_coords=None):
+    #: Origin of each translated coordinate band, from UMD's
+    #: ``wormhole_implementation.hpp``: ``tensix_translated_coordinate_start_x/y
+    #: = 18, 18`` and ``eth_translated_coordinate_start_x/y = 18, 16``. A
+    #: translated coord is the *logical* index plus the origin
+    #: (``WormholeCoordinateManager::fill_tensix_noc0_translated_mapping``),
+    #: and with nothing harvested the logical index is just the position in the
+    #: sorted physical axis — which is exactly what the unified band already
+    #: encodes, so no descriptor lookup is needed here.
+    TENSIX_TRANSLATED_ORIGIN = (18, 18)
+    ETH_TRANSLATED_ORIGIN = (18, 16)
+
+    @classmethod
+    def translated_coord_from_unified_worker(cls, unified):
+        """Map a unified worker coord (18..25, 16..25) to its translated coord.
+
+        Unified packs ``x = 18 + x_idx`` and ``y = 16 + (y_idx + 2) mod 10``;
+        translated is ``18 + x_idx`` / ``18 + y_idx``. So x carries straight
+        over and y is un-rotated: unified ``(18, 18)`` — physical ``(1, 1)``,
+        logical ``(0, 0)`` — is translated ``(18, 18)`` as well, and the two
+        bands coincide only for the first eight rows.
+        """
+        ux, uy = unified
+        x_idx = ux - 18
+        y_idx = (uy - 18) % 10
+        ox, oy = cls.TENSIX_TRANSLATED_ORIGIN
+        return (ox + x_idx, oy + y_idx)
+
+    @classmethod
+    def translated_coord_from_eth_physical(cls, physical):
+        """Map an SoC-physical eth coord to its translated coord.
+
+        ``WormholeCoordinateManager::fill_eth_noc0_translated_mapping`` closes
+        the ``x = 5`` gap and folds ``y in {0, 6}`` onto ``{0, 1}`` before
+        adding the origin, which is the same "index into the sorted axis" rule
+        the Tensix band uses.
+        """
+        px, py = physical
+        ox, oy = cls.ETH_TRANSLATED_ORIGIN
+        return (
+            ox + cls._ETH_PHYSICAL_X_VALUES.index(px),
+            oy + cls._ETH_PHYSICAL_Y_VALUES.index(py),
+        )
+
+    def __init__(self, diagnostics=None, tensix_coords=None, noc_translation=False):
         # Shared pre-tile setup (profile, diagnostics, tracing bus) — see
         # ``TT_Device``. Must come first: tile construction reads the profile.
         tensix_coords = self._begin_construction(
-            WORMHOLE_PROFILE, diagnostics, tensix_coords
+            WORMHOLE_PROFILE, diagnostics, tensix_coords, noc_translation
         )
         dram_tiles = self._build_dram_tiles()
         eth_tiles = []
@@ -130,3 +173,19 @@ class Wormhole(TT_Device):
         # Wormhole tile coords are the unified band, so the NUI's SoC-physical
         # NoC 0 coord has to be derived.
         return Wormhole.physical_noc0_coord_from_unified_worker(coord)
+
+    def _translated_tensix_coords(self, tile):
+        # Paired with the SoC-physical coord the translated one names, which is
+        # where the tile actually stands on the NoC torus — see
+        # ``TT_Device.translated_coords_for``.
+        physical = tile.get_noc_nui(0).get_id_pair()
+        translated = Wormhole.translated_coord_from_unified_worker(
+            tile.get_coord_pair()
+        )
+        return ((translated, physical),)
+
+    def _translated_eth_coords(self, tile):
+        # An EthTile's NUI carries its SoC-physical coord; the tile coord is
+        # the unified one, so go back through the physical to translate.
+        physical = tile.get_noc_nui(0).get_id_pair()
+        return ((Wormhole.translated_coord_from_eth_physical(physical), physical),)

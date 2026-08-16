@@ -1,0 +1,50 @@
+# Cluster descriptor that runs tt-sim's Blackhole with NoC coordinate
+# translation enabled — the configuration real cards ship in.
+#
+#   export TT_METAL_MOCK_CLUSTER_DESC_PATH=$PWD/driver/blackhole/cluster_descriptor.yaml
+#
+# Export it in the shell that runs the *tt-metal host binary*, not the server:
+# UMD reads it (ClusterOptions::cluster_descriptor, honoured for SIMULATION
+# chips) and it settles which coordinates the host puts on the wire. The
+# simulator then inherits the variable through UMD's uv_spawn of run.sh and
+# reads the same file to key its NoC directories the same way, so the two ends
+# cannot disagree. See docs/running-tt-metal-on-the-simulator.md.
+#
+# Nothing harvested on the Tensix or DRAM grids, so the SoC descriptor's full
+# 14x10 worker grid and all 8 DRAM banks stay addressable and the translated
+# DRAM coords are the unharvested ones ({17,18} x {12..23}). The eth and pcie
+# masks match a stock p150 and are inert here: tt-sim models no eth tile, and
+# the PCIe core is a zero-stub.
+arch:
+  0: blackhole
+chips:
+  {}
+chip_unique_ids:
+  0: 4476187513037
+ethernet_connections:
+  []
+ethernet_connections_to_remote_devices:
+  []
+chips_with_mmio:
+  - 0: 0
+io_device_type: PCIe
+harvesting:
+  0:
+    noc_translation: true
+    harvest_mask: 0
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 288
+    pcie_harvesting_mask: 2
+    l2cpu_harvesting_mask: 0
+chip_to_bus_id:
+  0: "0x01"
+boards:
+  -
+    - board_id: 4402341478400
+    - board_type: p150
+    - chips:
+        - 0
+asic_locations:
+  0: 0
+chip_pci_bdfs:
+  0: 0000:01:00.0

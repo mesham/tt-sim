@@ -1,0 +1,43 @@
+# Cluster descriptor that runs tt-sim's Wormhole with NoC coordinate
+# translation enabled — the configuration real cards ship in.
+#
+#   export TT_METAL_MOCK_CLUSTER_DESC_PATH=$PWD/driver/wormhole/cluster_descriptor.yaml
+#
+# Export it in the shell that runs the *tt-metal host binary*, not the server:
+# UMD reads it (ClusterOptions::cluster_descriptor, honoured for SIMULATION
+# chips) and it settles which coordinates the host puts on the wire. The
+# simulator then inherits the variable through UMD's uv_spawn of run.sh and
+# reads the same file to key its NoC directories the same way, so the two ends
+# cannot disagree. See docs/running-tt-metal-on-the-simulator.md.
+#
+# Supplying this descriptor at all is what bypasses UMD's `.so`-extension
+# heuristic (umd/device/cluster.cpp short-circuits on
+# `options.cluster_descriptor == nullptr`), which would otherwise force
+# translation off for a simulated chip regardless of what is written here.
+#
+# Single chip, nothing harvested, no ethernet links: tt-sim models one device.
+arch:
+  0: wormhole_b0
+chips:
+  0:
+    - 0
+    - 0
+    - 0
+    - 0
+ethernet_connections:
+  []
+chips_with_mmio:
+  - 0: 0
+harvesting:
+  0:
+    noc_translation: true
+    harvest_mask: 0
+    dram_harvesting_mask: 0
+    eth_harvesting_mask: 0
+    pcie_harvesting_mask: 0
+boards:
+  -
+    - board_id: 72059269368820857
+    - board_type: n150
+    - chips:
+        - 0

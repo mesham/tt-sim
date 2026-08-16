@@ -17,6 +17,21 @@ from .hostlink import stop_host
 class Fabric:
     def __init__(self):
         self.cores: dict[tuple[int, int], object] = {}
+        # Wire coord -> internal coord, for a run with NoC coordinate
+        # translation enabled: under translation the host addresses Wormhole
+        # workers at (18..25, 18..27) and Blackhole DRAM at {17,18}x{12..23},
+        # while everything downstream of here — the core registry, the worker
+        # guards, TT_SIM_TENSIX_COORDS, LazyTensixPool — keeps naming tiles by
+        # the SoC-physical coord the descriptor lists. Translating once, here,
+        # is why translated mode needed no change in any of them. Empty (and
+        # skipped) in the default untranslated mode.
+        self.wire_alias: dict[tuple[int, int], tuple[int, int]] = {}
+        # Wire coords that *prove* the host is in the other convention. See
+        # ``install_convention_guard``: this is the whole defence against a
+        # forgotten TT_METAL_MOCK_CLUSTER_DESC_PATH, which otherwise reads as a
+        # plausible run with quietly wrong answers.
+        self.foreign_coords: frozenset[tuple[int, int]] = frozenset()
+        self.convention_callback: Callable[[tuple[int, int]], None] | None = None
         # Invoked the first time a NullCore-backed coord receives a write
         # targeting L1 above NullCore.USER_DATA_ADDR_THRESHOLD — i.e. past
         # the kernel firmware / init scratch region, which is a strong
@@ -42,8 +57,20 @@ class Fabric:
         self.cores[coord] = core
 
     def _core(self, coord):
+        wire = coord
+        if self.wire_alias:
+            coord = self.wire_alias.get(coord, coord)
         core = self.cores.get(coord)
         if core is None:
+            # Tested against the coord *as it arrived*, never the aliased one:
+            # in translated mode a legitimate translated coord aliases onto a
+            # physical coord that is itself a wrong-convention coord, so
+            # checking after aliasing accuses every correct message.
+            # Only ever reached on a directory miss, and a wrong-convention
+            # coord always is one: the convention we are in is exactly the set
+            # of coords that got registered.
+            if wire in self.foreign_coords and self.convention_callback is not None:
+                self.convention_callback(wire)
             if self.core_factory is not None:
                 core = self.core_factory(coord)
             if core is None:
@@ -66,6 +93,93 @@ class Fabric:
 
     def deassert_reset(self, coord):
         self._core(coord).deassert_reset()
+
+
+def install_convention_guard(
+    fabric,
+    *,
+    translated,
+    wire_alias,
+    foreign_coords,
+    reason,
+    descriptor_hint,
+    wire_addr=None,
+    host_stopper=stop_host,
+    on_error=None,
+):
+    """Make a coordinate-convention mismatch a loud failure, not a wrong answer.
+
+    NoC coordinate translation is decided by the tt-metal *host*, from the
+    cluster descriptor ``TT_METAL_MOCK_CLUSTER_DESC_PATH`` names, and the
+    simulator's own mode is derived from the same variable (inherited through
+    UMD's ``uv_spawn``). They therefore agree — except when they do not: a host
+    program that forgets to export it emits untranslated coordinates at a
+    simulator keyed for translated ones, and the reverse happens when a
+    descriptor is exported but the simulator was started with
+    ``TT_SIM_NOC_TRANSLATION=0``.
+
+    Without a guard that failure is *quiet*, which is the specific shape this
+    project has repeatedly lost time to: every wrong-convention coordinate is
+    an unregistered coordinate, so it lands on a ``NullCore`` that zero-fills
+    reads and swallows writes. The program then runs to completion and reports
+    wrong numbers, or hangs waiting on a core that was never written to.
+
+    ``foreign_coords`` is the discriminating set — coords that belong to the
+    *other* convention and to no tile in this one. It fires on the first such
+    coord, which in practice is within the first few messages on both
+    architectures: on Wormhole the conventions differ for every worker, so
+    firmware upload trips it; on Blackhole worker coords are identical in both
+    conventions (a Blackhole core's translated coord *is* its NoC 0 coord) and
+    the discriminator is DRAM and eth, so the first buffer write trips it.
+
+    Fails the same way ``install_worker_guards``' launch guard does, and for
+    the same measured reason: stop the tt-metal host first, because UMD blocks
+    in ``recv_from_device`` with no timeout and exiting without it strands the
+    host for ever.
+    """
+    fired = []
+
+    def report(coord):
+        if fired:
+            return
+        fired.append(coord)
+        ours = "translated" if translated else "untranslated (SoC-physical)"
+        theirs = "an untranslated (SoC-physical)" if translated else "a translated"
+        lines = [
+            "[server] ERROR: NoC coordinate-convention mismatch.",
+            f"[server]   tt-sim is keyed for {ours} coordinates ({reason}),",
+            f"[server]   but the host addressed {coord[0]}-{coord[1]}, which is "
+            f"{theirs} coordinate.",
+        ]
+        if translated:
+            lines.append(
+                f"[server]   The host program is not exporting "
+                f"TT_METAL_MOCK_CLUSTER_DESC_PATH={descriptor_hint} — export it "
+                f"in the same shell that runs the tt-metal binary."
+            )
+        else:
+            lines.append(
+                "[server]   The host exported TT_METAL_MOCK_CLUSTER_DESC_PATH "
+                "with noc_translation: true, but this server was started with "
+                "translation off (TT_SIM_NOC_TRANSLATION=0). Unset it, or point "
+                "the host at an untranslated descriptor."
+            )
+        lines.append(
+            "[server]   Continuing would zero-fill every access to that "
+            "coordinate and silently produce wrong results, so the run is being "
+            "stopped."
+        )
+        print("\n".join(lines), file=sys.stderr, flush=True)
+        if on_error is not None:
+            on_error(coord)
+            return
+        if host_stopper("a coordinate-convention mismatch", addr=wire_addr):
+            os._exit(1)
+
+    fabric.wire_alias = dict(wire_alias)
+    fabric.foreign_coords = frozenset(foreign_coords)
+    fabric.convention_callback = report
+    return fired
 
 
 def install_worker_guards(

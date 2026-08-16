@@ -45,6 +45,21 @@ maps to physical `(1,2)` (vs `(1,1)` on Wormhole), so a *pinned* single-tile run
 on demand and neither is needed. `TT_SIM_TENSIX_CORES` and the `TT_SIM_DIAG_*`
 diagnostics work exactly as for Wormhole (handled by the shared bridge).
 
+To run with **NoC coordinate translation** on — the configuration real cards ship
+in — export the checked-in cluster descriptor in the shell that runs the host
+binary:
+
+```bash
+export TT_METAL_MOCK_CLUSTER_DESC_PATH="$PWD/driver/blackhole/cluster_descriptor.yaml"
+```
+
+The simulator inherits the variable through UMD's spawn of `run.sh` and reads the
+same file, so both ends agree by construction; forgetting it is a loud error, not
+a wrong answer. Blackhole's workers keep the same coordinates under translation
+(a core's translated coord *is* its NoC 0 coord) — what moves is DRAM, to
+`{17,18} × {12..23}`, and ethernet, to `(20..31, 25)`. See
+[§1.4 of the runbook](../../docs/running-tt-metal-on-the-simulator.md).
+
 ## Scope / status
 
 **Working end-to-end.** All bundled examples (`one`–`nine`, `loopback`) build and

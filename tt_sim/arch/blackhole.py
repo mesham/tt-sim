@@ -99,6 +99,28 @@ BLACKHOLE_PROFILE = ArchProfile(
         (9, 4),
         (9, 7),
     ),
+    # Translated coords of the same two sub-endpoints, in the same order.
+    # ``BlackholeCoordinateManager::map_dram_banks`` walks (bank, port) in
+    # descriptor order and hands out ``x = 17`` for banks 0-3 and ``x = 18``
+    # for banks 4-7, with ``y`` starting at 12 and incrementing once per port
+    # (3 ports per bank) — so bank b, port p is
+    # ``(17 + b//4, 12 + 3*(b%4) + p)``. Applying that to the ports named in
+    # the table above (ch0 uses port 2 on NoC 0 and port 1 on NoC 1, ch1-ch3
+    # port 0 and port 1, ch4-ch7 port 2 and port 1) gives the pairs below, and
+    # they reproduce the ``dram_bank_to_noc_xy`` table read off the wire from a
+    # translated run exactly: NoC 0 (17,14) (17,15) (17,18) (17,21) (18,14)
+    # (18,17) (18,20) (18,23), NoC 1 (17,13) (17,16) (17,19) (17,22) (18,13)
+    # (18,16) (18,19) (18,22).
+    dram_channel_translated_coords=(
+        ((17, 14), (17, 13)),
+        ((17, 15), (17, 16)),
+        ((17, 18), (17, 19)),
+        ((17, 21), (17, 22)),
+        ((18, 14), (18, 13)),
+        ((18, 17), (18, 16)),
+        ((18, 20), (18, 19)),
+        ((18, 23), (18, 22)),
+    ),
     # DRAM per channel: soc_descriptor.yaml `dram_bank_size` / `dram_view_size`
     # = 4,278,190,080 = 0xFF00_0000, one view per channel; 8 channels = 31.9
     # GiB. The physical channel is 4 GiB (ttsim config.h DRAM_CHANNEL_SIZE,

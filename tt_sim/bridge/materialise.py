@@ -112,10 +112,16 @@ class LazyTensixPool:
     byte what it always was.
     """
 
-    def __init__(self, fabric, device, tensix_coord_map, *, eager=()):
+    def __init__(self, fabric, device, tensix_coord_map, *, eager=(), noc_alias=None):
         self.fabric = fabric
         self.device = device
         self.coord_map = tensix_coord_map
+        #: ``translated coord -> physical coord``, or ``None`` when NoC
+        #: coordinate translation is off. Set, it is also the signal that a
+        #: NoC 1 coordinate can no longer be a mirror — see
+        #: :meth:`on_directory_miss`, where getting this wrong would null-route
+        #: a peer's packet and produce a silently wrong answer.
+        self.noc_alias = noc_alias
         #: Worker coords with a real tile behind them.
         self.materialised = set()
         #: Coords materialised after start-up, in order, and why — diagnostics
@@ -216,8 +222,34 @@ class LazyTensixPool:
         *and* deliver the packet to it, and then — the aliases being gone —
         fall through and build the real ``coord`` as well. DRAM is untouched by
         this: its mirrors are still registered, so a DRAM key never misses.
+
+        **With NoC coordinate translation on, there is no mirror reading to do
+        on either architecture.** The coordinate arrives translated, so it is
+        first mapped back to the physical worker it names; and then the mirror
+        arm is unreachable, because under translation neither arch's L1 bank
+        table emits a mirrored worker coordinate (Wormhole's NoC 1 half becomes
+        identical to its NoC 0 half; Blackhole's always was). Trying the mirror
+        anyway would materialise the wrong worker and then find the key already
+        claimed, leaving the real destination unbuilt and its packet
+        null-routed.
+
+        The two gates below stay **separate questions**, chained rather than
+        merged: ``noc1_tensix_mirror_aliases`` says whether the *directory*
+        carries Tensix mirror keys at all, and ``noc_alias`` says which
+        *convention the wire is speaking*. They are not the same fact and
+        neither implies the other — Wormhole under translation has the flag
+        ``True`` (its mirror aliases are still registered, and correctly so,
+        since the untranslated bank table needs them) while the wire carries no
+        mirror at all. Collapsing them into one boolean would lose exactly that
+        case.
         """
-        if noc_number == 1 and self.device.tt_device.profile.noc1_tensix_mirror_aliases:
+        if self.noc_alias is not None:
+            # Identity for a coord the alias does not move — Blackhole's
+            # workers, which are the same coordinate in both conventions.
+            coord = self.noc_alias.get(coord, coord)
+        elif (
+            noc_number == 1 and self.device.tt_device.profile.noc1_tensix_mirror_aliases
+        ):
             mirrored = self.device.tt_device.noc1_mirror(coord)
             if mirrored in self.coord_map:
                 if coord in self.coord_map:

@@ -54,11 +54,11 @@ class Blackhole(TT_Device):
     tensix_tile_class = BlackholeTensixTile
     dram_tile_class = BlackholeDRAMTile
 
-    def __init__(self, diagnostics=None, tensix_coords=None):
+    def __init__(self, diagnostics=None, tensix_coords=None, noc_translation=False):
         # Shared pre-tile setup (profile, diagnostics, tracing bus) — see
         # ``TT_Device``. Must come first: tile construction reads the profile.
         tensix_coords = self._begin_construction(
-            BLACKHOLE_PROFILE, diagnostics, tensix_coords
+            BLACKHOLE_PROFILE, diagnostics, tensix_coords, noc_translation
         )
         dram_tiles = self._build_dram_tiles()
         tensix_tiles = [self._build_tensix_tile(coord) for coord in tensix_coords]

@@ -25,17 +25,21 @@ from tt_sim.bridge import (
     diagnostics_from_env,
     enabled_diagnostic_names,
     host_not_stranded,
+    install_convention_guard,
     install_worker_guards,
     link_contention_summary,
     profiler_flush_summary,
 )
+from tt_sim.network.noc_translation import translation_source
 
 from .bh_device import make_device
 from .coords import (
+    CLUSTER_DESCRIPTOR_PATH,
     DEFAULT_COMPUTE_GRID,
     DRAM_COORD_MAP,
     TENSIX_COORD_MAP,
     default_tensix_coords,
+    wire_conventions,
 )
 
 
@@ -108,11 +112,24 @@ def main(argv=None):
     if not args.mock_tensix:
         tensix_pool, pinned = _parse_tensix_pool(os.environ)
         diagnostics = diagnostics_from_env()
+        translated, why = translation_source(os.environ)
         device = make_device(
-            cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics
+            cycles_per_poll=args.cycles_per_poll,
+            diagnostics=diagnostics,
+            noc_translation=translated,
         )
-        for translated, tile_coord in DRAM_COORD_MAP.items():
-            fabric.register(translated, DramCore(device, tile_coord))
+        alias, translated_only, untranslated_only = wire_conventions()
+        install_convention_guard(
+            fabric,
+            translated=translated,
+            wire_alias=alias if translated else {},
+            foreign_coords=untranslated_only if translated else translated_only,
+            reason=why,
+            descriptor_hint=CLUSTER_DESCRIPTOR_PATH,
+            wire_addr=addr,
+        )
+        for wire_coord, tile_coord in DRAM_COORD_MAP.items():
+            fabric.register(wire_coord, DramCore(device, tile_coord))
         if pinned:
             for physical in tensix_pool:
                 device.ensure_tensix_tile(physical)
@@ -123,7 +140,11 @@ def main(argv=None):
             # Nothing pinned: build the default worker and let the program ask
             # for the rest — see ``tt_sim.bridge.materialise``.
             lazy_pool = LazyTensixPool(
-                fabric, device, TENSIX_COORD_MAP, eager=tensix_pool
+                fabric,
+                device,
+                TENSIX_COORD_MAP,
+                eager=tensix_pool,
+                noc_alias=alias if translated else None,
             )
         # Same "worker isn't materialised" guards the Wormhole server installs:
         # without them traffic to (or a kernel launch on) a worker outside
@@ -142,6 +163,7 @@ def main(argv=None):
             f"[server] tt-sim Blackhole ready (tensix={tensix_pool} ({how}), "
             f"dram={list(DRAM_COORD_MAP)}, "
             f"compute_grid={grid[0]}x{grid[1]}, "
+            f"noc_translation={'on' if translated else 'off'} ({why}), "
             f"cycles_per_poll={args.cycles_per_poll})",
             file=sys.stderr,
             flush=True,

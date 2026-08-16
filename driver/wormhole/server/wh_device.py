@@ -12,13 +12,18 @@ from tt_sim.device.wormhole import Wormhole
 from .coords import TENSIX_COORD_MAP
 
 
-def wormhole_factory(diagnostics):
-    return Wormhole(diagnostics or DeviceTileDiagnostics())
+def wormhole_factory(diagnostics, noc_translation=False):
+    return Wormhole(
+        diagnostics or DeviceTileDiagnostics(), noc_translation=noc_translation
+    )
 
 
-def make_device(*, cycles_per_poll=100, diagnostics=None):
+def make_device(*, cycles_per_poll=100, diagnostics=None, noc_translation=False):
+    # ``noc_translation`` is decided once by the server, from the cluster
+    # descriptor the tt-metal host read, and handed to the device and to the
+    # convention guard from that one place — see ``server/__main__.py``.
     return Device(
-        wormhole_factory,
+        lambda d: wormhole_factory(d, noc_translation),
         TENSIX_COORD_MAP,
         cycles_per_poll=cycles_per_poll,
         diagnostics=diagnostics,

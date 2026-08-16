@@ -150,21 +150,42 @@ def main(argv=None):
             TensixCore,
             diagnostics_from_env,
             enabled_diagnostic_names,
+            install_convention_guard,
             install_worker_guards,
         )
+        from tt_sim.network.noc_translation import translation_source
 
-        from .coords import DRAM_COORD_MAP, ETH_COORD_MAP, TENSIX_COORD_MAP
+        from .coords import (
+            CLUSTER_DESCRIPTOR_PATH,
+            DRAM_COORD_MAP,
+            ETH_COORD_MAP,
+            TENSIX_COORD_MAP,
+            wire_conventions,
+        )
         from .wh_device import make_device
 
         tensix_pool, pinned = _parse_tensix_pool(os.environ)
         diagnostics = diagnostics_from_env()
+        translated, why = translation_source(os.environ)
         device = make_device(
-            cycles_per_poll=args.cycles_per_poll, diagnostics=diagnostics
+            cycles_per_poll=args.cycles_per_poll,
+            diagnostics=diagnostics,
+            noc_translation=translated,
         )
-        for translated, unified in DRAM_COORD_MAP.items():
-            fabric.register(translated, DramCore(device, unified))
-        for translated, unified in ETH_COORD_MAP.items():
-            fabric.register(translated, EthCore(device, unified))
+        alias, translated_only, untranslated_only = wire_conventions()
+        install_convention_guard(
+            fabric,
+            translated=translated,
+            wire_alias=alias if translated else {},
+            foreign_coords=untranslated_only if translated else translated_only,
+            reason=why,
+            descriptor_hint=CLUSTER_DESCRIPTOR_PATH,
+            wire_addr=addr,
+        )
+        for wire_coord, unified in DRAM_COORD_MAP.items():
+            fabric.register(wire_coord, DramCore(device, unified))
+        for wire_coord, unified in ETH_COORD_MAP.items():
+            fabric.register(wire_coord, EthCore(device, unified))
         if pinned:
             # The user named the set; build exactly it and nothing else. Every
             # other worker coord falls through to NullCore, as it always has.
@@ -179,7 +200,11 @@ def main(argv=None):
             # when a kernel launches on it, or when a peer sends it NoC
             # traffic, whichever comes first.
             lazy_pool = LazyTensixPool(
-                fabric, device, TENSIX_COORD_MAP, eager=tensix_pool
+                fabric,
+                device,
+                TENSIX_COORD_MAP,
+                eager=tensix_pool,
+                noc_alias=alias if translated else None,
             )
 
         # Surface the most common "silent zero-fill" config bug: host traffic
@@ -206,6 +231,7 @@ def main(argv=None):
             f"[server] tt-sim Wormhole ready "
             f"(tensix={tensix_pool} ({how}), dram={list(DRAM_COORD_MAP)}, "
             f"compute_grid={grid[0]}x{grid[1]}, "
+            f"noc_translation={'on' if translated else 'off'} ({why}), "
             f"cycles_per_poll={args.cycles_per_poll})",
             file=sys.stderr,
             flush=True,

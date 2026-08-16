@@ -58,6 +58,62 @@ DRAM_COORD_MAP = _build_dram_map()
 # eth coords fall through to NullCore.
 ETH_COORD_MAP = {}
 
+#: Path of the checked-in cluster descriptor that turns translation on.
+CLUSTER_DESCRIPTOR_PATH = (
+    pathlib.Path(__file__).resolve().parents[1] / "cluster_descriptor.yaml"
+)
+
+
+def _build_translated_wire_alias():
+    """``translated wire coord -> physical coord``, for DRAM only.
+
+    Blackhole's Tensix cores do **not** move under translation: a core's
+    translated coordinate *is* a NoC 0 Tensix coordinate, compacted past
+    harvested columns
+    (``BlackholeCoordinateManager::fill_tensix_noc0_translated_mapping``), and
+    with nothing harvested that is the physical coord unchanged. DRAM does move
+    — Blackhole virtualises it (``bh_hal.cpp``) — to ``{17,18} x {12..23}``,
+    which is off the 17x12 physical grid entirely. Eth moves to
+    ``(20..31, 25)`` but no eth tile is modelled here, so those coords fall
+    through to ``NullCore`` in either convention exactly as they do today.
+
+    Verified against a wire trace captured from a translated ``examples/one``
+    run: workers at ``(1..7, 2..11)`` and ``(10..16, 2..11)`` unchanged, eth at
+    ``(20..31, 25)``, DRAM at ``(17, 14)``.
+    """
+    alias = {}
+    for channel, physical in enumerate(BLACKHOLE_PROFILE.dram_channel_unified_coords):
+        for translated in BLACKHOLE_PROFILE.dram_channel_translated_coords[channel]:
+            alias[translated] = physical
+    return alias
+
+
+TRANSLATED_WIRE_ALIAS = _build_translated_wire_alias()
+
+#: Translated eth coords (``blackhole_implementation.hpp``:
+#: ``eth_translated_coordinate_start_x/y = 20, 25``). Not mapped to any tile —
+#: listed only so the guard can tell "the host is translated" from them.
+TRANSLATED_ETH_COORDS = frozenset((20 + i, 25) for i in range(len(_SOC.get("eth", ()))))
+
+
+def wire_conventions():
+    """``(translated_alias, translated_only, untranslated_only)``.
+
+    Workers are in neither discriminating set: they are the same coordinate in
+    both conventions on this architecture, so they say nothing. DRAM and eth
+    are what separate the two, and the host reaches DRAM within the first few
+    buffer writes.
+    """
+    translated_only = frozenset(TRANSLATED_WIRE_ALIAS) | TRANSLATED_ETH_COORDS
+    untranslated_only = frozenset(DRAM_COORD_MAP) | frozenset(
+        _parse_coord(c) for c in _SOC.get("eth", ())
+    )
+    return (
+        dict(TRANSLATED_WIRE_ALIAS),
+        translated_only - untranslated_only,
+        untranslated_only - translated_only,
+    )
+
 
 # tt-metal's compute-with-storage grid on this target when
 # TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE is unset: **13 columns x 10 rows**,

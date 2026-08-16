@@ -370,6 +370,8 @@ class DRAMEndpointNUI(NUI):
 
 
 class DRAMTile(TTDeviceTile):
+    tile_role = "dram"
+
     def __init__(
         self,
         coord_x,
@@ -525,6 +527,8 @@ class EthTile(TTDeviceTile):
     # traffic into eth L1. See ``TT_Device._register_tile_internals``.
     register_noc1_mirror = False
 
+    tile_role = "eth"
+
     # Per ``driver/wormhole/soc_descriptor.yaml`` (``eth_l1_size: 262144``).
     L1_SIZE = 0x40000
     # Per WormholeB0/EthernetTile/BabyRISCV/README.md.
@@ -639,6 +643,7 @@ class EthTile(TTDeviceTile):
 
 class TensixTile(TTDeviceTile):
     is_tensix = True
+    tile_role = "tensix"
 
     def __init__(
         self,

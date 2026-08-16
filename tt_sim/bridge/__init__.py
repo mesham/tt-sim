@@ -32,7 +32,11 @@ from tt_sim.bridge.device import (
     link_contention_summary,
     profiler_flush_summary,
 )
-from tt_sim.bridge.fabric import Fabric, install_worker_guards
+from tt_sim.bridge.fabric import (
+    Fabric,
+    install_convention_guard,
+    install_worker_guards,
+)
 from tt_sim.bridge.grid import compute_grid, fill_order
 from tt_sim.bridge.hostlink import find_wire_peer, host_not_stranded, stop_host
 from tt_sim.bridge.materialise import LazyTensixPool
@@ -56,6 +60,7 @@ __all__ = [
     "fill_order",
     "find_wire_peer",
     "host_not_stranded",
+    "install_convention_guard",
     "install_worker_guards",
     "link_contention_summary",
     "parse_trace_line",

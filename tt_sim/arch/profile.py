@@ -214,6 +214,18 @@ class ArchProfile:
     #: (mirrored on NoC 1) on both architectures — that is what the register is.
     noc_id_logical_mirrored_on_noc1: bool = True
 
+    #: Per-channel **translated** coords of the DRAM tile's worker-visible
+    #: endpoints — element 0 the NoC 0 sub-endpoint's, element 1 the NoC 1
+    #: sub-endpoint's — parallel to :attr:`dram_channel_unified_coords`. Empty
+    #: on an architecture that does not translate DRAM: Wormhole's virtualised
+    #: core types are ``{TENSIX, ETH}`` only (``wh_hal.cpp``) and its
+    #: coordinate manager says outright that "DRAM cores are not translated in
+    #: Wormhole", so its DRAM keeps physical coords and the mirrored NoC 1
+    #: alias in every mode. Blackhole translates DRAM
+    #: (``bh_hal.cpp`` lists it) and the values come from
+    #: ``BlackholeCoordinateManager::map_dram_banks``.
+    dram_channel_translated_coords: tuple[tuple[tuple[int, int], ...], ...] = ()
+
     #: Bytes of a ``DRAMTile``'s address space served by one **physical** GDDR6
     #: channel, or ``None`` when the split is not published. This is not the
     #: same thing as :attr:`dram_channel_size`, which is the whole flat range a

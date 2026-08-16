@@ -64,6 +64,7 @@ over a socket. The variables that matter:
 | `TT_METAL_SLOW_DISPATCH_MODE=1` | Forces `EnqueueProgram` to fall back to `detail::LaunchProgram` — the only launch path the simulator models. |
 | `LD_LIBRARY_PATH` | Must include `<tt-metal>/<build>/lib` so the host binary finds `libtt_metal.so` etc. |
 | `TT_SIM_TENSIX_COORDS` | **Optional.** Pins the worker tiles to exactly these, e.g. `1-1` or `1-1,2-1`. Unset, tt-sim materialises whatever the program turns out to use. |
+| `TT_METAL_MOCK_CLUSTER_DESC_PATH` | **Optional.** Point it at `driver/wormhole/cluster_descriptor.yaml` to run with **NoC coordinate translation** enabled, the configuration real cards ship in. Read by UMD (it decides which coordinates the host puts on the wire) *and*, through the environment the simulator inherits, by tt-sim itself — so the two ends cannot disagree. Forgetting it against a translated server is a loud error, not a wrong answer. See [§1.4 of the runbook](../../docs/running-tt-metal-on-the-simulator.md). |
 
 The project venv sets `TT_METAL_RUNTIME_ROOT`, `TT_METAL_SIMULATOR`,
 `TT_METAL_SLOW_DISPATCH_MODE=1` and `LD_LIBRARY_PATH` for you. Without it, export them

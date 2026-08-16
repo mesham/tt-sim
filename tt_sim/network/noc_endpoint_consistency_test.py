@@ -45,13 +45,24 @@ bank-to-noc table emits. Only the second is a NoC 1 coordinate. A
 the *other* space, and disagrees with the NUI — whose coord is the mirror, and
 is the correct one. That is a real defect and it is **not** what these tests
 fix: it is the two-convention keying itself, and it is cleared by removing that
-keying — which is what enabling NoC coordinate translation does — rather than
-by patching a coordinate at the point of use.
+keying rather than by patching a coordinate at the point of use.
+
+**Enabling NoC coordinate translation does not, by itself, clear it** — a
+correction to what this note first claimed, made after measuring rather than
+reasoning. Translation is *additive*: it gives every tile an unambiguous key in
+a disjoint space, which is what finally makes the canonical/mirror pair safe to
+delete, but it adds those keys and leaves the canonical NoC 1 entries exactly
+where they were. Measured on the full grid with translation on, these counts
+are **unchanged on Wormhole** (28 keys / 24 mis-costed) and **six higher on
+Blackhole** (148 / 142) — the six DRAM channels whose NoC 1 mirror cell a
+translated worker key takes over. Removing the dual keying is a separate
+change, and it is the one that moves these numbers to zero.
 
 So the invariant is asserted in full on NoC 0, and on NoC 1 for every key that
 is in NoC 1's own space; every remaining key must miss by *exactly* the mirror
 and by nothing else. The counts are pinned so that a change which moves them
-has to say so.
+has to say so. They are measured on an untranslated device, which is the
+default and the configuration every committed trace replays in.
 """
 
 import os

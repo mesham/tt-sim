@@ -117,6 +117,61 @@ TENSIX_COORD_MAP = _build_tensix_map(_SOC)
 DRAM_COORD_MAP = _build_dram_map(_SOC)
 ETH_COORD_MAP = _build_eth_map(_SOC)
 
+#: Path of the checked-in cluster descriptor that turns translation on. Quoted
+#: back to the user by the convention guard, so keep it next to the maps.
+CLUSTER_DESCRIPTOR_PATH = (
+    pathlib.Path(__file__).resolve().parents[1] / "cluster_descriptor.yaml"
+)
+
+
+def _build_translated_wire_alias():
+    """``translated wire coord -> SoC-physical coord``, for workers and eth.
+
+    Only these two move on Wormhole. DRAM does not — UMD's
+    ``WormholeCoordinateManager::fill_dram_noc0_translated_mapping`` says
+    outright "DRAM cores are not translated in Wormhole", and tt-metal agrees
+    (``wh_hal.cpp`` virtualises ``{TENSIX, ETH}`` only) — so a DRAM wire coord
+    is the same in both conventions and needs no entry, and must not appear in
+    the guard's discriminating set either.
+
+    Verified against a wire trace captured from a translated ``examples/one``
+    run: workers appear at ``(18..25, 18..27)``, eth at ``(18..25, 16..17)``,
+    DRAM at ``(0, 11)``.
+    """
+    alias = {
+        Wormhole.translated_coord_from_unified_worker(unified): physical
+        for physical, unified in TENSIX_COORD_MAP.items()
+    }
+    alias.update(
+        {
+            Wormhole.translated_coord_from_eth_physical(physical): physical
+            for physical in ETH_COORD_MAP
+        }
+    )
+    return alias
+
+
+#: Wire coords the host uses under translation, mapped back to the physical
+#: coords everything downstream of ``Fabric`` names tiles by.
+TRANSLATED_WIRE_ALIAS = _build_translated_wire_alias()
+
+
+def wire_conventions():
+    """``(translated_alias, translated_only, untranslated_only)``.
+
+    The two "only" sets are what the convention guard fires on: coordinates
+    that exist in one convention and belong to no tile in the other. DRAM is in
+    neither, because it is untranslated on Wormhole and so is common to both.
+    """
+    translated_only = frozenset(TRANSLATED_WIRE_ALIAS)
+    untranslated_only = frozenset(TENSIX_COORD_MAP) | frozenset(ETH_COORD_MAP)
+    return (
+        dict(TRANSLATED_WIRE_ALIAS),
+        translated_only - untranslated_only,
+        untranslated_only - translated_only,
+    )
+
+
 # tt-metal's compute-with-storage grid on this target when
 # TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE is unset, as **8 columns x 9 rows**,
 # not the 8x10 the SoC descriptor declares. The simulated chip reports zero

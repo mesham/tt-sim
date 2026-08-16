@@ -196,6 +196,39 @@ def test_a_noc1_miss_falls_back_to_the_canonical_reading():
     )
 
 
+def test_a_translated_noc_miss_materialises_the_worker_the_coord_names():
+    """With translation on, a peer's packet carries the *translated* coord and
+    the NoC 1 mirror reading is meaningless. Getting this wrong would leave the
+    real destination unbuilt and null-route the packet — a silently wrong
+    answer, which is the failure on-demand materialisation exists to avoid."""
+    device = Device(
+        lambda diagnostics: Wormhole(diagnostics=diagnostics, noc_translation=True),
+        TENSIX_COORD_MAP,
+        cycles_per_poll=100,
+    )
+    fabric = Fabric()
+    alias = {
+        Wormhole.translated_coord_from_unified_worker(unified): physical
+        for physical, unified in TENSIX_COORD_MAP.items()
+    }
+    pool = LazyTensixPool(
+        fabric, device, TENSIX_COORD_MAP, eager=[PEER], noc_alias=alias
+    )
+    translated = Wormhole.translated_coord_from_unified_worker(TENSIX_COORD_MAP[LATE])
+
+    for noc in (0, 1):
+        pool.materialised.discard(LATE)
+        pool.on_directory_miss(noc, translated)
+        assert LATE in pool.materialised
+
+    tile = device.tt_device.tile_directory[TENSIX_COORD_MAP[LATE]]
+    assert device.tt_device.noc_0_directory[translated] is tile.noc0_router
+    assert device.tt_device.noc_1_directory[translated] is tile.noc1_router
+    # ...and the mirror reading, which the untranslated hook would have taken,
+    # names a different worker entirely.
+    assert device.tt_device.noc1_mirror(LATE) != LATE
+
+
 def test_a_miss_on_something_that_is_not_a_worker_materialises_nothing():
     device, fabric, pool = _build()
 

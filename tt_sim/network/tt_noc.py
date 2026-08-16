@@ -12,7 +12,7 @@ from tt_sim.network.alignment import (
 from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.perf.model import noc_cost_model
 from tt_sim.trace import EventCategory, NoCEvent, get_bus
-from tt_sim.util.bits import clear_bit, extract_bits, replace_bits
+from tt_sim.util.bits import clear_bit, extract_bits, replace_bits, set_bit
 from tt_sim.util.conversion import (
     conv_to_bytes,
     conv_to_uint32,
@@ -1246,6 +1246,11 @@ class NUI(MemMapable, Clockable):
             self.x_coord = self.noc_grid_x - 1 - x_coord
             self.y_coord = self.noc_grid_y - 1 - y_coord
         self.id_pair = (x_coord, y_coord)
+        #: This endpoint's coordinate in the *translated* space, or ``None``
+        #: when translation is off. Set by ``TTDeviceTile.set_translated_coords``
+        #: at registration; see :meth:`set_translated_coord` for what it
+        #: changes and, pointedly, what it does not.
+        self.translated_coord = None
         self.generate_NIU_and_NoC_config()
         self.generate_NoC_node_id()
         self.request_initiators = [
@@ -1321,6 +1326,46 @@ class NUI(MemMapable, Clockable):
     def get_id_pair(self):
         # Return the ID in this NoC coordinate system
         return self.id_pair
+
+    def set_translated_coord(self, coord):
+        """Adopt ``coord`` as this endpoint's identity in translated space.
+
+        Changes exactly one register plus the ``NIU_CFG_0`` translation-enable
+        bit. The register is ``NOC_CFG(NOC_ID_LOGICAL)``, read by ``risc_init``
+        into ``my_x[noc]`` / ``my_y[noc]``
+        (``hw/inc/internal/tt-1xx/risc_common.h``, via ``MY_NOC_ENCODING``) and
+        compared by tt-metal against **virtual** bank coordinates in
+        ``Noc::is_local_bank`` (``hw/inc/api/dataflow/noc.h``) and
+        ``TensorAccessor::is_local_bank``. Under translation those comparands
+        are translated coords, so this register has to be one too or a core
+        never recognises its own bank. See :meth:`generate_NoC_id_logical`.
+
+        **``NOC_NODE_ID`` is deliberately left alone**, and that is a change of
+        mind worth recording. It reports where this interface physically sits,
+        which translation does not move; firmware installs it as the
+        return-address coordinate for reads and atomics, and on a real part
+        that still routes because the NIU keeps accepting physical coordinates
+        alongside translated ones. tt-sim models the same thing — translated
+        keys are *added* to the directory, never substituted for the physical
+        ones — so the physical self-address stays resolvable and the register
+        can stay honest.
+
+        Also deliberately unchanged: :attr:`x_coord` / :attr:`y_coord`, this
+        endpoint's position in the physical NoC mesh, which the cost model
+        reads to count hops. Translated space is not a mesh geometry and hop
+        counts taken in it would be fiction — a directory key that names some
+        *other* physical cell is given an
+        :class:`AliasedEndpoint` carrying that cell instead.
+        """
+        self.translated_coord = None if coord is None else tuple(coord)
+        # Recompute in place rather than re-running the generators: those also
+        # reset ``noc_config_regs``, and this is called after construction.
+        self.niu_cfg_0 = (
+            set_bit(self.niu_cfg_0, 14)
+            if self.translated_coord is not None
+            else clear_bit(self.niu_cfg_0, 14)
+        )
+        self.generate_NoC_id_logical()
 
     def next_request_seq(self):
         """A fresh issue number for a request this NIU is about to send."""
@@ -2121,19 +2166,7 @@ class NUI(MemMapable, Clockable):
         self.router_cfg_3 = 0
         self.router_cfg_4 = 0
 
-        # The coordinate a *core* reports as its own: tt-metal's firmware fills
-        # ``my_x[noc]`` / ``my_y[noc]`` from this register and then both
-        # compares it against that NoC's bank table (``is_local_bank``) and
-        # emits it as a destination (single-argument ``get_noc_addr``). So it
-        # follows the same per-arch convention as NoC 1's directory keys:
-        # mirrored on Wormhole, canonical on Blackhole. ``NOC_NODE_ID`` below
-        # is the physical node ID and stays per-NoC on both.
-        if self.noc_id_logical_mirrored_on_noc1:
-            logical_x, logical_y = self.x_coord, self.y_coord
-        else:
-            logical_x, logical_y = self.id_pair
-        self.noc_id_logical = replace_bits(0, logical_x, 0, 6)
-        self.noc_id_logical = replace_bits(self.noc_id_logical, logical_y, 6, 6)
+        self.generate_NoC_id_logical()
 
         # Backing store for the NOC_CFG(cnt) register block (0x100 + cnt*4)
         # that isn't modelled with dedicated semantics — e.g. the NoC ID
@@ -2142,9 +2175,52 @@ class NUI(MemMapable, Clockable):
         # which is enough for the init sequences that touch them.
         self.noc_config_regs = {}
 
+    def generate_NoC_id_logical(self):
+        """The coordinate a *core* reports as its own.
+
+        tt-metal's firmware fills ``my_x[noc]`` / ``my_y[noc]`` from this
+        register and then both compares it against that NoC's bank table
+        (``is_local_bank``) and emits it as a destination (single-argument
+        ``get_noc_addr``). So the value has to be in whatever convention that
+        NoC's bank table uses, and there are three of them:
+
+        * **Translation on** — the translated coord, on both NoCs. Under
+          translation the bank tables hold translated coords (Wormhole's NoC 1
+          half stops being mirrored and becomes identical to its NoC 0 half;
+          Blackhole's already was), so this is the only value
+          ``is_local_bank`` can ever match. It outranks the per-arch rule
+          below because it *replaces* the question that rule answers: there is
+          no second convention left to pick a side of.
+        * **Wormhole, translation off** — the NoC 1 grid mirror.
+        * **Blackhole, translation off** — the canonical coord on both NoCs.
+
+        ``NOC_NODE_ID`` is a different register and keeps its own answer; see
+        :meth:`generate_NoC_node_id`.
+        """
+        if self.translated_coord is not None:
+            x, y = self.translated_coord
+        elif self.noc_id_logical_mirrored_on_noc1:
+            x, y = self.x_coord, self.y_coord
+        else:
+            x, y = self.id_pair
+        self.noc_id_logical = replace_bits(0, x, 0, 6)
+        self.noc_id_logical = replace_bits(self.noc_id_logical, y, 6, 6)
+
     def generate_NoC_node_id(self):
-        self.noc_node_id = replace_bits(0, self.x_coord, 0, 6)
-        self.noc_node_id = replace_bits(self.noc_node_id, self.y_coord, 6, 6)
+        """The physical node ID of this NIU on this NoC — always.
+
+        Deliberately *not* translated, and deliberately not following
+        :meth:`generate_NoC_id_logical`: this register reports where the
+        interface physically sits, which is a fact about the silicon that
+        enabling coordinate translation does not change. On a real part the
+        firmware's self-address derived from it still routes, because the NIU
+        keeps accepting physical coordinates alongside translated ones — and
+        tt-sim models that too, by keeping every physical directory key when
+        it adds the translated ones.
+        """
+        x, y = self.x_coord, self.y_coord
+        self.noc_node_id = replace_bits(0, x, 0, 6)
+        self.noc_node_id = replace_bits(self.noc_node_id, y, 6, 6)
         self.noc_node_id = replace_bits(self.noc_node_id, 10, 12, 7)
         self.noc_node_id = replace_bits(self.noc_node_id, 12, 19, 7)
         self.noc_node_id = clear_bit(self.noc_node_id, 26)
