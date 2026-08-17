@@ -1,0 +1,46 @@
+PASS  stateless-1    arm=stateless confirmed from payload
+      marg N=4->16: 47.00 cycles/transaction
+      marg N=16->64: 47.01 cycles/transaction
+      marg N=64->128: 46.99 cycles/transaction
+      avg  52.48 cycles/transaction over every row (informational)
+      note no recorded card control for blackhole; this arm ESTABLISHES one rather than reproducing one
+PASS  stateful-1     arm=stateful confirmed from payload
+      marg N=4->16: 29.00 cycles/transaction
+      marg N=16->64: 29.00 cycles/transaction
+      marg N=64->128: 29.00 cycles/transaction
+      avg  34.80 cycles/transaction over every row (informational)
+PASS  stateless-2    arm=stateless confirmed from payload
+      marg N=4->16: 47.00 cycles/transaction
+      marg N=16->64: 47.01 cycles/transaction
+      marg N=64->128: 46.99 cycles/transaction
+      avg  52.48 cycles/transaction over every row (informational)
+      note no recorded card control for blackhole; this arm ESTABLISHES one rather than reproducing one
+PASS  stateful-2     arm=stateful confirmed from payload
+      marg N=4->16: 29.00 cycles/transaction
+      marg N=16->64: 29.00 cycles/transaction
+      marg N=64->128: 29.00 cycles/transaction
+      avg  34.81 cycles/transaction over every row (informational)
+  note no recorded card control for blackhole; this arm ESTABLISHES one rather than reproducing one
+  note no recorded card control for blackhole; this arm ESTABLISHES one rather than reproducing one
+
+== the paired verdict, blackhole
+   stateless 47.00  stateful 29.00  the loop bought 18.00
+   PREDICTION 1 -- THE FLOOR IS OUR ISSUE LOOP. The shorter loop fell by 18.00 cycles and landed at 29.00, inside the 15-30 band the shipped dataset occupies. The stateless figure is then a property of THIS PROGRAM's instruction stream and is not evidence of a per-read cost in the part.
+
+Before sending this home, check by eye:
+  * every line above says PASS. 'arm=X confirmed from payload' means the
+    issue loop was read back out of the data, not out of the flag.
+  * there is NO prior card control on blackhole, so the
+    stateless rounds establish one. What you can check here is that the
+    rounds agree with each other.
+  * the rounds of each arm agree (2 of each). They are separate runs
+    of an identical program, so a big spread means something else was on
+    the card. Do NOT re-run and keep the better session -- say so instead.
+  * the two arms DISAGREE, or agree, and either is a result. What is NOT
+    a result is a stateful round that failed its arm check: that number
+    is the stateless loop wearing the stateful label, and it reads as
+    H-FLOOR whatever the part does.
+
+Then send the WHOLE directory, logs included -- they carry the
+nocreadbench-config line recording what each run was configured as:
+  rsync -av /home/nx09/nx09/nebriscv/tt_traces/nocread-arms-blackhole/ <home>:~/nocread-arms-blackhole/

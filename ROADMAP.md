@@ -355,10 +355,38 @@ is left is the credibility layer.
    **BRISC only** — NCRISC and all three TRISCs were dropped. Not
    recaptured, because that moves every pinned constant in
    `stall_attribution_test.py`.
+   **AND THE MECHANISM LEG IS WORSE OFF THAN THE ABOVE READS,
+   2026-08-17.** Its `partition_closes` gate assumes
+   `WAITING_FOR_{NONZERO,NONFULL}_SEM_t` are disjoint sub-counts of
+   `THREAD_STALLS_t`. They are not: the vendor's **own** metric 36 is
+   a "Stall Cause Overlap Factor", documented identically for *both*
+   architectures — a family with a documented overlap factor is not a
+   partition. On a Wormhole card the buckets over-account by ~2,900 on
+   a ~4,300-cycle span and the gate refuses, both arms, all repeats.
+   **Blackhole's passes were never evidence**:
+   `TensixPerfCounters.note_stall` increments the total and at most one
+   reason bucket in the *same call*, so `sem_empty + sem_full <=
+   thread_stalls` holds by construction, and every Blackhole result
+   this leg has — the checked-in sim logs and the synthetic card files
+   derived from them — inherits that identity. **tt-sim cannot fail
+   this gate on either architecture**, so it has never tested hardware;
+   Wormhole is simply the first silicon allowed to disagree. The
+   refusal now *names* the counters and the excess instead of
+   reporting a negative bucket. Widening a tolerance or clamping the
+   bucket was rejected: a partition that cannot close is saying the
+   model of the hardware is wrong.
    **The NoC-bound leg is built, 2026-08-16** — `perfbench/nocevbench`
    plus `tt_sim.perf.noc_events`, behind six refusing gates. Two of
    three legs now exist; only **RV-bound** is left, and it has an
    instrument that does not exist on Wormhole (§6).
+   **VALIDATED ON BOTH ARCHES AGAINST SILICON, 2026-08-17.** Six
+   comparisons on a Wormhole card all pass — arms A/B/C x 256/4096 B,
+   errors **0.2-9.3 %** against a 25 % bar, every partition gate green
+   — and three on Blackhole. Arm C also gave the NoC translation port
+   its first hardware verdict at no extra card cost: card and
+   *translated* simulator agree on destination `(2, 2)` where the
+   untranslated simulator says `(7, 9)`, and the card reports
+   `self_noc=18,18` / `peer_noc=19,19` for itself.
    **The pivotal question answered yes with no bridge work**:
    `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` runs against tt-sim on
    *both* arches today and writes `.logs/noc_trace_dev0_ID0.json`. NoC
@@ -429,11 +457,46 @@ is left is the credibility layer.
    per-read floor. Every arm proved which loop it ran *from the
    returned payload* rather than from its flag, and the control
    reproduced the earlier session to 2.3 % on all three intervals.
-   **What it left behind is sharper than what it settled**: tt-sim
-   predicts the *saving* to within 6.7 % (15.00 against 16.07) while
-   under-predicting both absolute rates by a near-identical **7.03 and
-   5.96 cycles** — a fixed per-transaction term missing from the
-   burst-rate model, bracketed by two independent measurements.
+   **AND BLACKHOLE SETTLED IT EXACTLY, same day.** With an
+   instruction-level model now checked against a Wormhole card, the
+   Blackhole prediction could be **absolute** rather than a drop, and it
+   was printed by the runner before the measurement: **47.00 / 29.00,
+   saving 18.00**. The card returned **47.00 / 29.00 / 18.00** — zero
+   difference on all three, both rounds agreeing to 0.02 cycles across
+   every burst interval, every arm confirmed from its payload. That is
+   the strongest validation the cost model has: an instruction-level
+   prediction landing on a real part it had never been checked against
+   for this measurement.
+   **It also refutes the Blackhole floor outright.** The shipped
+   dataset says the shorter loop buys **1.0 cycle of 35.0** there —
+   that one figure is the entire basis for "Blackhole reads have a
+   floor the issue loop cannot get under", worth ~15 cycles a read, and
+   for the roadmap's own "initiator outstanding-read-request credit
+   limit" hypothesis. The card says it buys **18.00 of 47.00**. So
+   *both* architectures return H-LOOP, neither part has a per-read
+   floor, and the shipped rows describe a different kernel — 12 cycles
+   adrift on the stateless arm and a factor of 18 on the saving. That
+   is why comparing our absolutes against theirs could never have
+   settled anything, which cost most of a day to learn.
+   **A "missing constant" I reported here was my own error, and the
+   correction is the lesson.** I first read tt-sim as under-predicting
+   both arms by ~7 and ~6 cycles and called it a missing per-transaction
+   term. It was not: the four checked-in `*-sim*.csv` references are
+   **cost-model-off** runs, and a cost-model-off marginal is an
+   *instruction count* by design and by test
+   (`noc_issue_loop_test.py:180`). With `TT_SIM_COST_MODEL=1` the arms
+   read **44.00 / 29.00** against the card's 45.03 / 28.96 — residuals
+   **-1.03 (-2.3 %)** and **+0.04 (+0.1 %)**, opposite in sign, so not
+   a shared constant at all. The 44 is fully accounted: 38 instructions
+   at 1 cycle plus the **6-cycle load-use interlock** on the
+   `noc_cmd_buf_ready` poll, both already `isa_doc` in
+   `unit_costs.yaml`; verified at instruction level, 38 distinct PCs
+   212 times each with one 6.00-cycle stall per iteration, and 23 PCs
+   for stateful with the same stall. The arms differ in 15
+   instructions and *share* the poll, which is exactly why the saving
+   was right and the absolutes were not. **Reference CSVs must state
+   their cost-model configuration**; comparing an instruction count to
+   a card is a category error that looks like a finding.
    **Not retired, and the reason is worse than a missing session** —
    see item 2. Rung 4's two-arch claim cannot be made, for two
    independent reasons now rather than one.
