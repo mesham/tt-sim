@@ -132,6 +132,74 @@ sit comfortably inside ``idle_2 = 3911``. The partition was therefore
 double-counting them: once in ``idle_t``, once subtracted from
 ``unattributed_stall``.
 
+Metric 36 was tried as a correction, and it is not one
+-------------------------------------------------------
+
+The obvious move once the hardware *documents* an overlap is to stop assuming
+disjointness and subtract a measured overlap instead. That was settled, and the
+answer is no, on four independent grounds.
+
+**It is not a counter.** There is no select for it. The INSTRN_THREAD bank's
+complete select map is in ``tt_metal/hw/inc/internal/tt-1xx/wormhole/hw_counters.h``
+lines 116-175 (59 counters; req side 0-65, grant side 256/264/272 and 283) and
+``.../blackhole/hw_counters.h`` lines 158-219 (also 59); neither carries an
+overlap entry, and no other bank does either. Metric 36 is computed on the
+**host, in Python**, from nine already-read counters --
+``tools/tracy/perf_counter_analysis.py:1332-1350`` -- and the sibling LLK
+document files it under a heading that says so:
+``tt_metal/tt-llk/docs/performance_counters/performance_counters.md:785`` is
+``### Composite``, with the same metric as its number 26 at line 787. So the
+question "can a value for it be collected in the same window as the partition's
+counters" has no content: nothing collects it. What *is* collectable is its nine
+inputs, and they are collectable for free -- all nine are per-thread selects in
+the one bank the leg already enables (mask 32, ``INSTRN``,
+``perf-counters.md:876``), on both architectures
+(``perf-counters.md:875``), so no second pass is needed and the card session of
+2026-08-17 already carries them.
+
+**A scalar cannot say which buckets overlap.** The factor is one number per
+thread over all nine reasons. A partition needs to know how much of
+``WAITING_FOR_NONZERO_SEM_t`` in particular lies outside ``THREAD_STALLS_t``,
+and pairwise intersections are not recoverable from a sum of nine counts.
+
+**It cannot tell the two cases apart, and they need opposite corrections.**
+Reason cycles can double up *inside* a stalled cycle (several conditions true at
+once -- rescale the buckets) or fall *outside* ``THREAD_STALLS_t`` altogether
+(a latched condition counting while the thread runs -- move the mass into
+``idle_t``). Metric 36 produces the same number either way.
+
+**The card falsifies its documented mechanism.** The tech report explains values
+above 1 as "*multiple stall conditions are active simultaneously*"
+(``perf-counters.md:871``, ``:883``). Simultaneity between reasons can never
+push a *single* reason past the total, yet on the 2026-08-17 Wormhole part three
+counters do exactly that: ``WAITING_FOR_NONZERO_SEM_2`` = 3561 against
+``THREAD_STALLS_2`` = 270, and ``WAITING_FOR_MATH_IDLE_1`` =
+``WAITING_FOR_SFPU_IDLE_1`` = 38 against ``THREAD_STALLS_1`` = 36. The excess is
+therefore not simultaneity; it is the ``SEMWAIT``/Wait Gate behaviour above, and
+metric 36 mis-describes what it measures. :func:`stall_reason_overlap` reports
+``max_reason_excess`` so this is a printed number rather than a remembered
+argument.
+
+And even setting all of that aside, the arithmetic self-destructs.
+:func:`metric36_as_correction` computes what dividing a bucket by the factor
+would give: because the factor's numerator *contains* the bucket, the corrected
+value tends to ``THREAD_STALLS_t`` as the counter grows, whatever the counter
+says. On the card's thread 2 it returns 251 for the measured 3561, and 260 for a
+hypothetical 7122 -- a 100 % change in the input moving the output by 3.7 %. A
+correction that is nearly independent of the quantity it corrects is a fit.
+
+Two further points, either of which would be disqualifying alone: seven of the
+nine terms in the numerator are the ``WAITING_FOR_{UNIT}_IDLE`` family this leg
+already declined as unit-busy counts (see :data:`INSTRN_DECLINED` and
+``perf-counters.md:564``), so using the factor readmits them through the back
+door; and the counter semantics remain ``vendor_source``, which is corroboration
+and never provenance.
+
+**Conclusion, stated so the roadmap can quote it as settled rather than open:
+rung 4's mechanism leg cannot be built from the counters this hardware exposes.**
+The bank has no counter for the overlap it documents, and without one the named
+stall reasons cannot be turned into a partition of anything.
+
 Why this is not fixed by a per-arch bucket, and what Blackhole's pass is worth
 ------------------------------------------------------------------------------
 
@@ -150,6 +218,21 @@ So Blackhole's ``partition_closes`` has never been a test of hardware; it closes
 because the simulator's counters are built from one hook that makes it close.
 That is worth saying plainly: **Blackhole does not close with margin, and it
 does not close by luck -- it closes by construction, and is untested.**
+
+A gate that cannot fail is not a gate, so the identity has been broken where it
+belongs -- in the counter model, not in the criterion.
+:meth:`tt_sim.misc.perf_counters.TensixPerfCounters.note_wait_condition` counts
+a cycle in which a *latched* wait condition was unsatisfied without counting a
+stall, which is what ``SEMWAIT.md`` says the hardware does, and the test suite
+now drives ``TensixPerfCounters`` through its own hooks and its own MMIO
+readback into an overlapping state and asserts this gate refuses it -- and,
+in the other direction, passes a disjoint one built the same way. The refusal
+path is therefore reachable from the machinery rather than only from a
+hand-written CSV. What is *not* claimed: tt-sim's front end still never calls
+the new hook, because its only stall hook sits on the held path, so real
+simulator logs are unchanged and still cannot exhibit the overlap. That
+remaining gap is in ``tt_sim/pe/tensix/frontend.py`` and is recorded, not
+closed -- and closing it must not be attempted by inventing a magnitude.
 
 The partition is therefore left exactly as it is, and the refusal is left in
 place and made *specific*: :func:`sem_overlap_findings` names the counters, the
@@ -290,7 +373,11 @@ SEM_OVERLAP_EXPLANATION = (
     "cycle until it is met, so the counter also runs through cycles the thread "
     "had nothing at the gate to hold -- cycles inside idle_t. This partition "
     "cannot close on them, and that is the finding: do not widen a tolerance, "
-    "clamp the bucket, or make the buckets per-architecture to hide it."
+    "clamp the bucket, or make the buckets per-architecture to hide it. "
+    "Metric 36 cannot repair it either: it is a host-side ratio computed in "
+    "tools/tracy/perf_counter_analysis.py, not a counter any select exposes, "
+    "it cannot say which pair of buckets overlaps, and dividing a bucket by it "
+    "drives that bucket to THREAD_STALLS_t whatever the counter reads."
 )
 
 
@@ -504,6 +591,14 @@ def stall_reason_overlap(counters, thread):
     *understate* the overlap, which is the one direction a diagnosis must never
     err in. ``sem_excess`` needs only counters the partition already requires,
     so it is always available.
+
+    ``max_reason_excess`` is the one that decides whether metric 36 means what
+    it says. Its documented reading -- "values >1.0 mean multiple stall
+    conditions are active simultaneously" -- can only ever inflate the *sum* of
+    the nine. A positive ``max_reason_excess`` says some single counter beat the
+    thread's whole stall count on its own, which no simultaneity can do, so the
+    excess is a counter running outside ``THREAD_STALLS_t`` and the factor is
+    not a measure of overlap. See :func:`metric36_as_correction`.
     """
     stalls = counters.get(f"THREAD_STALLS_{thread}")
     sem = sum(counters.get(f"{name}_{thread}") for name in SEM_STALL_REASONS)
@@ -515,6 +610,17 @@ def stall_reason_overlap(counters, thread):
         block_sum = sum(
             counters.get(f"{name}_{thread}") for name in PER_THREAD_STALL_REASONS
         )
+    # The largest *single* reason, over whatever the log carries. Computed from
+    # the present counters rather than withheld like ``block_sum``, because the
+    # two err in opposite directions: a missing counter can only make this max
+    # smaller, and a smaller max can only *weaken* the conclusion drawn from it
+    # (see ``max_reason_excess`` below), so reporting it is safe where
+    # understating the block sum would not be.
+    max_reason, max_value = None, 0
+    for name in PER_THREAD_STALL_REASONS:
+        key = f"{name}_{thread}"
+        if key in counters.values and counters.get(key) > max_value:
+            max_reason, max_value = key, counters.get(key)
     return {
         "thread": thread,
         "thread_stalls": stalls,
@@ -524,7 +630,68 @@ def stall_reason_overlap(counters, thread):
         "block_factor": (block_sum / stalls)
         if (block_sum is not None and stalls)
         else None,
+        "max_reason": max_reason,
+        "max_reason_value": max_value,
+        #: Positive here falsifies the vendor's own explanation of metric 36.
+        #: "Multiple stall conditions active simultaneously" can make the *sum*
+        #: of the nine exceed ``THREAD_STALLS_t``; it can never make any one of
+        #: them exceed it, because a counter is not simultaneous with itself.
+        #: So a positive value means at least one reason counter runs on cycles
+        #: outside the thread's stalls entirely -- which is what ``SEMWAIT.md``
+        #: describes and what the 2026-08-17 card measured.
+        "max_reason_excess": max_value - stalls,
     }
+
+
+def metric36_as_correction(counters, thread, hypothetical_sem=None):
+    """What the vendor's overlap factor gives if used to deflate a bucket.
+
+    Computed, rather than argued, because "subtract the documented overlap" is
+    the first thing anyone will reach for once they learn metric 36 exists --
+    and the arithmetic refutes itself in a way that is easy to state and easy to
+    check.
+
+    Metric 36 is ``block_sum / stalls`` where ``block_sum`` *contains* the
+    counter being corrected, so::
+
+        corrected(sem) = sem / (block_sum / stalls)
+                       = sem * stalls / (sem + other)
+
+    which tends to ``stalls`` as ``sem`` grows, for any ``other``. The
+    "correction" therefore discards the very quantity it is applied to and
+    returns ``THREAD_STALLS_t`` back: it cannot disagree with the partition's
+    assumption, so it cannot test it. ``hypothetical_sem`` re-runs it against a
+    made-up semaphore count so the insensitivity is a number and not a claim.
+
+    Returns ``None`` when the log does not carry all nine counters, or when the
+    thread never stalled -- there is nothing to divide by in either case.
+    """
+    overlap = stall_reason_overlap(counters, thread)
+    stalls = overlap["thread_stalls"]
+    if overlap["block_sum"] is None or not stalls:
+        return None
+    sem = overlap["sem"]
+    other = overlap["block_sum"] - sem
+
+    def corrected(value):
+        return value * stalls / (value + other) if (value + other) else None
+
+    out = {
+        "thread": thread,
+        "thread_stalls": stalls,
+        "sem": sem,
+        "factor": overlap["block_factor"],
+        "corrected_sem": corrected(sem),
+        #: What ``corrected_sem`` converges on for a large counter. It is the
+        #: thread's own stall count -- i.e. the assumption the partition
+        #: already makes, handed back as if it had been measured.
+        "limit": float(stalls),
+        "hypothetical_sem": hypothetical_sem,
+        "corrected_hypothetical": (
+            corrected(hypothetical_sem) if hypothetical_sem is not None else None
+        ),
+    }
+    return out
 
 
 def sem_overlap_findings(label, counters):
@@ -1001,6 +1168,23 @@ def _overlap_lines(label, overlaps):
             f"THREAD_STALLS {overlap['thread_stalls']} "
             f"(excess {overlap['sem_excess']:+d}); {block}"
         )
+        # The single largest reason, because a *single* counter exceeding
+        # THREAD_STALLS is the thing simultaneity cannot explain -- and so the
+        # thing that decides whether the vendor's overlap factor describes what
+        # it claims to. Printed on every run, violated or not, for the same
+        # reason the line above is.
+        if overlap["max_reason"] is not None:
+            verdict = (
+                " -- one counter alone out-counts the thread's stalls, which "
+                "simultaneity between reasons cannot produce"
+                if overlap["max_reason_excess"] > 0
+                else ""
+            )
+            lines.append(
+                f"      largest single reason {overlap['max_reason']} = "
+                f"{overlap['max_reason_value']} "
+                f"(excess {overlap['max_reason_excess']:+d}){verdict}"
+            )
     return lines
 
 

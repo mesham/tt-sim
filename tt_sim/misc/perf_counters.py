@@ -331,13 +331,23 @@ class TensixPerfCounters:
 
     # -- the counting hooks ------------------------------------------------
     #
-    # Both are called from the Tensix wait gate, which is the one place that
-    # sees every stalled cycle and every accepted instruction. Neither
-    # allocates, neither consults the trace bus, and neither can move a cycle:
-    # they are pure increments on a branch the gate had already taken.
+    # ``note_stall`` and ``note_dispatch`` are called from the Tensix wait
+    # gate, which is the one place that sees every stalled cycle and every
+    # accepted instruction. Neither allocates, neither consults the trace bus,
+    # and neither can move a cycle: they are pure increments on a branch the
+    # gate had already taken. ``note_wait_condition`` is the third, and is
+    # currently uncalled by design -- see its docstring.
 
     def note_stall(self, thread_id, reason, src_bank=None):
-        """One cycle in which ``thread_id`` made no progress at the gate."""
+        """One cycle in which ``thread_id`` made no progress at the gate.
+
+        Increments ``thread_stalls[thread_id]`` **and** at most one reason
+        bucket, in the same call. That coupling is why
+        ``sem_empty_t + sem_full_t <= thread_stalls_t`` holds on every log this
+        class produces today, and why the mechanism-attribution leg's
+        ``partition_closes`` gate has never been able to fail in simulation.
+        The hardware does not couple them; see :meth:`note_wait_condition`.
+        """
         self.thread_stalls[thread_id] += 1
         if reason == "semaphore_empty":
             self.sem_empty[thread_id] += 1
@@ -349,6 +359,60 @@ class TensixPerfCounters:
         elif reason == "src_reserved_by_matrix":
             if src_bank is not None:
                 self.src_clear[src_bank] += 1
+
+    def note_wait_condition(self, thread_id, reason):
+        """One cycle in which a *latched* wait condition was unsatisfied.
+
+        Deliberately separate from :meth:`note_stall`, and deliberately not a
+        stall: this is the counting rule the hardware uses and the one tt-sim's
+        model could not previously express.
+
+        ``SEMWAIT`` does not pause the thread. Per
+        ``WormholeB0/TensixTile/TensixCoprocessor/SEMWAIT.md`` -- "the issuing
+        thread can continue execution until one of the blocked instructions is
+        reached, at which point execution of the thread is paused until all of
+        the selected conditions are simultaneously met", and "the Wait Gate
+        will then **continuously re-evaluate** the latched wait instruction
+        until all of the selected conditions are simultaneously met" -- the
+        latched condition is live from the ``SEMWAIT`` onwards, whether or not
+        anything is currently being held at the gate. A counter wired to that
+        condition therefore also runs through cycles the thread was *idle*.
+        ``BlackholeA0/.../SEMWAIT.md`` is identical bar one recommendation
+        paragraph, so this is not architecture-specific.
+
+        Measured on silicon, 2026-08-17: on a Wormhole part running
+        ``mechbench elw``, ``WAITING_FOR_NONZERO_SEM_2`` reads 3561 against a
+        ``THREAD_STALLS_2`` of 270 -- a **single** reason counter outrunning the
+        thread's whole stall count by 13x, which no amount of simultaneity
+        between reasons can explain.
+
+        **tt-sim's Tensix front end does not call this yet.** Its only stall
+        hook is on the held path (``WaitGate._note_latched_wait`` in
+        ``tt_sim/pe/tensix/frontend.py``, reachable only under ``latch_wait``),
+        so the un-held cycles of a live latched condition are never visited.
+        That is a modelling gap in the front end, recorded here rather than
+        closed here: the fix belongs in the wait gate, and no counter magnitude
+        may be invented to stand in for it. What this method does buy is that
+        the *counter model* no longer enforces an invariant the hardware breaks,
+        so the gate that refused on silicon can be shown to refuse on state this
+        class produced.
+
+        Only the two semaphore reasons are accepted. The four Src conditions are
+        per-instruction ownership tests evaluated on whatever is at the gate,
+        not latched conditions that outlive it, so a Src counter cannot run on a
+        cycle with nothing held -- and a caller reaching for one here has
+        mistaken which quantity it is counting.
+        """
+        if reason == "semaphore_empty":
+            self.sem_empty[thread_id] += 1
+        elif reason == "semaphore_full":
+            self.sem_full[thread_id] += 1
+        else:
+            raise ValueError(
+                f"note_wait_condition: {reason!r} is not a latched wait condition; "
+                "only semaphore_empty and semaphore_full can count while the "
+                "thread is not held at the gate"
+            )
 
     def note_dispatch(self, thread_id):
         """One instruction accepted past the gate from ``thread_id``."""

@@ -1,0 +1,18 @@
+== schema: the read arm's columns and arm names are unchanged
+   ok   the first 18 columns are the control's, in its order (got ['arm', 'repeat', 'point', 'num_readers', 'num_tx', 'tx_bytes', 'bytes_per_reader', 'total_bytes', 'max_cycles', 'min_cycles', 'agg_bytes_per_cycle', 'agg_gb_per_s', 'per_reader_bytes_per_cycle', 'distinct_banks', 'distinct_dram_cores', 'tags_ok', 'max_barrier_spins', 'measured_readers'])
+   ok   every read row still uses an unsuffixed arm name
+   ok   every read row leaves witness_ok at -1 ('the host did not look')
+   ok   every read row leaves stray_writes at -1
+== write arm: /home/nbrown23/tt_traces/dram-write-wormhole/run1.csv
+   ok   every writer stamped a result (ok)
+   ok   every writer read its own bytes back after the barrier -- none was dropped or mis-congruent (ok)
+   ok   the HOST found every writer's witness in the block the plan named (ok)
+   ok   no block the plan did not name moved off POISON -- nothing landed anywhere else (ok)
+   ok   a writer waited at the barrier in some multi-writer point, so the bursts really did overlap
+   ok   the fan-out CONTROL moved: 21.849 -> 51.208 B/cycle over 1 -> 64 writers (x2.34)
+   ok   onechan-write x0.97 against the control's x2.34, 42% of it -> ENDPOINT BOUND
+   ok   at 64 participants on the SAME endpoint: read 22.090 B/cycle, write 21.264 B/cycle, ratio 0.963
+   ok   wormhole ceilings: channel read 24.0 B/cycle, channel write 24.0, NoC link 32.0. A write plateau at the LINK is not a channel rate.
+   ok   OCCUPANCY only. This cannot price one write, cannot split service time from queueing, and cannot tell the endpoint from the one inbound router link. CORROBORATION, never provenance.
+----
+PASS

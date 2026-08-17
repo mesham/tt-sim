@@ -14,8 +14,16 @@ could plausibly produce -- a concatenated log, a Wormhole-numbered core compared
 against a Blackhole-numbered one, an unarmed bank, a partition that does not
 close.
 
-The card data is **synthetic**: no card session for this leg exists yet. Every
-file this module writes, and both files it reads out of
+Two of the gate's refusals are now reachable from tt-sim's own machinery rather
+than only from a hand-written CSV: :func:`_drive_perf_counters` runs a window on
+a real :class:`~tt_sim.misc.perf_counters.TensixPerfCounters` and reads it back
+through the MMIO path a profiler would use, in both directions.
+
+Two kinds of card data appear here. ``CARD_WH_ELW`` and ``CARD_WH_ELW_BLOCK``
+are **real**, transcribed from
+``perfbench/card-sessions/2026-08-17-wh-mechbench-wormhole/`` -- corroboration,
+never provenance, and no number in them may become a cost. Everything else is
+**synthetic**: every file this module writes, and the two it reads out of
 ``perfbench/mechbench/testdata/`` whose names say so, are stamped
 NOT-A-MEASUREMENT in the directory's README and must never be quoted as one.
 """
@@ -504,14 +512,19 @@ def test_the_refusal_is_not_widened_away(tmp_path):
     assert thread["other_stall"] == -3291
 
 
-def test_the_simulator_side_cannot_fail_this_gate(tmp_path):
+def test_no_real_simulator_log_has_ever_failed_this_gate(tmp_path):
     """Why Blackhole's pass is not evidence about Blackhole.
 
     ``TensixPerfCounters.note_stall`` increments ``thread_stalls[t]`` and at
-    most one reason bucket in the same call, so ``sem_empty_t + sem_full_t <=
-    thread_stalls_t`` holds identically on any tt-sim log, on either
+    most one reason bucket in the same call, and it is tt-sim's *only* stall
+    hook that the Tensix front end calls, so ``sem_empty_t + sem_full_t <=
+    thread_stalls_t`` holds on every log tt-sim has ever produced, on either
     architecture. Both checked-in simulator logs are pinned here to make that
     concrete: the gate closing on them says nothing about silicon.
+
+    This is a statement about the front end's call sites, not about the counter
+    model -- which can now represent the hardware's behaviour, and is driven
+    into it two tests below.
     """
     for name in ("sim-elw-blackhole.csv", "sim-mm-blackhole.csv"):
         core = next(
@@ -545,6 +558,198 @@ def test_note_stall_makes_the_partition_close_by_construction():
         + sum(counters_.src_clear.values())
     )
     assert named <= counters_.thread_stalls[2]
+
+
+# ---------------------------------------------------------------------------
+# Metric 36, tried as a correction and rejected
+#
+# The hardware documents the overlap (tech report metric 36, "Stall Cause
+# Overlap Factor"), so the tempting move is to stop assuming disjointness and
+# subtract a measured overlap. These pin the two reasons that cannot be argued
+# around: the factor's own documented mechanism is falsified by the card, and
+# using it as a divisor hands back the assumption it was meant to test.
+# ---------------------------------------------------------------------------
+
+
+def test_a_single_reason_alone_out_counts_the_thread_stalls_on_card_data(tmp_path):
+    """The measurement that falsifies metric 36's documented explanation.
+
+    "Values >1.0 mean multiple stall conditions are active simultaneously" can
+    inflate the *sum* of the nine reasons above ``THREAD_STALLS_t``. It can
+    never lift any one of them above it -- a counter is not simultaneous with
+    itself. On the 2026-08-17 Wormhole part, three do.
+    """
+    card = one_core(tmp_path, "card.csv", card_wh())
+    t2 = sa.stall_reason_overlap(card, 2)
+    assert t2["max_reason"] == "WAITING_FOR_NONZERO_SEM_2"
+    assert t2["max_reason_value"] == 3561
+    assert t2["max_reason_excess"] == 3561 - 270
+    # thread 1's pair of unit-idle counters do it too, on much smaller numbers,
+    # so this is not one anomalous counter on one thread.
+    t1 = sa.stall_reason_overlap(card, 1)
+    assert t1["max_reason_value"] == 38
+    assert t1["max_reason_excess"] == 38 - 36
+    # ...and the direction that matters: it must not fire where it should not.
+    assert sa.stall_reason_overlap(card, 0)["max_reason_excess"] == 0
+
+
+def test_metric36_as_a_correction_hands_back_the_assumption_it_should_test(tmp_path):
+    """Dividing a bucket by a factor that contains it is not a correction.
+
+    ``corrected(sem) = sem * stalls / (sem + other)`` tends to ``stalls`` as
+    ``sem`` grows. So the "corrected" semaphore bucket converges on exactly the
+    number the partition already assumed it could be at most, and it gets there
+    almost immediately: doubling the measured counter moves the answer by under
+    4 %.
+    """
+    card = one_core(tmp_path, "card.csv", card_wh())
+    fit = sa.metric36_as_correction(card, 2, hypothetical_sem=2 * 3561)
+    assert fit["factor"] == pytest.approx(3831 / 270)
+    assert fit["corrected_sem"] == pytest.approx(3561 * 270 / 3831)
+    assert fit["corrected_sem"] == pytest.approx(250.97, abs=0.01)
+    assert fit["corrected_hypothetical"] == pytest.approx(260.14, abs=0.01)
+    # a 100 % change in the input for under 4 % in the output
+    moved = abs(fit["corrected_hypothetical"] - fit["corrected_sem"])
+    assert moved / fit["corrected_sem"] < 0.04
+    # and the limit is the thread's own stall count, i.e. the assumption itself
+    assert fit["limit"] == 270
+    assert sa.metric36_as_correction(card, 2, hypothetical_sem=10**9)[
+        "corrected_hypothetical"
+    ] == pytest.approx(270, abs=0.01)
+
+
+def test_metric36_as_a_correction_is_withheld_without_the_whole_block(tmp_path):
+    """No factor, no correction -- rather than one computed from two of nine."""
+    partial = one_core(tmp_path, "card.csv", card_wh(block=False))
+    assert sa.metric36_as_correction(partial, 2) is None
+
+
+def test_metric36_as_a_correction_is_withheld_when_a_thread_never_stalled(tmp_path):
+    card = one_core(tmp_path, "card.csv", card_wh(THREAD_STALLS_0=0))
+    assert sa.metric36_as_correction(card, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# The gate must be reachable from tt-sim's own machinery, not only from a CSV
+#
+# ``partition_closes`` refused on silicon and has never refused on a simulator
+# log, because the front end's one stall hook couples the reason buckets to the
+# total. ``note_wait_condition`` is the counting rule ``SEMWAIT.md`` actually
+# describes -- a latched condition is re-evaluated every cycle whether or not
+# anything is held at the gate -- and these drive ``TensixPerfCounters``
+# through its own hooks and its own MMIO readback, both directions.
+# ---------------------------------------------------------------------------
+
+
+def _drive_perf_counters(overlapping):
+    """Run a window on a real ``TensixPerfCounters`` and read it back by MMIO.
+
+    Wormhole selects, to mirror the part the refusal came from. Everything goes
+    through the register interface a profiler would use -- start edge, counting
+    hooks, stop edge, then one ``mode``/``OUT_H`` pair per counter -- so what
+    comes back has been through the same decode path as a real readback rather
+    than lifted off the attributes.
+    """
+    from tt_sim.misc import perf_counters as pc
+
+    counters_ = pc.TensixPerfCounters(blackhole=False)
+    base, out_l, out_h = pc.BANK_REGISTERS["INSTRN_THREAD"]
+    counters_.write(base + 8, 1, 0)  # start edge: begins the window and clears
+    assert counters_.instrn_running
+
+    for _ in range(10):
+        counters_.note_stall(0, "src_reserved_by_unpacker", src_bank="A")
+    for _ in range(5):
+        counters_.note_stall(1, "semaphore_full")
+    for _ in range(30):
+        counters_.note_stall(2, "semaphore_empty")
+    if overlapping:
+        # The cycles hardware counts and tt-sim's front end never visits: the
+        # latched condition is unsatisfied but nothing is held at the gate.
+        for _ in range(250):
+            counters_.note_wait_condition(2, "semaphore_empty")
+    for thread in range(3):
+        for _ in range(20):
+            counters_.note_dispatch(thread)
+
+    counters_.write(base + 8, 2, 400)  # stop edge
+    assert not counters_.instrn_running
+
+    selects = {name: key for key, name in pc._instrn_selects(False).items()}
+    values = {"ref_cnt": counters_.read(out_l, 400)}
+    for name in sa.required_counters():
+        select, grant = selects[name]
+        counters_.write(base + 4, (select << 8) | (0x10000 if grant else 0), 400)
+        values[name] = counters_.read(out_h, 400)
+    return values
+
+
+def test_the_counter_model_can_represent_the_hardware_overlap():
+    """``note_wait_condition`` counts a reason without counting a stall.
+
+    That is the whole of the fix at this level: the class no longer enforces an
+    invariant silicon breaks. It also refuses the four Src conditions, which are
+    per-instruction ownership tests and cannot run with nothing at the gate.
+    """
+    from tt_sim.misc.perf_counters import TensixPerfCounters
+
+    counters_ = TensixPerfCounters(blackhole=False)
+    counters_.note_stall(2, "semaphore_empty")
+    for _ in range(9):
+        counters_.note_wait_condition(2, "semaphore_empty")
+    counters_.note_wait_condition(1, "semaphore_full")
+    assert counters_.thread_stalls == [0, 0, 1]
+    assert counters_.sem_empty[2] == 10
+    assert counters_.sem_full[1] == 1
+    with pytest.raises(ValueError, match="not a latched wait condition"):
+        counters_.note_wait_condition(0, "src_reserved_by_unpacker")
+
+
+def test_the_gate_refuses_a_window_the_counter_model_itself_produced(tmp_path):
+    """The refusal path, reached from tt-sim's machinery rather than a CSV.
+
+    A gate that cannot fail is not a gate. Before ``note_wait_condition`` no
+    sequence of calls on ``TensixPerfCounters`` could produce a set this gate
+    rejects, so its passing said nothing. Now one can, and it does.
+    """
+    values = _drive_perf_counters(overlapping=True)
+    assert values["ref_cnt"] == 400
+    assert values["WAITING_FOR_NONZERO_SEM_2"] == 280
+    assert values["THREAD_STALLS_2"] == 30
+
+    core = one_core(tmp_path, "sim.csv", {(1, 1): values})
+    gate = sa.gate_partition_closes(core, None)
+    assert not gate.passed
+    assert "WAITING_FOR_NONZERO_SEM_2 = 280" in gate.detail
+    assert "THREAD_STALLS_2 = 30" in gate.detail
+    assert "unattributed_stall = -250" in gate.detail
+    assert "SEMWAIT.md" in gate.detail
+
+    # and end to end, through the same entry point the CLI uses
+    reports = sa.analyse(sa.load_counter_samples(tmp_path / "sim.csv"), None)
+    assert len(reports) == 1
+    assert reports[0].refused
+
+
+def test_the_gate_passes_a_window_the_counter_model_itself_produced(tmp_path):
+    """The other direction, from the same machinery: disjoint counters close.
+
+    Without the un-held cycles this is exactly what tt-sim produces today, and
+    it must keep passing -- otherwise the test above would be demonstrating a
+    broken gate rather than a reachable refusal.
+    """
+    values = _drive_perf_counters(overlapping=False)
+    assert values["WAITING_FOR_NONZERO_SEM_2"] == 30
+
+    core = one_core(tmp_path, "sim.csv", {(1, 1): values})
+    gate = sa.gate_partition_closes(core, None)
+    assert gate.passed, gate.detail
+    assert sa.sem_overlap_findings("sim", core) == []
+    assert sa.core_partition(core)["unattributed_stall"] == 0
+
+    reports = sa.analyse(sa.load_counter_samples(tmp_path / "sim.csv"), None)
+    assert len(reports) == 1
+    assert not reports[0].refused
 
 
 # ---------------------------------------------------------------------------

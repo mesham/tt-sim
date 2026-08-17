@@ -1,0 +1,71 @@
+PRE-REGISTERED 2026-08-17, before any Wormhole card ran the write direction.
+
+WHAT THE SIMULATOR SAYS, ON BOTH PARTS, AT FOUR TILES AND 4096 B TRANSACTIONS
+  Wormhole   onechan read 23.406 B/cycle, onechan write 23.327. Ratio 0.997.
+             Both sit on the 24 B/cycle channel rate `dram.channel_serialisation`
+             holds for BOTH directions on that arch, so the model predicts a
+             SYMMETRIC endpoint and predicts it for a reason that is visible in
+             the source: Wormhole converts one published per-channel figure,
+             which its page states for reads and writes alike.
+  Blackhole  onechan read 44.364 B/cycle, onechan write 60.208. Ratio 1.357 --
+             the write is CHEAPER. Not because anything measured it: that arch
+             has a `vendor_source_derived` READ rate of 47.08 B/cycle and NO
+             write rate at all, so `DramChannels.write_bytes_per_cycle` is None
+             and every write claim is a no-op. The write arm is therefore
+             unqueued and runs up against the 64 B/cycle NoC link instead.
+             The predicted asymmetry is the SHAPE OF AN ABSENCE, not of a
+             measurement, and a card that shows Blackhole writes at the read's
+             rate would be saying the model under-charges there.
+
+  So tt-sim predicts OPPOSITE SIGNS on the two parts, and the Wormhole card's
+  own latency data leans the third way (write dearer). Three positions, and
+  this campaign can only adjudicate the occupancy one.
+
+WORMHOLE, IF THE WRITE ASYMMETRY IS REAL AND WRITES ARE DEARER
+  * onechan-write plateaus BELOW onechan read by more than the run-to-run
+    spread. The read arm's spread across 3 repeats on 2026-08-17 was under 1%,
+    so "below" means a write/read ratio under 0.95 at 48 and 64 participants,
+    repeatably, in BOTH runs.
+  * If the +21/+56-cycle latency gap were an occupancy gap it would be a large
+    one: those are ~20% and ~45% of the read's own ~120-cycle endpoint
+    difference, so a write plateau in the 15-20 B/cycle band -- not 21.9.
+  * fanchan-write must still scale (x1.5 or better), or the flatness is
+    unreadable and this prediction cannot be tested at all.
+
+WORMHOLE, IF THE LATENCY RESULT WAS AN ARTEFACT OF THE BARRIER
+  * write/read ratio inside 0.95-1.05 at EVERY participant count, with both
+    arms plateauing together at 21.9-22.2 B/cycle.
+  * THIS IS A POSITIVE RESULT AND NOT A NULL. It says the +21/+56 cycles a
+    latency probe sees are issue- or completion-side -- how long
+    noc_async_write_barrier takes to retire -- and not endpoint occupancy, so
+    they belong nowhere near `dram.access_latency`. It also agrees with
+    tt-sim's Wormhole prediction, and would leave `unit_costs.yaml`'s decision
+    to keep one figure for all three request actions standing on a second,
+    independent kind of evidence.
+
+WHAT WOULD MAKE THE RESULT UNINTERPRETABLE (any one of these; report it, do
+not re-run and keep the better session)
+  * fanchan-write scales under x1.5. Something upstream of the endpoint caps
+    both write arms and a flat concentrated arm says nothing. NOT hypothetical:
+    tt-sim does exactly this at four tiles, where the four workers share a
+    router row and the write control tops out near one link's rate. The card's
+    64 workers are the reason to expect it to move here, and the read arm's own
+    x5.74 on the same part is the evidence that it can.
+  * any row with witness_ok < num_readers, or stray_writes > 0. Bytes did not
+    go where the plan named, or went somewhere it did not.
+  * any multi-participant point with max_barrier_spins == 0. The bursts never
+    overlapped, and N writers running one after another produce exactly the
+    flat aggregate this campaign is looking for.
+  * the READ rows in the same file do not reproduce 2026-08-17: onechan flat in
+    21.9-22.2 B/cycle from 1 to 64 (the n=2 point sat at 20.3 and may again),
+    fanchan 22.2 -> 127.5 (x5.74), and -0.2 / -1.5 / -0.9 % against the
+    published 22.2 / 22.3 / 22.3 at 1 / 12 / 48. If the control moved, the part
+    or the session is not the one those figures came from.
+  * a write plateau at or above 32 B/cycle. That is the NoC link on Wormhole,
+    not an endpoint rate, and the run has sized the link.
+
+WHAT THE ANSWER CAN BE USED FOR, WHATEVER IT IS
+  Corroboration. Never provenance. `dram.bandwidth` is `unknown` on Wormhole
+  for want of a published document and a measurement is not a document. And
+  because the `samecore` arm does not exist on this part, a clean result is
+  about "the endpoint", not about "the GDDR6 channel".

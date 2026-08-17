@@ -1,0 +1,79 @@
+2026-08-17 16:16:16.651 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 16:16:16.651 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 16:16:16.651 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 16:16:16.651 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 16:16:16.656 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 16:16:16.673 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 16:16:16.760 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 16:16:16.760 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 16:16:16.760 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 16:16:16.760 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 16:16:16.763 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 16:16:16.771 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 16:16:16.816 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 16:16:16.816 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 16:16:16.817 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 16:16:16.817 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 16:16:16.820 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 16:16:16.826 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 16:16:16.830 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 16:16:16.838 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 16:16:16.838 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 16:16:16.884 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+dramratebench: arch=wormhole grid=8x8 clock=1000MHz banks=12 readers<=64 points=8
+dramratebench: bytes/reader=1048576 tx=4096B num_tx=256 repeats=3 dram_base=0x002D4C40
+  bank  0  logical (0,0)  noc (0,11)  offset 0x00000000  tag 0xDB000000
+  bank  1  logical (1,0)  noc (0,1)  offset 0x40000000  tag 0xDB000001
+  bank  2  logical (2,0)  noc (0,5)  offset 0x00000000  tag 0xDB000002
+  bank  3  logical (3,0)  noc (0,7)  offset 0x40000000  tag 0xDB000003
+  bank  4  logical (4,0)  noc (5,1)  offset 0x00000000  tag 0xDB000004
+  bank  5  logical (5,0)  noc (5,11)  offset 0x40000000  tag 0xDB000005
+  bank  6  logical (6,0)  noc (5,2)  offset 0x00000000  tag 0xDB000006
+  bank  7  logical (7,0)  noc (5,9)  offset 0x40000000  tag 0xDB000007
+  bank  8  logical (8,0)  noc (5,8)  offset 0x00000000  tag 0xDB000008
+  bank  9  logical (9,0)  noc (5,3)  offset 0x40000000  tag 0xDB000009
+  bank 10  logical (10,0)  noc (5,5)  offset 0x00000000  tag 0xDB00000A
+  bank 11  logical (11,0)  noc (5,7)  offset 0x40000000  tag 0xDB00000B
+dramratebench: no physical DRAM core fronts two banks on this part, so the
+  `samecore` arm (same inbound NoC link, different GDDR6 channel) is SKIPPED.
+  Without it, `onechan` cannot separate a channel limit from the limit of the
+  one router link every reader's flow converges on. Say so when reporting.
+
+dramratebench: wrote /home/nbrown23/tt_traces/dram-write-wormhole/run2.csv (0 failures)
+dramratebench: 8 point(s); 6 of 6 multi-reader point(s) had a reader wait at the
+  barrier; 0 point(s) had a reader that did not verify its DRAM tag
+
+dramratebench: SUSTAINED RATE -- N readers, 1048576 B each, ONE channel
+  readers   aggregate B/cycle   per reader   aggregate GB/s   fanchan B/cycle
+  Against wh_dram#performance (reads, static VC, 1 MiB per tile, ONE channel):
+    readers   published GB/s   measured GB/s   deviation
+          1             22.2               -           -  (not swept)
+         12             22.3               -           -  (not swept)
+         48             22.3               -           -  (not swept)
+  VERDICT: DEGENERATE -- the fan-out control has no low and high point to
+  compare, so nothing separates the endpoint from the fabric or the issue rate.
+  EXPECTED against tt-sim, which instantiates only the tiles named in
+  TT_SIM_TENSIX_COORDS and so cannot sweep the reader count.
+
+dramratebench: WRITE DIRECTION -- 8 point(s)
+  addressing: 0 point(s) failed the host's witness check (bytes did not
+  arrive where the plan named); 0 point(s) had a STRAY write (bytes arrived
+  on a block the plan never named)
+
+  writers   aggregate B/cycle   per writer   fanchan-write B/cycle   read onechan
+        1              21.850       21.850                  21.849              -
+       12              20.677        1.723                  35.140              -
+       48              21.285        0.443                  45.962              -
+       64              21.286        0.333                  50.914              -
+
+  fanchan-write 21.849 -> 50.892 B/cycle over 1 -> 64 writers (x2.33)
+  onechan-write 21.850 -> 21.286 B/cycle over 1 -> 64 writers (x0.97)
+  VERDICT (write): ENDPOINT BOUND -- concentrated writers reached 42% of the
+  scaling the same writers reached fanned out.
+2026-08-17 16:16:17.512 | info     |    BuildKernels | JIT cache stats: 1/1 hits (100.0%) [1 cached, 23 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 16:16:17.512 | info     |    BuildKernels | JIT telemetry: 3 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 16:16:17.519 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 16:16:17.519 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 16:16:17.537 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 16:16:17.537 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 16:16:17.537 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

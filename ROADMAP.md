@@ -375,6 +375,41 @@ is left is the credibility layer.
    reporting a negative bucket. Widening a tolerance or clamping the
    bucket was rejected: a partition that cannot close is saying the
    model of the hardware is wrong.
+   **SETTLED AS IMPOSSIBLE, 2026-08-17 — the mechanism leg cannot be
+   built from the counters this hardware exposes, and this is now a
+   fact rather than an open item.** The remaining move was to subtract
+   the overlap the vendor documents rather than assume none. **Metric
+   36 is not a counter**: the `INSTRN_THREAD` select maps
+   (`hw_counters.h:116-175` WH, `:158-219` BH, 59 each) carry no
+   overlap entry and no other bank does; it is computed on the host in
+   Python (`tools/tracy/perf_counter_analysis.py:1332-1350`) and the
+   LLK doc files it under `### Composite`
+   (`performance_counters.md:785`). Its nine *inputs* are free — same
+   bank, same window, both arches — but a scalar over nine reasons
+   cannot say which pair of buckets overlaps, cannot separate "two
+   reasons on one stalled cycle" from "a reason on an unstalled cycle"
+   (opposite corrections), and readmits the seven declined unit-busy
+   counters. **And the card falsifies the factor's documented
+   meaning**: simultaneity cannot lift a *single* reason above the
+   total, yet `WAITING_FOR_NONZERO_SEM_2` = 3,561 against
+   `THREAD_STALLS_2` = 270 and `WAITING_FOR_{MATH,SFPU}_IDLE_1` = 38
+   against 36. Using the factor as a divisor also self-destructs — its
+   numerator contains the bucket, so the "corrected" value tends to
+   `THREAD_STALLS_t` (251 for the measured 3,561; 260 for a
+   hypothetical 7,122). `stall_reason_overlap` now reports
+   `max_reason_excess` and `metric36_as_correction` computes the fit,
+   so both are printed numbers, not remembered arguments.
+   **And the gate can now fail in simulation.**
+   `TensixPerfCounters.note_wait_condition` counts a latched wait
+   condition without counting a stall — what `SEMWAIT.md` says the
+   hardware does and what `note_stall` structurally could not express
+   — and the suite drives a real counter bank through its own MMIO
+   readback into an overlapping window, asserting the gate refuses it
+   and passes a disjoint one built the same way. **Still open, and not
+   to be closed by inventing a magnitude**: tt-sim's front end never
+   calls the new hook, because its only stall hook sits on the held
+   path (`WaitGate._note_latched_wait`), so real simulator logs are
+   unchanged.
    **The NoC-bound leg is built, 2026-08-16** — `perfbench/nocevbench`
    plus `tt_sim.perf.noc_events`, behind six refusing gates. Two of
    three legs now exist; only **RV-bound** is left, and it has an

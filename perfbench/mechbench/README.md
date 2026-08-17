@@ -456,6 +456,88 @@ Widening `E_int`, clamping the bucket at zero, or moving the semaphore mass into
 semaphore count fell in `idle_t` versus `THREAD_STALLS_t`, so that split is
 unknowable from this bank and any value chosen for it would be invented.
 
+### The fourth alternative: subtract the overlap the hardware documents
+
+The hardware publishes an overlap factor, so the partition might not need
+disjointness — it might be able to subtract a *measured* overlap instead of
+assuming there is none. That was settled next, and **it cannot.**
+
+**Metric 36 is not a counter.** The `INSTRN_THREAD` bank's complete select map
+is `tt_metal/hw/inc/internal/tt-1xx/wormhole/hw_counters.h:116-175` (59
+counters; req side 0–65, grant side 256/264/272 and 283) and
+`.../blackhole/hw_counters.h:158-219` (also 59). Neither carries an overlap
+entry and no other bank does either. The factor is computed on the **host, in
+Python**, from nine already-read counters —
+`tools/tracy/perf_counter_analysis.py:1332-1350` — and the sibling LLK document
+files the same metric under a heading that says so:
+`tt_metal/tt-llk/docs/performance_counters/performance_counters.md:785` is
+`### Composite`, metric 26 at line 787. So "can a value for it be collected in
+the same window" has no content: nothing collects it. Its nine *inputs* are
+free — all per-thread selects in the one bank this leg already enables (mask 32,
+`INSTRN`, `perf-counters.md:876`), on both architectures
+(`perf-counters.md:875`) — and the 2026-08-17 session already carries them.
+
+**And the card falsifies what the factor claims to mean.** The tech report
+explains values above 1 as "*multiple stall conditions are active
+simultaneously*" (`perf-counters.md:871`, `:883`). Simultaneity between reasons
+can lift the *sum* of the nine above `THREAD_STALLS_t`; it can never lift any
+one of them above it, because a counter is not simultaneous with itself. Three
+do:
+
+| thread | largest single reason | value | `THREAD_STALLS_t` |
+| --- | --- | --: | --: |
+| 1 | `WAITING_FOR_MATH_IDLE_1` (= `SFPU_IDLE_1`) | 38 | 36 |
+| 2 | `WAITING_FOR_NONZERO_SEM_2` | 3 561 | 270 |
+
+So the excess is not simultaneity — it is the `SEMWAIT`/Wait Gate behaviour
+described above, and metric 36 mis-describes its own quantity.
+`stall_attribution` now reports `max_reason_excess` per thread, on every run,
+so this is a printed number rather than a remembered argument.
+
+Three further reasons, each sufficient on its own: a scalar over nine reasons
+cannot say *which* pair of buckets overlaps; it cannot distinguish "two reasons
+true on one stalled cycle" (rescale) from "a reason true on an unstalled cycle"
+(move the mass to `idle_t`), which need opposite corrections; and seven of its
+nine numerator terms are the `WAITING_FOR_{UNIT}_IDLE` family this leg already
+declined, so using the factor readmits them through the back door.
+
+The arithmetic also self-destructs, and `metric36_as_correction` computes it:
+because the factor's numerator *contains* the bucket,
+`corrected(sem) = sem × stalls / (sem + other)` tends to `THREAD_STALLS_t` as
+the counter grows. On the card's thread 2 it returns **251** for the measured
+3 561 and **260** for a hypothetical 7 122 — a 100 % change in the input for
+3.7 % in the output, converging on the number the partition already assumed.
+A correction that is nearly independent of the quantity it corrects is a fit.
+
+**So: rung 4's mechanism leg cannot be built from the counters this hardware
+exposes.** The bank has no counter for the overlap it documents, and without one
+the named stall reasons cannot be made into a partition of anything. That is a
+settled negative, not an open item.
+
+### The gate can now fail in simulation
+
+Separately, and not dependent on any of the above: `partition_closes` could not
+refuse anything tt-sim produced, and a gate that cannot fail is not a gate.
+
+`TensixPerfCounters.note_wait_condition` now counts a cycle in which a *latched*
+wait condition was unsatisfied **without** counting a stall — which is what
+`SEMWAIT.md` says the hardware does ("the issuing thread can continue execution
+until one of the blocked instructions is reached"; "the Wait Gate will then
+continuously re-evaluate the latched wait instruction"), and what
+`note_stall` structurally could not express. The test suite drives a real
+`TensixPerfCounters` through its own hooks and its own MMIO readback into an
+overlapping window and asserts this gate refuses it, and — the direction that
+matters as much — passes a disjoint window built the same way. The refusal is
+now reachable from the machinery, not only from a hand-written CSV.
+
+**What is not claimed:** tt-sim's front end still never calls the new hook. Its
+only stall hook sits on the held path (`WaitGate._note_latched_wait`, reachable
+only under `latch_wait`), so the un-held cycles of a live latched condition are
+never visited and real simulator logs are unchanged. That remaining gap is in
+`tt_sim/pe/tensix/frontend.py`, and it is recorded rather than closed: closing it
+means the wait gate re-evaluating a latched condition every cycle, which is a
+front-end change and must not be approximated by inventing a magnitude.
+
 ### What this leg can and cannot do on Wormhole, as of now
 
 With the semaphore pair out of the picture the only named mechanisms left in the
