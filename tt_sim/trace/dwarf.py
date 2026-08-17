@@ -46,8 +46,6 @@ import bisect
 from dataclasses import dataclass
 from pathlib import Path
 
-from elftools.elf.elffile import ELFFile
-
 #: Attributes consulted, in order, for a subprogram's name.
 _NAME_ATTRS = ("DW_AT_name", "DW_AT_linkage_name")
 #: Attributes followed when a DIE carries no name of its own.
@@ -142,6 +140,17 @@ class DwarfIndex:
         runtime L1 base of its own choosing, so without a bias the kernel
         half of a run resolves to nothing.
         """
+        # Imported here, not at module scope, and that is load-bearing rather
+        # than style. `tt_sim.trace.__init__` imports `auto`, which imports this
+        # module, so a module-scope `elftools` import makes pyelftools a hard
+        # requirement of importing *anything* under `tt_sim` — including the
+        # analysis tools, which only read JSON. That bit twice on 2026-08-13/17:
+        # once burning a simulator boot per arm before the reduction step
+        # failed, and once on a card box that has tt-metal but not tt-sim's
+        # Python dependencies. DWARF symbolisation is genuinely optional; this
+        # is the one place that needs it, so this is where the cost is paid.
+        from elftools.elf.elffile import ELFFile
+
         path = Path(elf_path)
         self._loaded_elfs.append(str(path))
         with path.open("rb") as handle:

@@ -93,6 +93,27 @@ echo "  out       : $OUT"
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
 export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
+export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:${LD_LIBRARY_PATH:-}"
+
+# A card box that also has a tt-sim checkout is exactly where this goes wrong:
+# with TT_METAL_SIMULATOR left set, every run below completes, validates its own
+# arithmetic, records counter samples and writes a session directory that is a
+# SIMULATOR decomposition labelled as a card's -- which is the one artefact this
+# leg must never produce, since comparing it against tt-sim is comparing tt-sim
+# to itself. `dramratebench` and `energybench` have always refused it.
+if [ -n "${TT_METAL_SIMULATOR:-}" ]; then
+  echo "TT_METAL_SIMULATOR is set ($TT_METAL_SIMULATOR)." >&2
+  echo "This script is the CARD side; unset it, or use ./run_sim.sh." >&2
+  exit 2
+fi
+
+# Its program launches through `detail::LaunchProgram`, the direct path, which
+# requires slow dispatch; a card defaults to FAST dispatch, so without this every
+# run aborts with rc=134 before doing any work. Measured on a Blackhole p150,
+# 2026-08-17, when nocevbench hit exactly this. The simulator runners have always
+# set it (tt-sim supports no other flow), which is why the gap survived in every
+# card runner: the sim side cannot reproduce the failure.
+export TT_METAL_SLOW_DISPATCH_MODE="${TT_METAL_SLOW_DISPATCH_MODE:-1}"
 
 if [ "$SKIP_BUILD" -eq 0 ] || [ ! -x "$SRC/build/mechbench" ]; then
   echo "== building (tt-metal supplies every flag; nothing to configure)"

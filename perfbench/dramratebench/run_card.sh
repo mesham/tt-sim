@@ -19,16 +19,8 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/src"
 
-: "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
-export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
-export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:${LD_LIBRARY_PATH:-}"
-
-if [ -n "${TT_METAL_SIMULATOR:-}" ]; then
-  echo "TT_METAL_SIMULATOR is set ($TT_METAL_SIMULATOR)." >&2
-  echo "This script is for a real card; unset it, or use perfbench/run.sh." >&2
-  exit 2
-fi
-
+# Arguments before the environment, so that `--help` answers on a box that has
+# no tt-metal yet -- which is the box an operator reads it on.
 ARGS=()
 seen_sep=0
 for arg in "$@"; do
@@ -39,6 +31,24 @@ for arg in "$@"; do
     *) ARGS+=("$arg") ;;
   esac
 done
+
+: "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
+export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
+
+# Its program launches through `detail::LaunchProgram`, the direct path, which
+# requires slow dispatch; a card defaults to FAST dispatch, so without this every
+# run aborts with rc=134 before doing any work. Measured on a Blackhole p150,
+# 2026-08-17, when nocevbench hit exactly this. The simulator runners have always
+# set it (tt-sim supports no other flow), which is why the gap survived in every
+# card runner: the sim side cannot reproduce the failure.
+export TT_METAL_SLOW_DISPATCH_MODE="${TT_METAL_SLOW_DISPATCH_MODE:-1}"
+export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:${LD_LIBRARY_PATH:-}"
+
+if [ -n "${TT_METAL_SIMULATOR:-}" ]; then
+  echo "TT_METAL_SIMULATOR is set ($TT_METAL_SIMULATOR)." >&2
+  echo "This script is for a real card; unset it, or use perfbench/run.sh." >&2
+  exit 2
+fi
 
 cd "$SRC" || exit 2
 if [ ! -x build/dramratebench ]; then
