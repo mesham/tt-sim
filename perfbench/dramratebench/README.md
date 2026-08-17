@@ -1,13 +1,20 @@
-# dramratebench — does a DRAM channel's read rate grow with the number of readers?
+# dramratebench — does a DRAM endpoint's rate grow with the number of participants?
 
-`N` Tensix tiles each read 1 MiB from DRAM, simultaneously, with `N` swept. Three
-arms differ in **which endpoint** those reads land on and in nothing else.
+`N` Tensix tiles each move 1 MiB to or from DRAM, simultaneously, with `N`
+swept. Three arms differ in **which endpoint** those transfers land on and in
+nothing else; a `--dir` axis differs in **which direction** they go and in
+nothing else.
 
 ```bash
 export TT_METAL_HOME=/path/to/your/built/tt-metal
-perfbench/dramratebench/run_card.sh          # on a card
+perfbench/dramratebench/run_card.sh          # the READ campaign, on a card
+perfbench/dramratebench/run_card_write.sh    # the WRITE campaign, on a card
 ./perfbench/run.sh dramratebench -- --bytes 8192 --tx-bytes 512 --readers 1,2
 ```
+
+`--dir` defaults to `read`, so every invocation that predates the write
+direction produces exactly the file it produced before. See
+[the write direction](#the-write-direction) below.
 
 **At the card, this is the whole of it** — copy and paste, no other setup, and
 nothing but `perfbench/` needs to be on the box:
@@ -335,18 +342,157 @@ slice 0 only, so every reader past the first had nothing to match; the data was
 clean and was thrown away. A check that cannot pass is exactly as damaging as
 one that cannot fail.
 
+## The write direction
+
+`unit_costs.yaml` charges one DRAM `access_latency` to a read, a write and an
+atomic alike on Wormhole, and the entry records why it declined to split them:
+Blackhole's `tm_noc_latencies` rows split cleanly (a write of 22 cycles against
+a read of 126) and doing the identical subtraction on Wormhole's gives write
+differences of `228 / 124 / 127 / 139 / 139 / 145 / 137 / 155` against read
+differences `104 / 104 / 104 / 112 / 104 / 112 / 128 / 152` — *"no clean
+asymmetry, a visible 64 B outlier, and a write that is if anything DEARER than a
+read"*. It stays one figure **"until Wormhole's own data says otherwise"**.
+
+A Wormhole card has since said something and it **agrees with the decline**: a
+latency probe on 2026-08-17 put the DRAM write at `+21.2` cycles over the read
+at 256 B and `+56.4` at 4096 B, dearer in both, opposite in sign to Blackhole's.
+Copying Blackhole's split across would have been actively wrong, not merely
+unsupported.
+
+**Neither of those can settle it.** Both are *latency* instruments — one
+transaction per row — and a latency instrument structurally cannot see an
+endpoint's **occupancy**, which is how long it is unavailable to the *next*
+request. That is a rate question, it is this program's shape, and `--dir write`
+is what asks it.
+
+### What it answers, and the three things it does not
+
+It answers: *are `N` writers concentrated on one endpoint serialised by it more,
+less or the same as `N` readers are?* It does **not** price a single write, it
+cannot split service time from queueing, and — because the `samecore` arm does
+not exist on either part — it cannot tell the endpoint from the one inbound
+router link every concentrated flow converges on. Report **"the endpoint"**,
+never "the channel", in either direction. Nothing it produces is provenance:
+Wormhole's `dram.bandwidth` is `unknown` for want of a *document*, and no
+measurement supplies one.
+
+### How a write proves it wrote where it says
+
+The bar is higher than the read arm's and it has to be. A read that misses its
+endpoint returns the wrong bytes and the reader itself reports it; a write that
+misses its endpoint completes, retires its barrier, and yields a perfectly
+plausible rate with the bytes sitting somewhere the plan never named. Three
+checks, and only the middle one has a read-arm analogue:
+
+| check | who makes it | what it catches | what it cannot |
+| --- | --- | --- | --- |
+| the payload **is** the witness | the writer, before the barrier | nothing on its own — it is what makes the other two about the *measured* traffic rather than a separate untimed poke | — |
+| `tags_ok` | the writer, after the barrier | a write that was dropped, mis-congruent or never issued: the block still holds POISON | **misdirection** — it re-reads through the coordinate and offset the write used, so a consistently wrong write reads back consistently wrong and matches |
+| `witness_ok` / `stray_writes` | the **host**, over PCIe | misdirection, in both directions: every writer's target block must hold that writer's witness, and every block the point did *not* target must still hold POISON | bytes that landed in the right bank but on the wrong GDDR6 channel behind it — tt-metal fronts every bank on its own NoC coordinate, so a host program cannot tell two sub-endpoints of one tile apart |
+
+The witness is keyed to the **target** `(bank, slice)` and not to the writer,
+because a point with more writers than slices has two writers aimed at one block
+and they must agree about what belongs in it. The host **re-lays POISON before
+every write point**, not once at start-up: after the first repeat the region
+already holds correct witnesses, so a later repeat whose writes were all
+silently dropped would read back exactly the right words and certify itself.
+This benchmark has been bitten by a check that could not *pass* (the 2026-08-09
+card run tagged slice 0 only, `tags_ok` came back 1 of 24, and clean data was
+thrown away); a check that cannot *fail* is the same defect with the sign
+flipped, and it does not throw data away, it certifies it.
+
+**The three checks were falsified, not assumed.** Two injections against the
+Wormhole simulator, 2026-08-17:
+
+* every writer aimed one slice past its target → `witness_ok` came back **0 of
+  N on all four points**, `stray_writes` fired on three of them, and
+  `tags_ok` **stayed at N throughout** — the device certified its own
+  misdirected write, exactly as the table above says it must. The rates it
+  produced (8.14 and 16.29 B/cycle) are entirely plausible and would have been
+  published.
+* every writer aimed at the *next bank's coordinate* → caught on one point in
+  four, and the reason is worth recording: tt-sim fronts twelve Wormhole banks
+  on **aliases of one modelled DRAM tile**, so a wrong coordinate at the same
+  offset lands in the same memory. **The coordinate half of this check is weak
+  against the simulator and strong against a card**, where the twelve banks are
+  twelve independent tiles. The address half is aliasing-independent and is what
+  the first injection exercises.
+
+### What tt-sim predicts, on both parts
+
+Four tiles, 4096 B transactions, `TT_SIM_COST_MODEL=1`:
+
+| arch | `onechan` read | `onechan` write | ratio | why |
+| --- | --- | --- | --- | --- |
+| Wormhole | 23.406 | 23.327 | **0.997** | `dram.channel_serialisation` is 24 B/cycle for **both** directions there — one published per-channel figure its page states for reads and writes alike — so the model asserts a symmetric endpoint |
+| Blackhole | 44.364 | 60.208 | **1.357** | a `vendor_source_derived` **read** rate of 47.08 B/cycle and **no write rate at all**, so `DramChannels.write_bytes_per_cycle` is `None`, every write claim is a no-op, and the unqueued write arm runs up against the 64 B/cycle NoC link instead |
+
+**tt-sim predicts opposite signs on the two parts, and the Wormhole card's own
+latency data leans a third way** (write dearer). Three positions; this campaign
+can adjudicate only the occupancy one. Blackhole's predicted asymmetry is the
+**shape of an absence** rather than of a measurement, and a card showing
+Blackhole writes at the read's rate would be saying the model under-charges
+there.
+
+### A limitation the simulator has and the card does not
+
+**tt-sim cannot currently produce a non-degenerate write fan-out control.** At
+four tiles `fanchan-write` scales ×1.47 on Wormhole and ×1.30 on Blackhole,
+under the ×1.5 gate, and the run correctly reports `DEGENERATE` rather than the
+flat concentrated curve it was hoping for. The cause is topology: the four
+workers `perfbench/run.sh` materialises sit in one router row, and a write
+carries its payload *outbound* over the links between them, so the four flows
+share links that four *reads* — whose data returns the other way round a
+directional torus — do not. The read fan-out scales ×2.78 and ×4.00 in the same
+runs. The card's 64 workers are the reason to expect the write control to move
+there, and the read arm's own ×5.74 on that part is the evidence that it can.
+
+### Running it
+
+```bash
+perfbench/dramratebench/run_card_write.sh --list        # schedule + wall estimate
+perfbench/dramratebench/run_card_write.sh --preflight   # checks that cost no card time
+perfbench/dramratebench/run_card_write.sh --out ~/tt_traces/dram-write-session
+```
+
+~21 min of card time, plus a cold build. It resets the board first — a heavy NoC
+run on 2026-08-17 left state that silently corrupted the *data* of the next
+program, with no abort and no diagnostic — and it writes its **pre-registered
+predictions to the session directory before the card runs**, so what was
+predicted travels with what was measured.
+
+`check_run.py` grades a run and re-derives the read arm's control; it is
+standard-library only, so it runs at the card:
+
+```bash
+perfbench/dramratebench/check_run.py --read-control        # the 2026-08-17 control
+perfbench/dramratebench/check_run.py --measured run1.csv   # the write gates
+```
+
+`check_run_test.py` drives every one of those gates **in both directions** —
+rows built to satisfy each and rows built to break it.
+
 ## Arguments
 
 ```
 --out FILE         where to write the CSV
---bytes N          bytes each reader pulls          (default 1048576, the vendor's)
---tx-bytes N       size of one noc_async_read       (default 4096)
+--bytes N          bytes each participant moves     (default 1048576, the vendor's)
+--tx-bytes N       size of one noc_async_read/write (default 4096)
 --repeats R        how many times to run the plan   (default 3)
 --max-readers N    cap the sweep                    (default: the whole worker grid)
---readers a,b,c    reader counts to sweep           (default 1,2,4,8,12,16,24,32,48)
+--readers a,b,c    participant counts to sweep      (default 1,2,4,8,12,16,24,32,48)
 --arms LIST        substring filter over onechan,fanchan,samecore
+--dir D            read (the default), write, or both
 --sustained        the vendor's own reader counts, 1,12,48
 ```
+
+`--dir` adds a `-write` copy of each selected arm; the read arm's rows keep
+their unsuffixed names, so `tt_sim.perf.dram_rate_sweep` and
+`card_session_verdicts.sh` — which both match `onechan` and `fanchan` exactly —
+read a file with writes in it exactly as they read one without. The write
+direction's three columns (`direction`, `witness_ok`, `stray_writes`) are
+**appended**, and are `-1` in a read row: not "zero verified", but "the host did
+not look, because for a read the device is the witness".
 
 `--sustained` sets **only** the reader counts. 1 MiB per reader, 4096 B
 transactions and three repeats are already the defaults, and the preset
