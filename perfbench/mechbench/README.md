@@ -94,6 +94,11 @@ the family it contradicts itself about. The Src conditions come from the same
 RTL generator. **If the partition fails to close on real card data, that is this
 leg's finding and it must be reported, not reshaped away.**
 
+**It failed, on the first card session, 2026-08-17 — and not on the Src
+conditions.** See [the Wormhole result](#the-wormhole-result-2026-08-17) below.
+That section is the current state of this leg; read it before quoting anything
+above it.
+
 ## The program
 
 `src/mechbench.cpp` — a normal tt-metal program. One core, three kernels, a DRAM
@@ -328,10 +333,157 @@ case for every one of them, from inputs a real session could plausibly produce �
 a concatenated log, a Wormhole-numbered core against a Blackhole-numbered one,
 an unarmed bank, a partition that does not close.
 
-### Synthetic card data, both directions
+---
 
-No card session exists for this leg yet, so `testdata/` carries two synthetic
-card logs derived from the real simulator decomposition. They are stamped
+## The Wormhole result, 2026-08-17
+
+The first card session for this leg ran on a Wormhole part
+(`perfbench/card-sessions/2026-08-17-wh-mechbench-wormhole/`, tt-metal
+`c49bb762`, `--tiles 8` so both sides ran the same program, mask 32, three
+repeats per arm). **The instrument works and the comparison refuses.**
+
+The card side is healthy by every measure the protocol asks for: `samples=59`
+per run, one core, one window, `THREAD_STALLS_1` stable at 36 (`elw`) and 30
+(`mm`) across all three repeats, and the two arms disagreeing on span (~4 300 vs
+~3 600) as they must. Four of the five gates pass. `partition_closes` refuses,
+identically on both arms and all six runs:
+
+```
+elw  core partition:      unattributed_stall = -2895   (span 3 x 4317)
+     thread 2 partition:  other_stall        = -3291
+mm   core partition:      unattributed_stall = -2208   (span 3 x 3613)
+     thread 2 partition:  other_stall        = -2556
+```
+
+### It is not the Src conditions
+
+The obvious suspect was wrong. **All four Src counters read exactly zero on the
+card, in both arms.** What out-counts `THREAD_STALLS` is the semaphore pair:
+
+| thread | `THREAD_STALLS_t` | `NONZERO_SEM_t` | `NONFULL_SEM_t` | `idle_t` | 9-counter block overlap |
+| --- | --: | --: | --: | --: | --: |
+| 0 (unpack) | 367 | 0 | 0 | 3 824 | 1.02x |
+| 1 (math) | 36 | 0 | 7 | 4 138 | 2.31x |
+| 2 (pack) | 270 | **3 561** | 0 | 3 911 | **14.19x** |
+
+(`elw`, run 1. `mm` is the same shape: 12.27x on thread 2.)
+
+### Which counters overlap, and why
+
+`WAITING_FOR_{NONZERO,NONFULL}_SEM_t` are **not disjoint sub-counts of
+`THREAD_STALLS_t`**, and two independent sources say so.
+
+**The vendor's own tech report**, `tt_metal/tech_reports/PerfCounters/perf-counters.md`:
+
+* **line 74** — the nine per-thread stall reasons are one Verilog generate array
+  in `tt_instruction_thread.sv`: Wormhole selects 39–65, Blackhole selects
+  31–57, "9 types × 3 threads" either way. The semaphore pair is *inside* the
+  same block as the `WAITING_FOR_{UNIT}_IDLE_t` family this leg already
+  declined; it is not a separate, better-behaved family.
+* **line 340** (metric 12) — the semaphore counters are normalised against
+  `ref_cnt`: `WAITING_FOR_NONZERO_SEM_N / ref_cnt * 100`. Not against
+  `THREAD_STALLS_N`. That is exactly the denominator metric 21 uses for the idle
+  waits, and **line 564** says why in as many words: those metrics "show
+  percentage of **total time**", unlike the stall-breakdown ones that were
+  removed for dividing by `THREAD_STALLS`.
+* **lines 871–883** (metric 36, "Stall Cause Overlap Factor") —
+  `sum(all 9 WAITING_FOR_*_N) / THREAD_STALLS_N`, with values above 1
+  documented as *normal*: "values >1.0 mean multiple stall conditions are active
+  simultaneously"; ">2.0x … common for Thread 2". Architectures: **Wormhole,
+  Blackhole.** A family with a published overlap factor is not a partition.
+
+**The ISA documentation** says why the overlap exists, and says it identically
+for both parts. `WormholeB0/TensixTile/TensixCoprocessor/SEMWAIT.md` —
+"Functional model" — has `SEMWAIT` *latch* a wait instruction and let the thread
+carry on; the thread only blocks when it reaches an instruction the block mask
+catches. `WormholeB0/TensixTile/TensixCoprocessor/WaitGate.md` then has the Wait
+Gate re-evaluate that latched condition **every cycle** until it is met. So the
+counter runs for every cycle the semaphore condition is unsatisfied — including
+every cycle the thread had nothing at the gate to be held. Those cycles are
+inside `idle_t`, not inside `THREAD_STALLS_t`; on the card's thread 2 the 3 561
+semaphore cycles fit comfortably inside `idle_2 = 3911`. `BlackholeA0/.../SEMWAIT.md`
+is identical bar one recommendation paragraph, and Blackhole's tree has no
+`WaitGate.md` at all — nothing anywhere makes this Wormhole-specific.
+
+So the partition was **double-counting**: cycles hardware counted while the
+thread was idle went once into `idle_t` (because they were never in
+`THREAD_STALLS_t`) and once out of `unattributed_stall`. The overlapping pair,
+named exactly: **`WAITING_FOR_NONZERO_SEM_t` against `idle_t`**, via a
+`THREAD_STALLS_t` containment that does not hold.
+
+### Blackhole does not close with margin, and it does not close by luck
+
+It closes **by construction**, and is untested.
+`TensixPerfCounters.note_stall` (`tt_sim/misc/perf_counters.py`) increments
+`thread_stalls[t]` and at most one reason bucket in the *same call*, so
+`sem_empty_t + sem_full_t ≤ thread_stalls_t` is an identity on any tt-sim log,
+on either architecture. Every Blackhole number this leg has is downstream of
+that: the two checked-in `sim-*-blackhole.csv` logs, and both synthetic card
+files, which were hand-derived from them. **`partition_closes` has therefore
+never been evaluated against Blackhole silicon**, and its passing on Blackhole
+is a statement about tt-sim's counter model, not about the part.
+`stall_attribution_test.py` now pins both halves of that — the identity in the
+counter model, and its consequence on both checked-in logs — so the claim is not
+left as prose.
+
+### What was decided, and what was rejected
+
+**The partition is unchanged. The refusal stays. It is now specific.**
+`sem_overlap_findings` tests the containment directly and names the counters,
+the excess and the vendor's own overlap factor, so the refusal reads as a
+statement about which counters are not disjoint rather than as a bare negative
+bucket. `--decompose-only` prints the same overlap for every thread whether or
+not it is violated, because "the semaphore counters fit inside `THREAD_STALLS`
+here" is silently true on every simulator log and was false on the first card.
+
+Three alternatives were rejected:
+
+* **A per-arch bucket definition** — would fit the one card session in hand. The
+  block, the overlap metric and the `SEMWAIT` semantics are documented
+  identically for both parts, and there is no Blackhole card session to say
+  otherwise. This is the tuning ROADMAP §4 forbids for this leg's sibling, in
+  another costume.
+* **Dropping the semaphore counters** — leaves the Wormhole core partition with
+  `issue`, `idle` and `unattributed` and *nothing else*, because its four Src
+  counters read zero. That is not a mechanism attribution; it is a span check
+  with extra steps.
+* **Refusing "Wormhole" by name** — mislabels a defect in the partition's model
+  of two counters as a property of a part, and buries the more serious half of
+  the finding, which is that Blackhole is untested rather than passing.
+
+Widening `E_int`, clamping the bucket at zero, or moving the semaphore mass into
+`idle_t` were never on the table. The hardware does not report how much of a
+semaphore count fell in `idle_t` versus `THREAD_STALLS_t`, so that split is
+unknowable from this bank and any value chosen for it would be invented.
+
+### What this leg can and cannot do on Wormhole, as of now
+
+With the semaphore pair out of the picture the only named mechanisms left in the
+core partition are the four Src conditions, and on this card, on this program,
+they are all zero. Two readings are open and this session cannot separate them:
+
+* the math thread genuinely never waits on the unpackers here — `THREAD_STALLS_1`
+  is only 36 of 4 317 cycles, so any Src wait is bounded by 36 whatever else is
+  true; or
+* tt-metal is reading the wrong instance. Wormhole gives the Src conditions
+  **twelve** selects (27–38) to Blackhole's four (27–30), and `hw_counters.h`
+  reads 27/30/33/36 — the first of each triple. The tech report calls the extra
+  slots "replicated", but a per-thread block would be equally consistent with
+  that select choice, and would mean tt-metal exposes only **thread 0's**
+  instance — while the thread that waits on Src is thread 1.
+
+Resolving that needs a run that reads selects 34 and 37 directly, which
+`run_card.sh` cannot ask for today. Until it is resolved, **a Wormhole `E_int`
+for this leg would rest on four counters whose meaning is not established**, and
+none is reported. That is the honest state, and it is a smaller claim than the
+one this file made before the session ran.
+
+---
+
+## Synthetic card data, both directions
+
+The two synthetic card logs in `testdata/` predate the session above and are
+derived from the real *simulator* decomposition. They are stamped
 **NOT-A-MEASUREMENT** in their filenames and in `testdata/README.md`, and both
 are guarded by the test suite:
 
@@ -366,6 +518,12 @@ that is the only place the Src conditions are decomposed.
 * anything about `WAITING_FOR_{UNIT}_IDLE`, `ANY_THREAD_STALL` or the
   `*_INSTRN_AVAILABLE_*` family — declined as unsourced or self-contradicting,
   and not to be resurrected because a gap needs filling;
+* **a share of `THREAD_STALLS_t` attributable to a semaphore.** Measured false
+  on silicon, 2026-08-17: `WAITING_FOR_{NONZERO,NONFULL}_SEM_t` are members of
+  the same nine-counter block and count cycles the latched Wait Gate condition
+  was unsatisfied, which spans `idle_t` as well. They remain a legitimate
+  *fraction of `ref_cnt`* — that is the vendor's own metric 12 — and nothing
+  more;
 * anything about the `FPU`, `PACK`, `UNPACK` or `L1` banks, which tt-sim does
   not model and which read back zero;
 * provenance for a cycle cost. The counter semantics come from a **vendor tech

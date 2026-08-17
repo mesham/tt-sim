@@ -88,6 +88,79 @@ be reported, not normalised away.
 ``idle_t`` goes negative when a thread's stalls plus issues exceed the window,
 which means the counters were not all latched over one span.
 
+It fired, 2026-08-17, and it was not the Src conditions
+--------------------------------------------------------
+
+The first real card session for this leg (a Wormhole part, both arms, all three
+repeats) refuses. The instrument is healthy -- all 16 counters present, the bank
+armed, one window, one core -- and the four Src conditions read **exactly zero**
+on both arms. What out-counts ``THREAD_STALLS`` is the *semaphore* pair::
+
+    elw  thread 2:  THREAD_STALLS_2 = 270   WAITING_FOR_NONZERO_SEM_2 = 3561
+    mm   thread 2:  THREAD_STALLS_2 = 249   WAITING_FOR_NONZERO_SEM_2 = 2805
+
+so ``other_stall_2`` lands at -3291 and ``unattributed_stall`` at -2895 on a
+3 x 4317 thread-cycle span.
+
+The partition assumed ``WAITING_FOR_{NONZERO,NONFULL}_SEM_t`` are disjoint
+sub-counts of ``THREAD_STALLS_t``. **They are not, and the vendor's own
+documentation says so in two places.** Those two counters are members of the
+same nine-counter per-thread block as the ``WAITING_FOR_{UNIT}_IDLE_t`` family
+this leg already declined -- one Verilog generate array in
+``tt_instruction_thread.sv``, Wormhole selects 39-65 and Blackhole selects
+31-57, nine reasons x three threads either way
+(``tt_metal/tech_reports/PerfCounters/perf-counters.md:74``). Metric 12 there
+normalises the semaphore counters against ``ref_cnt``, not against
+``THREAD_STALLS_N`` (line 340), exactly as metric 21 does for the idle waits;
+and metric 36, "Stall Cause Overlap Factor", is defined as
+``sum(all 9 WAITING_FOR_*_N) / THREAD_STALLS_N`` and documents values above 1
+as normal -- "*values >1.0 mean multiple stall conditions are active
+simultaneously*" -- for **Wormhole and Blackhole alike** (line 871-883). A
+family with a documented overlap factor is not a partition.
+
+The ISA documentation says why, and it is the same on both architectures.
+``SEMWAIT`` does not stall the thread: it *latches* a wait instruction and the
+thread carries on until it reaches an instruction the block mask catches
+(``WormholeB0/TensixTile/TensixCoprocessor/SEMWAIT.md``, "Functional model";
+``BlackholeA0/.../SEMWAIT.md`` is identical bar one recommendation paragraph).
+The Wait Gate then re-evaluates the latched condition *every cycle* until it is
+met (``WormholeB0/TensixTile/TensixCoprocessor/WaitGate.md``). So the counter
+runs for every cycle the condition is unsatisfied, including the cycles the
+thread has nothing at the gate to hold -- cycles which are inside ``idle_t``,
+not inside ``THREAD_STALLS_t``. On the card's thread 2 the 3561 semaphore cycles
+sit comfortably inside ``idle_2 = 3911``. The partition was therefore
+double-counting them: once in ``idle_t``, once subtracted from
+``unattributed_stall``.
+
+Why this is not fixed by a per-arch bucket, and what Blackhole's pass is worth
+------------------------------------------------------------------------------
+
+**Nothing here is Wormhole-specific.** The block, the vendor's overlap metric
+and the ``SEMWAIT`` semantics that explain it are documented identically for
+both parts. Wormhole is simply the first architecture on which this gate has
+ever seen silicon.
+
+**tt-sim cannot fail this gate, on either architecture.**
+:meth:`tt_sim.misc.perf_counters.TensixPerfCounters.note_stall` increments
+``thread_stalls[t]`` and at most one reason bucket in the *same call*, so
+``sem_empty_t + sem_full_t <= thread_stalls_t`` holds by construction. Every
+Blackhole result this leg has -- the two checked-in ``sim-*-blackhole.csv`` logs
+and both synthetic card files hand-derived from them -- inherits that identity.
+So Blackhole's ``partition_closes`` has never been a test of hardware; it closes
+because the simulator's counters are built from one hook that makes it close.
+That is worth saying plainly: **Blackhole does not close with margin, and it
+does not close by luck -- it closes by construction, and is untested.**
+
+The partition is therefore left exactly as it is, and the refusal is left in
+place and made *specific*: :func:`sem_overlap_findings` names the counters, the
+excess and the vendor's overlap factor. The three alternatives were all worse.
+A per-arch bucket definition would fit the one card session in hand. Dropping
+the semaphore counters would leave the Wormhole core partition with ``issue``,
+``idle`` and ``unattributed`` and nothing else -- its Src counters are zero --
+which is not a mechanism attribution at all. Refusing "Wormhole" by name would
+mislabel a defect in the partition's model of the counters as a property of a
+part, and would bury the fact that Blackhole is untested rather than passing.
+
 Provenance
 ----------
 
@@ -177,6 +250,48 @@ CORE_MECHANISMS = (
 
 #: The ordered per-thread partition mechanism names.
 THREAD_MECHANISMS = ("issue", "sem_empty", "sem_full", "other_stall", "idle")
+
+#: The nine per-thread stall-reason counters the ``INSTRN_THREAD`` bank
+#: generates as **one block** -- a single Verilog generate array in
+#: ``tt_instruction_thread.sv``, Wormhole selects 39-65 and Blackhole selects
+#: 31-57, nine reasons x three threads either way
+#: (``tt_metal/tech_reports/PerfCounters/perf-counters.md:74``). The partition
+#: consumes two of them; the other seven were declined as unit-busy counts. The
+#: whole block is named here because the vendor's own overlap metric (36) is
+#: defined over all nine, and because a diagnosis that quotes that metric has to
+#: be able to compute it.
+PER_THREAD_STALL_REASONS = (
+    "WAITING_FOR_THCON_IDLE",
+    "WAITING_FOR_UNPACK_IDLE",
+    "WAITING_FOR_PACK_IDLE",
+    "WAITING_FOR_MATH_IDLE",
+    "WAITING_FOR_NONZERO_SEM",
+    "WAITING_FOR_NONFULL_SEM",
+    "WAITING_FOR_MOVE_IDLE",
+    "WAITING_FOR_MMIO_IDLE",
+    "WAITING_FOR_SFPU_IDLE",
+)
+
+#: The two members of that block the partition treats as disjoint sub-counts of
+#: ``THREAD_STALLS_t``. This is the assumption :func:`sem_overlap_findings`
+#: tests directly rather than leaving to be inferred from a negative bucket.
+SEM_STALL_REASONS = ("WAITING_FOR_NONZERO_SEM", "WAITING_FOR_NONFULL_SEM")
+
+#: Said once, appended to the refusal, so the reader does not have to rediscover
+#: it from the arithmetic. Every claim in it is sourced in the module docstring.
+SEM_OVERLAP_EXPLANATION = (
+    "WAITING_FOR_{NONZERO,NONFULL}_SEM_t are members of the same nine-counter "
+    "per-thread stall-reason block as the WAITING_FOR_{UNIT}_IDLE_t family this "
+    "leg declined, and the vendor's own metric 36 defines an overlap factor "
+    "sum(all 9 WAITING_FOR_*_N)/THREAD_STALLS_N whose documented values exceed "
+    "1 on both Wormhole and Blackhole -- so they are NOT disjoint sub-counts of "
+    "THREAD_STALLS_t. Per SEMWAIT.md and WaitGate.md a SEMWAIT latches a "
+    "condition and lets the thread run on; the Wait Gate re-evaluates it every "
+    "cycle until it is met, so the counter also runs through cycles the thread "
+    "had nothing at the gate to hold -- cycles inside idle_t. This partition "
+    "cannot close on them, and that is the finding: do not widen a tolerance, "
+    "clamp the bucket, or make the buckets per-architecture to hide it."
+)
 
 
 def required_counters():
@@ -379,6 +494,66 @@ def thread_partition(counters, thread):
     }
 
 
+def stall_reason_overlap(counters, thread):
+    """The vendor's stall-overlap metric for one thread, plus what breaks here.
+
+    ``block_sum`` and ``block_factor`` are the tech report's metric 36
+    (``sum(all 9 WAITING_FOR_*_N) / THREAD_STALLS_N``) and come back ``None``
+    when the log does not carry all nine counters -- only two of the nine are in
+    :func:`required_counters`, and a missing counter read as zero would
+    *understate* the overlap, which is the one direction a diagnosis must never
+    err in. ``sem_excess`` needs only counters the partition already requires,
+    so it is always available.
+    """
+    stalls = counters.get(f"THREAD_STALLS_{thread}")
+    sem = sum(counters.get(f"{name}_{thread}") for name in SEM_STALL_REASONS)
+    present = [
+        f"{name}_{thread}" in counters.values for name in PER_THREAD_STALL_REASONS
+    ]
+    block_sum = None
+    if all(present):
+        block_sum = sum(
+            counters.get(f"{name}_{thread}") for name in PER_THREAD_STALL_REASONS
+        )
+    return {
+        "thread": thread,
+        "thread_stalls": stalls,
+        "sem": sem,
+        "sem_excess": sem - stalls,
+        "block_sum": block_sum,
+        "block_factor": (block_sum / stalls)
+        if (block_sum is not None and stalls)
+        else None,
+    }
+
+
+def sem_overlap_findings(label, counters):
+    """Name the counters that out-count ``THREAD_STALLS_t``, one line per thread.
+
+    This exists so the refusal is a statement about *which* counters are not
+    disjoint rather than a bare negative number. A negative
+    ``unattributed_stall`` is the arithmetic; this is the reason.
+    """
+    findings = []
+    for thread in range(3):
+        overlap = stall_reason_overlap(counters, thread)
+        if overlap["sem_excess"] <= 0:
+            continue
+        parts = [
+            f"{name}_{thread} = {counters.get(f'{name}_{thread}')}"
+            for name in SEM_STALL_REASONS
+        ]
+        detail = (
+            f"{label} thread {thread}: {' + '.join(parts)} exceed "
+            f"THREAD_STALLS_{thread} = {overlap['thread_stalls']} by "
+            f"{overlap['sem_excess']} cycles"
+        )
+        if overlap["block_factor"] is not None:
+            detail += f" (9-counter block overlap {overlap['block_factor']:.2f}x)"
+        findings.append(detail)
+    return findings
+
+
 def partition_closes(part, total):
     """``(ok, reasons)`` -- every bucket non-negative and the sum exact."""
     reasons = []
@@ -469,7 +644,17 @@ class GateResult:
     detail: str
 
     def line(self):
-        return f"  [{'PASS' if self.passed else 'REFUSE'}] {self.name}: {self.detail}"
+        """The gate's verdict, one ``|``-separated clause per line.
+
+        A refusal that names counters is long by design, and a 600-character
+        single line is a refusal nobody reads to the end of.
+        """
+        head = f"  [{'PASS' if self.passed else 'REFUSE'}] {self.name}: "
+        clauses = [c.strip() for c in self.detail.split(" | ")]
+        pad = " " * len(head)
+        return "\n".join(
+            (head if i == 0 else pad) + clause for i, clause in enumerate(clauses)
+        )
 
 
 def gate_counters_present(sim, hw):
@@ -582,9 +767,16 @@ def gate_partition_closes(sim, hw):
     test of whether they behave as stall counts on silicon. If it refuses on
     real card data, report the refusal -- do not reshape the partition to make
     it close.
+
+    It did refuse, on the 2026-08-17 Wormhole session, and not on the Src
+    conditions: the semaphore pair out-counts ``THREAD_STALLS_2`` by 3291
+    cycles. :func:`sem_overlap_findings` runs first so the refusal *names the
+    counters* instead of reporting only the negative bucket they produce.
     """
+    findings = []
     problems = []
     for label, side in [("sim", sim)] + ([("card", hw)] if hw is not None else []):
+        findings.extend(sem_overlap_findings(label, side))
         ok, reasons = partition_closes(core_partition(side), 3 * side.ref_cnt)
         if not ok:
             problems.append(f"{label} core partition: {'; '.join(reasons)}")
@@ -592,8 +784,11 @@ def gate_partition_closes(sim, hw):
             ok_t, reasons_t = partition_closes(thread_partition(side, t), side.ref_cnt)
             if not ok_t:
                 problems.append(f"{label} thread {t} partition: {'; '.join(reasons_t)}")
-    if problems:
-        return GateResult("partition_closes", False, " | ".join(problems))
+    if findings or problems:
+        detail = " | ".join(findings + problems)
+        if findings:
+            detail += " | " + SEM_OVERLAP_EXPLANATION
+        return GateResult("partition_closes", False, detail)
     return GateResult(
         "partition_closes",
         True,
@@ -620,6 +815,11 @@ class CoreReport:
     hw_thread_partitions: list = field(default_factory=list)
     sim_ref_cnt: int = 0
     hw_ref_cnt: int = 0
+    #: The vendor's stall-overlap metric per thread, per side. Filled **before**
+    #: the gates run, so that a refused core still records the numbers that
+    #: explain the refusal rather than an empty report.
+    sim_stall_overlap: list = field(default_factory=list)
+    hw_stall_overlap: list = field(default_factory=list)
     notes: list = field(default_factory=list)
 
     @property
@@ -641,6 +841,8 @@ class CoreReport:
             ],
             "sim_ref_cnt": self.sim_ref_cnt,
             "hw_ref_cnt": self.hw_ref_cnt,
+            "sim_stall_overlap": self.sim_stall_overlap,
+            "hw_stall_overlap": self.hw_stall_overlap,
             "sim_core_partition": self.sim_core_partition,
             "hw_core_partition": self.hw_core_partition,
             "sim_thread_partitions": self.sim_thread_partitions,
@@ -689,6 +891,9 @@ def analyse_core(sim, hw, mapped=False):
     report = CoreReport(core=sim.core, card_core=hw.core if hw is not None else None)
     report.sim_ref_cnt = sim.ref_cnt
     report.hw_ref_cnt = hw.ref_cnt if hw is not None else 0
+    report.sim_stall_overlap = [stall_reason_overlap(sim, t) for t in range(3)]
+    if hw is not None:
+        report.hw_stall_overlap = [stall_reason_overlap(hw, t) for t in range(3)]
     for gate in (
         gate_counters_present(sim, hw),
         gate_armed(sim, hw),
@@ -773,6 +978,32 @@ def _pct(x):
     return f"{100.0 * x:.2f} %"
 
 
+def _overlap_lines(label, overlaps):
+    """The assumption the partition rests on, printed as a number.
+
+    Reported whether or not it is violated, because "the semaphore counters fit
+    inside THREAD_STALLS on this run" is exactly the kind of thing that is
+    silently true on every simulator log and false on the first card.
+    """
+    lines = [
+        f"  {label} stall-reason overlap (the partition needs sem <= stalls per thread)"
+    ]
+    for overlap in overlaps:
+        factor = overlap["block_factor"]
+        if overlap["block_sum"] is None:
+            block = "9-counter block n/a (log carries only 2 of its 9 counters)"
+        elif factor is None:
+            block = f"9-counter block {overlap['block_sum']}, no factor (no stalls)"
+        else:
+            block = f"9-counter block {overlap['block_sum']} = {factor:.2f}x"
+        lines.append(
+            f"    thread {overlap['thread']}: sem {overlap['sem']} vs "
+            f"THREAD_STALLS {overlap['thread_stalls']} "
+            f"(excess {overlap['sem_excess']:+d}); {block}"
+        )
+    return lines
+
+
 def render(reports, decompose_only=False):
     out = []
     out.append("tt-sim interior cycle attribution vs Tensix hardware stall counters")
@@ -818,6 +1049,8 @@ def render(reports, decompose_only=False):
             for t, part in enumerate(report.sim_thread_partitions):
                 row = "".join(f"{part[m]:>13}" for m in THREAD_MECHANISMS)
                 out.append(f"  {t:<8}{row}")
+            out.append("")
+            out.extend(_overlap_lines("sim", report.sim_stall_overlap))
             out.append("")
             for note in report.notes:
                 out.append(f"  note: {note}")

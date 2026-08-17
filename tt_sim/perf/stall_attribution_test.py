@@ -358,6 +358,196 @@ def test_gate_partition_closes_refuses_a_negative_idle_bucket(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The semaphore-counter overlap -- the 2026-08-17 Wormhole finding
+#
+# The partition treats WAITING_FOR_{NONZERO,NONFULL}_SEM_t as disjoint
+# sub-counts of THREAD_STALLS_t. On silicon they are not: they belong to the
+# nine-counter per-thread stall-reason block, and per SEMWAIT.md/WaitGate.md a
+# latched wait condition keeps counting while the thread has nothing at the gate
+# to hold. These tests defend the refusal in both directions: it must fire, it
+# must name the counters, and it must NOT fire on a partition that does close.
+# ---------------------------------------------------------------------------
+
+
+#: The real Wormhole card counters for ``mechbench elw 8``, core (1,1),
+#: 2026-08-17 (``perfbench/card-sessions/2026-08-17-wh-mechbench-wormhole/``,
+#: run ``instrn-elw-1``). Corroboration, never provenance: no number here may
+#: become a cost. Only the fields the diagnosis reads are transcribed.
+CARD_WH_ELW = {
+    "ref_cnt": 4317,
+    "THREAD_STALLS_0": 367,
+    "THREAD_STALLS_1": 36,
+    "THREAD_STALLS_2": 270,
+    "THREAD_INSTRUCTIONS_0": 126,
+    "THREAD_INSTRUCTIONS_1": 143,
+    "THREAD_INSTRUCTIONS_2": 136,
+    "WAITING_FOR_NONZERO_SEM_0": 0,
+    "WAITING_FOR_NONZERO_SEM_1": 0,
+    "WAITING_FOR_NONZERO_SEM_2": 3561,
+    "WAITING_FOR_NONFULL_SEM_0": 0,
+    "WAITING_FOR_NONFULL_SEM_1": 7,
+    "WAITING_FOR_NONFULL_SEM_2": 0,
+    "WAITING_FOR_SRCA_VALID": 0,
+    "WAITING_FOR_SRCB_VALID": 0,
+    "WAITING_FOR_SRCA_CLEAR": 0,
+    "WAITING_FOR_SRCB_CLEAR": 0,
+}
+
+#: The other seven counters of the same block, same run. Present so the
+#: diagnosis can quote the vendor's own overlap factor rather than only the
+#: semaphore excess.
+CARD_WH_ELW_BLOCK = {
+    "WAITING_FOR_THCON_IDLE_0": 0,
+    "WAITING_FOR_UNPACK_IDLE_0": 367,
+    "WAITING_FOR_PACK_IDLE_0": 0,
+    "WAITING_FOR_MATH_IDLE_0": 0,
+    "WAITING_FOR_MOVE_IDLE_0": 0,
+    "WAITING_FOR_MMIO_IDLE_0": 6,
+    "WAITING_FOR_SFPU_IDLE_0": 0,
+    "WAITING_FOR_THCON_IDLE_1": 0,
+    "WAITING_FOR_UNPACK_IDLE_1": 0,
+    "WAITING_FOR_PACK_IDLE_1": 0,
+    "WAITING_FOR_MATH_IDLE_1": 38,
+    "WAITING_FOR_MOVE_IDLE_1": 0,
+    "WAITING_FOR_MMIO_IDLE_1": 0,
+    "WAITING_FOR_SFPU_IDLE_1": 38,
+    "WAITING_FOR_THCON_IDLE_2": 0,
+    "WAITING_FOR_UNPACK_IDLE_2": 0,
+    "WAITING_FOR_PACK_IDLE_2": 270,
+    "WAITING_FOR_MATH_IDLE_2": 0,
+    "WAITING_FOR_MOVE_IDLE_2": 0,
+    "WAITING_FOR_MMIO_IDLE_2": 0,
+    "WAITING_FOR_SFPU_IDLE_2": 0,
+}
+
+
+def card_wh(core=(1, 1), block=True, **overrides):
+    values = dict(CARD_WH_ELW)
+    if block:
+        values.update(CARD_WH_ELW_BLOCK)
+    values.update(overrides)
+    return {core: values}
+
+
+def test_stall_reason_overlap_reproduces_the_vendor_metric(tmp_path):
+    """Metric 36 -- ``sum(all 9 WAITING_FOR_*_N) / THREAD_STALLS_N``."""
+    card = one_core(tmp_path, "card.csv", card_wh())
+    overlap = sa.stall_reason_overlap(card, 2)
+    assert overlap["thread_stalls"] == 270
+    assert overlap["sem"] == 3561
+    assert overlap["sem_excess"] == 3291
+    assert overlap["block_sum"] == 3561 + 270
+    assert overlap["block_factor"] == pytest.approx(3831 / 270)
+
+
+def test_stall_reason_overlap_declines_the_factor_on_a_partial_log(tmp_path):
+    """A missing counter read as zero would *understate* the overlap.
+
+    That is the one direction a diagnosis must never err in, so the factor is
+    withheld rather than computed from the two counters that are required.
+    """
+    card = one_core(tmp_path, "card.csv", card_wh(block=False))
+    overlap = sa.stall_reason_overlap(card, 2)
+    assert overlap["block_sum"] is None
+    assert overlap["block_factor"] is None
+    # ...but the part built from required counters is still reported.
+    assert overlap["sem_excess"] == 3291
+
+
+def test_sem_overlap_findings_are_silent_when_the_counters_are_disjoint(tmp_path):
+    """The direction that matters most: this must not fire on a closing side."""
+    sim = one_core(tmp_path, "sim.csv", counters())
+    assert sa.sem_overlap_findings("sim", sim) == []
+
+
+def test_sem_overlap_findings_name_the_counters_on_real_card_data(tmp_path):
+    card = one_core(tmp_path, "card.csv", card_wh())
+    findings = sa.sem_overlap_findings("card", card)
+    assert len(findings) == 1
+    assert "WAITING_FOR_NONZERO_SEM_2 = 3561" in findings[0]
+    assert "WAITING_FOR_NONFULL_SEM_2 = 0" in findings[0]
+    assert "THREAD_STALLS_2 = 270" in findings[0]
+    assert "3291 cycles" in findings[0]
+    assert "14.19x" in findings[0]
+
+
+def test_gate_partition_closes_names_the_semaphore_counters(tmp_path):
+    """The refusal must be specific, not a bare negative bucket.
+
+    A generic "unattributed_stall = -2895 (negative)" is the arithmetic; a
+    reader six months from now needs the reason, which is that two named
+    counters are not the quantity the partition took them for.
+    """
+    sim = one_core(tmp_path, "sim.csv", counters(core=(1, 1)))
+    card = one_core(tmp_path, "card.csv", card_wh())
+    gate = sa.gate_partition_closes(sim, card)
+    assert not gate.passed
+    assert "WAITING_FOR_NONZERO_SEM_2" in gate.detail
+    assert "THREAD_STALLS_2" in gate.detail
+    # the arithmetic is kept as the evidence, not replaced by the explanation
+    assert "unattributed_stall = -2895" in gate.detail
+    assert "other_stall = -3291" in gate.detail
+    assert "SEMWAIT.md" in gate.detail
+    # and the line is broken up rather than emitted as one unreadable run
+    assert gate.line().count("\n") >= 3
+
+
+def test_the_refusal_is_not_widened_away(tmp_path):
+    """No tolerance, no clamp: a negative bucket stays negative and refuses."""
+    card = one_core(tmp_path, "card.csv", card_wh())
+    part = sa.core_partition(card)
+    assert part["unattributed_stall"] == -2895
+    ok, reasons = sa.partition_closes(part, 3 * card.ref_cnt)
+    assert not ok
+    assert reasons
+    thread = sa.thread_partition(card, 2)
+    assert thread["other_stall"] == -3291
+
+
+def test_the_simulator_side_cannot_fail_this_gate(tmp_path):
+    """Why Blackhole's pass is not evidence about Blackhole.
+
+    ``TensixPerfCounters.note_stall`` increments ``thread_stalls[t]`` and at
+    most one reason bucket in the same call, so ``sem_empty_t + sem_full_t <=
+    thread_stalls_t`` holds identically on any tt-sim log, on either
+    architecture. Both checked-in simulator logs are pinned here to make that
+    concrete: the gate closing on them says nothing about silicon.
+    """
+    for name in ("sim-elw-blackhole.csv", "sim-mm-blackhole.csv"):
+        core = next(
+            iter(sa.group_by_core(sa.load_counter_samples(TESTDATA / name)).values())
+        )
+        for t in range(3):
+            overlap = sa.stall_reason_overlap(core, t)
+            assert overlap["sem_excess"] <= 0, (name, t, overlap)
+        assert sa.sem_overlap_findings("sim", core) == []
+
+
+def test_note_stall_makes_the_partition_close_by_construction():
+    """The invariant above, straight from the counter model rather than a log."""
+    from tt_sim.misc.perf_counters import TensixPerfCounters
+
+    counters_ = TensixPerfCounters(blackhole=True)
+    for reason, bank in (
+        ("semaphore_empty", None),
+        ("semaphore_full", None),
+        ("src_reserved_by_unpacker", "A"),
+        ("src_reserved_by_matrix", "B"),
+        ("something_else", None),
+    ):
+        for _ in range(7):
+            counters_.note_stall(2, reason, src_bank=bank)
+    assert counters_.thread_stalls[2] == 35
+    named = (
+        counters_.sem_empty[2]
+        + counters_.sem_full[2]
+        + sum(counters_.src_valid.values())
+        + sum(counters_.src_clear.values())
+    )
+    assert named <= counters_.thread_stalls[2]
+
+
+# ---------------------------------------------------------------------------
 # analyse() and the report
 # ---------------------------------------------------------------------------
 
