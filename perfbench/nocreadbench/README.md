@@ -484,9 +484,25 @@ Differencing the `burst` axis of those four files:
 
 | | stateless | stateful | the loop bought |
 | --- | --- | --- | --- |
-| tt-sim, Wormhole | 38.00 cycles/tx | 23.00 | **15.00** |
-| tt-sim, Blackhole | 41.00 | 23.00 | **18.00** |
+| tt-sim, Wormhole, **cost model OFF** | 38.00 cycles/tx | 23.00 | **15.00** |
+| tt-sim, Blackhole, **cost model OFF** | 41.00 | 23.00 | **18.00** |
+| tt-sim, Wormhole, **cost model ON** | **44.00** | **29.00** | **15.00** |
+| tt-sim, Blackhole, **cost model ON** | **47.00** | **29.00** | **18.00** |
+| Wormhole card, 2026-08-17 | 45.03 | 28.96 | 16.07 |
 | the shipped dataset | 25.00 / 35.00 | 17.33 / 34.00 | 7.67 (WH) / 1.00 (BH) |
+
+**Read the configuration before you read the numbers.** The four checked-in
+`*-sim*.csv` files are **cost-model-off** runs, and a cost-model-off marginal is
+an *instruction count* — by design, and asserted by
+`tt_sim/perf/noc_issue_loop_test.py:180`. Comparing one to a card is a category
+error, and on 2026-08-17 it produced a confident false finding: the off figures
+sit ~7 and ~6 cycles below the card, which reads as a fixed missing
+per-transaction term. It is not one. With the model on, tt-sim reads 44.00 and
+29.00 against the card's 45.03 and 28.96 — residuals **-1.03** and **+0.04**,
+*opposite in sign*, so there is no shared constant to find. The 44 is fully
+accounted for: 38 instructions at one cycle plus the **6-cycle load-use
+interlock** on the `noc_cmd_buf_ready` poll, both already `isa_doc` in
+`unit_costs.yaml`.
 
 Three things to read off it, and one not to.
 
