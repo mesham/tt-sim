@@ -32,6 +32,17 @@
 # run happening right now (owner alive) — the orphan recovery the broad pkill
 # provided, and which must not be lost.
 #
+# A tag already in the environment whose owner is still running is ADOPTED, not
+# replaced. Every benchmark runner calls sim_procs_init itself, so minting
+# unconditionally meant `sim_procs.sh run <label> -- perfbench/...` was
+# overwritten by the callee one process later: the server ended up carrying the
+# callee's tag, the wrapper's cleanup matched nothing, and a server stranded by
+# a crash or a `timeout` outlived the wrapper that was supposed to own it
+# (measured 2026-08-17). The outermost live tag therefore wins, and an inner
+# script joins that scope rather than starting a rival one. Only a *live* tag is
+# adopted: a stale one left in the environment by a run that has since died
+# would make every new server instantly reapable as an orphan.
+#
 # Matching walks /proc rather than using `pkill -f`, and never considers this
 # script or its ancestors. `pkill -f` matches any process whose command line
 # merely *mentions* the pattern, so a shell invoked with the pattern in its
@@ -41,7 +52,8 @@
 #
 # USAGE
 #     . "$REPO/driver/sim_procs.sh"
-#     sim_procs_init diff          # label, no dots; conventionally the script name
+#     sim_procs_init diff          # label, no dots; conventionally the script
+#                                  # name. An enclosing run's tag wins over it.
 #     trap 'sim_kill_own_servers' EXIT INT TERM
 #     ...
 #     sim_kill_own_servers         # between runs, to clear a timed-out leftover
@@ -97,6 +109,31 @@ _sim_stat_field() {
 
 _sim_starttime() { _sim_stat_field "$1" 20; }
 
+# "<owner> <starttime>" for a bare `ttsim-run.<label>.<pid>.<starttime>` tag, or
+# empty if it does not parse. Every decision about whether a tag's run is still
+# going goes through here, so there is one parse in the file rather than three
+# that can drift apart. Anything with a non-digit in either field — including
+# the space that a mangled tag would carry — fails to parse, and an unparseable
+# tag is never treated as dead.
+_sim_tag_owner_pair() {
+  local tag="${1:-}" rest owner start
+  case "$tag" in ttsim-run.*) ;; *) return 0 ;; esac
+  rest="${tag#ttsim-run.}" # <label>.<pid>.<starttime>
+  rest="${rest#*.}"        # <pid>.<starttime>
+  owner="${rest%%.*}"
+  start="${rest#*.}"
+  case "$owner$start" in *[!0-9]* | "") return 0 ;; esac
+  printf '%s %s' "$owner" "$start"
+}
+
+# Is the run that minted this tag still going?
+_sim_tag_is_live() {
+  local pair
+  pair="$(_sim_tag_owner_pair "${1:-}")"
+  [ -n "$pair" ] || return 1
+  [ "$(_sim_starttime "${pair%% *}")" = "${pair##* }" ]
+}
+
 # This shell and every process above it, so cleanup can never target itself,
 # the calling shell, or the terminal it was launched from.
 _sim_ancestry() {
@@ -142,17 +179,14 @@ _sim_servers() {
 # differ). Anything that cannot be parsed is left alone — killing a stranger's
 # server is far worse than leaving an orphan.
 _sim_reap_orphans() {
-  local pid cmd tag rest owner start n=0
+  local pid cmd tag pair n=0
   for pid in $(_sim_servers "run-tag ttsim-run."); do
     cmd="$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline")" || continue
     tag="${cmd##*run-tag }"
     tag="${tag%% *}"
-    rest="${tag#ttsim-run.}" # <label>.<pid>.<starttime>
-    rest="${rest#*.}"        # <pid>.<starttime>
-    owner="${rest%%.*}"
-    start="${rest#*.}"
-    case "$owner$start" in *[!0-9]* | "") continue ;; esac
-    [ "$(_sim_starttime "$owner")" = "$start" ] && continue
+    pair="$(_sim_tag_owner_pair "$tag")"
+    [ -n "$pair" ] || continue # unparseable is "not ours to judge", not "dead"
+    [ "$(_sim_starttime "${pair%% *}")" = "${pair##* }" ] && continue
     kill -9 "$pid" 2>/dev/null && n=$((n + 1))
   done
   [ "$n" -gt 0 ] && echo "[sim] reaped $n orphaned simulator server(s) from an earlier run" >&2
@@ -168,10 +202,22 @@ _sim_kill_all() {
   return 0
 }
 
+SIM_RUN_TAG_ADOPTED=0
+
 # Call once, before running anything that can spawn a server.
+#
+# An enclosing run's tag wins over $label. See "A tag already in the
+# environment ..." in the header: every runner in the tree calls this, so
+# minting unconditionally is what broke `sim_procs.sh run <label> -- <runner>`.
 sim_procs_init() {
-  local label="${1:-run}"
-  SIM_RUN_TAG="ttsim-run.${label}.$$.$(_sim_starttime $$)"
+  local label="${1:-run}" inherited="${TT_SIM_RUN_TAG:-}"
+  if _sim_tag_is_live "$inherited"; then
+    SIM_RUN_TAG="$inherited"
+    SIM_RUN_TAG_ADOPTED=1
+  else
+    SIM_RUN_TAG="ttsim-run.${label}.$$.$(_sim_starttime $$)"
+    SIM_RUN_TAG_ADOPTED=0
+  fi
   export TT_SIM_RUN_TAG="$SIM_RUN_TAG"
   if _sim_truthy "${TT_SIM_KILL_ALL_SERVERS:-}"; then
     _sim_kill_all
@@ -199,19 +245,14 @@ sim_kill_own_servers() {
 # and do nothing else. The CLI below runs only when the file is executed.
 # ---------------------------------------------------------------------------
 
-# `ttsim-run.<label>.<owner>.<starttime>` -> "<owner> <starttime>", empty if the
-# command line carries no parseable tag.
+# A server's command line -> "<owner> <starttime>", empty if it carries no
+# parseable tag.
 _sim_tag_owner() {
-  local cmd="$1" tag rest owner start
+  local cmd="$1" tag
   case "$cmd" in *"run-tag ttsim-run."*) ;; *) return 0 ;; esac
   tag="${cmd##*run-tag }"
   tag="${tag%% *}"
-  rest="${tag#ttsim-run.}"
-  rest="${rest#*.}"
-  owner="${rest%%.*}"
-  start="${rest#*.}"
-  case "$owner$start" in *[!0-9]* | "") return 0 ;; esac
-  printf '%s %s' "$owner" "$start"
+  _sim_tag_owner_pair "$tag"
 }
 
 # "orphan" (tagged, owner gone), "live" (tagged, owner running) or "untagged".
@@ -292,7 +333,11 @@ _sim_cli_run() {
   # However the command ends -- success, failure, Ctrl-C, SIGTERM -- the servers
   # it caused to be started go with it. That is the whole point of the wrapper.
   trap 'sim_kill_own_servers' EXIT INT TERM
-  echo "[sim] run tag $SIM_RUN_TAG" >&2
+  if [ "$SIM_RUN_TAG_ADOPTED" = 1 ]; then
+    echo "[sim] joining the enclosing run's tag $SIM_RUN_TAG (label '$label' unused)" >&2
+  else
+    echo "[sim] run tag $SIM_RUN_TAG" >&2
+  fi
   "$@"
   rc=$?
   sim_kill_own_servers

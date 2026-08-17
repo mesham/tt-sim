@@ -66,8 +66,11 @@ fi
 # have since died. This script cannot clean up after *itself* — it execs the
 # benchmark, so no trap of ours survives — but the tag keeps a server it leaves
 # behind recoverable by the next run of any of the test scripts, which is what
-# the old machine-wide `pkill` in those scripts used to do implicitly. See
-# driver/sim_procs.sh.
+# the old machine-wide `pkill` in those scripts used to do implicitly.
+#
+# Under `driver/sim_procs.sh run <label> -- perfbench/run.sh ...` the inherited
+# tag is kept rather than replaced by `perfbench`, which is what lets that
+# wrapper reap the server this run leaves behind. See driver/sim_procs.sh.
 # shellcheck source=../driver/sim_procs.sh
 . "$REPO/driver/sim_procs.sh"
 sim_procs_init perfbench
