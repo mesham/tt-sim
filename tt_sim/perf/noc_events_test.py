@@ -20,9 +20,11 @@ from pathlib import Path
 import pytest
 
 from tt_sim.perf.noc_events import (
+    ARM_NOC_PAIRING,
     TOLERANCE,
     analyse,
     census,
+    gate_arm_matches,
     gate_barriers_pair,
     gate_census_matches,
     gate_events_present,
@@ -409,7 +411,186 @@ def test_load_traces_concatenates_and_the_gate_then_refuses():
     assert all(r.refused for r in reports)
 
 
+# ---------------------------------------------------------------------------
+# The opt-in arm gate
+# ---------------------------------------------------------------------------
+
+
+def test_the_checked_in_sim_run_is_arm_a_and_the_gate_says_so():
+    """The recorded run really is the control arm: NCRISC reads on NoC 1 and
+    BRISC writes on NoC 0. That pairing is what makes direction and NoC the same
+    statement, which is the confound arm B exists to break."""
+    reports = analyse(load_trace(SIM), load_trace(CARD_AGREE), expect_arm="A")
+    assert len(reports) == 2
+    for report in reports:
+        assert not report.refused, report.gates
+        assert any(g.name == "arm_matches" and g.passed for g in report.gates)
+
+
+def test_the_arm_gate_refuses_a_run_that_kept_the_other_arm_s_nocs():
+    """The failure the gate exists for: a run labelled B that silently ran A's
+    configuration. It is well-formed, every other gate passes it, and it would
+    read as "the error stayed on the write" -- which is what the *rival*
+    hypothesis predicts."""
+    reports = analyse(load_trace(SIM), load_trace(CARD_AGREE), expect_arm="B")
+    assert all(r.refused for r in reports)
+    details = " ".join(
+        g.detail for r in reports for g in r.gates if g.name == "arm_matches"
+    )
+    assert "did not take" in details
+
+
+def test_the_arm_gate_is_absent_unless_asked_for():
+    """Six standing gates, and the seventh only when a caller names an arm."""
+    reports = analyse(load_trace(SIM), load_trace(CARD_AGREE))
+    for report in reports:
+        assert [g.name for g in report.gates] == [
+            "events_present",
+            "single_window",
+            "per_core",
+            "barriers_pair",
+            "partition_closes",
+            "census_matches",
+        ]
+
+
+def test_arms_a_and_c_share_a_pairing_so_the_peer_is_what_separates_them():
+    """Stated as a test rather than a comment, because it is the reason
+    ``--peer-noc`` exists: arm C changes the target, not the NoCs, so the NoC
+    table alone cannot tell a peer-L1 run from a DRAM one."""
+    assert ARM_NOC_PAIRING["A"] == ARM_NOC_PAIRING["C"]
+    sim = stream_of(simple_stream())
+    assert gate_arm_matches(sim, None, "C").passed
+    refused = gate_arm_matches(sim, None, "C", peer=(2, 3))
+    assert not refused.passed
+    assert "peer" in refused.detail
+
+
+def test_the_arm_gate_accepts_a_run_that_addressed_the_peer():
+    records = [dict(r) for r in simple_stream()]
+    for record in records:
+        if record.get("type") == "READ":
+            record["dx"], record["dy"] = 2, 3
+    stream = group_by_stream(_load(records))[((1, 2), "NCRISC")]
+    assert gate_arm_matches(stream, None, "C", peer=(2, 3)).passed
+
+
+def test_cli_refuses_a_peer_without_an_arm():
+    with pytest.raises(SystemExit):
+        main(["--sim", str(SIM), "--decompose-only", "--peer-noc", "2,3"])
+
+
 def test_parse_core_map():
     assert parse_core_map(["1,1=1,2"]) == {(1, 1): (1, 2)}
     with pytest.raises(ValueError, match="SIMX,SIMY=CARDX,CARDY"):
         parse_core_map(["1,1"])
+
+
+# ---------------------------------------------------------------------------
+# perfbench/nocevbench/check_arm.py -- the card-box copy of the arm check.
+#
+# It is standalone by design (a card box has only perfbench/nocevbench/ on it
+# and no tt-sim), so it is loaded by path rather than imported. Guarded here
+# because its arm-C peer check is the one that a Wormhole session breaks, in two
+# opposite ways, and both were found against tt-sim rather than at a card:
+# under NoC coordinate translation the config's peer coord and the trace's are
+# in different spaces and a naive equality REFUSES a good run; untranslated, the
+# NoC 1 destination is the peer's grid mirror and a naive equality refuses it
+# with a message that names neither cause.
+# ---------------------------------------------------------------------------
+import importlib.util  # noqa: E402
+
+_CHECK_ARM = (
+    Path(__file__).resolve().parents[2] / "perfbench" / "nocevbench" / "check_arm.py"
+)
+
+
+def _check_arm():
+    spec = importlib.util.spec_from_file_location("check_arm", _CHECK_ARM)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _arm_c_trace(read_dest, write_dest, source=(1, 1)):
+    """One NCRISC read on NOC_1 and one BRISC write on NOC_0, as arm C emits."""
+    return [
+        {
+            "proc": "NCRISC",
+            "noc": "NOC_1",
+            "type": "READ",
+            "num_bytes": 256,
+            "timestamp": 10,
+            "sx": source[0],
+            "sy": source[1],
+            "dx": read_dest[0],
+            "dy": read_dest[1],
+        },
+        {
+            "proc": "BRISC",
+            "noc": "NOC_0",
+            "type": "WRITE_",
+            "num_bytes": 256,
+            "timestamp": 20,
+            "sx": source[0],
+            "sy": source[1],
+            "dx": write_dest[0],
+            "dy": write_dest[1],
+        },
+    ]
+
+
+def test_check_arm_accepts_arm_c_across_two_coordinate_spaces():
+    """A translated Wormhole run: the config names the peer (19, 19) and this
+    core (18, 18) while the trace numbers them (2, 2) and (1, 1). Both are
+    right; only the spaces differ, and the disagreement on the *initiating*
+    core is what says so."""
+    module = _check_arm()
+    config = {
+        "arm": "C",
+        "reader": "NCRISC:NOC_1",
+        "writer": "BRISC:NOC_0",
+        "target": "l1",
+        "self_noc": "18,18",
+        "peer_noc": "19,19",
+        "noc_grid": "10,12",
+    }
+    problems, notes = module.check("C", _arm_c_trace((2, 2), (2, 2)), config)
+    assert problems == []
+    assert any("different coordinate spaces" in note for note in notes)
+
+
+def test_check_arm_names_the_untranslated_noc1_mirror():
+    """An untranslated Wormhole run: the NoC 1 read went to (7, 9), the grid
+    mirror of the peer (2, 2) on 10x12. Refused -- the two sides are not
+    comparable -- but refused by name, with the fix in the message."""
+    module = _check_arm()
+    config = {
+        "arm": "C",
+        "reader": "NCRISC:NOC_1",
+        "writer": "BRISC:NOC_0",
+        "target": "l1",
+        "self_noc": "1,1",
+        "peer_noc": "2,2",
+        "noc_grid": "10,12",
+    }
+    problems, _ = module.check("C", _arm_c_trace((7, 9), (2, 2)), config)
+    assert len(problems) == 1
+    assert "grid mirror" in problems[0]
+    assert "TT_METAL_MOCK_CLUSTER_DESC_PATH" in problems[0]
+
+
+def test_check_arm_still_refuses_a_peer_it_never_addressed():
+    """The check the other two must not have weakened."""
+    module = _check_arm()
+    config = {
+        "arm": "C",
+        "reader": "NCRISC:NOC_1",
+        "writer": "BRISC:NOC_0",
+        "target": "l1",
+        "self_noc": "1,1",
+        "peer_noc": "2,2",
+        "noc_grid": "10,12",
+    }
+    problems, _ = module.check("C", _arm_c_trace((4, 4), (4, 4)), config)
+    assert any("did not go to the core the arm names" in p for p in problems)

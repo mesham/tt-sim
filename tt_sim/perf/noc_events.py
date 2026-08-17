@@ -144,6 +144,27 @@ WRITE_ISSUES = {
     "WRITE_WITH_TRID_WITH_STATE",
 }
 
+#: ``perfbench/nocevbench``'s experimental arms, as the NoC each RISC's
+#: transactions must be seen on. Direction and NoC are fully confounded in the
+#: original program -- the reader runs on NoC 1 and the writer on NoC 0, so
+#: "writes cost +95 cycles" and "NoC 0 costs +95 cycles" are the same statement
+#: -- and arm B swaps exactly those two enum values to break it.
+#:
+#: The table is duplicated in ``perfbench/nocevbench/check_arm.py``, which is
+#: the collection-time check and has to run on a card box with no tt-sim on it.
+#: Three rows, deliberately: the copy is what lets each side check the other
+#: rather than agree with it by construction.
+#:
+#: **Arms A and C are indistinguishable by this table** -- C changes the target,
+#: not the NoCs -- so ``--expect-arm C`` separates C from B but not from A. What
+#: separates A from C is the transaction *destination*, which is why
+#: ``--peer-noc`` exists below.
+ARM_NOC_PAIRING = {
+    "A": {("NCRISC", "read"): "NOC_1", ("BRISC", "write"): "NOC_0"},
+    "B": {("NCRISC", "read"): "NOC_0", ("BRISC", "write"): "NOC_1"},
+    "C": {("NCRISC", "read"): "NOC_1", ("BRISC", "write"): "NOC_0"},
+}
+
 
 # ---------------------------------------------------------------------------
 # Reading the artefact
@@ -703,6 +724,75 @@ def gate_partition_closes(sim, hw):
     )
 
 
+def _arm_problems(label, stream, arm, peer):
+    """What ``stream`` contradicts about running nocevbench arm ``arm``."""
+    problems = []
+    direction = (
+        "read"
+        if any(e.type in READ_ISSUES for e in stream.noc_events)
+        else "write"
+        if any(e.type in WRITE_ISSUES for e in stream.noc_events)
+        else None
+    )
+    if direction is None:
+        return [f"{label} {stream.label} issued no transactions at all"]
+    want = ARM_NOC_PAIRING[arm].get((stream.proc, direction))
+    if want is None:
+        return [f"{label} {stream.label} issued {direction}s, which arm {arm} does not"]
+    issues = READ_ISSUES if direction == "read" else WRITE_ISSUES
+    seen = {e.noc for e in stream.noc_events if e.type in issues}
+    if seen != {want}:
+        problems.append(
+            f"{label} {stream.label}'s {direction}s ran on {sorted(seen)}, arm {arm} "
+            f"asks for {want} -- the NoC assignment did not take and this is a "
+            "different arm than the one named"
+        )
+    if peer is not None:
+        dests = {e.dst for e in stream.noc_events if e.type in issues and e.dst}
+        if dests != {peer}:
+            problems.append(
+                f"{label} {stream.label} addressed {sorted(dests)} rather than the "
+                f"peer {peer}"
+            )
+    return problems
+
+
+def gate_arm_matches(sim, hw, arm, peer=None):
+    """Both sides really ran ``perfbench/nocevbench``'s arm ``arm``.
+
+    **Opt-in** (``--expect-arm``), and not one of the six standing gates: it is
+    meaningful only for that program. It exists because an arm-B run that
+    silently kept arm A's NoC pairing is *well-formed* -- it passes every other
+    gate, decomposes cleanly, and reports a per-class latency table that reads
+    as a result. It would say the ~95-cycle error "stayed on the write", which
+    is exactly what the rival hypothesis predicts, so the session would produce
+    a confident wrong conclusion rather than a refusal.
+
+    The claim is therefore checked against the emitted trace -- every record
+    carries the NoC its transaction used (``profiler.cpp:840-887``) -- and never
+    against the command line that asked for it.
+
+    ``census_matches`` already refuses an A-against-B comparison as a side
+    effect, because the NoC is part of the class key; this gate additionally
+    catches *both* sides having drifted onto the same wrong arm, which the
+    census cannot see. It does **not** separate A from C, whose NoC pairings are
+    identical by design -- pass ``--peer-noc`` for that, and see
+    ``perfbench/nocevbench/check_arm.py``, which does the same check at
+    collection time on a box with no tt-sim on it.
+    """
+    problems = []
+    for label, side in _sides(sim, hw):
+        problems.extend(_arm_problems(label, side, arm, peer))
+    if problems:
+        return GateResult("arm_matches", False, "; ".join(problems))
+    pairing = ARM_NOC_PAIRING[arm]
+    used = pairing.get((sim.proc, "read"), pairing.get((sim.proc, "write")))
+    detail = f"arm {arm}: {sim.proc}'s transactions all on {used}"
+    if peer is not None:
+        detail += f", every transfer addressed the peer at {peer}"
+    return GateResult("arm_matches", True, detail)
+
+
 def gate_barriers_pair(sim, hw):
     """Every barrier START is closed by an END, on both sides.
 
@@ -859,19 +949,22 @@ class StreamReport:
         }
 
 
-def analyse_stream(sim, hw, mapped=False):
+def analyse_stream(sim, hw, mapped=False, expect_arm=None, peer=None):
     """Every gate, then the criterion, for one ``(core, RISC)`` stream."""
     report = StreamReport(
         core=sim.core, proc=sim.proc, card_core=hw.core if hw is not None else None
     )
-    for gate in (
+    gates = [
         gate_events_present(sim, hw),
         gate_single_window(sim, hw),
         gate_per_core(sim, hw, mapped=mapped),
         gate_barriers_pair(sim, hw),
         gate_partition_closes(sim, hw),
         gate_census_matches(sim, hw),
-    ):
+    ]
+    if expect_arm is not None:
+        gates.append(gate_arm_matches(sim, hw, expect_arm, peer))
+    for gate in gates:
         report.gates.append(gate)
         if not gate.passed:
             report.refused = True
@@ -907,7 +1000,7 @@ def analyse_stream(sim, hw, mapped=False):
     return report
 
 
-def analyse(sim_events, hw_events, core_map=None):
+def analyse(sim_events, hw_events, core_map=None, expect_arm=None, peer=None):
     """One :class:`StreamReport` per ``(core, RISC)`` stream present in ``sim``."""
     core_map = dict(core_map or {})
     sim_streams = group_by_stream(sim_events)
@@ -916,7 +1009,7 @@ def analyse(sim_events, hw_events, core_map=None):
     for key in sorted(sim_streams, key=repr):
         sim = sim_streams[key]
         if hw_streams is None:
-            reports.append(analyse_stream(sim, None))
+            reports.append(analyse_stream(sim, None, expect_arm=expect_arm, peer=peer))
             continue
         target = (core_map.get(sim.core, sim.core), sim.proc)
         hw = hw_streams.get(target)
@@ -934,7 +1027,15 @@ def analyse(sim_events, hw_events, core_map=None):
             )
             reports.append(report)
             continue
-        reports.append(analyse_stream(sim, hw, mapped=sim.core in core_map))
+        reports.append(
+            analyse_stream(
+                sim,
+                hw,
+                mapped=sim.core in core_map,
+                expect_arm=expect_arm,
+                peer=peer,
+            )
+        )
     return reports
 
 
@@ -1115,6 +1216,24 @@ def main(argv=None):
         metavar="SIMX,SIMY=CARDX,CARDY",
         help="state a deliberate sim-core to card-core correspondence",
     )
+    parser.add_argument(
+        "--expect-arm",
+        choices=sorted(ARM_NOC_PAIRING),
+        help=(
+            "refuse unless both traces really ran perfbench/nocevbench's arm "
+            "A, B or C, judged by the NoC each RISC's transactions were "
+            "recorded on rather than by the flag the run was given"
+        ),
+    )
+    parser.add_argument(
+        "--peer-noc",
+        metavar="X,Y",
+        help=(
+            "arm C's peer core, as the program's nocevbench-config line reports "
+            "it; with --expect-arm C, every transaction must address it. This is "
+            "what separates arm C from arm A, whose NoC pairing is identical"
+        ),
+    )
     parser.add_argument("--report", help="write the text report here as well as stdout")
     parser.add_argument("--json", dest="json_path", help="write the report as JSON")
     args = parser.parse_args(argv)
@@ -1124,9 +1243,25 @@ def main(argv=None):
     if args.card and args.decompose_only:
         parser.error("--decompose-only and --card are mutually exclusive")
 
+    if args.peer_noc and not args.expect_arm:
+        parser.error("--peer-noc is only meaningful with --expect-arm")
+    peer = None
+    if args.peer_noc:
+        try:
+            px, py = (int(v) for v in args.peer_noc.split(","))
+        except ValueError:
+            parser.error(f"--peer-noc expects X,Y, got {args.peer_noc!r}")
+        peer = (px, py)
+
     sim_events = load_traces(args.sim)
     hw_events = load_traces(args.card) if args.card else None
-    reports = analyse(sim_events, hw_events, parse_core_map(args.map_core))
+    reports = analyse(
+        sim_events,
+        hw_events,
+        parse_core_map(args.map_core),
+        expect_arm=args.expect_arm,
+        peer=peer,
+    )
     internal = internal_attribution(args.sim_internal) if args.sim_internal else None
     text = render(reports, decompose_only=hw_events is None, internal=internal)
     print(text, end="")

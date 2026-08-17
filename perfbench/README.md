@@ -199,6 +199,16 @@ It rsyncs with `perfbench/`, so **all twelve probes run from `perfbench/` alone*
 The session picks it up automatically for a matching `--arch`; `--plan FILE`
 overrides.
 
+`perfbench/nocbench/noc-plan-wormhole.csv` is the same thing for Wormhole with
+one difference that must travel with it: it was generated from the
+**simulator's** grid dump (`tt_sim/perf/datasets/nocbench-grid-wormhole-sim.csv`),
+not a card's, because no Wormhole part has ever dumped one. It is therefore
+valid only for an **unharvested** Wormhole part, and it is provisional until a
+card confirms it. That is safe rather than hopeful: the session dumps the live
+grid first and checks every addressed tile against it, so a harvested part
+refuses with the offending coordinates instead of measuring. Regenerate from
+the card's own dump on the first visit that produces one.
+
 A plan is only valid for the grid it was built from — one naming a tile the part
 does not have measures nothing, and on a harvested card that is easy to do by
 accident. So before using any pre-built plan the session dumps the card's live
@@ -401,10 +411,19 @@ aliased sub-endpoints a host program cannot tell apart from independent ones. So
 with that reason on both parts, and a clean `ENDPOINT BOUND` must be reported as
 "the endpoint" rather than "the channel".
 
-### Blackhole now, Wormhole as a follow-on
+### Blackhole now, Wormhole as a programme
 
-The lab has a Blackhole part and no Wormhole part; a Wormhole session is
-**planned, not abandoned**. Every probe here already runs on both — `--arch
+**Wormhole access is now standing rather than a single booking**, and the
+sessions, their order, the pre-registered predictions and the on-the-spot
+checks are in [`docs/plans/wormhole-session.md`](../docs/plans/wormhole-session.md).
+Read that before scheduling anything. Two things from it belong here:
+`mechbench`, `nocreadbench` and `dramratebench` have **never touched a card**
+and their first contact is a deliberate de-risking pass, not a measurement; and
+on Wormhole tt-sim shadows **56 of 80 workers on NoC 1** in the default
+untranslated mode, so a multi-core simulator side runs with
+`TT_METAL_MOCK_CLUSTER_DESC_PATH` set or it is not comparable to a card.
+
+Every probe here already runs on both — `--arch
 wormhole` executes the same block — so the follow-on is a hardware booking
 rather than new work. That is checked, not assumed: `--sim --arch wormhole` has
 been run end to end and all twelve probes execute or skip with the right reason,
