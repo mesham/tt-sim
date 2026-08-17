@@ -1,0 +1,55 @@
+PASS  stateless-1    arm=stateless confirmed from payload
+      marg N=4->16: 44.83 cycles/transaction
+      marg N=16->64: 45.01 cycles/transaction
+      marg N=64->128: 44.98 cycles/transaction
+      avg  52.58 cycles/transaction over every row (informational)
+      ctrl N=4->16: 44.83 vs 2026-08-17's 44.08 (1.7 %) -- the control reproduces
+      ctrl N=16->64: 45.01 vs 2026-08-17's 44.00 (2.3 %) -- the control reproduces
+      ctrl N=64->128: 44.98 vs 2026-08-17's 43.97 (2.3 %) -- the control reproduces
+PASS  stateful-1     arm=stateful confirmed from payload
+      marg N=4->16: 29.00 cycles/transaction
+      marg N=16->64: 29.03 cycles/transaction
+      marg N=64->128: 29.02 cycles/transaction
+      avg  37.44 cycles/transaction over every row (informational)
+PASS  stateless-2    arm=stateless confirmed from payload
+      marg N=4->16: 45.11 cycles/transaction
+      marg N=16->64: 44.99 cycles/transaction
+      marg N=64->128: 45.00 cycles/transaction
+      avg  52.56 cycles/transaction over every row (informational)
+      ctrl N=4->16: 45.11 vs 2026-08-17's 44.08 (2.3 %) -- the control reproduces
+      ctrl N=16->64: 44.99 vs 2026-08-17's 44.00 (2.3 %) -- the control reproduces
+      ctrl N=64->128: 45.00 vs 2026-08-17's 43.97 (2.3 %) -- the control reproduces
+PASS  stateful-2     arm=stateful confirmed from payload
+      marg N=4->16: 28.89 cycles/transaction
+      marg N=16->64: 29.01 cycles/transaction
+      marg N=64->128: 28.99 cycles/transaction
+      avg  37.44 cycles/transaction over every row (informational)
+  ctrl N=4->16: 44.83 vs 2026-08-17's 44.08 (1.7 %) -- the control reproduces
+  ctrl N=16->64: 45.01 vs 2026-08-17's 44.00 (2.3 %) -- the control reproduces
+  ctrl N=64->128: 44.98 vs 2026-08-17's 43.97 (2.3 %) -- the control reproduces
+  ctrl N=4->16: 45.11 vs 2026-08-17's 44.08 (2.3 %) -- the control reproduces
+  ctrl N=16->64: 44.99 vs 2026-08-17's 44.00 (2.3 %) -- the control reproduces
+  ctrl N=64->128: 45.00 vs 2026-08-17's 43.97 (2.3 %) -- the control reproduces
+
+== the paired verdict, wormhole
+   stateless 45.03  stateful 28.96  the loop bought 16.07
+   PREDICTION 1 -- THE FLOOR IS OUR ISSUE LOOP. The shorter loop fell by 16.07 cycles and landed at 28.96, inside the 15-30 band the shipped dataset occupies. The stateless figure is then a property of THIS PROGRAM's instruction stream and is not evidence of a per-read cost in the part.
+
+Before sending this home, check by eye:
+  * every line above says PASS. 'arm=X confirmed from payload' means the
+    issue loop was read back out of the data, not out of the flag.
+  * the stateless rounds each printed 'the control reproduces' for all
+    three burst intervals. If any says CTRL MOVED, SAY SO and send the
+    session anyway -- a control that moved is the most important result
+    in the directory, and it means the two arms are not a pair.
+  * the rounds of each arm agree (2 of each). They are separate runs
+    of an identical program, so a big spread means something else was on
+    the card. Do NOT re-run and keep the better session -- say so instead.
+  * the two arms DISAGREE, or agree, and either is a result. What is NOT
+    a result is a stateful round that failed its arm check: that number
+    is the stateless loop wearing the stateful label, and it reads as
+    H-FLOOR whatever the part does.
+
+Then send the WHOLE directory, logs included -- they carry the
+nocreadbench-config line recording what each run was configured as:
+  rsync -av /home/nbrown23/tt_traces/nocread-arms-wormhole/ <home>:~/nocread-arms-wormhole/

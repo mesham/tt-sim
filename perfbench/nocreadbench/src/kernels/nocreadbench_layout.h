@@ -7,7 +7,7 @@
 // `tt_sim/perf/noc_dataset_sweep.py` can only difference it along one axis.
 #pragma once
 
-#define NOCREADBENCH_MAGIC 0x4E524232u  // "NRB2"; bump on any layout change
+#define NOCREADBENCH_MAGIC 0x4E524233u  // "NRB3"; bump on any layout change
 
 // ---------------------------------------------------------------------------
 // Result word indices, per participating core.
@@ -62,7 +62,17 @@
 #define NOCREADBENCH_R_CMDBUF_OVFL_REST 19
 #define NOCREADBENCH_R_CMDBUF_OVFL_END 20
 #define NOCREADBENCH_R_TRID 21  // which transaction id the kernel pinned and sampled
-#define NOCREADBENCH_R_WORDS 24
+// --- added with NRB3: the issue-loop variant, and the witness that proves it --
+// `_MODE` is what the kernel ACTUALLY RAN, not what it was asked for; a kernel
+// asked for the stateful loop under a plan it cannot express (more than one
+// source tile, whose coordinate the stateful path holds in state) stamps
+// `NOCREADBENCH_MODE_REFUSED` and measures nothing.
+#define NOCREADBENCH_R_MODE 22
+// The mode witness. It is a WORD OF PAYLOAD, read back over the NoC by the same
+// API call the timed loop issued, and it is the reason a stateful run cannot be
+// forged by passing a flag -- see the probe in reader.cpp.
+#define NOCREADBENCH_R_PROBE 23
+#define NOCREADBENCH_R_WORDS 28
 
 // ---------------------------------------------------------------------------
 // Runtime argument indices for kernels/dataflow/reader.cpp.
@@ -86,7 +96,45 @@
 // `noc_clear_packet_tag` writes), so pinning it changes no other tag field.
 #define NOCREADBENCH_A_TRID 9
 #define NOCREADBENCH_A_SAMPLE 10  // 1 = also run the untimed sampling burst
-#define NOCREADBENCH_A_SRC 11       // 2 * num_src words follow, (x, y) pairs
+// Which issue loop to time. STATELESS is the 2026-08-17 arm and must stay
+// bit-for-bit the program that session ran; STATEFUL is `noc_async_read_set_state`
+// once plus `noc_async_read_with_state` per transaction, which is what the
+// `stateful` rows of tt-metal's shipped dataset time.
+#define NOCREADBENCH_A_MODE 11
+// A worker core that is NOT the initiator and NOT any source of this point. The
+// kernel points the read state at it and then issues one transaction through the
+// arm's own API call; which tile answers is the mode. See reader.cpp.
+#define NOCREADBENCH_A_WITNESS_X 12
+#define NOCREADBENCH_A_WITNESS_Y 13
+#define NOCREADBENCH_A_SRC 14       // 2 * num_src words follow, (x, y) pairs
+
+// ---------------------------------------------------------------------------
+// Issue-loop variants.
+// ---------------------------------------------------------------------------
+#define NOCREADBENCH_MODE_STATELESS 0u
+#define NOCREADBENCH_MODE_STATEFUL 1u
+#define NOCREADBENCH_MODE_REFUSED 0xFFFFFFFFu
+
+// ---------------------------------------------------------------------------
+// The mode witness.
+// ---------------------------------------------------------------------------
+// The host stamps this signature into the first words of every participating
+// core's source region, so a word of returned payload names the tile it came
+// from. The stateless issue path writes NOC_TARG_ADDR_COORDINATE on every
+// transaction and the stateful one never does (`ncrisc_noc_read_with_state`,
+// wormhole/noc_nonblocking_api.h:1163; blackhole's at :1369), so a single
+// transaction issued after the state has been pointed at a DIFFERENT tile comes
+// back from the source under the stateless loop and from the witness under the
+// stateful one. That is a property of the code that ran, not of the flag that
+// asked for it, and it is the discipline `perfbench/nocevbench/check_arm.py`
+// applies to the NoC ids in a trace.
+#define NOCREADBENCH_SIG(x, y) (0x5A5A0000u | (((x) & 0xFFu) << 8) | ((y) & 0xFFu))
+#define NOCREADBENCH_SIG_WORDS 4  // how many words of it the host stamps
+#define NOCREADBENCH_PROBE_FILL 0xEEEEEEEEu  // pre-fill, so "nothing landed" shows
+// Where the probe's payload lands: this many bytes below the top of the arena's
+// SOURCE half, which the initiator never reads into and never reads from (it is
+// only ever a source on the remote cores).
+#define NOCREADBENCH_PROBE_BACKOFF 256u
 
 // ---------------------------------------------------------------------------
 // Registers the kernel reads. Both spelled out rather than relying on a

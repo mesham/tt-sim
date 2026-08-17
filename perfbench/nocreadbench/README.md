@@ -8,9 +8,17 @@ by reading a hardware counter, and once by the shape of a sweep.
 export TT_METAL_HOME=/path/to/your/built/tt-metal   # built with ./build_metal.sh
 cd perfbench/nocreadbench/src
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-../run_card.sh                                      # ~1–3 minutes
-# -> nocreadbench-<arch>.csv   <- this is the file to send back, with the console output
+
+../run_card.sh                    # the E0–E7 sweep, ~1–3 minutes
+# -> nocreadbench-<arch>.csv   <- send this back, with the console output
+
+../run_card.sh --preflight        # costs no card time
+../run_card.sh --arms             # the STATEFUL comparison, ~3 minutes
+# -> nocread-arms-session/     <- send the whole directory back
 ```
+
+The `--arms` session is the newer question and the one with pre-registered
+predictions: see [The stateful variant](#the-stateful-variant-and-the-two-predictions).
 
 Run it on **both** a Wormhole part and a Blackhole part if you have both. The
 whole reason this exists is a per-architecture difference, and one part cannot
@@ -33,6 +41,7 @@ Differenced along its transactions-per-barrier axis, a pipelined burst of
 | N = 64 → 256 | **25.00** | **35.0** |
 | the same, `stateful` (a shorter issue loop) | **17.33** | **34.0** |
 | tt-sim's reconstruction of the issue loop | 18 | 19 |
+| **this program, on a real Wormhole part, 2026-08-17** | **44.0** | not yet run |
 
 Two things in that table need explaining and the dataset cannot explain either.
 
@@ -47,6 +56,140 @@ Two things in that table need explaining and the dataset cannot explain either.
 The roadmap named the Blackhole excess "the initiator's outstanding-read-request
 credit limit". That is a hypothesis, and it is one of at least four. This
 program is how you tell them apart.
+
+## What a real Wormhole part actually said, and what it left ambiguous
+
+On **2026-08-17** this program ran on a Wormhole part
+(`perfbench/card-sessions/2026-08-17-wormhole-B/`). The `burst` control measured
+a marginal **44.0 cycles per transaction**: 44.08 at N = 4 → 16, 44.00 at
+16 → 64, 43.97 at 64 → 128 — flat to 0.25 % across a 32× range in burst length,
+and flat to 1.0 % across hops 1..7, which is also what refuted the credit-limit
+hypothesis on that part. Every experiment's *average* landed near 46.8.
+
+That is **1.76× the 25.00 the shipped dataset carries for the same shape**. The
+disagreement is not noise, is not an average-versus-marginal confusion, and is
+not distance-dependent. It is also not, by itself, a statement about the part:
+the vendor's dataset was taken on a different part with a different program, so
+`noc_latencies.yaml`'s 25.00 is **not the published figure for the part under
+test**, and the row above is not "the control failed".
+
+Two candidates survive the flatness, and the dataset cannot separate them:
+
+- **H-LOOP.** 44 is *our issue loop*. The rate is set by the instruction stream
+  on the issuing baby RISC-V, ours is longer than the dataset's, and the number
+  says nothing about the silicon.
+- **H-FLOOR.** 44 is a per-read cost in the part that the dataset says is not
+  there.
+
+## The stateful variant, and the two predictions
+
+The dataset's own `stateful` rows are the discriminator, because they are the
+same experiment with a **shorter issue loop**: on Wormhole they buy 7.67 cycles
+(25.00 → 17.33) and land *below* the long loop's figure, which is that dataset's
+evidence that Wormhole has no per-read floor; on Blackhole they buy 1.0
+(35.0 → 34.0), which is its evidence that Blackhole does. `--stateful` runs that
+loop here.
+
+### What it removes from the loop, and where that is written down
+
+The stateless arm calls `noc_async_read`, which for these sizes reaches
+`ncrisc_noc_fast_read`
+(`tt_metal/hw/inc/internal/tt-1xx/wormhole/noc_nonblocking_api.h:415`). Per
+transaction it writes five command-buffer registers — `NOC_RET_ADDR_LO`,
+`NOC_TARG_ADDR_LO`, `NOC_TARG_ADDR_COORDINATE`, `NOC_AT_LEN_BE`, `NOC_CMD_CTRL`
+— and extracts the coordinate from a 64-bit NoC address every time
+(`(uint32_t)(src_addr >> NOC_ADDR_COORD_SHIFT)`, same function). Blackhole's
+equivalent writes `NOC_TARG_ADDR_MID` as well: six.
+
+The stateful arm calls `noc_async_read_set_state`
+(`tt_metal/hw/inc/api/dataflow/dataflow_api.h:673`) once, which reaches
+`ncrisc_noc_read_set_state` (`wormhole/noc_nonblocking_api.h:1117`,
+`blackhole/noc_nonblocking_api.h:1321`) and writes **only** the coordinate — plus
+`NOC_TARG_ADDR_MID` on Blackhole. Then per transaction it calls
+`noc_async_read_with_state` (`dataflow_api.h:708`) →
+`ncrisc_noc_read_with_state` (`wormhole:1163`, `blackhole:1369`), which writes
+`NOC_RET_ADDR_LO`, `NOC_TARG_ADDR_LO`, `NOC_AT_LEN_BE`, `NOC_CMD_CTRL` and
+nothing else.
+
+So the removal is exactly: **one command-buffer store per transaction on
+Wormhole, two on Blackhole**, plus the 64-bit address arithmetic that fed them —
+the stateful loop deals only in 32-bit local addresses. Both arms keep the
+`while (!noc_cmd_buf_ready(...))` poll, which is the loop's six-cycle load-use
+interlock, and both keep the closing barrier.
+
+This is the same pair tt-metal's own estimator kernel switches on for the
+`stateful` rows:
+`tests/tt_metal/tt_metal/data_movement/noc_estimator_tests/kernels/reader.cpp`,
+`if constexpr (stateful)`, through `Noc::set_async_read_state` /
+`Noc::async_read_with_state` (`tt_metal/hw/inc/api/dataflow/noc.h:252`), whose
+default `max_page_size` puts it on those same any-length entry points.
+
+### The predictions — written here before any card ran the variant
+
+| | if **H-LOOP** | if **H-FLOOR** |
+| --- | --- | --- |
+| the stateful marginal | **falls** by roughly the removed instructions, to **≤ 30 cycles/tx** — inside the 15–30 band the shipped dataset's Wormhole rows occupy | **barely moves**: within 10 % of the stateless arm |
+| what the 44 then is | a property of *this program's* instruction stream, and not evidence about the part | a per-read cost in the part, worth ~40 cycles that no instruction removes |
+
+`check_mode.py` prints which one the numbers landed on, and can print
+**NEITHER** — a drop too large to call unmoved that still lands outside the
+dataset's band. That is a real outcome, not a failure, and it is written down so
+that it cannot be quietly reclassified afterwards.
+
+### The stateless arm is the control, and that is checked
+
+`--stateful` changes the issue call and nothing else; the two arms are one kernel
+body compiled twice (`if constexpr` on the mode). The default arm therefore has
+to be the program the 2026-08-17 session ran, and `check_mode.py` compares its
+marginals against that session's 44.08 / 44.00 / 43.97 with a 3 % tolerance and
+**fails the run** if they moved. On a part with no recorded session it says so
+instead of inventing a comparison, and on a simulator run (`sim=1` in the CSV
+header) it applies no card control at all.
+
+One honest caveat: the shared kernel body moved the stateless loop's **constant**
+term by a few cycles against NRB2 — measured on tt-sim as **+4 cycles on Wormhole
+and +1 on Blackhole**, while the *per-transaction* cost is bit-identical (38.00
+and 41.00 before and after, at all three burst intervals). That is register
+allocation around a shared loop body, not a change in the loop. The marginal is
+what the arms are compared on and what the control is checked on, precisely
+because differencing the burst axis removes that constant; the whole-file
+average, which does not remove it, is printed as informational, and at N = 64 the
+shift moves it by 4/64 = 0.06 cycles.
+
+The alternative was to duplicate the loop so the stateless arm could be
+byte-identical. That trades away the property the experiment actually needs — the
+two arms differing *only* in the issue call, with the same stride bookkeeping,
+the same barrier and the same sampling — in exchange for agreeing with a
+historical constant. The wrong trade, and it is recorded here rather than left to
+be discovered.
+
+### How a run proves its own variant
+
+Not from the flag. `--stateful` on a stale binary, a JIT cache that kept the old
+kernel, or a shell that dropped the argument all produce a well-formed CSV whose
+rate is the stateless loop's — and that reading is **exactly what H-FLOOR
+predicts**, so it would be read as a result.
+
+So the mode is read out of returned payload. The host stamps a per-tile
+signature into every participating core's source region. After all its bursts,
+the kernel points the read state at a **witness** core — logical (1, 1), which is
+never the initiator (0, 0) and never a source, since every source in the plan
+sits on row 0 or column 0 — and issues **one transaction through the same API
+call its timed loop used**, addressed at this point's real source:
+
+- the **stateless** call rewrites `NOC_TARG_ADDR_COORDINATE`, so the **source**
+  answers;
+- the **stateful** call never writes it, so the **witness** answers.
+
+The landed signature word is the `probe_word` column, beside `sig_src` and
+`sig_witness`, so a row is `stateless` iff `probe_word == sig_src` and `stateful`
+iff `probe_word == sig_witness`. The kernel also stamps the mode it actually
+ran, including a `refused` value the host cannot ask for — a stateful run over
+more than one source tile, which the stateful path cannot express because the
+source tile *is* the state. The host refuses any point whose probe disagrees
+with the mode requested, exits non-zero, and prints `MODE NOT CONFIRMED`;
+`check_mode.py` re-derives the same thing from the CSV alone, on the card, with
+nothing but the standard library.
 
 ## The hypotheses, and what each predicts — written before anything was run
 
@@ -228,7 +371,30 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./build/nocreadbench --num-tx 64           # shorter bursts
 ./build/nocreadbench --repeats 5           # more repeats; default 3
 ./build/nocreadbench --no-sample           # skip E0's untimed second burst
+./build/nocreadbench --stateful            # the SHORTER issue loop (see above)
+./build/nocreadbench --only burst          # just one axis, for the simulator
 ```
+
+For the stateful comparison, do not run the two arms by hand — the protocol
+interleaves them, checks each one's mode against its own payload, checks the
+control against 2026-08-17 on the spot, and prints the paired verdict:
+
+```bash
+perfbench/nocreadbench/run_card.sh --preflight    # costs no card time
+perfbench/nocreadbench/run_card.sh --arms         # ~3 minutes of card
+```
+
+`--stateful` drops the `srcfan` points with more than one source: the stateful
+path holds the source tile in the command buffer, so cycling sources would pay
+back the very store the variant removes. It says how many it dropped and why, and
+the kernel refuses such a point independently — a drop that failed to happen
+still cannot be measured.
+
+`--only` changes nothing about a point that survives it, and that is checked
+rather than argued: `--only burst` on the Wormhole simulator reproduces the full
+plan's burst cycles exactly (192 / 648 / 2472 / 4904). The L1 arena is sized from
+the largest transaction in the plan, and every path here already needs the 8 KiB
+floor, so filtering does not move an address either.
 
 `--num-tx` defaults to **128 and should not be raised much above it**:
 `NIU_MST_REQS_OUTSTANDING_ID` is 8 bits, and both architectures'
@@ -262,12 +428,24 @@ The program prints a verdict. These mean *do not read the rate columns*:
   file means anything.
 - `CMD_BUF_AVAIL: DEGENERATE` — rest, last in-loop sample and peak all agree, so
   the register reported nothing. **This is not a depth of zero.**
-- The `burst` rows disagree with `noc_latencies.yaml` (25.0 cycles/transaction
-  on Wormhole, 35.0 on Blackhole, at 64 B and N ≥ 64). If this control does not
-  reproduce, nothing downstream of it is worth reading. Note that at
-  `--num-tx 128` Wormhole is *above* the N = 16 → 64 regime change and Blackhole
-  is not in a regime at all.
+- `MODE NOT CONFIRMED` — one or more points could not prove which issue loop they
+  ran from the tile that answered their own probe. Every rate in the file is then
+  unattributable, and a stateful number produced by the stateless loop is
+  precisely the wrong answer to the question the variant is asked. `check_mode.py`
+  re-derives the same thing from the CSV alone.
+- On **Wormhole**, the `burst` marginals moved off the 2026-08-17 session's
+  **44.08 / 44.00 / 43.97 cycles/transaction** by more than 3 %. That session is
+  the control; `check_mode.py` checks it and fails the run. Note that the shipped
+  dataset's 25.0 (Wormhole) / 35.0 (Blackhole) are **not** the control — they were
+  taken on other parts, and this part already disagrees with the Wormhole figure
+  by 1.76×. On **Blackhole** there is no recorded card session yet, so the
+  stateless arm establishes a control rather than reproducing one. Note also that
+  at `--num-tx 128` Wormhole is *above* the dataset's N = 16 → 64 regime change
+  and Blackhole is not in a regime at all.
 - Any row with `cycles == 0` or a missing result stamp — the kernel did not run.
+  After a layout change the magic moves (`NRB2` → `NRB3`), and a host binary built
+  before it reads the new kernel's stamp as garbage: **rebuild the host program
+  whenever the kernel changes**, which `run_card.sh` does by default.
 
 ## What happens to the number afterwards
 
@@ -294,9 +472,45 @@ TT_METAL_HOME=/path/to/tt-metal ./perfbench/run_card_session.sh --sim --arch bla
 
 `src/nocreadbench-wormhole-sim.csv` and `src/nocreadbench-blackhole-sim.csv` are
 exactly those two runs, cost model **off**, at the session's smoke settings
-(`--num-tx 8 --repeats 1`). They are checked in as shape references for the
-columns, not as measurements of anything, and they are what proves the NRB2
-layout builds and runs on both parts.
+(`--num-tx 8 --repeats 1`); `src/nocreadbench-wormhole-sim-stateful.csv` and
+`src/nocreadbench-blackhole-sim-stateful.csv` are the same two with
+`--stateful`. They are checked in as shape references for the columns, not as
+measurements of anything, and they are what proves the NRB3 layout — both arms,
+and the mode witness — builds and runs on both parts.
+
+### What tt-sim says about the two arms, and why it is not an answer
+
+Differencing the `burst` axis of those four files:
+
+| | stateless | stateful | the loop bought |
+| --- | --- | --- | --- |
+| tt-sim, Wormhole | 38.00 cycles/tx | 23.00 | **15.00** |
+| tt-sim, Blackhole | 41.00 | 23.00 | **18.00** |
+| the shipped dataset | 25.00 / 35.00 | 17.33 / 34.00 | 7.67 (WH) / 1.00 (BH) |
+
+Three things to read off it, and one not to.
+
+- **tt-sim's stateless arm is unchanged by this work.** 38.00 and 41.00 are what
+  the NRB2 program cost here, bit-for-bit, at all three burst intervals. That is
+  the control check the card cannot do at home.
+- **tt-sim's saving does not match either of the dataset's**, and on Blackhole it
+  goes the wrong way: the dataset says the shorter loop buys 1.0 cycles there and
+  7.67 on Wormhole, while tt-sim says 18 and 15. Nor is it the ~1–2 cycles that
+  `tt_sim.perf.noc_issue_loop`'s reconstruction would predict from removing one
+  store (Wormhole) or two (Blackhole) — the compiled loop differs by more than
+  its stores, because the stateless arm also carries 64-bit address arithmetic
+  the stateful one does not.
+- **That mismatch is structural, not a bug to tune out.** tt-sim's NIU appends to
+  an unbounded queue, so it has no per-read floor on either architecture *by
+  construction*; every cycle the variant saves must therefore show up as
+  instruction-stream saving. A dataset row where the shorter loop buys 1.0 of 35
+  is the signature of something tt-sim does not model, and the simulator cannot
+  be the witness for or against it. **Nothing in `tt_sim/perf/` was changed to
+  narrow the gap.**
+
+What the simulator side *does* establish is that both arms build, run and
+attribute themselves correctly on both architectures, and that the control arm
+did not move.
 
 The Blackhole one could not exist until recently: the Blackhole build reads
 `CMD_BUF_AVAIL` and `CMD_BUF_OVFL`, and tt-sim's NUI raised

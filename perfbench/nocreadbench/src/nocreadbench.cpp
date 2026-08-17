@@ -40,11 +40,36 @@
 // hypothesis, INCLUDING what "no effect" looks like -- is in
 // perfbench/nocreadbench/README.md and was written before anything was run.
 //
+// THE SECOND QUESTION, AND WHY --stateful EXISTS
+// ----------------------------------------------
+// On a real Wormhole part on 2026-08-17 the `burst` control measured a marginal
+// 44.0 cycles per transaction -- 44.08 at N = 4 -> 16, 44.00 at 16 -> 64, 43.97
+// at 64 -> 128, flat to 0.25 % over a 32x range, and flat to 1.0 % over hops
+// 1..7. The shipped dataset's own figure for the same shape is 25.00. The
+// disagreement is real; its CAUSE is ambiguous, and only two candidates survive
+// the flatness:
+//
+//   * a HARDWARE FLOOR this part has and the dataset says it does not, or
+//   * OUR ISSUE LOOP IS SIMPLY LONGER than the dataset's, in which case 44 is a
+//     property of this program and says nothing about the part.
+//
+// The dataset's own `stateful` rows are the discriminator, because they are the
+// same experiment with a SHORTER ISSUE LOOP: on Wormhole they land 7.67 cycles
+// below the long loop's figure, which is that dataset's evidence that Wormhole
+// has no per-read floor; on Blackhole they buy 1.0, which is its evidence that
+// Blackhole does. `--stateful` runs that loop here. The predictions, written
+// down before any card ran it, are in README.md under "The stateful variant".
+//
+// The default is UNCHANGED and must stay so: it is the arm the 2026-08-17
+// session ran, and a variant is only worth anything against a control that
+// reproduces. The two arms share one kernel body, `if constexpr` on the mode.
+//
 // Nothing here writes to a cost table. A number this program produces is a
 // measurement on one part and can enter `unit_costs.yaml` only as
 // `corroboration`, never as provenance.
 //
 //   nocreadbench [--out FILE] [--num-tx N] [--repeats R] [--no-sample]
+//                [--stateful] [--only EXPERIMENT[,EXPERIMENT...]]
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -86,6 +111,11 @@ struct Point {
     uint32_t hops = 0;  // planned Manhattan-ish distance, for E1's abscissa
     std::vector<uint32_t> result;
     bool measured = false;
+    // The mode witness, resolved at write-out time so the CSV, the verdict and
+    // the exit status can never disagree about what the kernel actually ran.
+    uint32_t sig_src = 0;      // signature the host stamped at sources[0]
+    uint32_t sig_witness = 0;  // and at the witness core
+    bool mode_confirmed = false;
     // Derived at write-out time and reused by the verdict, so the verdict and
     // the CSV can never disagree about what was measured.
     uint32_t outstanding_delta = 0;  // max - rest; the occupancy, not the raw counter
@@ -110,6 +140,8 @@ int main(int argc, char** argv) {
                             // many outstanding requests.
     uint32_t repeats = 3;
     uint32_t sample = 1;
+    uint32_t mode = NOCREADBENCH_MODE_STATELESS;
+    std::string only;  // comma-separated experiment names; empty = all
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--out" && i + 1 < argc) {
@@ -120,6 +152,10 @@ int main(int argc, char** argv) {
             repeats = (uint32_t)atoi(argv[++i]);
         } else if (a == "--no-sample") {
             sample = 0;
+        } else if (a == "--stateful") {
+            mode = NOCREADBENCH_MODE_STATEFUL;
+        } else if (a == "--only" && i + 1 < argc) {
+            only = "," + std::string(argv[++i]) + ",";
         } else {
             fprintf(stderr, "nocreadbench: unknown argument '%s'\n", a.c_str());
             return 2;
@@ -139,11 +175,27 @@ int main(int argc, char** argv) {
         out_path = "nocreadbench-" + arch + ".csv";
     }
 
+    // Recorded in the artefact, not left to whoever reads it. A simulator CSV
+    // read against the card's control band produces a "CONTROL MOVED" verdict
+    // from two numbers that were never the same measurement, and `check_mode.py`
+    // needs to be able to tell them apart with nothing but the file.
+    const bool on_sim = getenv("TT_METAL_SIMULATOR") != nullptr;
+
     const CoreCoord master{0, 0};
     // Physical coordinates, for the hop counts. Logical-to-physical is not
     // affine on a harvested part, so every distance is computed in the space
     // the routers actually use.
     const CoreCoord m_phys = device->worker_core_from_logical_core(master);
+
+    // The mode witness. Every source this program uses sits on row 0 or column
+    // 0 (see the plan below), and the initiator is (0, 0), so logical (1, 1) is
+    // never either -- checked per point rather than argued, because a witness
+    // that coincided with the source would make the probe read the same
+    // signature under both modes and quietly stop discriminating.
+    const CoreCoord witness{1, 1};
+    const CoreCoord w_phys = device->worker_core_from_logical_core(witness);
+    const uint32_t sig_witness = NOCREADBENCH_SIG((uint32_t)w_phys.x, (uint32_t)w_phys.y);
+    const char* mode_name = (mode == NOCREADBENCH_MODE_STATEFUL) ? "stateful" : "stateless";
 
     // --- the plan ----------------------------------------------------------
     // Every experiment holds everything fixed but one axis. num_tx, the NoC,
@@ -241,6 +293,43 @@ int main(int argc, char** argv) {
         plan.push_back(p);
     }
 
+    // --- the two filters ----------------------------------------------------
+    // `--only` is for the simulator side, where 36 points at a few tens of
+    // thousands of cycles a second is minutes and the `burst` axis is the one
+    // the variant is read off. It changes nothing about a point that survives.
+    const size_t planned = plan.size();
+    if (!only.empty()) {
+        std::vector<Point> kept;
+        for (const Point& p : plan) {
+            if (only.find("," + p.experiment + ",") != std::string::npos) {
+                kept.push_back(p);
+            }
+        }
+        plan = kept;
+        if (plan.empty()) {
+            fprintf(stderr, "nocreadbench: --only matched no experiment (have: size dist srcfan dstspread srcspread burst)\n");
+            CloseDevice(device);
+            return 2;
+        }
+    }
+    // A stateful loop holds the source TILE in the read command buffer, so it
+    // cannot cycle sources without paying back the store the variant exists to
+    // remove. Those points are DROPPED rather than run against one source under
+    // the srcfan name -- and the kernel refuses them independently, so a drop
+    // that failed to happen still cannot be measured.
+    size_t dropped_multisrc = 0;
+    if (mode == NOCREADBENCH_MODE_STATEFUL) {
+        std::vector<Point> kept;
+        for (const Point& p : plan) {
+            if (p.sources.size() > 1) {
+                dropped_multisrc++;
+                continue;
+            }
+            kept.push_back(p);
+        }
+        plan = kept;
+    }
+
     // --- L1 scratch, at one address common to every core --------------------
     uint32_t max_bytes = 0;
     for (const Point& p : plan) {
@@ -265,6 +354,21 @@ int main(int argc, char** argv) {
            "data_addr=0x%08X results_addr=0x%08X\n",
            arch.c_str(), (unsigned)grid.x, (unsigned)grid.y, plan.size(), repeats, num_tx,
            data_addr, results_addr);
+    // One machine-readable line, in the shape `nocevbench-config` has, so a
+    // checker reading only the logs can tell what the run was CONFIGURED as --
+    // and then go and disagree with it from the data if the kernel did
+    // something else.
+    printf("nocreadbench-config arch=%s mode=%s sim=%u points=%zu of=%zu dropped_multisrc=%zu "
+           "witness=%u,%u witness_sig=0x%08X num_tx=%u repeats=%u sample=%u only=%s\n",
+           arch.c_str(), mode_name, on_sim ? 1u : 0u, plan.size(), planned, dropped_multisrc,
+           (unsigned)witness.x, (unsigned)witness.y, sig_witness, num_tx, repeats, sample,
+           only.empty() ? "-" : only.substr(1, only.size() - 2).c_str());
+    if (dropped_multisrc != 0) {
+        printf("nocreadbench: %zu srcfan point(s) dropped -- the stateful issue path holds the\n"
+               "  source tile in the command buffer and cannot cycle sources without paying\n"
+               "  back the store this variant exists to remove.\n",
+               dropped_multisrc);
+    }
     fflush(stdout);
 
     FILE* out = fopen(out_path.c_str(), "w");
@@ -273,15 +377,20 @@ int main(int argc, char** argv) {
         CloseDevice(device);
         return 1;
     }
-    fprintf(out, "# nocreadbench arch=%s grid=%ux%u num_tx=%u repeats=%u\n",
-            arch.c_str(), (unsigned)grid.x, (unsigned)grid.y, num_tx, repeats);
+    fprintf(out, "# nocreadbench arch=%s grid=%ux%u num_tx=%u repeats=%u mode=%s sim=%u\n",
+            arch.c_str(), (unsigned)grid.x, (unsigned)grid.y, num_tx, repeats, mode_name,
+            on_sim ? 1u : 0u);
     fprintf(out, "# every row is one timed burst; cycles_per_tx = cycles / num_tx\n");
+    fprintf(out, "# mode is what the KERNEL stamped; probe_word says which tile answered a\n");
+    fprintf(out, "# transaction issued with the state pointed elsewhere, so it is stateless\n");
+    fprintf(out, "# iff probe_word == sig_src and stateful iff probe_word == sig_witness\n");
     fprintf(out,
             "experiment,repeat,point,mst_x,mst_y,mst_node_x,mst_node_y,num_src,src0_x,src0_y,"
             "hops,num_tx,tx_bytes,dst_stride,src_stride,cycles,cycles_per_tx,"
             "outstanding_max,outstanding_end,samples,cmdbuf_avail_rest,cmdbuf_avail_busy,"
             "outstanding_rest,outstanding_delta,inflight_max,inflight_rest,trid,"
-            "cmdbuf_avail_max,cmdbuf_ovfl_rest,cmdbuf_ovfl_end\n");
+            "cmdbuf_avail_max,cmdbuf_ovfl_rest,cmdbuf_ovfl_end,"
+            "mode,probe_word,sig_src,sig_witness\n");
 
     size_t failures = 0;
     for (uint32_t rep = 0; rep < repeats; rep++) {
@@ -293,6 +402,25 @@ int main(int argc, char** argv) {
                 src_phys.push_back(device->worker_core_from_logical_core(c));
             }
             p.hops = hop_count(m_phys, src_phys[0], (uint32_t)grid.x + 2, (uint32_t)grid.y + 2);
+            p.sig_src = NOCREADBENCH_SIG((uint32_t)src_phys[0].x, (uint32_t)src_phys[0].y);
+            p.sig_witness = sig_witness;
+            if (p.sig_src == p.sig_witness) {
+                fprintf(stderr,
+                        "nocreadbench: point %zu (%s): the witness core (%u,%u) IS the source, so the\n"
+                        "  mode probe cannot discriminate. Refusing rather than reporting an\n"
+                        "  unverifiable mode.\n",
+                        pi, p.experiment.c_str(), (unsigned)w_phys.x, (unsigned)w_phys.y);
+                failures++;
+                continue;
+            }
+            // Stamp the signatures the probe reads back. Written EVERY launch,
+            // not once, because the reads land in the same arena and a previous
+            // point's landings may have crossed into the source half on a core
+            // that was both source and landing target in some other geometry.
+            std::vector<uint32_t> src_sig(NOCREADBENCH_SIG_WORDS, p.sig_src);
+            std::vector<uint32_t> wit_sig(NOCREADBENCH_SIG_WORDS, p.sig_witness);
+            detail::WriteToDeviceL1(device, p.sources[0], data_addr, src_sig);
+            detail::WriteToDeviceL1(device, witness, data_addr, wit_sig);
 
             std::vector<CoreRange> ranges{CoreRange(p.master)};
             for (const CoreCoord& c : p.sources) {
@@ -319,6 +447,9 @@ int main(int argc, char** argv) {
             args[NOCREADBENCH_A_NUM_SRC] = (uint32_t)p.sources.size();
             args[NOCREADBENCH_A_TRID] = 0;
             args[NOCREADBENCH_A_SAMPLE] = sample;
+            args[NOCREADBENCH_A_MODE] = mode;
+            args[NOCREADBENCH_A_WITNESS_X] = (uint32_t)w_phys.x;
+            args[NOCREADBENCH_A_WITNESS_Y] = (uint32_t)w_phys.y;
             for (const CoreCoord& c : src_phys) {
                 args.push_back((uint32_t)c.x);
                 args.push_back((uint32_t)c.y);
@@ -338,6 +469,26 @@ int main(int argc, char** argv) {
                 continue;
             }
             const uint32_t cycles = p.result[NOCREADBENCH_R_CYCLES];
+            // THE MODE CHECK, and it is read out of returned PAYLOAD rather
+            // than out of the flag that asked for the mode. The kernel issued
+            // one transaction with the read state pointed at the witness core;
+            // the stateless call rewrites the coordinate and the source
+            // answers, the stateful call does not and the witness answers. A
+            // stale binary, a dropped argument or a kernel that silently kept
+            // the other loop all land on the wrong signature here.
+            const uint32_t got_mode = p.result[NOCREADBENCH_R_MODE];
+            const uint32_t probe = p.result[NOCREADBENCH_R_PROBE];
+            const uint32_t want_probe = (mode == NOCREADBENCH_MODE_STATEFUL) ? p.sig_witness : p.sig_src;
+            p.mode_confirmed = (got_mode == mode) && (probe == want_probe);
+            if (!p.mode_confirmed) {
+                failures++;
+                fprintf(stderr,
+                        "nocreadbench: point %zu (%s): asked for the %s loop; the kernel stamped "
+                        "mode=0x%08X and its probe read 0x%08X (source 0x%08X, witness 0x%08X, "
+                        "expected 0x%08X). THE ARM DID NOT TAKE.\n",
+                        pi, p.experiment.c_str(), mode_name, got_mode, probe, p.sig_src,
+                        p.sig_witness, want_probe);
+            }
             // The occupancy is the DIFFERENCE. The counter is live hardware
             // state the kernel inherits, so its raw value carries a baseline
             // that has nothing to do with this burst -- 71 or 72 on the
@@ -353,7 +504,7 @@ int main(int argc, char** argv) {
                 p.result[NOCREADBENCH_R_CMDBUF_AVAIL_MAX] != p.result[NOCREADBENCH_R_CMDBUF_AVAIL_REST];
             fprintf(out,
                     "%s,%u,%zu,%u,%u,%u,%u,%zu,%u,%u,%u,%u,%u,%u,%u,%u,%.3f,%u,%u,%u,0x%08X,0x%08X,"
-                    "%u,%u,%u,%u,%u,0x%08X,0x%08X,0x%08X\n",
+                    "%u,%u,%u,%u,%u,0x%08X,0x%08X,0x%08X,%s,0x%08X,0x%08X,0x%08X\n",
                     p.experiment.c_str(), rep, pi,
                     (unsigned)p.master.x, (unsigned)p.master.y,
                     p.result[NOCREADBENCH_R_NODE_X], p.result[NOCREADBENCH_R_NODE_Y],
@@ -371,7 +522,13 @@ int main(int argc, char** argv) {
                     p.result[NOCREADBENCH_R_TRID],
                     p.result[NOCREADBENCH_R_CMDBUF_AVAIL_MAX],
                     p.result[NOCREADBENCH_R_CMDBUF_OVFL_REST],
-                    p.result[NOCREADBENCH_R_CMDBUF_OVFL_END]);
+                    p.result[NOCREADBENCH_R_CMDBUF_OVFL_END],
+                    // The kernel's own word, not the host's flag: REFUSED is a
+                    // value the kernel can stamp and the host cannot ask for.
+                    got_mode == NOCREADBENCH_MODE_STATEFUL    ? "stateful"
+                    : got_mode == NOCREADBENCH_MODE_STATELESS ? "stateless"
+                                                              : "refused",
+                    probe, p.sig_src, p.sig_witness);
             fflush(out);
         }
     }
@@ -386,6 +543,35 @@ int main(int argc, char** argv) {
     // README's table; what is printed here is only the one reading that needs
     // no arithmetic at all.
     printf("nocreadbench: wrote %s (%zu failures)\n", out_path.c_str(), failures);
+
+    // --- the mode verdict, before anything else ----------------------------
+    // Everything downstream is a comparison between two issue loops, so "which
+    // loop ran" is prior to every other reading in the file. It is settled from
+    // the returned payload, per point, and a run that cannot settle it is not a
+    // result at whatever rate it printed.
+    size_t confirmed = 0, measured_points = 0;
+    for (const Point& p : plan) {
+        if (!p.measured) {
+            continue;
+        }
+        measured_points++;
+        if (p.mode_confirmed) {
+            confirmed++;
+        }
+    }
+    if (measured_points != 0 && confirmed == measured_points) {
+        printf("nocreadbench: MODE CONFIRMED -- all %zu measured point(s) ran the %s issue\n"
+               "  loop, read back from which tile answered a transaction issued with the read\n"
+               "  state pointed at the witness core. Not taken from the --stateful flag.\n",
+               confirmed, mode_name);
+    } else {
+        printf("  VERDICT: MODE NOT CONFIRMED -- %zu of %zu measured point(s) proved the %s\n"
+               "  loop from their own payload. Every rate in this file is unattributable:\n"
+               "  a stateful number produced by the stateless loop is exactly the wrong\n"
+               "  answer to the question this variant is asked.\n",
+               confirmed, measured_points, mode_name);
+    }
+
     if (sample != 0) {
         // Everything below is a DIFFERENCE against each point's own rest
         // sample. The previous revision took the maximum RAW counter value and
