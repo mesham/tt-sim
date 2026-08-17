@@ -1044,8 +1044,20 @@ def noc_cost_model(arch):
 # the same file's L1 rows, which cross the fabric and no DRAM, so the limit it
 # reads is at the endpoint. The WRITE direction is deliberately left unsourced:
 # its secant lands within 2.5 % of those same L1 rows, resolving no endpoint
-# limit, and charging it would deepen the one row already pinned in
+# limit, and charging it would deepen the one row then pinned in
 # ``KNOWN_OVER_CHARGED``. Hence the per-direction rates below.
+#
+# THE LATENCY BECAME PER-DIRECTION TOO ON 2026-08-17, on Blackhole only, and it
+# is what emptied that ``KNOWN_OVER_CHARGED`` set. The flat figure above is
+# derived from *read* rows on both arches -- ``dram_cycles`` and
+# ``l1_remote_read_cycles`` are both remote reads -- and was being charged to
+# writes as well, over-charging a Blackhole DRAM write by ~104 cycles against
+# tt-metal's own measurement of it. ``access_latency.write`` is that direction's
+# own subtraction on the same 740-entry campaign (22 cycles, flat over
+# 64 B..8 KiB), so ``service_cycles_for`` now answers by action exactly as
+# ``channel_bytes_per_cycle`` already did. Wormhole declines: the identical
+# subtraction on its rows returns no clean asymmetry and, if anything, a dearer
+# write, so there is nothing there to charge less.
 
 
 class DramCostModel:
@@ -1058,6 +1070,20 @@ class DramCostModel:
       source nothing for this arch. Both shipped arches source one (99
       Wormhole, 126 Blackhole); the ``None`` path is what a third arch, or the
       base entry's ``unknown``, would land on.
+
+      **It is a READ latency**, on both arches, and that is a property of the
+      derivation rather than a caveat added afterwards: each is the difference
+      of two of tt-metal's measured rows for a *remote read*, one to DRAM and
+      one to L1. Nothing about a write enters either subtraction.
+    * :attr:`service_cycles_write` -- the same for a WRITE, and the reason the
+      sentence above needed saying. Blackhole's table derives one (22 cycles,
+      the same DRAM-minus-L1 subtraction on the same vendor campaign in the
+      ONE_TO_ONE direction) because its rows separate the two directions
+      cleanly; Wormhole's do not, and its entry declines out loud. Where an
+      arch declines, this **is** :attr:`service_cycles`, so a write is charged
+      exactly what it was charged before rather than nothing.
+      :meth:`service_cycles_for` is the accessor, and
+      :attr:`service_split_by_action` says whether the two differ here at all.
     * :attr:`is_exact` -- False for both shipped entries, whose
       ``bound: at_least`` records that the derived figure is the DRAM-versus-L1
       *difference* and therefore a floor under the absolute device latency.
@@ -1097,6 +1123,32 @@ class DramCostModel:
         #: the same thing it means everywhere else in this module: charged at
         #: the low end, so a modelled cycle count is a floor.
         self.bound = None if cost is None else cost.bound
+        # The entry may carry a per-action override for the WRITE direction,
+        # with its own provenance, source and derivation -- it is a different
+        # subtraction on a different campaign, so it could not honestly hang
+        # off this entry's. Blackhole has one; Wormhole deliberately does not
+        # (both notes say so), and an arch without one falls back to the single
+        # figure, which is exactly what every arch did before.
+        write = entry.get("write") or {}
+        #: Provenance of the write figure, or ``None`` where there is none.
+        #: Separate from :attr:`provenance` because the two are sourced apart.
+        self.write_provenance = write.get("provenance")
+        write_raw = write if "cycles" in write else None
+        write_cost = CycleCost.parse(write_raw)
+        write_cycles = _sourced_cycles(write_raw, self.write_provenance)
+        #: The service time for a WRITE. Coalesced to :attr:`service_cycles`
+        #: where the table sources no separate figure, so every consumer can
+        #: read it unconditionally.
+        self.service_cycles_write = (
+            self.service_cycles if write_cycles is None else write_cycles
+        )
+        #: The bound on the write figure, or ``None``.
+        self.write_bound = None if write_cost is None else write_cost.bound
+        #: Whether this arch's table splits the endpoint's service time by
+        #: request action at all. False is not a gap in the model but a stated
+        #: refusal on the arch whose measured rows do not resolve the two
+        #: directions -- see the Wormhole entry's note.
+        self.service_split_by_action = write_cycles is not None
         #: Named so a report can say the gaps are gaps rather than imply they
         #: were modelled. Both are unquantified by every available source.
         self.bank_conflicts_modelled = False
@@ -1148,6 +1200,23 @@ class DramCostModel:
             self.channel_bytes_per_cycle_read is not None
             or self.channel_bytes_per_cycle_write is not None
         )
+
+    def service_cycles_for(self, is_write=False):
+        """The endpoint's flat service time for this direction, or ``None``.
+
+        The same shape as :meth:`channel_bytes_per_cycle` one line down, and
+        for the same reason: a DRAM endpoint answers a write when it accepts it
+        and a read when the array has been read, so where a table resolves the
+        two they are two numbers. Where it does not, both directions get the
+        one figure it does source -- not nothing, because the read figure is a
+        real measurement of *an* endpoint service and declining to charge it to
+        a write would under-model a term rather than decline an unsourced one.
+
+        ``is_write`` is false for an ATOMIC, which reads the array before it
+        modifies it; :meth:`~tt_sim.device.tiles.DRAMEndpointNUI._is_write`
+        makes the same call for the channel rate.
+        """
+        return self.service_cycles_write if is_write else self.service_cycles
 
     def channel_bytes_per_cycle(self, is_write=False):
         """The channel's rate for this direction, or ``None`` if unsourced."""

@@ -597,7 +597,11 @@ dram:
       derived figure -- 99 Wormhole, 126 Blackhole -- under
       ``arch_overrides.<arch>.dram.access_latency``. Both are the difference of
       two of tt-metal's measured end-to-end rows; see each entry for its own
-      arithmetic and its own cross-check.
+      arithmetic and its own cross-check. Both are also **read** figures, and
+      Blackhole additionally carries a ``write`` sub-entry (22 cycles) because
+      its measured rows separate the two directions cleanly and Wormhole's do
+      not. So "the DRAM access latency" is one number per arch on Wormhole and
+      two on Blackhole, and each entry says which it is.
 
       **Blackhole's used to be a gap and the record of why is kept here**,
       because it was closed by finding out that neither reason was about
@@ -1116,6 +1120,22 @@ arch_overrides:
           other, so they are not. The size term now lives in
           ``dram.channel_serialisation`` and this entry stays exactly what it
           was: a flat per-request device latency.
+
+          **NOT SPLIT BY ACTION, and Blackhole is.** 99 is charged to a read, a
+          write and an atomic alike here, and that is a decision rather than an
+          omission. Blackhole gained a separate DRAM *write* figure on
+          2026-08-17 (``arch_overrides.blackhole.dram.access_latency.write``,
+          22 cycles), derived by subtracting tm_noc_latencies' L1 row from its
+          DRAM_SHARDED row in the ONE_TO_ONE direction. Doing the identical
+          subtraction on Wormhole's rows gives write differences of
+          228 / 124 / 127 / 139 / 139 / 145 / 137 / 155 over 64 B..8 KiB,
+          against read differences of 104 / 104 / 104 / 112 / 104 / 112 / 128 /
+          152. That is not the same finding at all: no clean asymmetry, a
+          visible 64 B outlier, and a write that is if anything DEARER than a
+          read -- so there is no direction here to charge less, and inventing
+          one from Blackhole's rows would be laundering one part's measurement
+          into another's. This entry therefore stays one number for all three
+          request actions until Wormhole's own data says otherwise.
   blackhole:
     noc:
       flit_bits: 512
@@ -1215,23 +1235,103 @@ arch_overrides:
         note: >
           Everything the Wormhole entry's note says about what this is and is
           not applies unchanged: it is a difference charged as a latency, hence
-          ``bound: at_least``; it is a flat per-request service time paid on
-          every read, write and atomic arriving over the NoC; and it models no
-          bank conflicts, no refresh window, no endpoint occupancy and no size
-          dependence.
+          ``bound: at_least``; and it models no bank conflicts, no refresh
+          window, no endpoint occupancy and no size dependence.
 
-          One difference worth naming rather than inheriting. Blackhole's
+          One difference worth naming rather than inheriting, and since
+          2026-08-17 it is modelled rather than only recorded. Blackhole's
           measured rows say a *write* to DRAM costs far less over L1 than a
           read does: in tm_noc_latencies at one transaction the DRAM-minus-L1
-          difference is ~20-30 cycles for ONE_TO_ONE against ~108-152 for
+          difference is ~13-29 cycles for ONE_TO_ONE against ~88-155 for
           ONE_FROM_ONE. That asymmetry is physically unsurprising -- a write is
           answered when it is accepted, a read when the array has been read --
-          but this entry charges one number to all three request actions, so a
-          Blackhole DRAM write is over-charged relative to that measurement.
-          Wormhole's rows do not show the asymmetry cleanly enough to model it
-          (its DRAM-write row's 64 B column is a visible outlier), so splitting
-          the term by action would be a per-arch shape change resting on one
-          arch's data, and it is not done.
+          and this entry used to charge one number to all three request
+          actions, so a Blackhole DRAM write was over-charged by ~104 cycles
+          relative to that measurement. ``write`` below is that direction's own
+          figure, by the same subtraction on the same file; **126 is the READ
+          figure and is unchanged.** Wormhole's rows still do not show the
+          asymmetry cleanly enough to model it, so this stays a per-arch shape
+          change and both arches' notes say so.
+        write:
+          cycles: 22
+          bound: at_least
+          provenance: vendor_source_derived
+          source: tm_noc_latencies
+          derivation: >
+            The same DRAM-minus-L1 subtraction as the read figure above, in the
+            other direction. tm_noc_latencies, Blackhole, UNICAST ONE_TO_ONE (a
+            write), one transaction per barrier, one subordinate, different
+            axis, DRAM_SHARDED minus L1, over the eight sizes the DRAM sweep
+            actually issues (above 8 KiB the file is padded fill rather than
+            measurement -- see ``point_is_measured``):
+
+              bytes     64  128  256  512 1024 2048 4096 8192
+              DRAM     380  388  388  391  396  422  454  523
+              L1       358  359  360  369  375  403  432  510
+              -----------------------------------------------
+              diff      22   29   28   22   21   19   22   13
+
+            mean 22.0, median 22, flat across seven doublings -- so 22 cycles,
+            size-independent, which is what a flat per-request service time
+            looks like. One subtraction per column and one mean, on cycle
+            counts read straight off the vendor file; no modelled quantity and
+            no fitted coefficient enters it.
+
+            WHY THIS ENTRY CITES A DIFFERENT CAMPAIGN FROM THE READ FIGURE, and
+            why the two are still commensurable. tm_dm_common publishes one
+            DRAM row and it is a *read*, so there is no write figure to
+            subtract there; the write direction exists only in
+            tm_noc_latencies. The two campaigns are therefore checked against
+            each other in the direction they share: the same subtraction on the
+            same rows for ONE_FROM_ONE gives 108 / 88 / 128 / 127 / 152 / 124 /
+            139 / 155, mean 127.6, against the 126 the read figure ships from
+            tm_dm_common -- 1.3 %. And scaling that shipped read figure by this
+            campaign's own write-to-read ratio, 126 * 22.0 / 127.6 = 21.7,
+            returns the same 22 to within half a cycle. So the split does not
+            depend on which of the two campaigns is treated as the anchor.
+          note: >
+            BLACKHOLE ONLY, and the reason is in the data rather than in the
+            physics. A write is answered when the endpoint accepts it and a
+            read when the array has been read, so an asymmetry is expected on
+            both chips -- but Wormhole's rows do not show one that can be
+            modelled. The same subtraction there gives write differences of
+            228 / 124 / 127 / 139 / 139 / 145 / 137 / 155 against read
+            differences of 104 / 104 / 104 / 112 / 104 / 112 / 128 / 152: no
+            clean asymmetry, a visible 64 B outlier, and if anything a *dearer*
+            write. So Wormhole keeps one figure for all three request actions
+            and its own entry says so. A per-arch shape change resting on one
+            arch's data is acceptable only where it says so, and this is where.
+
+            What is charged, and to what. ``DramCostModel.service_cycles_for``
+            picks this figure for a WRITE and the read figure for a READ; an
+            ATOMIC takes the read figure, because it reads the array before it
+            modifies it. The channel term is untouched and was already per
+            direction (``channel_serialisation`` derives a Blackhole read rate
+            and declines a write one), so a Blackhole DRAM write is now charged
+            22 flat cycles and nothing else.
+
+            Same shape as the read figure and the same caveats: a difference
+            charged as a latency, hence ``bound: at_least``; no bank conflicts,
+            no refresh window, no device occupancy, no size dependence.
+
+            One thing this closes. While the read-derived 126 was charged to
+            writes as well, ``tt_sim/perf/noc_dataset_sweep_test.py`` pinned
+            that row as the assembled model's single ``KNOWN_OVER_CHARGED``
+            entry -- the one place the assembled model predicted a transfer
+            costing *more* than tt-metal measured it, by 37 to 52 cycles over
+            64 B..8 KiB. That set is now empty, every prediction on that row
+            having fallen by exactly 104, and the assertion that it stays empty
+            is still in place.
+
+            CORROBORATION, WHICH IS NOT PROVENANCE. A Blackhole p150 session
+            (``perfbench/card-sessions/2026-08-17-nocfixed/``: three arms, two
+            sizes, three repeats, all 18 runs passing every instrument gate)
+            measured the over-charge this removes at +97 cycles at 256 B and
+            +89 at 4096 B, against the 126 - 22 = 104 predicted here, and its
+            NoC-swap and peer-L1 arms showed the error following the *write*
+            rather than the NoC and vanishing when DRAM leaves the path
+            entirely. Not one number above is fitted to it, and nothing
+            measured by ``perfbench`` may enter this file as a source.
       bandwidth:
         provenance: unknown
         note: >

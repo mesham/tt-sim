@@ -260,13 +260,25 @@ def test_the_dataset_is_the_shape_this_module_documents():
     assert {key["noc_index"] for key, _ in entries} == {0}
 
 
-#: The one place the assembled model is known to over-charge, found by this
-#: sweep and pinned here so it cannot quietly spread. A Blackhole DRAM *write*
+#: Rows the assembled model is known to over-charge, found by this sweep and
+#: pinned here so a new one cannot appear quietly.
+#:
+#: **EMPTY since 2026-08-17, and the empty set is the result.** The single
+#: entry was ``("blackhole", "DRAM write diff-axis")``: a Blackhole DRAM write
 #: is answered when the endpoint accepts it, not when the array has been
-#: written, so the flat ``access_latency`` derived from the *read* figures is
-#: too large for it -- by 12 to 28 cycles. The entry's own note in
-#: ``unit_costs.yaml`` names the asymmetry; this is what it costs.
-KNOWN_OVER_CHARGED = {("blackhole", "DRAM write diff-axis")}
+#: written, so the flat ``dram.access_latency`` derived from the *read* rows
+#: was too large for it -- by 37 to 52 cycles on this sweep's eight measured
+#: sizes, net of the issuing-core path the harness now runs. (The figure this
+#: comment used to carry, "12 to 28", predates that harness change and was not
+#: re-measured with it; the residuals were -52 / -44 / -52 / -49 / -52 / -42 /
+#: -42 / -37 over 64 B..8 KiB immediately before the split landed.)
+#: ``unit_costs.yaml`` now derives that direction's own figure from the same
+#: vendor campaign (22 cycles against 126), so every prediction on that row
+#: falls by exactly 104 and its residual becomes +52 / +60 / +52 / +55 / +52 /
+#: +62 / +62 / +67. No other row on either arch moves by a cycle. The
+#: assertion below is deliberately left in place so a future over-charge is
+#: still somebody's decision rather than a drift.
+KNOWN_OVER_CHARGED = set()
 
 
 @_needs_dataset
@@ -276,9 +288,9 @@ def test_the_model_is_a_floor_everywhere_but_one_named_row(arch):
     measurement includes an issuing-core path the model does not charge for,
     so every residual should be positive; a negative one means the model
     over-charges, inventing back-pressure the hardware does not have, which is
-    the direction every bound in these tables is chosen to avoid. Exactly one
-    row does, it is named in :data:`KNOWN_OVER_CHARGED`, and a second appearing
-    is a change somebody has to make deliberately."""
+    the direction every bound in these tables is chosen to avoid. No row does
+    today -- :data:`KNOWN_OVER_CHARGED` is empty -- and one appearing is a
+    change somebody has to make deliberately."""
     entries, sizes = sweep.load_dataset(_dataset_path())
     with _cost_model_on():
         kept, _ = sweep.retained(entries, sweep.ARCH_IDS[arch])

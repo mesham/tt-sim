@@ -202,20 +202,31 @@ def test_derived_entries_show_their_working():
 
 def test_vendor_derived_entries_are_exactly_the_ones_we_expect():
     """``vendor_source_derived`` is arithmetic on vendor numbers — below a
-    published figure, above a guess. It exists for exactly three entries: the
-    same subtraction once per arch, and Blackhole's DRAM channel rate, which is
-    one division on two cycle counts from the same vendor's measured dataset.
-    Adding a fourth must be as deliberate as adding an ``estimated`` one, so
-    the list is here rather than inferred. Every one must also show its
-    working, which :func:`test_derived_entries_show_their_working` enforces.
+    published figure, above a guess. It exists for exactly four entries: the
+    same DRAM-minus-L1 subtraction once per arch, Blackhole's DRAM channel
+    rate, which is one division on two cycle counts from the same vendor's
+    measured dataset, and (since 2026-08-17) Blackhole's DRAM *write* service
+    time, which is the first of those subtractions run in the other direction
+    on the second of those datasets. Adding a fifth must be as deliberate as
+    adding an ``estimated`` one, so the list is here rather than inferred.
+    Every one must also show its working, which
+    :func:`test_derived_entries_show_their_working` enforces.
 
     Note what the rank does *not* ask for, because a roadmap bullet once read
     as though it did: a published *page*. Blackhole has no DRAM tile page and
-    two of these three are Blackhole DRAM entries. What it asks for is vendor
-    numbers and arithmetic written out."""
+    three of these four are Blackhole DRAM entries. What it asks for is vendor
+    numbers and arithmetic written out.
+
+    The fourth is nested inside the third's entry rather than beside it, and
+    that is deliberate: it is a different subtraction on a different campaign,
+    so it carries its own ``provenance``, ``source`` and ``derivation`` and is
+    walked, checked and counted here exactly like a top-level one. A write
+    figure hanging silently off the read figure's provenance is precisely what
+    this convention exists to prevent."""
     expected = {
         "arch_overrides.wormhole.dram.access_latency",
         "arch_overrides.blackhole.dram.access_latency",
+        "arch_overrides.blackhole.dram.access_latency.write",
         "arch_overrides.blackhole.dram.channel_serialisation",
     }
     found = set()
@@ -1062,6 +1073,13 @@ EXPECTED_CONSUMERS = {
     # ``estimated`` provenance they forbid, and ``energy_quarantine_test.py``
     # is the tripwire that keeps them out.
     "perfbench/energybench/aggregate_power.py",
+    # Prose only, and for the same reason as the entry above: nocevbench's
+    # arm check is standard-library only -- it runs on a card box with no
+    # ``tt_sim`` to import -- and names ``tt_sim.perf.noc_events`` solely to say
+    # which module consumes the traces it guards. It reads no table and charges
+    # nothing; it is here because the scan below is a text match on the package
+    # name.
+    "perfbench/nocevbench/check_arm.py",
     # Not a cost consumer at all: the profiler-readback guard borrows five
     # RV32I *encoders* from ``tt_sim.perf.noc_issue_loop`` to build the stand-in
     # firmware tail it loads onto BRISC. It reads no table and imports no cost;

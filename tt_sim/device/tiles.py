@@ -245,6 +245,18 @@ class DRAMEndpointNUI(NUI):
     occupancy, and the direction is read off the request's own action —
     an ATOMIC counting as a read, since it reads the array before modifying it.
 
+    And so is the **latency** term, since 2026-08-17 and on Blackhole only. The
+    figure above is derived from *read* rows on both arches (``dram_cycles``
+    minus ``l1_remote_read_cycles``, two remote reads), and charging it to a
+    write asserts that a write is answered when the array has been written,
+    which tt-metal's own campaign says it is not: the same DRAM-minus-L1
+    subtraction in the ONE_TO_ONE direction gives 22 cycles on Blackhole
+    against ~126 for a read. ``service_cycles_write`` is that figure, picked by
+    the same :meth:`_is_write` the rate terms use. Wormhole's rows do not
+    separate the two directions — its write differences are no smaller than its
+    read ones — so its table declines the split and both attributes hold the
+    same 99 there.
+
     Modelled by holding the *request* rather than delaying the response, which
     is both the more faithful ordering — the data really is not read until the
     device has got to it, so a write becomes visible late and its ACK later
@@ -276,10 +288,24 @@ class DRAMEndpointNUI(NUI):
     )
 
     def __init__(
-        self, *args, service_cycles=None, dram_cost=None, channels=None, **kwargs
+        self,
+        *args,
+        service_cycles=None,
+        service_cycles_write=None,
+        dram_cost=None,
+        channels=None,
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.service_cycles = service_cycles
+        #: The same, for a WRITE, because a DRAM endpoint answers a write when
+        #: it accepts it and a read when the array has been read. Coalesced to
+        #: :attr:`service_cycles` when the arch's table sources no separate
+        #: write figure (Wormhole), so :meth:`transmit` reads one attribute on
+        #: the model-off path and branches only once the model is on.
+        self.service_cycles_write = (
+            service_cycles if service_cycles_write is None else service_cycles_write
+        )
         #: The :class:`~tt_sim.perf.model.DramCostModel`, or ``None``. Only its
         #: channel rate is read here; the service time is unpacked above so the
         #: hot path is one attribute read rather than a method call.
@@ -363,6 +389,8 @@ class DRAMEndpointNUI(NUI):
     def transmit(self, data_request, delay=None):
         service = self.service_cycles
         if service is not None and data_request.action in self._SERVICED_ACTIONS:
+            if self._is_write(data_request):
+                service = self.service_cycles_write
             service += self._channel_excess(data_request)
             service += self._channel_wait(data_request, delay)
             delay = service if delay is None else delay + service
@@ -408,6 +436,10 @@ class DRAMTile(TTDeviceTile):
         # channel rates the endpoint charges on top, which are per direction.
         latency = dram_cost_model(profile.name)
         service_cycles = None if latency is None else latency.service_cycles
+        # Per direction on Blackhole, whose table derives a write figure of its
+        # own; the same number as the read on Wormhole, whose rows do not
+        # resolve the two directions and whose entry declines to invent one.
+        service_cycles_write = None if latency is None else latency.service_cycles_write
 
         # The channels themselves, shared by both NIUs because each is one
         # piece of hardware behind two NoC interfaces, and kept apart from each
@@ -434,6 +466,7 @@ class DRAMTile(TTDeviceTile):
             self.dram_memory,
             tile_kind="D",
             service_cycles=service_cycles,
+            service_cycles_write=service_cycles_write,
             dram_cost=latency,
             channels=self.channels,
             **profile.noc_kwargs,
@@ -445,6 +478,7 @@ class DRAMTile(TTDeviceTile):
             self.dram_memory,
             tile_kind="D",
             service_cycles=service_cycles,
+            service_cycles_write=service_cycles_write,
             dram_cost=latency,
             channels=self.channels,
             **profile.noc_kwargs,

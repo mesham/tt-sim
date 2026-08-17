@@ -41,6 +41,16 @@ a document. Its *write* direction is deliberately unsourced, so what this file
 pins there is a refusal that has to survive a deep merge: a Blackhole write
 must read ``None``, never Wormhole's 24.
 
+Since 2026-08-17 the **latency** is per direction too, on Blackhole only, and
+that is the change this file's newest two tests pin. 126 and 99 are both *read*
+figures by construction — each is one measured remote read minus another — so
+charging them to a write asserted that a write is answered when the array has
+been written. The same vendor campaign says a Blackhole write is answered ~104
+cycles sooner, and its own DRAM-minus-L1 subtraction (22 cycles, flat over
+64 B..8 KiB) is what that direction is charged now. Wormhole's rows resolve no
+such asymmetry, so it declines and both directions keep the one 99 — which
+makes the two tests a pair rather than one test and one restatement.
+
 Since 2026-08-09 that same rate is spent a *second* way and the endpoint has a
 queue: the channel carries one transfer at a time, so a request arriving while
 it is busy waits ``ceil(N / 24)`` for it. What is pinned here is that it needed
@@ -166,6 +176,76 @@ def test_blackhole_is_the_same_subtraction_on_the_same_table():
         assert model.bound == "at_least"
         for tile in Blackhole().dram_tiles:
             assert tile.noc0_router.service_cycles == 529 - 403
+
+
+def test_the_blackhole_service_time_is_per_action_and_wormholes_is_not():
+    """The 2026-08-17 split, pinned as the arithmetic it is on both arches.
+
+    126 is a *read* figure — ``dram_cycles - l1_remote_read_cycles``, two
+    remote reads — so charging it to a write asserts that a write is answered
+    when the array has been written. tt-metal's ``tm_noc_latencies`` says it is
+    not: the same DRAM-minus-L1 subtraction in the ONE_TO_ONE direction is
+    22 / 29 / 28 / 22 / 21 / 19 / 22 / 13 over 64 B..8 KiB on Blackhole, mean
+    22.0, so a Blackhole DRAM write is charged 22 and a read is still charged
+    126.
+
+    Wormhole is the control and its answer is a refusal: the identical
+    subtraction on its rows returns no clean asymmetry and if anything a
+    *dearer* write, so its entry declines the split and both directions read
+    the same 99. That the refusal survives the deep merge is the same property
+    the channel-rate test below pins — a Blackhole figure must not become a
+    Wormhole one by being present in the tree."""
+    with _env("1"):
+        blackhole = dram_cost_model("blackhole")
+        wormhole = dram_cost_model("wormhole")
+    assert blackhole.service_cycles == 529 - 403
+    assert blackhole.service_cycles_write == 22
+    assert blackhole.service_cycles_for(is_write=True) == 22
+    assert blackhole.service_cycles_for() == 126
+    assert blackhole.service_split_by_action is True
+    # Its own provenance and its own bound, because it is its own subtraction
+    # on its own campaign rather than a qualifier on the read figure.
+    assert blackhole.write_provenance == "vendor_source_derived"
+    assert blackhole.write_bound == "at_least"
+
+    assert wormhole.service_cycles == 358 - 259
+    assert wormhole.service_cycles_write == 99
+    assert wormhole.service_cycles_for(is_write=True) == 99
+    assert wormhole.service_split_by_action is False
+    assert wormhole.write_provenance is None
+
+
+def test_a_blackhole_dram_write_waits_the_write_service_and_a_read_the_read_one():
+    """The consumer end of the same split, on a real device: the endpoint holds
+    a write for 22 cycles and a read for 126, and the difference is exactly the
+    104 cycles the two table entries differ by. Wormhole's endpoint holds both
+    for the same 99, so the arch that declines the split is charged as it was
+    before it existed."""
+    expected = {"blackhole": (126, 22), "wormhole": (99, 99)}
+    actions = NUI.NoCDataRequest.DataRequestAction
+    for arch, device_class in (("blackhole", Blackhole), ("wormhole", Wormhole)):
+        read, write = expected[arch]
+        with _env("1"):
+            for tile in device_class().dram_tiles:
+                for nui in (tile.noc0_router, tile.noc1_router):
+                    assert nui.service_cycles == read
+                    assert nui.service_cycles_write == write
+        for action, service in (
+            (actions.READ, read),
+            (actions.WRITE, write),
+            # An ATOMIC reads the array before it modifies it, so it takes the
+            # read figure — the same call ``_is_write`` makes for the rates.
+            (actions.ATOMIC, read),
+        ):
+            # A device of its own per action: the channel is a queue since
+            # 2026-08-09, so three requests through one endpoint would measure
+            # the second and third waiting for the first rather than their own
+            # service times.
+            with _env("1"):
+                nui = device_class().dram_tiles[0].noc0_router
+            request = NUI.NoCDataRequest(None, action, 4, nui.id_pair, 0, b"\0\0\0\0")
+            nui.transmit(request, delay=None)
+            assert sorted(nui.delayed_arrivals) == [service], (arch, action)
 
 
 def test_the_channel_rate_is_the_published_bandwidth_at_the_published_clock():
