@@ -95,15 +95,6 @@ case "$ARCH" in
   wormhole)  SELF_COORD="1-1" ;;
   *) echo "unknown arch: $ARCH" >&2; exit 2 ;;
 esac
-# Wormhole's translated workers live at logical+18 on both axes, off the 10x12
-# physical grid entirely; Blackhole's translated Tensix coord IS its NOC 0
-# coord, so only Wormhole moves. Measured 2026-08-17: without this, arm C
-# pre-built the physical (2,2) while the device addressed the translated
-# (19,19), so the arm ran against a different core at a different distance and
-# the post-run check refused it -- correctly, but only after the run.
-if [ "$TRANSLATED" = 1 ] && [ "$ARCH" = wormhole ]; then
-  SELF_COORD="18-18"
-fi
 
 # Arm C addresses a second core's L1, so that core has to exist in the
 # simulator. LazyTensixPool would materialise it on demand, but naming it up
@@ -116,15 +107,9 @@ if [ "$ARM" = "C" ]; then
 import os, sys
 arch, peer = os.environ["ARCH"], os.environ["PEER"]
 lx, ly = (int(v) for v in peer.split(","))
-translated = os.environ.get("TRANSLATED") == "1"
 if arch == "blackhole":
     xs = list(range(1, 8)) + list(range(10, 17))
     ys = list(range(2, 12))
-elif translated:
-    # Wormhole translated: logical + 18 on both axes, a dense band with no
-    # harvesting gaps -- which is the whole reason the space is unambiguous.
-    xs = [18 + i for i in range(8)]
-    ys = [18 + i for i in range(10)]
 else:
     xs = [1, 2, 3, 4, 6, 7, 8, 9]
     ys = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11]
@@ -211,8 +196,19 @@ for bytes in $BYTES; do
   fi
   if [ -n "$PEER_COORD" ]; then
     reported=$(sed -n 's/.*peer_noc=\([0-9]*\),\([0-9]*\).*/\1-\2/p' "$OUT/$bytes.out" | head -1)
-    if [ "$reported" != "$PEER_COORD" ]; then
-      echo "   FAIL the device put the peer at $reported, but TT_SIM_TENSIX_COORDS"
+    # TT_SIM_TENSIX_COORDS names TILES, which are keyed by PHYSICAL coord --
+    # the SoC descriptor's own space, and the server rejects anything else.
+    # `peer_noc` is the coordinate a KERNEL addresses, which translation moves:
+    # on Wormhole a logical (lx,ly) becomes (lx+18, ly+18), confirmed by the
+    # card reporting self_noc=18,18 / peer_noc=19,19 on 2026-08-17. So the two
+    # are in different spaces whenever translation is on, and comparing them
+    # raw is what this expectation exists to avoid.
+    EXPECT_PEER="$PEER_COORD"
+    if [ "$TRANSLATED" = 1 ] && [ "$ARCH" = wormhole ]; then
+      EXPECT_PEER=$(echo "$PEER" | awk -F, '{printf "%d-%d", $1+18, $2+18}')
+    fi
+    if [ "$reported" != "$EXPECT_PEER" ]; then
+      echo "   FAIL the device put the peer at $reported, but expected $EXPECT_PEER"
       echo "        pre-built $PEER_COORD. The logical->physical map in this script"
       echo "        is wrong for $ARCH, so the arm ran against a different core."
       status=1

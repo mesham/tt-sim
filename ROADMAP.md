@@ -269,6 +269,17 @@ is left is the credibility layer.
    translated) and Blackhole drops them (its translated coords *are*
    physical coords, so one worker's mirror is another's translated
    key).
+   **Silicon has now had its say, 2026-08-17.** The port was validated
+   only against tt-sim's own invariants and a reading of tt-metal's
+   source; a Wormhole card session closed that. Its arm-C destination
+   is `(2, 2)`, matching the *translated* simulator, where the
+   untranslated one says `(7, 9)` -- the grid mirror; and the card
+   reports `self_noc=18,18` / `peer_noc=19,19` for itself, so
+   tt-metal's plumbing on a real part agrees with the descriptor
+   tt-sim was handed. Wormhole is the arch where this matters, because
+   untranslated it still shadows 56 of 80 workers and its translated
+   coord is *not* its physical one, so every mapping is exercised
+   rather than being the identity.
    **The method lesson, which is the transferable part**: every one of
    these was found by an instrument, not by reading. The static
    directory probe predicted the runtime failure set exactly before any
@@ -385,13 +396,61 @@ is left is the credibility layer.
    **Still unverified against silicon, so the bottleneck report's
    79.8 % NoC split on nekbone remains unverified** — this leg is what
    would retire it, and it needs one card session.
-3. **A Wormhole card session.** Not code — a hardware booking, so it
-   is lead time rather than effort and should be requested early. It
-   now gates **five** items: the committed DRAM sustained-rate
-   prediction (Wormhole-only), the store-coalescing and multiply
-   pairs, the `nocreadbench` half, the NoC-contention row (currently
-   prediction with nothing to check it against), and any two-arch
-   claim for rung 4.
+3. **Wormhole access — FOUR OF FIVE GATED ITEMS RETIRED, 2026-08-17.**
+   It was a booking; it became standing access, which changed the shape
+   from "one irreplaceable session" to a programme: a de-risking pass
+   first, then measurement. `docs/plans/wormhole-session.md` carries the
+   runsheet, and five sessions are banked under
+   `perfbench/card-sessions/2026-08-17-*`.
+   **Retired.** *The DRAM sustained rate*: agrees with
+   `wh_dram#performance` to **-0.2 / -1.5 / -0.9 %** at 1 / 12 / 48
+   readers, with its own control moving x5.86 across channels while the
+   same readers on one channel moved x0.995 — the endpoint shape
+   tt-sim's `DramChannels` term asserts. *The store-coalescing and
+   multiply pairs*: coalesce/spread **1.0010** on Wormhole against
+   Blackhole's **5.2x** — a real architectural difference, now measured
+   on both parts rather than inferred from one; divide lands at 33.03
+   cycles/instr, exactly `divide_general`'s documented `max`.
+   *The NoC-contention row*: **CONGESTION MEASURED**, saturating —
+   +0.01 cycles/link at 64 B and 512 B, then +20.1 / +78.6 / +158.0 at
+   2 / 8 / 16 KiB, with the first shared link costing ~500 cycles at
+   16 KiB and the second and third ~18 and ~0.5. *The `nocreadbench`
+   half*: see below, and it is the one that turned over.
+   **The 44-vs-25 disagreement was ours, not the part's.** The first
+   session measured a marginal **44.0 cycles/transaction** against
+   tt-metal's shipped 25.00 — flat to 0.25 % across a 32x range in
+   burst length and 1.0 % across hops — and it looked like the only
+   genuine model-versus-silicon disagreement the programme had found.
+   A second session with a **shorter issue loop** (the `set_state` /
+   `with_state` pair the vendor's own stateful rows use) settled it:
+   **45.03 -> 28.96, the loop bought 16.07**, landing inside the band
+   the dataset occupies. Verdict **H-LOOP**, registered before the run:
+   44 was this program's instruction stream, and Wormhole has no
+   per-read floor. Every arm proved which loop it ran *from the
+   returned payload* rather than from its flag, and the control
+   reproduced the earlier session to 2.3 % on all three intervals.
+   **What it left behind is sharper than what it settled**: tt-sim
+   predicts the *saving* to within 6.7 % (15.00 against 16.07) while
+   under-predicting both absolute rates by a near-identical **7.03 and
+   5.96 cycles** — a fixed per-transaction term missing from the
+   burst-rate model, bracketed by two independent measurements.
+   **Not retired, and the reason is worse than a missing session** —
+   see item 2. Rung 4's two-arch claim cannot be made, for two
+   independent reasons now rather than one.
+   **Two things the programme learned that no simulator could have
+   told us.** A **board reset belongs between sessions**: `mechbench`
+   failed all six runs with `mismatches=4052` immediately after a
+   congestion session and passed cleanly after `tt-smi -r 0` with a
+   byte-identical configuration. It corrupts *data*, not launches —
+   no abort, no diagnostic — so a session that skips it produces a
+   plausible result. And **four card runners had never touched
+   hardware**: all launch through `detail::LaunchProgram`, which needs
+   slow dispatch, while a card defaults to fast, so every one aborted
+   `rc=134` before doing any work. Both are invisible in simulation by
+   construction — tt-sim supports no other dispatch flow and has no
+   residual device state — which is exactly why the de-risking pass
+   went first.
+
 4. **Upstream example coverage — DONE 2026-08-13.**
    `driver/tests/upstream_sweep.py` runs 21 of tt-metal's own
    `programming_examples` on both arches with **no grid environment
