@@ -344,12 +344,47 @@ is left is the credibility layer.
    **BRISC only** — NCRISC and all three TRISCs were dropped. Not
    recaptured, because that moves every pinned constant in
    `stall_attribution_test.py`.
-   The other two legs still need: **RV-bound** — an instrument that
-   does not exist on Wormhole (§6); **NoC-bound** —
-   `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1`, a different artefact
-   needing its own parser, compared against `noc_flight_cycles` plus
-   queueing at ±25 %. That leg is what retires the bottleneck report's
-   unverified 79.8 % NoC split on nekbone.
+   **The NoC-bound leg is built, 2026-08-16** — `perfbench/nocevbench`
+   plus `tt_sim.perf.noc_events`, behind six refusing gates. Two of
+   three legs now exist; only **RV-bound** is left, and it has an
+   instrument that does not exist on Wormhole (§6).
+   **The pivotal question answered yes with no bridge work**:
+   `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` runs against tt-sim on
+   *both* arches today and writes `.logs/noc_trace_dev0_ID0.json`. NoC
+   events go into the *same* per-RISC L1 profiler vector as the zone
+   markers, so `Device.settle_profiler_flush` (§5) already covers them
+   — every readback hazard was pre-paid.
+   **What the artefact is forced a change to the leg's design, and it
+   is not a compromise.** Every transaction event is stamped **at
+   issue** (`kernel_profiler.hpp:178`; ~40 call sites in
+   `dataflow_api.h`, macro always ahead of the issue); the *only*
+   completion timestamp anywhere is a barrier's
+   `READ/WRITE_BARRIER_END`. So **there is no hardware per-packet
+   flight time** and this item's own phrasing — "agreement with
+   `noc_flight_cycles` plus queueing" — presupposed one. Two
+   corrections follow: the comparison is card-JSON against **the same
+   artefact** emitted by tt-sim, one parser, no translation step; and
+   `noc_flight_cycles` is reported *simulator-side only, as a
+   diagnostic, never a gate*. "Plus queueing" would also
+   **double-count** — `noc_flight_cycles` is `arrival - issue_cycle`
+   and `NUI.transmit` stamps `issue_cycle` *after* `send_to` has
+   charged flight + injection-port queueing + link wait +
+   serialisation.
+   The partition (`prologue`, `issue`, `read_wait`, `write_wait`,
+   `other_wait`, `local`) telescopes to the zone span by construction,
+   so `partition_closes` is really a monotonicity test on a 44-bit
+   wall clock read as two register accesses. The synthetic
+   compensating case is the leg's argument in one file: `E_total`
+   **4.78 %**, `E_int` **48.33 %**, ratio **10.12x**, and **every
+   per-class latency passes at 4.8 %** — an envelope check *and* a
+   latency check both pass it; only the decomposition sees it.
+   Stated limits, not deferred work: `read_wait`/`write_wait` and the
+   per-class latencies are **two readings of the same intervals**, not
+   independent detectors; addresses and VCs are unreachable in the
+   file-dumping path; no distance arm (needs a remote L1 target).
+   **Still unverified against silicon, so the bottleneck report's
+   79.8 % NoC split on nekbone remains unverified** — this leg is what
+   would retire it, and it needs one card session.
 3. **A Wormhole card session.** Not code — a hardware booking, so it
    is lead time rather than effort and should be requested early. It
    now gates **five** items: the committed DRAM sustained-rate
@@ -825,12 +860,21 @@ from the rest, so no cross-core span is admissible.
 3. **Mechanism attribution** from the perf counters above — the only
    check that has ever touched the five wired Tensix backends, which
    rungs 1 and 2 validate *not at all*.
-4. **The NoC split, checked directly.**
+4. **The NoC split, checked directly.** Built 2026-08-16 —
+   `perfbench/nocevbench` + `tt_sim.perf.noc_events`; see the v2.0
+   list's item 2 for what it established and what it corrected.
    `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` needs **no kernel change**
    and brackets every `noc_async_read_barrier` with timestamped
-   `READ_BARRIER_START/END`. Require agreement with `noc_flight_cycles`
-   plus queueing to ± 25 %. **This retires the bottleneck report's
-   unverified 79.8 % NoC split on nekbone.**
+   `READ_BARRIER_START/END`.
+   **Correction, from reading tt-metal rather than assuming: there is
+   no per-transaction completion timestamp**, so the "agreement with
+   `noc_flight_cycles` plus queueing" once written here has no
+   hardware counterpart and is *not* what the leg does. The comparison
+   is tt-sim's own `noc_trace_*.json` against a card's, decomposed by
+   mechanism at ± 25 %; `noc_flight_cycles` is a simulator-side
+   diagnostic only, and already contains the queueing. **The
+   bottleneck report's 79.8 % NoC split on nekbone stays unverified
+   until a card session runs this.**
 
 Thresholds: `E_total ≤ 10 %` is what nekbone already achieved, kept as
 the control against envelope regression. `E_int ≤ 25 %` is 2.5x that —

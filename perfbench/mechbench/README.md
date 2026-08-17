@@ -374,10 +374,12 @@ that is the only place the Src conditions are decomposed.
   nothing measured here may enter `unit_costs.yaml`;
 * anything about the other two rung-4 programs. **RV-bound and NoC-bound are out
   of scope here.** The RV-bound leg has no instrument on Wormhole at all (no
-  Zicsr, so no `mcycle`/`minstret`); the NoC-bound leg needs
-  `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` and a comparison against
-  `noc_flight_cycles` plus queueing, which is a different artefact and a
-  different parser.
+  Zicsr, so no `mcycle`/`minstret`). The NoC-bound leg is built — a different
+  artefact and a different parser, `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` read
+  by [`perfbench/nocevbench`](../nocevbench/README.md) — and it corrected this
+  file's own description of it: hardware records **no** per-transaction
+  completion time, so there is nothing to compare `noc_flight_cycles` against
+  directly.
 
 One more, worth stating because it is the most tempting mistake: a `PASS` here
 is a statement about **this program's** mechanisms on **this core**. It says

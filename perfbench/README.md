@@ -25,11 +25,15 @@ perfbench/
 ├── energybench/        the odd one out: its output is WATTS, not cycles. A
 │                       loop-to-steady-state harness for ranking-level energy
 │                       estimation, plus the card protocol and the analysis
-└── mechbench/          the other odd one out: it measures nothing new about
-                        hardware. It runs one Tensix-bound program on silicon
-                        and on tt-sim under the same tt-metal build and compares
-                        the two *decompositions* -- rung 4's mechanism-
-                        attribution leg
+├── mechbench/          the other odd one out: it measures nothing new about
+│                       hardware. It runs one Tensix-bound program on silicon
+│                       and on tt-sim under the same tt-metal build and compares
+│                       the two *decompositions* -- rung 4's mechanism-
+│                       attribution leg
+└── nocevbench/         mechbench's sibling: the same idea applied to data
+                        movement, via tt-metal's NoC event trace
+                        (TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1) -- rung 4's
+                        NoC-timing leg
 ```
 
 `mechbench` is not a cycle-cost probe either. It is a **comparison**: it consumes
@@ -40,6 +44,15 @@ result, not a bug. Nothing it measures may become a cost — the counter semanti
 come from a vendor tech report and RTL, which is `vendor_source`: fine for
 corroboration, disqualifying as provenance. See
 [`mechbench/README.md`](mechbench/README.md).
+
+`nocevbench` is the same shape for the NoC. Both sides emit the **identical
+artefact** — a tt-metal `noc_trace_dev*.json` — so one parser reads both and
+there is no translation step. It cuts a data-movement core's kernel zone into
+six buckets that telescope to the span, compares them at ± 25 %, and refuses
+rather than warns behind six gates. What it cannot do is state a per-packet
+flight time on hardware: every transaction event is stamped *at issue* and the
+only completion timestamp is a barrier's. See
+[`nocevbench/README.md`](nocevbench/README.md).
 
 `energybench` is not a cycle-cost probe and does not belong to the table below.
 It measures **steady-state repeated-kernel board power** against an in-session
