@@ -1,0 +1,14 @@
+PASS  instrn-elw-1       samples=59   span=4373     THREAD_STALLS_1=36
+PASS  instrn-mm-1        samples=59   span=3752     THREAD_STALLS_1=30
+
+Before sending this home, check by eye:
+  * every line above says PASS;
+  * the 1 repeats of an arm agree on span and on THREAD_STALLS_1.
+    They are separate runs of an identical program, so a big spread
+    means something else was on the card, and the session is suspect.
+  * elw and mm DISAGREE. They differ by one instruction and are supposed
+    to load opposite mechanisms; identical numbers mean one arm did not
+    build the way it was meant to.
+
+Then send the WHOLE directory, stdout logs included:
+  rsync -av /tmp/smoke-mech/ <home>:~/mechbench-session/

@@ -1,0 +1,100 @@
+2026-08-17 12:50:06.500 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:50:06.501 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:50:06.501 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:50:06.501 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:50:06.505 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:50:06.523 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:50:06.614 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:50:06.614 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:50:06.614 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:50:06.614 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:50:06.619 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:50:06.626 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:50:06.700 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:50:06.700 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:50:06.701 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:50:06.701 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:50:06.703 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:50:06.709 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:50:06.719 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:50:06.719 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:50:06.719 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:50:06.766 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+nocbench: arch=wormhole runs=47 data_addr=0x00166000 results_addr=0x00165F80 max_tx=16384 B
+  run 0 flow 0  (18,18)->(19,18)  64 x 4096 B  8675 cycles  rendezvous 12
+  run 1 flow 0  (18,18)->(20,18)  64 x 4096 B  8659 cycles  rendezvous 12
+  run 2 flow 0  (18,18)->(21,18)  64 x 4096 B  8670 cycles  rendezvous 12
+  run 3 flow 0  (18,18)->(22,18)  64 x 4096 B  8659 cycles  rendezvous 12
+  run 4 flow 0  (18,18)->(23,18)  64 x 4096 B  8653 cycles  rendezvous 12
+  run 5 flow 0  (18,18)->(24,18)  64 x 4096 B  8642 cycles  rendezvous 12
+  run 6 flow 0  (18,18)->(25,18)  64 x 4096 B  8645 cycles  rendezvous 12
+  run 7 flow 0  (18,18)->(18,19)  64 x 4096 B  8686 cycles  rendezvous 12
+  run 8 flow 0  (18,18)->(18,20)  64 x 4096 B  8691 cycles  rendezvous 13
+  run 9 flow 0  (18,18)->(18,21)  64 x 4096 B  8699 cycles  rendezvous 12
+  run 10 flow 0  (18,18)->(18,22)  64 x 4096 B  8684 cycles  rendezvous 12
+  run 11 flow 0  (18,18)->(18,23)  64 x 4096 B  8693 cycles  rendezvous 12
+  run 12 flow 0  (18,18)->(18,24)  64 x 4096 B  8674 cycles  rendezvous 12
+  run 13 flow 0  (18,18)->(18,25)  64 x 4096 B  8671 cycles  rendezvous 12
+  run 14 flow 0  (18,18)->(19,19)  64 x 4096 B  8773 cycles  rendezvous 12
+  run 15 flow 0  (18,18)->(20,20)  64 x 4096 B  8760 cycles  rendezvous 12
+  run 16 flow 0  (18,18)->(21,21)  64 x 4096 B  8749 cycles  rendezvous 13
+  run 17 flow 0  (18,18)->(22,22)  64 x 4096 B  8764 cycles  rendezvous 12
+  run 18 flow 0  (18,18)->(23,23)  64 x 4096 B  8740 cycles  rendezvous 12
+  run 19 flow 0  (18,18)->(24,24)  64 x 4096 B  8732 cycles  rendezvous 12
+  run 20 flow 0  (18,18)->(25,25)  64 x 4096 B  8754 cycles  rendezvous 13
+  run 21 flow 0  (18,18)->(19,19)  64 x 64 B  2991 cycles  rendezvous 12
+  run 22 flow 0  (18,18)->(19,19)  64 x 512 B  3007 cycles  rendezvous 12
+  run 23 flow 0  (18,18)->(19,19)  64 x 4096 B  8771 cycles  rendezvous 13
+  run 24 flow 0  (18,18)->(19,19)  64 x 16384 B  34006 cycles  rendezvous 12
+  run 25 flow 0  (19,25)->(18,18)  64 x 8192 B  17235 cycles  rendezvous 12
+  run 26 flow 0  (19,25)->(18,18)  64 x 8192 B  32491 cycles  rendezvous 11
+  run 26 flow 1  (20,24)->(18,18)  64 x 8192 B  33955 cycles  rendezvous 261368
+  run 27 flow 0  (19,18)->(22,19)  64 x 64 B  2746 cycles  rendezvous 11
+  run 27 flow 1  (23,18)->(18,20)  64 x 64 B  2746 cycles  rendezvous 261384
+  run 28 flow 0  (19,18)->(22,19)  64 x 64 B  2744 cycles  rendezvous 11
+  run 28 flow 1  (25,18)->(20,20)  64 x 64 B  2748 cycles  rendezvous 261547
+  run 29 flow 0  (19,18)->(22,19)  64 x 64 B  2752 cycles  rendezvous 12
+  run 29 flow 1  (21,18)->(24,20)  64 x 64 B  2747 cycles  rendezvous 260458
+  run 30 flow 0  (19,18)->(22,19)  64 x 64 B  2744 cycles  rendezvous 11
+  run 30 flow 1  (20,18)->(23,20)  64 x 64 B  2750 cycles  rendezvous 265607
+  run 31 flow 0  (19,18)->(22,19)  64 x 512 B  2756 cycles  rendezvous 11
+  run 31 flow 1  (23,18)->(18,20)  64 x 512 B  2758 cycles  rendezvous 260648
+  run 32 flow 0  (19,18)->(22,19)  64 x 512 B  2760 cycles  rendezvous 11
+  run 32 flow 1  (25,18)->(20,20)  64 x 512 B  2770 cycles  rendezvous 261277
+  run 33 flow 0  (19,18)->(22,19)  64 x 512 B  2760 cycles  rendezvous 11
+  run 33 flow 1  (21,18)->(24,20)  64 x 512 B  2771 cycles  rendezvous 261469
+  run 34 flow 0  (19,18)->(22,19)  64 x 512 B  2758 cycles  rendezvous 11
+  run 34 flow 1  (20,18)->(23,20)  64 x 512 B  2765 cycles  rendezvous 261645
+  run 35 flow 0  (19,18)->(22,19)  64 x 2048 B  4585 cycles  rendezvous 11
+  run 35 flow 1  (23,18)->(18,20)  64 x 2048 B  4595 cycles  rendezvous 261416
+  run 36 flow 0  (19,18)->(22,19)  64 x 2048 B  8672 cycles  rendezvous 12
+  run 36 flow 1  (25,18)->(20,20)  64 x 2048 B  8513 cycles  rendezvous 260119
+  run 37 flow 0  (19,18)->(22,19)  64 x 2048 B  8679 cycles  rendezvous 11
+  run 37 flow 1  (21,18)->(24,20)  64 x 2048 B  8739 cycles  rendezvous 262224
+  run 38 flow 0  (19,18)->(22,19)  64 x 2048 B  8698 cycles  rendezvous 11
+  run 38 flow 1  (20,18)->(23,20)  64 x 2048 B  8756 cycles  rendezvous 261834
+  run 39 flow 0  (19,18)->(22,19)  64 x 8192 B  17135 cycles  rendezvous 11
+  run 39 flow 1  (23,18)->(18,20)  64 x 8192 B  17136 cycles  rendezvous 266752
+  run 40 flow 0  (19,18)->(22,19)  64 x 8192 B  33272 cycles  rendezvous 11
+  run 40 flow 1  (25,18)->(20,20)  64 x 8192 B  32967 cycles  rendezvous 261150
+  run 41 flow 0  (19,18)->(22,19)  64 x 8192 B  33576 cycles  rendezvous 11
+  run 41 flow 1  (21,18)->(24,20)  64 x 8192 B  33826 cycles  rendezvous 259961
+  run 42 flow 0  (19,18)->(22,19)  64 x 8192 B  33568 cycles  rendezvous 11
+  run 42 flow 1  (20,18)->(23,20)  64 x 8192 B  33820 cycles  rendezvous 261083
+  run 43 flow 0  (19,18)->(22,19)  64 x 16384 B  33954 cycles  rendezvous 11
+  run 43 flow 1  (23,18)->(18,20)  64 x 16384 B  33880 cycles  rendezvous 261600
+  run 44 flow 0  (19,18)->(22,19)  64 x 16384 B  66169 cycles  rendezvous 12
+  run 44 flow 1  (25,18)->(20,20)  64 x 16384 B  65884 cycles  rendezvous 262267
+  run 45 flow 0  (19,18)->(22,19)  64 x 16384 B  67098 cycles  rendezvous 11
+  run 45 flow 1  (21,18)->(24,20)  64 x 16384 B  67353 cycles  rendezvous 261754
+  run 46 flow 0  (19,18)->(22,19)  64 x 16384 B  67115 cycles  rendezvous 11
+  run 46 flow 1  (20,18)->(23,20)  64 x 16384 B  67366 cycles  rendezvous 261716
+nocbench: wrote /home/nbrown23/tt_traces/card-session-wormhole-noc/noc-epoch.wormhole.csv (68 flows, 0 failures)
+nocbench: analyse with `python3 -m tt_sim.perf.noc_congestion_sweep --measured /home/nbrown23/tt_traces/card-session-wormhole-noc/noc-epoch.wormhole.csv`
+2026-08-17 12:50:06.839 | info     |    BuildKernels | JIT cache stats: 1/1 hits (100.0%) [1 cached, 67 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:50:06.839 | info     |    BuildKernels | JIT telemetry: 3 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:50:06.846 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:50:06.846 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:50:06.863 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:50:06.863 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:50:06.863 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

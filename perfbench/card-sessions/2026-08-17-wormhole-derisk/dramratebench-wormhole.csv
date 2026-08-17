@@ -1,0 +1,9 @@
+# dramratebench arch=wormhole magic=0x44524231 grid=8x8 clock_mhz=1000 banks=12
+# bytes_per_reader=65536 tx_bytes=4096 num_tx=16 repeats=1 samecore=absent-on-this-part
+# agg_bytes_per_cycle = num_readers * bytes_per_reader / max(t1-t0); each
+# reader differences its OWN clock, so a per-core clock epoch cancels
+arm,repeat,point,num_readers,num_tx,tx_bytes,bytes_per_reader,total_bytes,max_cycles,min_cycles,agg_bytes_per_cycle,agg_gb_per_s,per_reader_bytes_per_cycle,distinct_banks,distinct_dram_cores,tags_ok,max_barrier_spins,measured_readers
+onechan,0,0,1,16,4096,65536,65536,3404,3404,19.2526,19.253,19.2526,1,1,1,0,1
+fanchan,0,1,1,16,4096,65536,65536,3246,3246,20.1898,20.190,20.1898,1,1,1,0,1
+onechan,0,2,4,16,4096,65536,262144,13087,11862,20.0309,20.031,5.0077,1,1,4,26673,4
+fanchan,0,3,4,16,4096,65536,262144,3406,3255,76.9654,76.965,19.2413,4,4,4,30016,4

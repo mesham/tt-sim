@@ -1,0 +1,27 @@
+# riscvbench raw points -- see docs/plans/riscv-front-end-benchmark.md
+# arch=wormhole magic=0x7B10CF04 probe_mask=0x339 phases=r variants=t1 base_blocks=32 gset=0 group_reps=16 pad=16 stack_addr=0xFFB00798 scratch_addr=0x0016B3A0 div_dividend=0x12345678 div_divisor=3
+phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
+r,t1,0,loop_overhead,-,1,1,32,64,79
+r,t1,0,loop_overhead,-,1,1,64,64,141
+r,t1,0,loop_overhead,-,1,1,96,64,205
+r,t1,0,loop_overhead,-,1,1,128,64,269
+r,t1,3,rv_mul_indep,RV,1,1,32,64,4173
+r,t1,3,rv_mul_indep,RV,1,1,64,64,8327
+r,t1,3,rv_mul_indep,RV,1,1,96,64,12487
+r,t1,3,rv_mul_indep,RV,1,1,128,64,16647
+r,t1,4,rv_mul_dep,RV,1,1,32,64,4180
+r,t1,4,rv_mul_dep,RV,1,1,64,64,8347
+r,t1,4,rv_mul_dep,RV,1,1,96,64,12507
+r,t1,4,rv_mul_dep,RV,1,1,128,64,16667
+r,t1,5,rv_div,RV,1,1,32,64,67655
+r,t1,5,rv_div,RV,1,1,64,64,135305
+r,t1,5,rv_div,RV,1,1,96,64,202953
+r,t1,5,rv_div,RV,1,1,128,64,270601
+r,t1,8,rv_store_spread,RV_LSU,1,1,32,64,10651
+r,t1,8,rv_store_spread,RV_LSU,1,1,64,64,21281
+r,t1,8,rv_store_spread,RV_LSU,1,1,96,64,31931
+r,t1,8,rv_store_spread,RV_LSU,1,1,128,64,42582
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,32,64,10653
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,64,64,21296
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,96,64,31951
+r,t1,9,rv_store_coalesce,RV_LSU,1,1,128,64,42616

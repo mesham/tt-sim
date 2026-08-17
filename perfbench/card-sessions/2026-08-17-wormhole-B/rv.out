@@ -1,0 +1,876 @@
+2026-08-17 12:34:14.919 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:14.919 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:14.919 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:14.919 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:14.924 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:14.941 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:15.027 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:15.028 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:15.028 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:15.028 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:15.032 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:15.040 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:15.106 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:15.106 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:15.107 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:15.107 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:15.110 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:15.118 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:15.121 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:15.124 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:15.127 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:15.173 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase r [t1]: done (1 issuing thread), 48 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase r [t2]: done (2 issuing threads), 144 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase r [t3]: done (3 issuing threads), 288 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase t [t1]: done (1 issuing thread), 324 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase t [t2]: done (2 issuing threads), 396 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase t [t3]: done (3 issuing threads), 504 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase c [t1]: done (1 issuing thread), 536 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase c [t2]: done (2 issuing threads), 600 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase c [t3]: done (3 issuing threads), 696 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase q [t1]: done (1 issuing thread), 761 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase q [t2]: done (2 issuing threads), 891 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase q [t3]: done (3 issuing threads), 1086 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase f [t1]: done (1 issuing thread), 1114 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase f [t2]: done (2 issuing threads), 1170 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase f [t3]: done (3 issuing threads), 1254 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase s [t1]: done (1 issuing thread), 1306 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase s [t2]: done (2 issuing threads), 1394 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase s [t3]: done (3 issuing threads), 1518 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase g [t1]: done (1 issuing thread), 1530 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase g [t2]: done (2 issuing threads), 1554 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+phase g [t3]: done (3 issuing threads), 1590 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB007A8 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      r   t1      -        1            1.98       0.000   0.9999
+rv_addi_indep      r   t1      RV       1           65.73       0.996   1.0000
+rv_addi_dep        r   t1      RV       1           65.78       0.997   1.0000
+rv_mul_indep       r   t1      RV       1          129.94       1.999   1.0000
+rv_mul_dep         r   t1      RV       1          130.07       2.001   1.0000
+rv_div             r   t1      RV       1         2114.02      33.001   1.0000
+rv_load_chase      r   t1      RV_LSU   1          513.45       7.992   1.0000
+rv_load_indep      r   t1      RV_LSU   1          112.00       1.719   1.0000
+rv_store_spread    r   t1      RV_LSU   1          332.60       5.166   1.0000
+rv_store_coalesce  r   t1      RV_LSU   1          332.86       5.170   1.0000
+rv_load_stack      r   t1      RV_LSU   1          128.94       1.984   1.0000
+rv_store_stack     r   t1      RV_LSU   1           65.78       0.997   1.0000
+loop_overhead      r   t2      -        0            2.00       0.000   1.0000
+rv_addi_indep      r   t2      RV       0           65.88       0.998   1.0000
+rv_addi_dep        r   t2      RV       0           65.84       0.998   1.0000
+rv_mul_indep       r   t2      RV       0          129.96       1.999   1.0000
+rv_mul_dep         r   t2      RV       0          129.98       2.000   1.0000
+rv_div             r   t2      RV       0         2114.02      33.000   1.0000
+rv_load_chase      r   t2      RV_LSU   0          520.23       8.097   1.0000
+rv_load_indep      r   t2      RV_LSU   0          121.44       1.866   1.0000
+rv_store_spread    r   t2      RV_LSU   0          345.42       5.366   1.0000
+rv_store_coalesce  r   t2      RV_LSU   0          640.46       9.976   1.0000
+rv_load_stack      r   t2      RV_LSU   0          128.99       1.984   1.0000
+rv_store_stack     r   t2      RV_LSU   0           65.88       0.998   1.0000
+loop_overhead      r   t2      -        1            2.00       0.000   1.0000
+rv_addi_indep      r   t2      RV       1           65.73       0.996   1.0000
+rv_addi_dep        r   t2      RV       1           65.82       0.997   1.0000
+rv_mul_indep       r   t2      RV       1          129.94       1.999   1.0000
+rv_mul_dep         r   t2      RV       1          130.07       2.001   1.0000
+rv_div             r   t2      RV       1         2114.02      33.000   1.0000
+rv_load_chase      r   t2      RV_LSU   1          514.39       8.006   1.0000
+rv_load_indep      r   t2      RV_LSU   1          116.84       1.794   1.0000
+rv_store_spread    r   t2      RV_LSU   1          345.08       5.361   1.0000
+rv_store_coalesce  r   t2      RV_LSU   1          640.59       9.978   1.0000
+rv_load_stack      r   t2      RV_LSU   1          128.94       1.983   1.0000
+rv_store_stack     r   t2      RV_LSU   1           65.77       0.996   1.0000
+loop_overhead      r   t3      -        0            2.00       0.000   1.0000
+rv_addi_indep      r   t3      RV       0           65.88       0.998   1.0000
+rv_addi_dep        r   t3      RV       0           65.86       0.998   1.0000
+rv_mul_indep       r   t3      RV       0          129.96       1.999   1.0000
+rv_mul_dep         r   t3      RV       0          129.98       2.000   1.0000
+rv_div             r   t3      RV       0         2114.02      33.000   1.0000
+rv_load_chase      r   t3      RV_LSU   0          519.65       8.088   1.0000
+rv_load_indep      r   t3      RV_LSU   0          122.63       1.885   1.0000
+rv_store_spread    r   t3      RV_LSU   0          441.43       6.866   0.9998
+rv_store_coalesce  r   t3      RV_LSU   0          640.64       9.979   1.0000
+rv_load_stack      r   t3      RV_LSU   0          128.99       1.984   1.0000
+rv_store_stack     r   t3      RV_LSU   0           65.88       0.998   1.0000
+loop_overhead      r   t3      -        1            2.00       0.000   1.0000
+rv_addi_indep      r   t3      RV       1           65.73       0.996   1.0000
+rv_addi_dep        r   t3      RV       1           65.82       0.997   1.0000
+rv_mul_indep       r   t3      RV       1          129.94       1.999   1.0000
+rv_mul_dep         r   t3      RV       1          130.04       2.001   1.0000
+rv_div             r   t3      RV       1         2114.02      33.000   1.0000
+rv_load_chase      r   t3      RV_LSU   1          512.17       7.971   1.0000
+rv_load_indep      r   t3      RV_LSU   1          133.05       2.048   1.0000
+rv_store_spread    r   t3      RV_LSU   1          701.82      10.935   1.0000
+rv_store_coalesce  r   t3      RV_LSU   1          994.57      15.509   1.0000
+rv_load_stack      r   t3      RV_LSU   1          128.94       1.983   1.0000
+rv_store_stack     r   t3      RV_LSU   1           65.77       0.996   1.0000
+loop_overhead      r   t3      -        2            2.00       0.000   1.0000
+rv_addi_indep      r   t3      RV       2           65.89       0.998   1.0000
+rv_addi_dep        r   t3      RV       2           65.87       0.998   1.0000
+rv_mul_indep       r   t3      RV       2          129.98       2.000   1.0000
+rv_mul_dep         r   t3      RV       2          129.94       1.999   1.0000
+rv_div             r   t3      RV       2         2114.00      33.000   1.0000
+rv_load_chase      r   t3      RV_LSU   2          512.18       7.972   1.0000
+rv_load_indep      r   t3      RV_LSU   2          134.43       2.069   0.9999
+rv_store_spread    r   t3      RV_LSU   2          701.40      10.928   1.0000
+rv_store_coalesce  r   t3      RV_LSU   2          992.83      15.482   1.0000
+rv_load_stack      r   t3      RV_LSU   2          128.94       1.983   1.0000
+rv_store_stack     r   t3      RV_LSU   2           65.86       0.998   1.0000
+loop_overhead      t   t1      -        1            1.99       0.000   1.0000
+tt_nop             t   t1      NONE     1           65.78       0.997   1.0000
+tt_sfpnop          t   t1      SFPU     1           65.69       0.995   1.0000
+tt_setdmareg       t   t1      THCON    1           65.72       0.996   1.0000
+tt_adddmareg       t   t1      THCON    1          192.10       2.970   1.0000
+tt_pad             t   t1      TTINSN   1          362.59      22.538   1.0000
+tt_fuse2           t   t1      TTINSN   1          406.59      25.287   1.0000
+tt_fuse4           t   t1      TTINSN   1          452.51      28.157   1.0000
+tt_spread4         t   t1      TTINSN   1          455.56      28.348   1.0000
+loop_overhead      t   t2      -        0            1.99       0.000   1.0000
+tt_nop             t   t2      NONE     0           65.89       0.998   1.0000
+tt_sfpnop          t   t2      SFPU     0          128.02       1.969   1.0000
+tt_setdmareg       t   t2      THCON    0          127.97       1.968   1.0000
+tt_adddmareg       t   t2      THCON    0          384.96       5.984   1.0000
+tt_pad             t   t2      TTINSN   0          257.66      15.979   1.0000
+tt_fuse2           t   t2      TTINSN   0          289.60      17.975   1.0000
+tt_fuse4           t   t2      TTINSN   0          321.57      19.974   1.0000
+tt_spread4         t   t2      TTINSN   0          321.46      19.967   1.0000
+loop_overhead      t   t2      -        1            1.99       0.000   1.0000
+tt_nop             t   t2      NONE     1           65.71       0.996   1.0000
+tt_sfpnop          t   t2      SFPU     1          127.97       1.968   1.0000
+tt_setdmareg       t   t2      THCON    1          127.96       1.968   1.0000
+tt_adddmareg       t   t2      THCON    1          384.94       5.984   1.0000
+tt_pad             t   t2      TTINSN   1          362.50      22.532   1.0000
+tt_fuse2           t   t2      TTINSN   1          406.98      25.312   1.0000
+tt_fuse4           t   t2      TTINSN   1          451.52      28.096   1.0000
+tt_spread4         t   t2      TTINSN   1          455.43      28.340   1.0000
+loop_overhead      t   t3      -        0            1.99       0.000   1.0000
+tt_nop             t   t3      NONE     0           65.86       0.998   1.0000
+tt_sfpnop          t   t3      SFPU     0          192.07       2.970   1.0000
+tt_setdmareg       t   t3      THCON    0          192.08       2.970   1.0000
+tt_adddmareg       t   t3      THCON    0          577.47       8.992   1.0000
+tt_pad             t   t3      TTINSN   0          257.66      15.979   1.0000
+tt_fuse2           t   t3      TTINSN   0          289.61      17.976   1.0000
+tt_fuse4           t   t3      TTINSN   0          321.53      19.971   1.0000
+tt_spread4         t   t3      TTINSN   0          321.50      19.969   1.0000
+loop_overhead      t   t3      -        1            1.99       0.000   1.0000
+tt_nop             t   t3      NONE     1           65.71       0.996   1.0000
+tt_sfpnop          t   t3      SFPU     1          191.99       2.969   1.0000
+tt_setdmareg       t   t3      THCON    1          191.97       2.968   1.0000
+tt_adddmareg       t   t3      THCON    1          577.66       8.995   1.0000
+tt_pad             t   t3      TTINSN   1          359.72      22.358   1.0000
+tt_fuse2           t   t3      TTINSN   1          404.33      25.146   1.0000
+tt_fuse4           t   t3      TTINSN   1          449.13      27.946   1.0000
+tt_spread4         t   t3      TTINSN   1          451.36      28.085   1.0000
+loop_overhead      t   t3      -        2            2.00       0.000   1.0000
+tt_nop             t   t3      NONE     2           65.86       0.998   1.0000
+tt_sfpnop          t   t3      SFPU     2          192.00       2.969   1.0000
+tt_setdmareg       t   t3      THCON    2          191.95       2.968   1.0000
+tt_adddmareg       t   t3      THCON    2          577.46       8.992   1.0000
+tt_pad             t   t3      TTINSN   2          257.72      15.983   1.0000
+tt_fuse2           t   t3      TTINSN   2          289.60      17.975   1.0000
+tt_fuse4           t   t3      TTINSN   2          321.57      19.973   1.0000
+tt_spread4         t   t3      TTINSN   2          321.61      19.976   1.0000
+loop_overhead      c   t1      -        1            1.98       0.000   0.9999
+c_ctrl_xor         c   t1      RV_BR    1           65.83       0.998   1.0000
+c_nt               c   t1      RV_BR    1           67.72       1.027   1.0000
+c_t                c   t1      RV_BR    1          195.67       3.026   1.0000
+c_xor_nt           c   t1      RV_BR    1          155.52       2.399   1.0000
+c_xor_t            c   t1      RV_BR    1          276.82       4.294   1.0000
+c_xor_alt          c   t1      RV_BR    1          214.06       3.314   1.0000
+c_jal              c   t1      RV_BR    1          195.65       3.026   1.0000
+loop_overhead      c   t2      -        0            2.00       0.000   1.0000
+c_ctrl_xor         c   t2      RV_BR    0           65.90       0.998   1.0000
+c_nt               c   t2      RV_BR    0           67.85       1.029   1.0000
+c_t                c   t2      RV_BR    0          195.56       3.024   1.0000
+c_xor_nt           c   t2      RV_BR    0          131.76       2.027   1.0000
+c_xor_t            c   t2      RV_BR    0          259.31       4.020   1.0000
+c_xor_alt          c   t2      RV_BR    0          195.29       3.020   1.0000
+c_jal              c   t2      RV_BR    0          195.51       3.024   1.0000
+loop_overhead      c   t2      -        1            2.00       0.000   1.0000
+c_ctrl_xor         c   t2      RV_BR    1           65.77       0.996   1.0000
+c_nt               c   t2      RV_BR    1           67.68       1.026   1.0000
+c_t                c   t2      RV_BR    1          195.72       3.027   1.0000
+c_xor_nt           c   t2      RV_BR    1          148.25       2.285   1.0000
+c_xor_t            c   t2      RV_BR    1          276.70       4.292   1.0000
+c_xor_alt          c   t2      RV_BR    1          214.11       3.314   1.0000
+c_jal              c   t2      RV_BR    1          195.65       3.026   1.0000
+loop_overhead      c   t3      -        0            2.00       0.000   1.0000
+c_ctrl_xor         c   t3      RV_BR    0           65.90       0.998   1.0000
+c_nt               c   t3      RV_BR    0           67.84       1.029   1.0000
+c_t                c   t3      RV_BR    0          195.55       3.024   1.0000
+c_xor_nt           c   t3      RV_BR    0          131.74       2.027   1.0000
+c_xor_t            c   t3      RV_BR    0          259.29       4.020   1.0000
+c_xor_alt          c   t3      RV_BR    0          195.31       3.020   1.0000
+c_jal              c   t3      RV_BR    0          195.56       3.024   1.0000
+loop_overhead      c   t3      -        1            2.00       0.000   1.0000
+c_ctrl_xor         c   t3      RV_BR    1           65.78       0.996   1.0000
+c_nt               c   t3      RV_BR    1           67.72       1.027   1.0000
+c_t                c   t3      RV_BR    1          195.72       3.027   1.0000
+c_xor_nt           c   t3      RV_BR    1          153.56       2.368   1.0000
+c_xor_t            c   t3      RV_BR    1          276.65       4.291   1.0000
+c_xor_alt          c   t3      RV_BR    1          213.82       3.310   1.0000
+c_jal              c   t3      RV_BR    1          195.65       3.026   1.0000
+loop_overhead      c   t3      -        2            2.00       0.000   1.0000
+c_ctrl_xor         c   t3      RV_BR    2           65.92       0.999   1.0000
+c_nt               c   t3      RV_BR    2           67.86       1.029   1.0000
+c_t                c   t3      RV_BR    2          195.62       3.025   1.0000
+c_xor_nt           c   t3      RV_BR    2          131.80       2.028   1.0000
+c_xor_t            c   t3      RV_BR    2          259.30       4.020   1.0000
+c_xor_alt          c   t3      RV_BR    2          194.95       3.015   1.0000
+c_jal              c   t3      RV_BR    2          195.56       3.024   1.0000
+loop_overhead      f   t1      -        1            1.99       0.000   1.0000
+f_64               f   t1      RV_FETCH 1           65.73       0.996   1.0000
+f_128              f   t1      RV_FETCH 1          131.26       1.010   1.0000
+f_256              f   t1      RV_FETCH 1          366.01       1.422   1.0000
+f_512              f   t1      RV_FETCH 1          721.12       1.405   1.0000
+f_1024             f   t1      RV_FETCH 1         1440.22       1.405   1.0000
+f_2048             f   t1      RV_FETCH 1         2868.98       1.400   1.0000
+loop_overhead      f   t2      -        0            2.00       0.000   1.0000
+f_64               f   t2      RV_FETCH 0           65.90       0.998   1.0000
+f_128              f   t2      RV_FETCH 0          129.78       0.998   1.0000
+f_256              f   t2      RV_FETCH 0          257.61       0.998   1.0000
+f_512              f   t2      RV_FETCH 0          514.94       1.002   1.0000
+f_1024             f   t2      RV_FETCH 0         1182.63       1.153   1.0000
+f_2048             f   t2      RV_FETCH 0         2362.04       1.152   1.0000
+loop_overhead      f   t2      -        1            1.99       0.000   1.0000
+f_64               f   t2      RV_FETCH 1           65.81       0.997   1.0000
+f_128              f   t2      RV_FETCH 1          131.28       1.010   1.0000
+f_256              f   t2      RV_FETCH 1          365.54       1.420   1.0000
+f_512              f   t2      RV_FETCH 1          720.88       1.404   1.0000
+f_1024             f   t2      RV_FETCH 1         1440.72       1.405   1.0000
+f_2048             f   t2      RV_FETCH 1         2868.31       1.400   1.0000
+loop_overhead      f   t3      -        0            2.00       0.000   1.0000
+f_64               f   t3      RV_FETCH 0           65.90       0.998   1.0000
+f_128              f   t3      RV_FETCH 0          129.76       0.998   1.0000
+f_256              f   t3      RV_FETCH 0          257.66       0.999   1.0000
+f_512              f   t3      RV_FETCH 0          514.95       1.002   1.0000
+f_1024             f   t3      RV_FETCH 0         1181.36       1.152   1.0000
+f_2048             f   t3      RV_FETCH 0         2357.78       1.150   1.0000
+loop_overhead      f   t3      -        1            1.99       0.000   1.0000
+f_64               f   t3      RV_FETCH 1           65.78       0.997   1.0000
+f_128              f   t3      RV_FETCH 1          131.29       1.010   1.0000
+f_256              f   t3      RV_FETCH 1          362.71       1.409   1.0000
+f_512              f   t3      RV_FETCH 1          715.99       1.395   1.0000
+f_1024             f   t3      RV_FETCH 1         1429.58       1.394   1.0000
+f_2048             f   t3      RV_FETCH 1         2824.71       1.378   1.0000
+loop_overhead      f   t3      -        2            2.00       0.000   1.0000
+f_64               f   t3      RV_FETCH 2           65.86       0.998   1.0000
+f_128              f   t3      RV_FETCH 2          129.78       0.998   1.0000
+f_256              f   t3      RV_FETCH 2          257.59       0.998   1.0000
+f_512              f   t3      RV_FETCH 2          514.89       1.002   1.0000
+f_1024             f   t3      RV_FETCH 2         1180.76       1.151   1.0000
+f_2048             f   t3      RV_FETCH 2         2357.84       1.150   1.0000
+loop_overhead      s   t1      -        1            2.00       0.000   1.0000
+s_loop_addi        s   t1      TTQUEUE  1            1.50      -0.499   1.0000
+s_co_plain         s   t1      TTQUEUE  1            2.87       0.868   0.9972
+s_co_repeat        s   t1      TTQUEUE  1            2.87       0.868   0.9972
+s_co_sync          s   t1      TTQUEUE  1            3.00       0.998   1.0000
+s_solo_plain       s   t1      TTQUEUE  1            2.87       0.867   0.9972
+s_solo_sync        s   t1      TTQUEUE  1            3.00       1.001   1.0000
+loop_overhead      s   t2      -        0            2.00       0.000   1.0000
+s_loop_addi        s   t2      TTQUEUE  0            1.50      -0.498   1.0000
+s_co_plain         s   t2      TTQUEUE  0            5.54       3.536   0.9914
+s_co_repeat        s   t2      TTQUEUE  0            5.54       3.536   0.9914
+s_co_sync          s   t2      TTQUEUE  0            6.00       4.003   1.0000
+loop_overhead      s   t2      -        1            2.00       0.000   1.0000
+s_loop_addi        s   t2      TTQUEUE  1            1.50      -0.498   1.0000
+s_co_plain         s   t2      TTQUEUE  1            5.76       3.762   0.9971
+s_co_repeat        s   t2      TTQUEUE  1            5.76       3.762   0.9971
+s_co_sync          s   t2      TTQUEUE  1            6.01       4.005   1.0000
+s_solo_plain       s   t2      TTQUEUE  1            2.87       0.867   0.9972
+s_solo_sync        s   t2      TTQUEUE  1            3.00       0.998   1.0000
+loop_overhead      s   t3      -        0            2.00       0.000   1.0000
+s_loop_addi        s   t3      TTQUEUE  0            1.50      -0.498   1.0000
+s_co_plain         s   t3      TTQUEUE  0            8.34       6.340   0.9917
+s_co_repeat        s   t3      TTQUEUE  0            8.33       6.328   0.9914
+s_co_sync          s   t3      TTQUEUE  0            8.99       6.989   1.0000
+loop_overhead      s   t3      -        1            2.00       0.000   1.0000
+s_loop_addi        s   t3      TTQUEUE  1            1.50      -0.498   1.0000
+s_co_plain         s   t3      TTQUEUE  1            8.65       6.651   0.9969
+s_co_repeat        s   t3      TTQUEUE  1            8.66       6.657   0.9969
+s_co_sync          s   t3      TTQUEUE  1            9.00       7.004   1.0000
+s_solo_plain       s   t3      TTQUEUE  1            2.87       0.867   0.9972
+s_solo_sync        s   t3      TTQUEUE  1            3.00       1.001   1.0000
+loop_overhead      s   t3      -        2            2.00       0.000   1.0000
+s_loop_addi        s   t3      TTQUEUE  2            1.50      -0.499   1.0000
+s_co_plain         s   t3      TTQUEUE  2            8.65       6.655   0.9969
+s_co_repeat        s   t3      TTQUEUE  2            8.66       6.657   0.9969
+s_co_sync          s   t3      TTQUEUE  2            8.99       6.993   1.0000
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1437.13       1.401   1.0000
+g_1280             g   t1      RV_FETCH 1         1796.03       1.402   1.0000
+loop_overhead      g   t2      -        0            2.00       0.000   1.0000
+g_1024             g   t2      RV_FETCH 0         1183.06       1.153   1.0000
+g_1280             g   t2      RV_FETCH 0         1478.82       1.154   1.0000
+loop_overhead      g   t2      -        1            2.00       0.000   1.0000
+g_1024             g   t2      RV_FETCH 1         1437.12       1.401   1.0000
+g_1280             g   t2      RV_FETCH 1         1794.78       1.401   1.0000
+loop_overhead      g   t3      -        0            2.00       0.000   1.0000
+g_1024             g   t3      RV_FETCH 0         1181.62       1.152   1.0000
+g_1280             g   t3      RV_FETCH 0         1476.65       1.152   1.0000
+loop_overhead      g   t3      -        1            2.00       0.000   1.0000
+g_1024             g   t3      RV_FETCH 1         1427.10       1.392   1.0000
+g_1280             g   t3      RV_FETCH 1         1769.17       1.381   1.0000
+loop_overhead      g   t3      -        2            2.00       0.000   1.0000
+g_1024             g   t3      RV_FETCH 2         1181.70       1.152   1.0000
+g_1280             g   t3      RV_FETCH 2         1476.70       1.152   1.0000
+  NOT MONOTONE: q/t1/q_adddmareg_sync thread 1: n=1 -> 19 cycles, n=2 -> 18 cycles
+  NOT MONOTONE: q/t2/q_adddmareg_sync thread 1: n=1 -> 19 cycles, n=2 -> 18 cycles
+
+------------------------------------------------------------------------------
+phase T: does the instruction cache fuse adjacent .ttinsn words?
+------------------------------------------------------------------------------
+  Every group below carries the same 16 `addi`s. `fuse4` and `spread4`
+  additionally carry the same FOUR `.ttinsn` words and differ only in whether
+  any two of them are adjacent. BlackholeA0/.../PushTensixInstruction.md says
+  up to four adjacent ones fuse into a single cycle, so:
+    spread4 - fuse4  ==  3 cycles  ->  the cache fuses, as documented
+    spread4 - fuse4  ==  0 cycles  ->  it does not, and `riscv.ttinsn_fusion`
+                                       describes something a kernel cannot reach
+
+  variant   probe   thr     cyc/group    vs tt_pad
+  t1        tt_pad  1          22.538
+  t1        tt_fuse2 1          25.287        2.750
+  t1        tt_fuse4 1          28.157        5.620
+  t1        tt_spread4 1          28.348        5.811
+    -> spread4 - fuse4 = +0.191 cycles/group   (documented: +3.000)
+  t2        tt_pad  0          15.979
+  t2        tt_fuse2 0          17.975        1.996
+  t2        tt_fuse4 0          19.974        3.994
+  t2        tt_spread4 0          19.967        3.987
+    -> spread4 - fuse4 = -0.007 cycles/group   (documented: +3.000)
+  t2        tt_pad  1          22.532
+  t2        tt_fuse2 1          25.312        2.780
+  t2        tt_fuse4 1          28.096        5.564
+  t2        tt_spread4 1          28.340        5.809
+    -> spread4 - fuse4 = +0.245 cycles/group   (documented: +3.000)
+  t3        tt_pad  0          15.979
+  t3        tt_fuse2 0          17.976        1.996
+  t3        tt_fuse4 0          19.971        3.992
+  t3        tt_spread4 0          19.969        3.990
+    -> spread4 - fuse4 = -0.002 cycles/group   (documented: +3.000)
+  t3        tt_pad  1          22.358
+  t3        tt_fuse2 1          25.146        2.788
+  t3        tt_fuse4 1          27.946        5.588
+  t3        tt_spread4 1          28.085        5.727
+    -> spread4 - fuse4 = +0.139 cycles/group   (documented: +3.000)
+  t3        tt_pad  2          15.983
+  t3        tt_fuse2 2          17.975        1.992
+  t3        tt_fuse4 2          19.973        3.990
+  t3        tt_spread4 2          19.976        3.993
+    -> spread4 - fuse4 = +0.003 cycles/group   (documented: +3.000)
+
+------------------------------------------------------------------------------
+phase C: is there a branch predictor, and what does a mispredict cost?
+------------------------------------------------------------------------------
+  `c_nt` and `c_t` execute the IDENTICAL dynamic instruction sequence -- a
+  branch whose target is the address the not-taken path falls through to --
+  and differ in exactly one bit: whether it was taken. The `c_xor_*` trio adds
+  an `xori` so that the ALTERNATING pattern has a value to alternate on, and
+  carries it in all three so the mix is matched.
+
+  variant   thr          nt      taken        alt     alt - nt
+  t1        1         1.027      3.026          -        1.999    (bare)
+  t1        1         2.399      4.294      3.314        0.915    (with xori)
+  t2        0         1.029      3.024          -        1.995    (bare)
+  t2        0         2.027      4.020      3.020        0.993    (with xori)
+  t2        1         1.026      3.027          -        2.001    (bare)
+  t2        1         2.285      4.292      3.314        1.029    (with xori)
+  t3        0         1.029      3.024          -        1.995    (bare)
+  t3        0         2.027      4.020      3.020        0.993    (with xori)
+  t3        1         1.027      3.027          -        2.000    (bare)
+  t3        1         2.368      4.291      3.310        0.942    (with xori)
+  t3        2         1.029      3.025          -        1.996    (bare)
+  t3        2         2.028      4.020      3.015        0.987    (with xori)
+
+  All three equal -> no predictor, or no penalty. taken > nt -> a static
+  not-taken prediction. alt > taken ~ nt -> a real predictor, defeated by
+  alternation. tt_sim/perf/unit_costs.yaml records the bubble as 2 cycles on
+  Wormhole and 4 on Blackhole (`integer_unit.branch_mispredict_bubble`), which
+  is the SIZE of a mispredict; how OFTEN one happens is what this measures.
+
+------------------------------------------------------------------------------
+phase Q: how far does the core run ahead of the Tensix backend?
+------------------------------------------------------------------------------
+  EXPLORATORY. Nothing in the ISA documentation or either vendor tree gives
+  a Tensix instruction queue depth, so there is no prediction here to
+  confirm or refute -- only a number nothing has measured.
+
+  CYCLES BELOW ARE RAW and every derived number is a DIFFERENCE of two of
+  them, over the widest span available. `q_ctrl` is NOT subtracted point by
+  point: the cascade evaluates all seven of its `if (p >= k)` tests at EVERY
+  burst length, so its cost is constant in n rather than growing with it, and
+  what does vary -- branch directions, first touch of the deeper blocks -- is
+  non-monotonic. It is the noise floor, printed as such.
+
+  TWO BURST FORMS, because the burst had to get longer and a longer
+  straight-line burst is a longer INSTRUCTION STREAM:
+    cascade  n = 1..128     2^p copies emitted straight-line. At n = 1024
+                            this would be 4 KiB of text, in the octave where
+                            phase F found a fetch cliff -- and a fetch cost
+                            that grows with n is indistinguishable from
+                            back-pressure, which is what this phase reads.
+                            So the cascade was NOT extended.
+    loop     n = 16..1024   n/16 iterations of one 16-instruction block: 64
+                            bytes of text at every n, so no difference
+                            between two loop points can be instruction
+                            fetch. `q_loop_addi` is the same loop with
+                            `addi` bodies and measures what the form itself
+                            costs, back edge included.
+  The forms OVERLAP at n = 16..128 and the overlap is checked below: it is
+  the evidence that changing the form did not change the quantity.
+
+  [t1 thread 1]
+    cascade, raw cycles         1      2      4      8     16     32     64    128      rate
+    q_ctrl                     11      7     16     13     23     27     28     24   (noise)
+    q_nop                       5      9     22     34     46     55    103    191     1.295
+    q_setdmareg                 5      9     27     29     45     65    101    179     1.196
+    q_adddmareg                 5      9     22     36     46     69    112    318     2.429
+    q_adddmareg_sync           19     18     28     37     61    109    205    395     2.982
+    loop, raw cycles           16     32     64    128    256    512   1024      rate
+    q_loop_addi                35     50     86    158    302    590   1166     1.122
+    q_loop_adddmareg           35     44    117    309    693   1461   2997     2.938
+    q_loop_adddmareg_sync      70    110    206    398    782   1550   3086     2.992
+    noise floor: `q_ctrl` spans 7-28 cycles (21) across the burst lengths;
+      that is what one raw point can be wrong by.
+    form check, ADDDMAREG burst, cascade vs loop where both run:
+             n    cascade       loop  loop-casc
+            16         46         35        -11
+            32         69         44        -25
+            64        112        117         +5
+           128        318        309         -9
+      -> over n=16..128: cascade 2.429, loop 2.446 cycles per instruction
+         (difference +0.018 -- the loop's own back edge is in this, and
+         `q_loop_addi` above says how much of it that is)
+    out to n=1024:  issuing core 2.938  |  drained 2.992  |  issue-limited baseline 1.122 (`q_loop_addi`)
+    backlog in flight when the last .ttinsn returned (cycles of ThCon
+    work, less 35 for tensix_sync()'s own cost at n=16):
+      n=16 +0  n=32 +31  n=64 +54  n=128 +54  n=256 +54  n=512 +54  n=1024 +54  
+    marginal cost between adjacent burst lengths:  16->32 0.56  32->64 2.28  64->128 3.00  128->256 3.00  256->512 3.00  512->1024 3.00  
+    -> KNEE between n=64 and n=128: the marginal reaches 3.00 against a
+       drained 2.992, so the core is back-pressured from there on.
+    -> the backlog FLATTENED at ~54 cycles (last two doublings added
+       0 then 0), clearing a 42-cycle noise floor, and at the
+       drained rate of 2.992 cycles per instruction that is ~18
+       INSTRUCTIONS in flight -- a measurement of the Tensix
+       instruction queue's depth in entries.
+
+  [t2 thread 0]
+    cascade, raw cycles         1      2      4      8     16     32     64    128      rate
+    q_ctrl                     11      9     22     14     21     33     22     23   (noise)
+    q_nop                       5      9     21     32     40     52     85    161     1.080
+    q_setdmareg                 5      7     10     29     43     54     89    160     1.045
+    q_adddmareg                 5      9     19     31     35     52    138    568     4.759
+    q_adddmareg_sync           19     20     35     56    104    200    392    776     6.000
+    loop, raw cycles           16     32     64    128    256    512   1024      rate
+    q_loop_addi                30     50     86    158    302    590   1166     1.127
+    q_loop_adddmareg           32     44    106    490   1258   2794   5866     5.788
+    q_loop_adddmareg_sync      76    173    365    746   1514   3056   6125     6.001
+    noise floor: `q_ctrl` spans 9-33 cycles (24) across the burst lengths;
+      that is what one raw point can be wrong by.
+    form check, ADDDMAREG burst, cascade vs loop where both run:
+             n    cascade       loop  loop-casc
+            16         35         32         -3
+            32         52         44         -8
+            64        138        106        -32
+           128        568        490        -78
+      -> over n=16..128: cascade 4.759, loop 4.089 cycles per instruction
+         (difference -0.670 -- the loop's own back edge is in this, and
+         `q_loop_addi` above says how much of it that is)
+    out to n=1024:  issuing core 5.788  |  drained 6.001  |  issue-limited baseline 1.127 (`q_loop_addi`)
+    backlog in flight when the last .ttinsn returned (cycles of ThCon
+    work, less 44 for tensix_sync()'s own cost at n=16):
+      n=16 +0  n=32 +85  n=64 +215  n=128 +212  n=256 +212  n=512 +218  n=1024 +215  
+    marginal cost between adjacent burst lengths:  16->32 0.75  32->64 1.94  64->128 6.00  128->256 6.00  256->512 6.00  512->1024 6.00  
+    -> KNEE between n=64 and n=128: the marginal reaches 6.00 against a
+       drained 6.001, so the core is back-pressured from there on.
+    -> the backlog FLATTENED at ~215 cycles (last two doublings added
+       6 then -3), clearing a 48-cycle noise floor, and at the
+       drained rate of 6.001 cycles per instruction that is ~36
+       INSTRUCTIONS in flight -- a measurement of the Tensix
+       instruction queue's depth in entries.
+
+  [t2 thread 1]
+    cascade, raw cycles         1      2      4      8     16     32     64    128      rate
+    q_ctrl                     11      7     16     11     21     25     24     22   (noise)
+    q_nop                       5     14     22     36     46     53    101    182     1.214
+    q_setdmareg                 5      9     27     29     45     67    101    208     1.455
+    q_adddmareg                 5     15     22     36     46     72    255    689     5.741
+    q_adddmareg_sync           19     18     29     58    106    201    394    777     5.991
+    loop, raw cycles           16     32     64    128    256    512   1024      rate
+    q_loop_addi                30     50     86    158    302    590   1166     1.127
+    q_loop_adddmareg           28     44    214    598   1366   2902   5974     5.899
+    q_loop_adddmareg_sync      73    174    367    747   1516   3056   6125     6.004
+    noise floor: `q_ctrl` spans 7-25 cycles (18) across the burst lengths;
+      that is what one raw point can be wrong by.
+    form check, ADDDMAREG burst, cascade vs loop where both run:
+             n    cascade       loop  loop-casc
+            16         46         28        -18
+            32         72         44        -28
+            64        255        214        -41
+           128        689        598        -91
+      -> over n=16..128: cascade 5.741, loop 5.089 cycles per instruction
+         (difference -0.652 -- the loop's own back edge is in this, and
+         `q_loop_addi` above says how much of it that is)
+    out to n=1024:  issuing core 5.899  |  drained 6.004  |  issue-limited baseline 1.127 (`q_loop_addi`)
+    backlog in flight when the last .ttinsn returned (cycles of ThCon
+    work, less 45 for tensix_sync()'s own cost at n=16):
+      n=16 +0  n=32 +85  n=64 +108  n=128 +104  n=256 +105  n=512 +109  n=1024 +106  
+    marginal cost between adjacent burst lengths:  16->32 1.00  32->64 5.31  64->128 6.00  128->256 6.00  256->512 6.00  512->1024 6.00  
+    -> KNEE between n=64 and n=128: the marginal reaches 6.00 against a
+       drained 6.004, so the core is back-pressured from there on.
+    -> the backlog FLATTENED at ~106 cycles (last two doublings added
+       4 then -3), clearing a 36-cycle noise floor, and at the
+       drained rate of 6.004 cycles per instruction that is ~18
+       INSTRUCTIONS in flight -- a measurement of the Tensix
+       instruction queue's depth in entries.
+
+  [t3 thread 0]
+    cascade, raw cycles         1      2      4      8     16     32     64    128      rate
+    q_ctrl                     11      9     23     14     21     33     22     22   (noise)
+    q_nop                       5      9     21     31     40     52     87    161     1.080
+    q_setdmareg                 5      9     12     31     42     52     86    253     1.884
+    q_adddmareg                 5      9     19     32     35     52    336    936     8.045
+    q_adddmareg_sync           19     23     35     69    131    287    575   1148     9.080
+    loop, raw cycles           16     32     64    128    256    512   1024      rate
+    q_loop_addi                29     50     86    158    302    590   1166     1.128
+    q_loop_adddmareg           32     44    154    730   1882   4186   8794     8.692
+    q_loop_adddmareg_sync     100    281    570   1150   2292   4603   9214     9.042
+    noise floor: `q_ctrl` spans 9-33 cycles (24) across the burst lengths;
+      that is what one raw point can be wrong by.
+    form check, ADDDMAREG burst, cascade vs loop where both run:
+             n    cascade       loop  loop-casc
+            16         35         32         -3
+            32         52         44         -8
+            64        336        154       -182
+           128        936        730       -206
+      -> over n=16..128: cascade 8.045, loop 6.232 cycles per instruction
+         (difference -1.813 -- the loop's own back edge is in this, and
+         `q_loop_addi` above says how much of it that is)
+    out to n=1024:  issuing core 8.692  |  drained 9.042  |  issue-limited baseline 1.128 (`q_loop_addi`)
+    backlog in flight when the last .ttinsn returned (cycles of ThCon
+    work, less 68 for tensix_sync()'s own cost at n=16):
+      n=16 +0  n=32 +169  n=64 +348  n=128 +352  n=256 +342  n=512 +349  n=1024 +352  
+    marginal cost between adjacent burst lengths:  16->32 0.75  32->64 3.44  64->128 9.00  128->256 9.00  256->512 9.00  512->1024 9.00  
+    -> KNEE between n=64 and n=128: the marginal reaches 9.00 against a
+       drained 9.042, so the core is back-pressured from there on.
+    -> the backlog FLATTENED at ~352 cycles (last two doublings added
+       7 then 3), clearing a 48-cycle noise floor, and at the
+       drained rate of 9.042 cycles per instruction that is ~39
+       INSTRUCTIONS in flight -- a measurement of the Tensix
+       instruction queue's depth in entries.
+
+  [t3 thread 1]
+    cascade, raw cycles         1      2      4      8     16     32     64    128      rate
+    q_ctrl                     12      7     16     13     23     27     26     22   (noise)
+    q_nop                       5     16     22     36     46     55    109    194     1.321
+    q_setdmareg                 5      9     27     29     45     65    116    302     2.295
+    q_adddmareg                 5     16     22     36     47     67    453   1068     9.116
+    q_adddmareg_sync           19     23     39     71    139    287    576   1153     9.054
+    loop, raw cycles           16     32     64    128    256    512   1024      rate
+    q_loop_addi                36     50     86    158    302    590   1166     1.121
+    q_loop_adddmareg           29     52    313    889   2041   4345   8953     8.853
+    q_loop_adddmareg_sync     116    269    557   1138   2279   4592   9202     9.014
+    noise floor: `q_ctrl` spans 7-27 cycles (20) across the burst lengths;
+      that is what one raw point can be wrong by.
+    form check, ADDDMAREG burst, cascade vs loop where both run:
+             n    cascade       loop  loop-casc
+            16         47         29        -18
+            32         67         52        -15
+            64        453        313       -140
+           128       1068        889       -179
+      -> over n=16..128: cascade 9.116, loop 7.679 cycles per instruction
+         (difference -1.438 -- the loop's own back edge is in this, and
+         `q_loop_addi` above says how much of it that is)
+    out to n=1024:  issuing core 8.853  |  drained 9.014  |  issue-limited baseline 1.121 (`q_loop_addi`)
+    backlog in flight when the last .ttinsn returned (cycles of ThCon
+    work, less 87 for tensix_sync()'s own cost at n=16):
+      n=16 +0  n=32 +130  n=64 +157  n=128 +162  n=256 +151  n=512 +160  n=1024 +162  
+    marginal cost between adjacent burst lengths:  16->32 1.44  32->64 8.16  64->128 9.00  128->256 9.00  256->512 9.00  512->1024 9.00  
+    -> KNEE between n=32 and n=64: the marginal reaches 8.16 against a
+       drained 9.014, so the core is back-pressured from there on.
+    -> the backlog FLATTENED at ~162 cycles (last two doublings added
+       9 then 2), clearing a 40-cycle noise floor, and at the
+       drained rate of 9.014 cycles per instruction that is ~18
+       INSTRUCTIONS in flight -- a measurement of the Tensix
+       instruction queue's depth in entries.
+
+  [t3 thread 2]
+    cascade, raw cycles         1      2      4      8     16     32     64    128      rate
+    q_ctrl                     12      7     16     13     19     25     26     20   (noise)
+    q_nop                       5      9     26     27     45     56     90    161     1.036
+    q_setdmareg                 5      9     19     29     43     58    107    302     2.312
+    q_adddmareg                 5     10     26     29     38     65    480   1071     9.223
+    q_adddmareg_sync           19     25     41     73    141    291    577   1152     9.027
+    loop, raw cycles           16     32     64    128    256    512   1024      rate
+    q_loop_addi                31     50     86    158    302    590   1166     1.126
+    q_loop_adddmareg           32     52    313    889   2041   4345   8953     8.850
+    q_loop_adddmareg_sync     122    284    566   1148   2282   4598   9212     9.018
+    noise floor: `q_ctrl` spans 7-26 cycles (19) across the burst lengths;
+      that is what one raw point can be wrong by.
+    form check, ADDDMAREG burst, cascade vs loop where both run:
+             n    cascade       loop  loop-casc
+            16         38         32         -6
+            32         65         52        -13
+            64        480        313       -167
+           128       1071        889       -182
+      -> over n=16..128: cascade 9.223, loop 7.652 cycles per instruction
+         (difference -1.571 -- the loop's own back edge is in this, and
+         `q_loop_addi` above says how much of it that is)
+    out to n=1024:  issuing core 8.850  |  drained 9.018  |  issue-limited baseline 1.126 (`q_loop_addi`)
+    backlog in flight when the last .ttinsn returned (cycles of ThCon
+    work, less 90 for tensix_sync()'s own cost at n=16):
+      n=16 +0  n=32 +142  n=64 +163  n=128 +169  n=256 +151  n=512 +163  n=1024 +169  
+    marginal cost between adjacent burst lengths:  16->32 1.25  32->64 8.16  64->128 9.00  128->256 9.00  256->512 9.00  512->1024 9.00  
+    -> KNEE between n=32 and n=64: the marginal reaches 8.16 against a
+       drained 9.018, so the core is back-pressured from there on.
+    -> the backlog FLATTENED at ~169 cycles (last two doublings added
+       12 then 6), clearing a 38-cycle noise floor, and at the
+       drained rate of 9.018 cycles per instruction that is ~19
+       INSTRUCTIONS in flight -- a measurement of the Tensix
+       instruction queue's depth in entries.
+
+
+------------------------------------------------------------------------------
+phase F: does a bigger loop body cost more per instruction?
+------------------------------------------------------------------------------
+  Same instruction throughout; only the distance between the loop's two ends
+  changes. The ISA docs give the fetch PERIOD (one 128-bit L1 read per four
+  instructions) and no cache size and no miss cost, so a flat row is
+  consistent with the documentation and a cliff is a number nothing has
+  published. Both are results.
+
+  THIS PHASE'S BODIES ARE FROZEN. Two tracked silicon datasets carry its
+  rows, and its build is within a few hundred bytes of tt-metal's kernel
+  config buffer besides. The footprints BETWEEN 1024 and 2048, which narrow
+  the boundary this phase located, are phase G.
+
+  variant   thr       f_64     f_128     f_256     f_512    f_1024    f_2048
+  t1        1        0.996     1.010     1.422     1.405     1.405     1.400
+  t2        0        0.998     0.998     0.998     1.002     1.153     1.152
+  t2        1        0.997     1.010     1.420     1.404     1.405     1.400
+  t3        0        0.998     0.998     0.999     1.002     1.152     1.150
+  t3        1        0.997     1.010     1.409     1.395     1.394     1.378
+  t3        2        0.998     0.998     0.998     1.002     1.151     1.150
+
+------------------------------------------------------------------------------
+phase S: is the Tensix instruction queue shared, or one per thread?
+------------------------------------------------------------------------------
+  EXPLORATORY, and it is the question phase Q left open: that phase resolves
+  a depth at ONE issuing thread and cannot resolve one at any other, and a
+  shared queue of depth D looks exactly like a per-thread queue of depth D
+  when only one thread is looking at it. (Phase Q's own read-out prints a
+  LOWER BOUND -- ~16 entries pre-drain, ~22 after QLOOPPROBE gained its
+  untimed sync -- because it drops the term below; the settled figure on
+  Blackhole silicon is ~31-32.)
+
+  WHAT SEPARATES THE TWO, and what does not:
+    * a second thread that only SPINS does not. It pushes nothing, so it
+      holds no entry either way. It is run below anyway, as `s_solo_*`, and
+      it is the control for `another core is awake` as against `another core
+      is issuing` -- its depth must not move under EITHER hypothesis.
+    * a second thread issuing at a low, known rate does not either: queue
+      occupancy is arrival rate times residence time, so a thread served
+      faster than it arrives holds ~0 entries however long it runs.
+    * only a SATURATED second thread holds entries, and the backend
+      bandwidth it necessarily steals is measured here (`s_co_sync`) and
+      divided back out. That is `s_co_*`, and it is the discriminator.
+
+  THE REFERENCE BURST IS n=4, not phase Q's 16, and that is the other half
+  of why this can answer what phase Q could not. The backlog is
+  (sync[n] - plain[n]) - (sync[ref] - plain[ref]), and the subtrahend is only
+  `tensix_sync()`'s own cost if the queue is EMPTY at the reference burst. At
+  n=16 it is not -- and at two or three issuing threads a shared queue's
+  per-thread share may be smaller than the ~10 entries an n=16 burst leaves
+  outstanding, which makes phase Q's multi-thread backlogs structurally zero
+  rather than merely small.
+
+  So the depth in ENTRIES reported below is
+      D = backlog / S + 4 * (1 - p/S)
+  with S the drained rate from the `_sync` probe and p the issue-limited
+  rate from `s_loop_addi`. Both are measured in the same slot. The second
+  term is the reference burst's own occupancy, which phase Q's read-out
+  drops; it is ~2 entries here and ~10 there, so a phase-S depth at one
+  thread is expected to come out ABOVE phase Q's printed figure by roughly
+  that difference. If it does, phase Q's figure is a lower bound and this
+  says by how much. If it does not, this correction is wrong and should be
+  said so. On Blackhole silicon it did, and the two forms reconcile to 0.7
+  entries once phase Q's bursts are drained too.
+
+  [t1 thread 1]
+    raw cycles             4       8      16      32      64     128     256     512      rate
+    s_loop_addi           18      26      38      62     110     206     398     782     1.504
+    s_co_plain            17      22      34      58     117     309     693    1461     2.843
+    s_co_repeat           17      22      34      58     117     309     693    1461     2.843
+    s_co_sync             29      38      62     110     206     398     782    1550     2.994
+    s_solo_plain          14      24      36      60     117     309     693    1461     2.848
+    s_solo_sync           25      38      62     110     206     398     782    1550     3.002
+    repeatability: |s_co_plain - s_co_repeat| <= 0 cycles; a backlog must
+      clear twice that before it is divided by anything.
+    co-issuing          backlog 77 cycles (last doubling +0), drained 2.994,
+      issue-limited 1.504  ->  DEPTH ~28 ENTRIES
+    solo (others spin)  backlog 78 cycles (last doubling +0), drained 3.002,
+      issue-limited 1.504  ->  DEPTH ~28 ENTRIES
+
+  [t2 thread 0]
+    raw cycles             4       8      16      32      64     128     256     512      rate
+    s_loop_addi           16      26      38      62     110     206     398     782     1.508
+    s_co_plain            18      22      34      58     112     490    1258    2794     5.465
+    s_co_repeat           18      22      34      58     112     490    1258    2794     5.465
+    s_co_sync             33      56     105     197     392     777    1540    3083     6.004
+    repeatability: |s_co_plain - s_co_repeat| <= 0 cycles; a backlog must
+      clear twice that before it is divided by anything.
+    co-issuing          backlog 274 cycles (last doubling +7), drained 6.004,
+      issue-limited 1.508  ->  DEPTH ~49 ENTRIES
+
+  [t2 thread 1]
+    raw cycles             4       8      16      32      64     128     256     512      rate
+    s_loop_addi           16      26      38      62     110     206     398     782     1.508
+    s_co_plain            12      22      34      58     214     598    1366    2902     5.689
+    s_co_repeat           13      22      34      58     214     598    1366    2902     5.687
+    s_co_sync             27      57     104     197     392     776    1538    3083     6.016
+    s_solo_plain          14      24      36      60     117     309     693    1461     2.848
+    s_solo_sync           30      38      62     110     206     398     782    1550     2.992
+    repeatability: |s_co_plain - s_co_repeat| <= 1 cycles; a backlog must
+      clear twice that before it is divided by anything.
+    co-issuing          backlog 166 cycles (last doubling +9), drained 6.016,
+      issue-limited 1.508  ->  DEPTH ~31 ENTRIES
+    solo (others spin)  backlog 73 cycles (last doubling +0), drained 2.992,
+      issue-limited 1.508  ->  DEPTH ~26 ENTRIES
+
+  [t3 thread 0]
+    raw cycles             4       8      16      32      64     128     256     512      rate
+    s_loop_addi           16      26      38      62     110     206     398     782     1.508
+    s_co_plain            18      22      34      58     160     736    1888    4192     8.217
+    s_co_repeat           18      22      34      58     154     730    1882    4186     8.205
+    s_co_sync             54      71     154     290     578    1154    2306    4610     8.969
+    repeatability: |s_co_plain - s_co_repeat| <= 6 cycles; a backlog must
+      clear twice that before it is divided by anything.
+    co-issuing          backlog 382 cycles (last doubling +0), drained 8.969,
+      issue-limited 1.508  ->  DEPTH ~46 ENTRIES
+
+  [t3 thread 1]
+    raw cycles             4       8      16      32      64     128     256     512      rate
+    s_loop_addi           16      26      38      62     110     206     398     782     1.508
+    s_co_plain            13      22      34      58     310     886    2038    4342     8.522
+    s_co_repeat           13      22      34      58     313     889    2041    4345     8.528
+    s_co_sync             32      76     146     291     575    1158    2294    4615     9.022
+    s_solo_plain          14      24      36      60     117     309     693    1461     2.848
+    s_solo_sync           24      38      62     110     206     398     782    1550     3.004
+    repeatability: |s_co_plain - s_co_repeat| <= 3 cycles; a backlog must
+      clear twice that before it is divided by anything.
+    co-issuing          backlog 254 cycles (last doubling +17), drained 9.022,
+      issue-limited 1.508  ->  DEPTH ~31 ENTRIES
+    solo (others spin)  backlog 79 cycles (last doubling +0), drained 3.004,
+      issue-limited 1.508  ->  DEPTH ~28 ENTRIES
+
+  [t3 thread 2]
+    raw cycles             4       8      16      32      64     128     256     512      rate
+    s_loop_addi           18      26      38      62     110     206     398     782     1.504
+    s_co_plain            17      22      34      58     313     889    2041    4345     8.520
+    s_co_repeat           12      22      34      58     313     889    2041    4345     8.530
+    s_co_sync             41      75     149     281     580    1151    2304    4607     8.988
+    repeatability: |s_co_plain - s_co_repeat| <= 5 cycles; a backlog must
+      clear twice that before it is divided by anything.
+    co-issuing          backlog 238 cycles (last doubling -1), drained 8.988,
+      issue-limited 1.504  ->  DEPTH ~30 ENTRIES
+
+  VERDICT (thread 1, the one every variant activates, so the only thing
+  that changes between these rows is what the OTHER cores are doing):
+    t2: 31 entries against t1's 28 = 1.10x. Per-thread predicts 1.00x,
+      shared predicts 0.50x.  ->  PER-THREAD (each core has its own queue)
+      control: with the other 1 core(s) only SPINNING, 26 entries (0.95x).
+      Both hypotheses predict 1.00x here; a departure is something other than
+      queue sharing -- instruction fetch out of the same L1, most likely.
+    t3: 31 entries against t1's 28 = 1.14x. Per-thread predicts 1.00x,
+      shared predicts 0.33x.  ->  PER-THREAD (each core has its own queue)
+      control: with the other 2 core(s) only SPINNING, 28 entries (1.02x).
+      Both hypotheses predict 1.00x here; a departure is something other than
+      queue sharing -- instruction fetch out of the same L1, most likely.
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 0 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.401  g_1280   5120 B    1.402      +0.000
+  t2        0         1.153  g_1280   5120 B    1.154      +0.000
+  t2        1         1.401  g_1280   5120 B    1.401      -0.001
+  t3        0         1.152  g_1280   5120 B    1.152      +0.000
+  t3        1         1.392  g_1280   5120 B    1.381      -0.011
+  t3        2         1.152  g_1280   5120 B    1.152      +0.000
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Is the instrument live? The probes with a non-trivial documented cost
+------------------------------------------------------------------------------
+  rv_mul_dep            2.001 cycles/instruction
+  rv_div               33.001 cycles/instruction
+  rv_load_chase         7.992 cycles/instruction
+  rv_store_spread       5.166 cycles/instruction
+
+  4 of 4 read above 1.0, so the timer resolves a real per-instruction
+  cost and a 1.000 elsewhere in this run is a finding rather than a floor.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 not in this --gset  g_1280 ran  g_1408 not in this --gset  g_1536 not in this --gset  g_1792 not in this --gset  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+  phase S probes:        s_loop_addi ran  s_co_plain ran  s_co_repeat ran  s_co_sync ran  s_solo_plain ran  s_solo_sync ran  
+    The structural check for this phase is that `s_co_sync` exceeds
+    `s_co_plain` at every burst length -- a drain cannot be free. If the
+    two are equal the phase measured nothing whatever the verdict said.
+    Against tt-sim the backlog grows without bound (its Tensix queue is a
+    list append), so every slot refuses a depth and there is no verdict:
+    forced, and a fact about the simulator rather than about any card.
+
+wrote 1590 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv.wormhole.csv
+TTRVBENCH_VALID_R: yes
+TTRVBENCH_VALID_T: yes
+TTRVBENCH_VALID_C: yes
+TTRVBENCH_VALID_Q: no (2 checks failed)
+TTRVBENCH_VALID_F: yes
+TTRVBENCH_VALID_S: yes
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: no -- but the verdict above is PER PHASE. Send the CSV
+  regardless: the rows of a phase that passed are unaffected by one that did
+  not, and at least one phase here is usable.
+2026-08-17 12:34:15.302 | info     |    BuildKernels | JIT cache stats: 21/21 hits (100.0%) [21 cached, 14 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:15.302 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:15.308 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:15.308 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:15.326 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:15.327 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:15.327 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

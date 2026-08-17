@@ -1,0 +1,18 @@
+PASS  instrn-elw-1       samples=59   span=4317     THREAD_STALLS_1=36
+PASS  instrn-mm-1        samples=59   span=3613     THREAD_STALLS_1=30
+PASS  instrn-elw-2       samples=59   span=4212     THREAD_STALLS_1=36
+PASS  instrn-mm-2        samples=59   span=3579     THREAD_STALLS_1=30
+PASS  instrn-elw-3       samples=59   span=4318     THREAD_STALLS_1=36
+PASS  instrn-mm-3        samples=59   span=3560     THREAD_STALLS_1=30
+
+Before sending this home, check by eye:
+  * every line above says PASS;
+  * the 3 repeats of an arm agree on span and on THREAD_STALLS_1.
+    They are separate runs of an identical program, so a big spread
+    means something else was on the card, and the session is suspect.
+  * elw and mm DISAGREE. They differ by one instruction and are supposed
+    to load opposite mechanisms; identical numbers mean one arm did not
+    build the way it was meant to.
+
+Then send the WHOLE directory, stdout logs included:
+  rsync -av /home/nbrown23/tt_traces/mechbench-wormhole/ <home>:~/mechbench-session/

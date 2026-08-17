@@ -1,0 +1,688 @@
+2026-08-17 12:33:28.323 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:33:28.323 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:33:28.324 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:33:28.324 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:33:28.328 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:33:28.346 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:33:28.428 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:33:28.428 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:33:28.428 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:33:28.428 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:33:28.432 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:33:28.439 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:33:28.485 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:28.485 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:33:28.486 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:33:28.486 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:33:28.488 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:28.494 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:28.498 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:28.502 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:28.505 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:28.550 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset1.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB00798 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1437.24       1.402   1.0000
+g_1536             g   t1      RV_FETCH 1         2151.56       1.399   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 1 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.402  g_1536   6144 B    1.399      -0.002
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 not in this --gset  g_1280 not in this --gset  g_1408 not in this --gset  g_1536 ran  g_1792 not in this --gset  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset1.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:33:30.610 | info     |    BuildKernels | JIT cache stats: 0/3 hits (0.0%) [0 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:33:30.610 | info     |    BuildKernels | JIT telemetry: 1 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:33:30.616 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:33:30.616 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:33:30.635 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:33:30.635 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:33:30.635 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
+2026-08-17 12:33:30.910 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:33:30.910 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:33:30.910 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:33:30.910 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:33:30.914 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:33:30.932 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:33:31.021 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:33:31.021 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:33:31.021 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:33:31.021 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:33:31.025 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:33:31.033 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:33:31.106 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:31.106 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:33:31.108 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:33:31.108 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:33:31.111 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:31.115 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:31.121 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:31.124 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:31.125 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:31.171 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset2.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB00798 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1437.17       1.402   1.0000
+g_1792             g   t1      RV_FETCH 1         2511.90       1.401   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 2 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.402  g_1792   7168 B    1.401      -0.001
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 not in this --gset  g_1280 not in this --gset  g_1408 not in this --gset  g_1536 not in this --gset  g_1792 ran  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset2.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:33:33.459 | info     |    BuildKernels | JIT cache stats: 0/3 hits (0.0%) [0 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:33:33.459 | info     |    BuildKernels | JIT telemetry: 1 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:33:33.467 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:33:33.467 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:33:33.487 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:33:33.487 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:33:33.487 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
+2026-08-17 12:33:33.754 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:33:33.754 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:33:33.755 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:33:33.755 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:33:33.758 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:33:33.776 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:33:33.865 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:33:33.865 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:33:33.865 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:33:33.865 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:33:33.869 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:33:33.877 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:33:33.947 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:33.947 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:33:33.948 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:33:33.948 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:33:33.950 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:33.958 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:33.962 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:33.966 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:33.966 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:34.012 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset3.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB007A8 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1436.05       1.400   1.0000
+g_1152             g   t1      RV_FETCH 1         1616.29       1.401   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 3 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.400  g_1152   4608 B    1.401      +0.001
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 ran  g_1280 not in this --gset  g_1408 not in this --gset  g_1536 not in this --gset  g_1792 not in this --gset  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset3.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:33:35.794 | info     |    BuildKernels | JIT cache stats: 0/3 hits (0.0%) [0 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:33:35.794 | info     |    BuildKernels | JIT telemetry: 1 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:33:35.803 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:33:35.803 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:33:35.826 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:33:35.826 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:33:35.826 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
+2026-08-17 12:33:36.096 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:33:36.096 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:33:36.096 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:33:36.097 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:33:36.101 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:33:36.119 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:33:36.205 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:33:36.205 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:33:36.205 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:33:36.205 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:33:36.209 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:33:36.217 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:33:36.262 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:36.262 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:33:36.263 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:33:36.263 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:33:36.267 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:33:36.273 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:36.278 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:36.280 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:36.282 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:33:36.332 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset4.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB00798 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1436.43       1.401   1.0000
+g_1408             g   t1      RV_FETCH 1         1975.02       1.401   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 4 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.401  g_1408   5632 B    1.401      +0.000
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 not in this --gset  g_1280 not in this --gset  g_1408 ran  g_1536 not in this --gset  g_1792 not in this --gset  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset4.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:33:38.300 | info     |    BuildKernels | JIT cache stats: 0/3 hits (0.0%) [0 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:33:38.300 | info     |    BuildKernels | JIT telemetry: 1 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:33:38.307 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:33:38.307 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:33:38.327 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:33:38.328 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:33:38.328 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
+2026-08-17 12:34:16.337 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:16.337 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:16.338 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:16.338 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:16.342 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:16.359 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:16.449 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:16.449 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:16.449 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:16.449 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:16.453 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:16.460 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:16.523 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:16.523 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:16.524 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:16.524 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:16.526 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:16.531 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:16.535 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:16.540 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:16.540 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:16.586 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset1.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB00798 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1437.12       1.401   1.0000
+g_1536             g   t1      RV_FETCH 1         2151.41       1.399   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 1 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.401  g_1536   6144 B    1.399      -0.002
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 not in this --gset  g_1280 not in this --gset  g_1408 not in this --gset  g_1536 ran  g_1792 not in this --gset  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset1.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:16.602 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:16.602 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:16.609 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:16.609 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:16.628 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:16.628 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:16.628 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
+2026-08-17 12:34:16.903 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:16.903 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:16.904 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:16.904 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:16.909 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:16.926 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:17.024 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:17.025 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:17.025 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:17.025 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:17.029 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:17.037 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:17.082 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:17.082 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:17.083 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:17.083 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:17.086 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:17.094 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.098 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.101 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.105 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.150 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset2.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB00798 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1437.20       1.402   1.0000
+g_1792             g   t1      RV_FETCH 1         2512.01       1.401   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 2 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.402  g_1792   7168 B    1.401      -0.001
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 not in this --gset  g_1280 not in this --gset  g_1408 not in this --gset  g_1536 not in this --gset  g_1792 ran  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset2.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:17.166 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:17.166 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:17.173 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:17.173 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:17.192 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:17.192 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:17.192 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
+2026-08-17 12:34:17.459 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:17.460 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:17.460 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:17.460 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:17.464 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:17.482 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:17.567 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:17.567 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:17.567 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:17.567 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:17.572 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:17.579 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:17.623 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:17.623 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:17.624 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:17.624 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:17.627 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:17.633 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.645 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.645 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.645 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:17.691 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset3.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB007A8 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1436.15       1.401   1.0000
+g_1152             g   t1      RV_FETCH 1         1616.41       1.401   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 3 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.401  g_1152   4608 B    1.401      +0.001
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 ran  g_1280 not in this --gset  g_1408 not in this --gset  g_1536 not in this --gset  g_1792 not in this --gset  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset3.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:17.705 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:17.705 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:17.712 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:17.712 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:17.731 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:17.731 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:17.731 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
+2026-08-17 12:34:17.992 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:17.993 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:17.993 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:17.993 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:17.997 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:18.015 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:18.103 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:18.103 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:18.103 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:18.103 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:18.108 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:18.116 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:18.163 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:18.163 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:18.164 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:18.164 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:18.167 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:18.174 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:18.178 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:18.185 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:18.185 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:18.230 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase g [t1]: done (1 issuing thread), 12 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset4.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB00798 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      g   t1      -        1            2.00       0.000   1.0000
+g_1024             g   t1      RV_FETCH 1         1436.72       1.401   1.0000
+g_1408             g   t1      RV_FETCH 1         1975.03       1.401   1.0000
+
+------------------------------------------------------------------------------
+phase G: narrowing the step phase F put between 4 KiB and 8 KiB
+------------------------------------------------------------------------------
+  EXPLORATORY, and a NARROWING rather than a new question. Phase F reads a
+  flat 0.998 cycles/instruction from a 64-instruction loop body through 1024
+  and 1.251 at 2048, which locates a boundary in that octave and nothing
+  finer. This set adds ONE intermediate, compiled against a 1024-instruction
+  body in the SAME kernel so the comparison does not cross a build.
+
+  WHAT THIS CAN AND CANNOT SAY. It locates a boundary in LOOP-BODY SIZE. It
+  is not a cache capacity: no document in the ISA documentation or either
+  vendor tree gives an instruction cache size or a miss cost, and a step in
+  cost against footprint is equally consistent with a prefetch window, a
+  TLB-like structure or an L1 access pattern. Narrowing the boundary does
+  not license a different noun for it.
+
+  --gset 4 of 0..4 is compiled in; run the other sets to fill the row.
+
+  variant   thr      g_1024  probe     bytes cyc/instr        step
+  t1        1         1.401  g_1408   5632 B    1.401      +0.000
+
+  A STEP at the intermediate puts the boundary at or below that many bytes
+  of loop body; a FLAT pair puts it above, with phase F's 8192 bounding it
+  from the other side. Read the FIVE --gset runs together: they bracket it
+  between footprints that were actually run, and that bracket is the whole
+  claim. Sets 3 and 4 (4608 and 5632 B) were added on 2026-08-09 because the
+  onset was bracketed only to (4096, 5120] and neither endpoint of that
+  bracket had ever been measured from INSIDE it.
+
+------------------------------------------------------------------------------
+Did the new probes run at all? (a null is not an absence)
+------------------------------------------------------------------------------
+  phase G probes:        g_1024 ran  g_1152 not in this --gset  g_1280 not in this --gset  g_1408 ran  g_1536 not in this --gset  g_1792 not in this --gset  
+    Exactly one intermediate is compiled per --gset, so four of the five
+    read `not in this --gset` in every healthy run and that is not an
+    absence. Against tt-sim all of them must read the SAME as each other:
+    it models no instruction cache at all, so a flat row is forced there
+    and says nothing about any hardware. `ran` with a flat row is that
+    null; a probe that never executed would print nothing at all above.
+
+wrote 12 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-gset4.wormhole.csv
+TTRVBENCH_VALID_G: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:18.246 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:18.246 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:18.253 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:18.253 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:18.271 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:18.271 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:18.271 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

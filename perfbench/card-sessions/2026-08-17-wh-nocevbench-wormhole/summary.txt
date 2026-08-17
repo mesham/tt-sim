@@ -1,0 +1,66 @@
+PASS  A-256-1        events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=409.6 min=406 max=435; NOC_1 READ 256B n=8 mean=388.5 min=384 max=403
+PASS  A-4096-1       events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=606.4 min=574 max=752; NOC_1 READ 4096B n=8 mean=547.0 min=546 max=548
+PASS  B-256-1        events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 256B n=8 mean=404.6 min=386 max=483; NOC_1 WRITE_ 256B n=8 mean=409.5 min=404 max=436
+PASS  B-4096-1       events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 4096B n=8 mean=553.9 min=547 max=571; NOC_1 WRITE_ 4096B n=8 mean=576.6 min=572 max=597
+PASS  C-256-1        events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=301.4 min=296 max=332; NOC_1 READ 256B n=8 mean=303.2 min=303 max=304
+PASS  C-4096-1       events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=428.6 min=416 max=466; NOC_1 READ 4096B n=8 mean=436.9 min=431 max=442
+PASS  A-256-2        events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=429.8 min=406 max=558; NOC_1 READ 256B n=8 mean=393.9 min=384 max=425
+PASS  A-4096-2       events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=602.2 min=572 max=750; NOC_1 READ 4096B n=8 mean=572.4 min=547 max=699
+PASS  B-256-2        events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 256B n=8 mean=386.9 min=385 max=389; NOC_1 WRITE_ 256B n=8 mean=409.2 min=404 max=434
+PASS  B-4096-2       events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 4096B n=8 mean=557.9 min=547 max=579; NOC_1 WRITE_ 4096B n=8 mean=576.8 min=572 max=598
+PASS  C-256-2        events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=301.4 min=296 max=332; NOC_1 READ 256B n=8 mean=303.2 min=303 max=304
+PASS  C-4096-2       events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=427.2 min=416 max=465; NOC_1 READ 4096B n=8 mean=437.6 min=432 max=440
+PASS  A-256-3        events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=408.1 min=402 max=429; NOC_1 READ 256B n=8 mean=407.8 min=387 max=499
+PASS  A-4096-3       events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=603.4 min=572 max=750; NOC_1 READ 4096B n=8 mean=552.4 min=546 max=572
+PASS  B-256-3        events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 256B n=8 mean=387.0 min=387 max=387; NOC_1 WRITE_ 256B n=8 mean=408.6 min=404 max=429
+PASS  B-4096-3       events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 4096B n=8 mean=547.1 min=546 max=548; NOC_1 WRITE_ 4096B n=8 mean=598.8 min=572 max=750
+PASS  C-256-3        events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=300.6 min=296 max=332; NOC_1 READ 256B n=8 mean=303.2 min=303 max=304
+PASS  C-4096-3       events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=427.6 min=416 max=461; NOC_1 READ 4096B n=8 mean=438.0 min=432 max=442
+
+Before sending this home, check by eye:
+  * every line above says PASS. 'arm=X confirmed' means the NoC each
+    RISC actually used was read back out of the trace and matched the
+    arm -- a run without it measured something other than what it says.
+  * ARM A IS THE CONTROL, and the indented line under each run carries
+    that run's observed per-class latencies. There is NO prior card
+    session on wormhole, so arm A ESTABLISHES the control
+    rather than reproducing one, and the 375-382 / 480-510 band quoted
+    in the README is BLACKHOLE's -- do not read this part against it.
+    What arm A is checked against is the simulator side run at the same
+    --arch, --bytes and --chunks, at home. What you CAN check here is
+    that the repeats agree and that the two size arms differ.
+  * the 3 repeats of an arm agree. They are separate runs of an
+    identical program, so a big spread means something else was on the
+    card and the session is suspect. Do NOT re-run and keep the better
+    session -- say so in the handover instead.
+  * the size arms DISAGREE with each other. They differ only in transfer
+    size and are supposed to separate the per-hop term from the per-byte
+    one; identical numbers mean one arm did not run the way it was meant to.
+
+  Arm B swapped the NoCs -- every run above was already refused if it
+  had not, but see it for yourself:
+    for t in /home/nbrown23/tt_traces/nocevbench-wormhole/runs/B-*/.logs/noc_trace_dev0_ID0.json; do
+      /home/nbrown23/tt-sim/perfbench/nocevbench/check_arm.py --arm B --trace "$t"; done
+    Expect READ on NOC_0 and WRITE_ on NOC_1 -- the opposite of arm A.
+
+Then send the WHOLE directory, stdout logs included -- they carry the
+nocevbench-config line that records what each run was configured as:
+  rsync -av /home/nbrown23/tt_traces/nocevbench-wormhole/ <home>:~/nocevbench-wormhole/

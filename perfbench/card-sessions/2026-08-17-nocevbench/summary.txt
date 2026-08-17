@@ -1,0 +1,23 @@
+PASS  256-1        events=50   barrier_ends=16   noc_trace_dev0_ID0.json
+PASS  4096-1       events=50   barrier_ends=16   noc_trace_dev0_ID0.json
+PASS  256-2        events=50   barrier_ends=16   noc_trace_dev0_ID0.json
+PASS  4096-2       events=50   barrier_ends=16   noc_trace_dev0_ID0.json
+PASS  256-3        events=50   barrier_ends=16   noc_trace_dev0_ID0.json
+PASS  4096-3       events=50   barrier_ends=16   noc_trace_dev0_ID0.json
+
+Before sending this home, check by eye:
+  * every line above says PASS;
+  * the 3 repeats of an arm agree. They are separate runs of an
+    identical program, so a big spread means something else was on the
+    card and the session is suspect. Do NOT re-run and keep the better
+    session -- say so in the handover instead.
+  * the arms DISAGREE with each other. They differ only in transfer size
+    and are supposed to separate the per-hop term from the per-byte one;
+    identical numbers mean one arm did not run the way it was meant to.
+
+  A quick look at one trace, if you want one:
+    python3 -c "import json;d=json.load(open('<trace>'));
+      print([(r.get('proc'),r.get('type'),r['timestamp']) for r in d][:12])"
+
+Then send the WHOLE directory, stdout logs included:
+  rsync -av /home/nx09/nx09/nebriscv/tt_traces/nocevbench-session/ <home>:~/nocevbench-session/

@@ -1,0 +1,164 @@
+2026-08-17 12:34:11.778 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:11.778 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:11.778 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:11.778 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:11.782 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:11.800 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:11.891 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:11.891 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:11.891 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:11.891 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:11.895 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:11.904 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:11.970 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:11.970 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:11.971 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:11.971 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:11.974 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:11.988 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:11.988 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:11.988 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:11.988 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:12.035 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase A [t1]: done (1 issuing thread), 80 rows written to /home/nbrown23/tt_traces/card-session-wormhole/tensix-warm.wormhole.csv
+phase A [t2]: done (2 issuing threads), 240 rows written to /home/nbrown23/tt_traces/card-session-wormhole/tensix-warm.wormhole.csv
+phase A [t3]: done (3 issuing threads), 480 rows written to /home/nbrown23/tt_traces/card-session-wormhole/tensix-warm.wormhole.csv
+
+==============================================================================
+tensixbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+dvalid setup: once -- one SETDVALID for the tile (X1, de-confounded)
+
+probe          variant unit      thr     cyc/block  cyc/instr      R^2
+loop_overhead  t1      -         1            2.00      0.000   1.0000
+NOP            t1      NONE      1           65.85      0.998   1.0000
+DMANOP         t1      TDMA      1           65.90      0.998   1.0000
+SFPNOP         t1      SFPU      1           65.85      0.998   1.0000
+SFPMOV         t1      SFPU      1           65.90      0.999   1.0000
+SFPADD         t1      SFPU      1           65.86      0.998   1.0000
+SFPMUL         t1      SFPU      1           65.87      0.998   1.0000
+SFPMAD         t1      SFPU      1           65.92      0.999   1.0000
+SFPABS         t1      SFPU      1           65.87      0.998   1.0000
+SETDMAREG      t1      THCON     1           65.85      0.998   1.0000
+ADDDMAREG      t1      THCON     1          192.11      2.970   1.0000
+MULDMAREG      t1      THCON     1          192.07      2.970   1.0000
+SHIFTDMAREG    t1      THCON     1          192.12      2.971   1.0000
+CMPDMAREG      t1      THCON     1          192.13      2.971   1.0000
+RDCFG          t1      CFG       1          128.00      1.969   1.0000
+SETRWC         t1      MATH      1           65.87      0.998   1.0000
+INCRWC         t1      MATH      1           65.86      0.998   1.0000
+MVMUL          t1      MATH      1           65.89      0.998   1.0000
+ELWADD         t1      MATH      1           65.85      0.998   1.0000
+ELWMUL         t1      MATH      1           65.90      0.998   1.0000
+loop_overhead  t2      -         0            2.00      0.000   1.0000
+NOP            t2      NONE      0           65.93      0.999   1.0000
+DMANOP         t2      TDMA      0          127.84      1.966   1.0000
+SFPNOP         t2      SFPU      0          127.97      1.968   1.0000
+SFPMOV         t2      SFPU      0          127.89      1.967   1.0000
+SFPADD         t2      SFPU      0          127.99      1.969   1.0000
+SFPMUL         t2      SFPU      0          127.99      1.969   1.0000
+SFPMAD         t2      SFPU      0          127.94      1.968   1.0000
+SFPABS         t2      SFPU      0          128.03      1.969   1.0000
+SETDMAREG      t2      THCON     0          127.91      1.967   1.0000
+ADDDMAREG      t2      THCON     0          384.42      5.975   1.0000
+MULDMAREG      t2      THCON     0          384.07      5.970   1.0000
+SHIFTDMAREG    t2      THCON     0          384.10      5.970   1.0000
+CMPDMAREG      t2      THCON     0          384.07      5.970   1.0000
+RDCFG          t2      CFG       0          127.85      1.966   1.0000
+SETRWC         t2      MATH      0          128.02      1.969   1.0000
+INCRWC         t2      MATH      0          127.93      1.968   1.0000
+MVMUL          t2      MATH      0          390.43      6.069   1.0000
+ELWADD         t2      MATH      0          390.07      6.064   1.0000
+ELWMUL         t2      MATH      0          390.08      6.064   1.0000
+loop_overhead  t2      -         1            2.00      0.000   1.0000
+NOP            t2      NONE      1           65.85      0.998   1.0000
+DMANOP         t2      TDMA      1          127.98      1.968   1.0000
+SFPNOP         t2      SFPU      1          127.99      1.969   1.0000
+SFPMOV         t2      SFPU      1          127.98      1.968   1.0000
+SFPADD         t2      SFPU      1          127.98      1.968   1.0000
+SFPMUL         t2      SFPU      1          128.00      1.969   1.0000
+SFPMAD         t2      SFPU      1          127.98      1.968   1.0000
+SFPABS         t2      SFPU      1          127.98      1.968   1.0000
+SETDMAREG      t2      THCON     1          127.97      1.968   1.0000
+ADDDMAREG      t2      THCON     1          384.45      5.976   1.0000
+MULDMAREG      t2      THCON     1          384.12      5.971   1.0000
+SHIFTDMAREG    t2      THCON     1          384.16      5.971   1.0000
+CMPDMAREG      t2      THCON     1          384.10      5.970   1.0000
+RDCFG          t2      CFG       1          127.77      1.965   1.0000
+SETRWC         t2      MATH      1          127.99      1.969   1.0000
+INCRWC         t2      MATH      1          127.96      1.968   1.0000
+MVMUL          t2      MATH      1          390.43      6.069   1.0000
+ELWADD         t2      MATH      1          390.16      6.065   1.0000
+ELWMUL         t2      MATH      1          390.10      6.064   1.0000
+loop_overhead  t3      -         0            2.00      0.000   1.0000
+NOP            t3      NONE      0           65.93      0.999   1.0000
+DMANOP         t3      TDMA      0          191.63      2.963   1.0000
+SFPNOP         t3      SFPU      0          192.23      2.972   1.0000
+SFPMOV         t3      SFPU      0          191.93      2.968   1.0000
+SFPADD         t3      SFPU      0          192.08      2.970   1.0000
+SFPMUL         t3      SFPU      0          191.98      2.968   1.0000
+SFPMAD         t3      SFPU      0          192.07      2.970   1.0000
+SFPABS         t3      SFPU      0          192.12      2.971   1.0000
+SETDMAREG      t3      THCON     0          191.95      2.968   1.0000
+ADDDMAREG      t3      THCON     0          576.77      8.981   1.0000
+MULDMAREG      t3      THCON     0          576.04      8.969   1.0000
+SHIFTDMAREG    t3      THCON     0          576.06      8.970   1.0000
+CMPDMAREG      t3      THCON     0          576.07      8.970   1.0000
+RDCFG          t3      CFG       0          127.41      1.959   1.0000
+SETRWC         t3      MATH      0          192.21      2.972   1.0000
+INCRWC         t3      MATH      0          192.10      2.970   1.0000
+MVMUL          t3      MATH      0          775.12     12.080   1.0000
+ELWADD         t3      MATH      0          774.04     12.063   1.0000
+ELWMUL         t3      MATH      0          774.02     12.063   1.0000
+loop_overhead  t3      -         1            2.00      0.000   1.0000
+NOP            t3      NONE      1           65.85      0.998   1.0000
+DMANOP         t3      TDMA      1          191.96      2.968   1.0000
+SFPNOP         t3      SFPU      1          191.93      2.968   1.0000
+SFPMOV         t3      SFPU      1          192.02      2.969   1.0000
+SFPADD         t3      SFPU      1          191.96      2.968   1.0000
+SFPMUL         t3      SFPU      1          191.99      2.969   1.0000
+SFPMAD         t3      SFPU      1          192.11      2.971   1.0000
+SFPABS         t3      SFPU      1          192.01      2.969   1.0000
+SETDMAREG      t3      THCON     1          192.00      2.969   1.0000
+ADDDMAREG      t3      THCON     1          576.88      8.982   1.0000
+MULDMAREG      t3      THCON     1          576.10      8.970   1.0000
+SHIFTDMAREG    t3      THCON     1          576.16      8.971   1.0000
+CMPDMAREG      t3      THCON     1          576.08      8.970   1.0000
+RDCFG          t3      CFG       1          127.34      1.958   1.0000
+SETRWC         t3      MATH      1          191.96      2.968   1.0000
+INCRWC         t3      MATH      1          192.01      2.969   1.0000
+MVMUL          t3      MATH      1          775.19     12.081   1.0000
+ELWADD         t3      MATH      1          774.17     12.065   1.0000
+ELWMUL         t3      MATH      1          774.08     12.064   1.0000
+loop_overhead  t3      -         2            2.00      0.000   1.0000
+NOP            t3      NONE      2           65.92      0.999   1.0000
+DMANOP         t3      TDMA      2          191.96      2.968   1.0000
+SFPNOP         t3      SFPU      2          192.06      2.970   1.0000
+SFPMOV         t3      SFPU      2          191.98      2.968   1.0000
+SFPADD         t3      SFPU      2          192.01      2.969   1.0000
+SFPMUL         t3      SFPU      2          192.00      2.969   1.0000
+SFPMAD         t3      SFPU      2          191.99      2.969   1.0000
+SFPABS         t3      SFPU      2          192.01      2.969   1.0000
+SETDMAREG      t3      THCON     2          191.95      2.968   1.0000
+ADDDMAREG      t3      THCON     2          576.80      8.981   1.0000
+MULDMAREG      t3      THCON     2          576.04      8.969   1.0000
+SHIFTDMAREG    t3      THCON     2          576.05      8.970   1.0000
+CMPDMAREG      t3      THCON     2          576.07      8.970   1.0000
+RDCFG          t3      CFG       2          127.30      1.958   1.0000
+SETRWC         t3      MATH      2          191.99      2.969   1.0000
+INCRWC         t3      MATH      2          191.92      2.967   1.0000
+MVMUL          t3      MATH      2          775.14     12.080   1.0000
+ELWADD         t3      MATH      2          774.00     12.063   1.0000
+ELWMUL         t3      MATH      2          774.05     12.063   1.0000
+
+wrote 480 rows to /home/nbrown23/tt_traces/card-session-wormhole/tensix-warm.wormhole.csv
+TTBENCH_VALID_A: yes
+TTBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:12.061 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 2 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:12.061 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:12.068 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:12.068 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:12.085 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:12.085 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:12.085 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

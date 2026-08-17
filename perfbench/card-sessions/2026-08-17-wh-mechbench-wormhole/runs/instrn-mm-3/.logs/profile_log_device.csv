@@ -1,0 +1,81 @@
+ARCH: wormhole_b0, CHIP_FREQ[MHz]: 1000, Max Compute Cores: 64
+PCIe slot, core_x, core_y, RISC processor type, timer_id, time[cycles since reset], data, run host ID, trace id, trace id counter, zone name, type, source line, source file, meta data
+0,1,1,BRISC,30530,13130952785,0,0,,,BRISC-FW,ZONE_START,433,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/brisc.cc,
+0,1,1,BRISC,30604,13130953617,0,0,,,BRISC-KERNEL,ZONE_START,77,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/brisck.cc,
+0,1,1,BRISC,30604,13130959378,0,0,,,BRISC-KERNEL,ZONE_END,77,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/brisck.cc,
+0,1,1,BRISC,9090,13130959514,15290083573784,0,,,,TS_DATA,0,,{"counter type":"CFG_INSTRN_AVAILABLE_0";"ref cnt":3560;"value":24}
+0,1,1,BRISC,9090,13130959587,15290083573799,0,,,,TS_DATA,0,,{"counter type":"CFG_INSTRN_AVAILABLE_1";"ref cnt":3560;"value":39}
+0,1,1,BRISC,9090,13130959658,15290083573777,0,,,,TS_DATA,0,,{"counter type":"CFG_INSTRN_AVAILABLE_2";"ref cnt":3560;"value":17}
+0,1,1,BRISC,9090,13130959729,15290083573782,0,,,,TS_DATA,0,,{"counter type":"SYNC_INSTRN_AVAILABLE_0";"ref cnt":3560;"value":22}
+0,1,1,BRISC,9090,13130959800,15290083573784,0,,,,TS_DATA,0,,{"counter type":"SYNC_INSTRN_AVAILABLE_1";"ref cnt":3560;"value":24}
+0,1,1,BRISC,9090,13130959875,15290083573805,0,,,,TS_DATA,0,,{"counter type":"SYNC_INSTRN_AVAILABLE_2";"ref cnt":3560;"value":45}
+0,1,1,BRISC,9090,13130959946,15290083573833,0,,,,TS_DATA,0,,{"counter type":"THCON_INSTRN_AVAILABLE_0";"ref cnt":3560;"value":73}
+0,1,1,BRISC,9090,13130960018,15290083573760,0,,,,TS_DATA,0,,{"counter type":"THCON_INSTRN_AVAILABLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960089,15290083573841,0,,,,TS_DATA,0,,{"counter type":"THCON_INSTRN_AVAILABLE_2";"ref cnt":3560;"value":81}
+0,1,1,BRISC,9090,13130960162,15290083573760,0,,,,TS_DATA,0,,{"counter type":"MOVE_INSTRN_AVAILABLE_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960233,15290083573760,0,,,,TS_DATA,0,,{"counter type":"MOVE_INSTRN_AVAILABLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960304,15290083573760,0,,,,TS_DATA,0,,{"counter type":"MOVE_INSTRN_AVAILABLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960375,15290083573761,0,,,,TS_DATA,0,,{"counter type":"FPU_INSTRN_AVAILABLE_0";"ref cnt":3560;"value":1}
+0,1,1,BRISC,9090,13130960448,15290083577062,0,,,,TS_DATA,0,,{"counter type":"FPU_INSTRN_AVAILABLE_1";"ref cnt":3560;"value":3302}
+0,1,1,BRISC,9090,13130960519,15290083573764,0,,,,TS_DATA,0,,{"counter type":"FPU_INSTRN_AVAILABLE_2";"ref cnt":3560;"value":4}
+0,1,1,BRISC,9090,13130960590,15290083573780,0,,,,TS_DATA,0,,{"counter type":"UNPACK_INSTRN_AVAILABLE_0";"ref cnt":3560;"value":20}
+0,1,1,BRISC,9090,13130960665,15290083573760,0,,,,TS_DATA,0,,{"counter type":"UNPACK_INSTRN_AVAILABLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960739,15290083573760,0,,,,TS_DATA,0,,{"counter type":"UNPACK_INSTRN_AVAILABLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960810,15290083573760,0,,,,TS_DATA,0,,{"counter type":"PACK_INSTRN_AVAILABLE_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960884,15290083573760,0,,,,TS_DATA,0,,{"counter type":"PACK_INSTRN_AVAILABLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130960955,15290083573770,0,,,,TS_DATA,0,,{"counter type":"PACK_INSTRN_AVAILABLE_2";"ref cnt":3560;"value":10}
+0,1,1,BRISC,9090,13130961027,15290083574084,0,,,,TS_DATA,0,,{"counter type":"THREAD_STALLS_0";"ref cnt":3560;"value":324}
+0,1,1,BRISC,9090,13130961098,15290083573790,0,,,,TS_DATA,0,,{"counter type":"THREAD_STALLS_1";"ref cnt":3560;"value":30}
+0,1,1,BRISC,9090,13130961169,15290083574009,0,,,,TS_DATA,0,,{"counter type":"THREAD_STALLS_2";"ref cnt":3560;"value":249}
+0,1,1,BRISC,9090,13130961240,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCA_CLEAR";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961311,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCB_CLEAR";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961382,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCA_VALID";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961455,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SRCB_VALID";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961526,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_THCON_IDLE_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961597,15290083574079,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_UNPACK_IDLE_0";"ref cnt":3560;"value":319}
+0,1,1,BRISC,9090,13130961668,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_PACK_IDLE_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961742,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MATH_IDLE_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961813,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONZERO_SEM_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961885,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONFULL_SEM_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130961956,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MOVE_IDLE_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962027,15290083573765,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MMIO_IDLE_0";"ref cnt":3560;"value":5}
+0,1,1,BRISC,9090,13130962098,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SFPU_IDLE_0";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962177,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_THCON_IDLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962250,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_UNPACK_IDLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962322,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_PACK_IDLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962393,15290083573794,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MATH_IDLE_1";"ref cnt":3560;"value":34}
+0,1,1,BRISC,9090,13130962464,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONZERO_SEM_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962538,15290083573766,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONFULL_SEM_1";"ref cnt":3560;"value":6}
+0,1,1,BRISC,9090,13130962609,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MOVE_IDLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962681,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MMIO_IDLE_1";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962752,15290083573794,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SFPU_IDLE_1";"ref cnt":3560;"value":34}
+0,1,1,BRISC,9090,13130962823,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_THCON_IDLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962894,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_UNPACK_IDLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130962967,15290083574009,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_PACK_IDLE_2";"ref cnt":3560;"value":249}
+0,1,1,BRISC,9090,13130963038,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MATH_IDLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130963109,15290083576624,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONZERO_SEM_2";"ref cnt":3560;"value":2864}
+0,1,1,BRISC,9090,13130963180,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_NONFULL_SEM_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130963253,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MOVE_IDLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130963324,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_MMIO_IDLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130963395,15290083573760,0,,,,TS_DATA,0,,{"counter type":"WAITING_FOR_SFPU_IDLE_2";"ref cnt":3560;"value":0}
+0,1,1,BRISC,9090,13130963466,15290083573849,0,,,,TS_DATA,0,,{"counter type":"THREAD_INSTRUCTIONS_0";"ref cnt":3560;"value":89}
+0,1,1,BRISC,9090,13130963539,15290083573910,0,,,,TS_DATA,0,,{"counter type":"THREAD_INSTRUCTIONS_1";"ref cnt":3560;"value":150}
+0,1,1,BRISC,9090,13130963610,15290083573879,0,,,,TS_DATA,0,,{"counter type":"THREAD_INSTRUCTIONS_2";"ref cnt":3560;"value":119}
+0,1,1,BRISC,9090,13130963685,15290083574363,0,,,,TS_DATA,0,,{"counter type":"ANY_THREAD_STALL";"ref cnt":3560;"value":603}
+0,1,1,BRISC,30530,13130963818,0,0,,,BRISC-FW,ZONE_END,433,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/brisc.cc,
+0,1,1,NCRISC,20088,13130952942,0,0,,,NCRISC-FW,ZONE_START,129,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/ncrisc.cc,
+0,1,1,NCRISC,11826,13130953574,0,0,,,NCRISC-KERNEL,ZONE_START,69,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/ncrisck.cc,
+0,1,1,NCRISC,11826,13130958621,0,0,,,NCRISC-KERNEL,ZONE_END,69,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/ncrisck.cc,
+0,1,1,NCRISC,20088,13130958746,0,0,,,NCRISC-FW,ZONE_END,129,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/ncrisc.cc,
+0,1,1,TRISC_0,17193,13130953054,0,0,,,TRISC-FW,ZONE_START,150,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc,
+0,1,1,TRISC_0,33120,13130953468,0,0,,,TRISC-KERNEL,ZONE_START,86,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc,
+0,1,1,TRISC_0,33120,13130958694,0,0,,,TRISC-KERNEL,ZONE_END,86,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc,
+0,1,1,TRISC_0,17193,13130958739,0,0,,,TRISC-FW,ZONE_END,150,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc,
+0,1,1,TRISC_1,17193,13130953048,0,0,,,TRISC-FW,ZONE_START,150,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc,
+0,1,1,TRISC_1,33120,13130953377,0,0,,,TRISC-KERNEL,ZONE_START,86,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc,
+0,1,1,TRISC_1,33120,13130956881,0,0,,,TRISC-KERNEL,ZONE_END,86,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc,
+0,1,1,TRISC_1,17193,13130958745,0,0,,,TRISC-FW,ZONE_END,150,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc,
+0,1,1,TRISC_2,17193,13130953049,0,0,,,TRISC-FW,ZONE_START,150,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc,
+0,1,1,TRISC_2,33120,13130953469,0,0,,,TRISC-KERNEL,ZONE_START,86,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc,
+0,1,1,TRISC_2,33120,13130958161,0,0,,,TRISC-KERNEL,ZONE_END,86,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisck.cc,
+0,1,1,TRISC_2,17193,13130958864,0,0,,,TRISC-FW,ZONE_END,150,/home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/hw/firmware/src/tt-1xx/trisc.cc,

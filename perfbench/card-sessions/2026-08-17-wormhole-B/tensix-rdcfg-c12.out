@@ -1,0 +1,55 @@
+2026-08-17 12:34:12.948 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:12.948 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:12.948 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:12.948 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:12.953 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:12.971 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:13.061 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:13.061 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:13.061 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:13.061 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:13.065 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:13.074 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:13.119 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:13.119 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:13.120 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:13.120 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:13.125 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:13.134 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:13.138 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:13.142 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:13.142 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:13.188 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+note: dropping probes 22-25 and 28-29 (the C12 slots) on wormhole.
+  They stall on STALLWAIT condition C12, "Any thread has an instruction in
+  any stage of the Configuration Unit pipeline", which only BlackholeA0
+  defines. Wormhole's fifteen condition bits name no unit RDCFG runs on --
+  and do not need to: WormholeB0/RDCFG.md blocks the issuing thread for the
+  whole instruction, so there the documented ">= 2" is an occupancy and
+  probe 14 already measures it.
+phase A [t1]: done (1 issuing thread), 4 rows written to /home/nbrown23/tt_traces/card-session-wormhole/tensix-rdcfg-c12.wormhole.csv
+phase A [t2]: skipped (--variants t1,t3)
+phase A [t3]: done (3 issuing threads), 16 rows written to /home/nbrown23/tt_traces/card-session-wormhole/tensix-rdcfg-c12.wormhole.csv
+
+==============================================================================
+tensixbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+dvalid setup: once -- one SETDVALID for the tile (X1, de-confounded)
+
+probe          variant unit      thr     cyc/block  cyc/instr      R^2
+loop_overhead  t1      -         1            2.00      0.000   1.0000
+loop_overhead  t3      -         0            2.00      0.000   1.0000
+loop_overhead  t3      -         1            2.00      0.000   1.0000
+loop_overhead  t3      -         2            2.00      0.000   1.0000
+
+wrote 16 rows to /home/nbrown23/tt_traces/card-session-wormhole/tensix-rdcfg-c12.wormhole.csv
+TTBENCH_VALID_A: yes
+TTBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:13.203 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 1 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:13.203 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:13.210 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:13.210 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:13.229 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:13.229 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:13.229 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

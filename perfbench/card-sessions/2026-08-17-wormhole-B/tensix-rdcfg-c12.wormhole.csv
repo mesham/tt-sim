@@ -1,0 +1,19 @@
+# tensixbench raw points -- see docs/plans/tensix-cost-benchmark.md
+# arch=wormhole magic=0x7B10CE05 unroll=64 probe_mask=0x1 dvalid_setup=once src_format=undefined src_style=undefined mm_block=8 variants=t1,t3 fidelities=LoFi,HiFi2,HiFi4
+phase,variant,probe_id,probe,unit,active_threads,thread,n,unroll,cycles
+A,t1,0,loop_overhead,-,1,1,32,64,77
+A,t1,0,loop_overhead,-,1,1,64,64,141
+A,t1,0,loop_overhead,-,1,1,96,64,205
+A,t1,0,loop_overhead,-,1,1,128,64,269
+A,t3,0,loop_overhead,-,3,0,32,64,77
+A,t3,0,loop_overhead,-,3,0,64,64,141
+A,t3,0,loop_overhead,-,3,0,96,64,205
+A,t3,0,loop_overhead,-,3,0,128,64,269
+A,t3,0,loop_overhead,-,3,1,32,64,77
+A,t3,0,loop_overhead,-,3,1,64,64,141
+A,t3,0,loop_overhead,-,3,1,96,64,205
+A,t3,0,loop_overhead,-,3,1,128,64,269
+A,t3,0,loop_overhead,-,3,2,32,64,77
+A,t3,0,loop_overhead,-,3,2,64,64,141
+A,t3,0,loop_overhead,-,3,2,96,64,205
+A,t3,0,loop_overhead,-,3,2,128,64,269

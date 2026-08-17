@@ -1,0 +1,121 @@
+2026-08-17 12:34:12.385 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:12.385 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:12.386 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:12.386 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:12.389 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:12.407 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:12.496 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:12.496 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:12.496 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:12.496 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:12.500 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:12.509 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:12.575 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:12.575 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:12.576 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:12.576 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:12.581 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:12.591 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:12.600 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:12.600 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:12.600 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:12.646 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+note: dropping probes 22-25 and 28-29 (the C12 slots) on wormhole.
+  They stall on STALLWAIT condition C12, "Any thread has an instruction in
+  any stage of the Configuration Unit pipeline", which only BlackholeA0
+  defines. Wormhole's fifteen condition bits name no unit RDCFG runs on --
+  and do not need to: WormholeB0/RDCFG.md blocks the issuing thread for the
+  whole instruction, so there the documented ">= 2" is an occupancy and
+  probe 14 already measures it.
+phase A [t1]: done (1 issuing thread), 32 rows written to /home/nbrown23/tt_traces/card-session-wormhole/tensix-rdcfg.wormhole.csv
+phase A [t2]: skipped (--variants t1)
+phase A [t3]: skipped (--variants t1)
+
+==============================================================================
+tensixbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+dvalid setup: once -- one SETDVALID for the tile (X1, de-confounded)
+
+probe          variant unit      thr     cyc/block  cyc/instr      R^2
+loop_overhead  t1      -         1            2.00      0.000   1.0000
+SETDMAREG      t1      THCON     1           65.72      0.996   1.0000
+ADDDMAREG      t1      THCON     1          192.20      2.972   1.0000
+RDCFG          t1      CFG       1          127.96      1.968   1.0000
+RDCFG_STALL    t1      CFG-LAT   1          255.98      3.968   1.0000
+SETDMA_STALL   t1      THCON-LAT 1          191.98      2.968   1.0000
+RDCFG_DEP      t1      CFG-DEP   1          320.00      4.969   1.0000
+RDCFG_INDEP    t1      CFG-DEP   1          319.96      4.968   1.0000
+
+------------------------------------------------------------------------------
+phase A: the wrong-condition control (slots 20/21, TRISC_CFG)
+------------------------------------------------------------------------------
+  variant thr    rdcfg/pair    base/pair   difference
+  t1      1           3.968        2.968       +1.000
+
+TTBENCH_CFGLAT_WRONGBIT: 1.0000
+  TRISC_CFG is about the RISCV core's outstanding memory requests, not
+  about the Configuration Unit's pipeline, so ~0 here is the CORRECT
+  reading and is what makes the C12 difference above attributable to the
+  condition bit. A control that moved would mean it is not.
+
+------------------------------------------------------------------------------
+phase A: RDCFG -> GPR -> consumer, dependent against independent (26/27)
+------------------------------------------------------------------------------
+  Both arms are TTI_RDCFG(60,0) followed by TTI_ADDDMAREG(1,63,0,X).
+  X = 60 in slot 26 (the RDCFG destination) and X = 59 in slot 27.
+  BlackholeA0 RDCFG.md makes the separation software's job, so the
+  documented prediction is that this difference is ZERO and the latency
+  is not a duration at all. See the visibility section below.
+
+  variant thr      dep/pair   indep/pair   difference
+  t1      1           4.969        4.968       +0.001
+
+TTBENCH_DEP_DIFF: 0.0006
+TTBENCH_DEP_PARTS: 4.9688 1.9682 2.9719
+  the dependent pair costs 4.969 cycles against 1.968 + 2.972 = 4.940 for
+  the two instructions measured bare (probes 14 and 10). A pair that
+  came in UNDER the sum would mean an arm is not issuing both
+  instructions, and then a zero difference would say nothing.
+
+------------------------------------------------------------------------------
+phase A: RDCFG's latency as a producer-to-consumer DISTANCE
+------------------------------------------------------------------------------
+  seeds 0xA5A5A5A5 / 0x5A5A5A5A, never-ran marker 0xDEADBEEF, config index 0,
+  64 repetitions per separation.
+
+  control: no RDCFG at all  -> 0xA5A5A5A5, 0x5A5A5A5A (want 0xA5A5A5A5, 0x5A5A5A5A)  ok
+  control: RDCFG at d=8     -> 0x00000000, 0x00000000 (want them equal, and
+                               neither seed nor marker)                ok
+  consumer never ran: 0 repetitions;  unexplained: 0
+
+  d         fresh      stale      other
+  1            64          0          0
+  2            64          0          0
+  3            64          0          0
+  4            64          0          0
+
+TTBENCH_VIS_CONTROLS: stale-ok fresh-ok 0 0
+TTBENCH_VIS_DMIN: 1 64
+TTBENCH_VIS_COUNTS: 64 64 64 64
+  d_min is the smallest separation at which EVERY repetition saw the value
+  RDCFG wrote. Because the consumer may read its operand some cycles into
+  its own execution, d_min is a LOWER BOUND on the latency -- which is the
+  direction the charging policy takes bounds in. d_min = 2 corroborates
+  ConfigurationUnit.md's '>= 2 cycles' exactly; d_min = 1 would leave the
+  '>= 2' unreached rather than refute it, since a consumer that reads late
+  is a complete alternative explanation. A MIXTURE at any d (fresh and
+  stale both non-zero) means the RISC-V front end did not deliver the
+  sequence at one instruction per cycle and the separation is not what it
+  says; that is why every repetition is counted rather than one taken.
+
+wrote 32 rows to /home/nbrown23/tt_traces/card-session-wormhole/tensix-rdcfg.wormhole.csv
+TTBENCH_VALID_A: yes
+TTBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:12.662 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:12.662 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:12.669 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:12.669 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:12.688 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:12.688 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:12.688 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

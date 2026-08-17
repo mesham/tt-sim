@@ -1,0 +1,64 @@
+PASS  A-256-1        events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=378.9 min=375 max=406; NOC_1 READ 256B n=8 mean=490.0 min=479 max=519
+PASS  A-4096-1       events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=450.6 min=447 max=476; NOC_1 READ 4096B n=8 mean=597.2 min=575 max=719
+PASS  B-256-1        events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 256B n=8 mean=504.5 min=487 max=591; NOC_1 WRITE_ 256B n=8 mean=378.9 min=375 max=406
+PASS  B-4096-1       events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 4096B n=8 mean=573.9 min=567 max=606; NOC_1 WRITE_ 4096B n=8 mean=450.9 min=447 max=478
+PASS  C-256-1        events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=373.4 min=370 max=397; NOC_1 READ 256B n=8 mean=375.9 min=371 max=410
+PASS  C-4096-1       events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=433.4 min=426 max=461; NOC_1 READ 4096B n=8 mean=436.0 min=427 max=467
+PASS  A-256-2        events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=378.9 min=375 max=406; NOC_1 READ 256B n=8 mean=490.9 min=487 max=518
+PASS  A-4096-2       events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=450.6 min=447 max=476; NOC_1 READ 4096B n=8 mean=585.2 min=575 max=623
+PASS  B-256-2        events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 256B n=8 mean=502.9 min=487 max=591; NOC_1 WRITE_ 256B n=8 mean=378.6 min=375 max=404
+PASS  B-4096-2       events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 4096B n=8 mean=572.9 min=567 max=598; NOC_1 WRITE_ 4096B n=8 mean=450.6 min=447 max=476
+PASS  C-256-2        events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=373.4 min=370 max=397; NOC_1 READ 256B n=8 mean=375.9 min=371 max=410
+PASS  C-4096-2       events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=434.4 min=426 max=461; NOC_1 READ 4096B n=8 mean=437.9 min=427 max=466
+PASS  A-256-3        events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=378.6 min=375 max=404; NOC_1 READ 256B n=8 mean=505.9 min=487 max=607
+PASS  A-4096-3       events=50   barrier_ends=16   arm=A confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=450.6 min=447 max=476; NOC_1 READ 4096B n=8 mean=575.9 min=567 max=606
+PASS  B-256-3        events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 256B n=8 mean=489.5 min=479 max=523; NOC_1 WRITE_ 256B n=8 mean=378.9 min=375 max=406
+PASS  B-4096-3       events=50   barrier_ends=16   arm=B confirmed  noc_trace_dev0_ID0.json
+      NOC_0 READ 4096B n=8 mean=577.8 min=575 max=597; NOC_1 WRITE_ 4096B n=8 mean=450.6 min=447 max=476
+PASS  C-256-3        events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 256B n=8 mean=372.6 min=370 max=391; NOC_1 READ 256B n=8 mean=374.6 min=371 max=400
+PASS  C-4096-3       events=50   barrier_ends=16   arm=C confirmed  noc_trace_dev0_ID0.json
+      NOC_0 WRITE_ 4096B n=8 mean=432.5 min=426 max=454; NOC_1 READ 4096B n=8 mean=437.0 min=427 max=467
+
+Before sending this home, check by eye:
+  * every line above says PASS. 'arm=X confirmed' means the NoC each
+    RISC actually used was read back out of the trace and matched the
+    arm -- a run without it measured something other than what it says.
+  * ARM A IS THE CONTROL, and the indented line under each run carries
+    that run's observed per-class latencies. Arm A's WRITE 256 mean
+    should be 375-382 and its READ 256 mean 480-510: that is the
+    2026-08-17 session reproducing. If it is not, SAY SO and send the
+    session anyway -- a control that moved is the most important result
+    in the directory.
+  * the 3 repeats of an arm agree. They are separate runs of an
+    identical program, so a big spread means something else was on the
+    card and the session is suspect. Do NOT re-run and keep the better
+    session -- say so in the handover instead.
+  * the size arms DISAGREE with each other. They differ only in transfer
+    size and are supposed to separate the per-hop term from the per-byte
+    one; identical numbers mean one arm did not run the way it was meant to.
+
+  Arm B swapped the NoCs -- every run above was already refused if it
+  had not, but see it for yourself:
+    for t in /home/nx09/nx09/nebriscv/tt_traces/nocfixed-session/runs/B-*/.logs/noc_trace_dev0_ID0.json; do
+      /home/nx09/nx09/nebriscv/tt-sim/perfbench/nocevbench/check_arm.py --arm B --trace "$t"; done
+    Expect READ on NOC_0 and WRITE_ on NOC_1 -- the opposite of arm A.
+
+Then send the WHOLE directory, stdout logs included -- they carry the
+nocevbench-config line that records what each run was configured as:
+  rsync -av /home/nx09/nx09/nebriscv/tt_traces/nocfixed-session/ <home>:~/nocfixed-session/

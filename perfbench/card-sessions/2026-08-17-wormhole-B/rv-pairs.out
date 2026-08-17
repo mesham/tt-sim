@@ -1,0 +1,59 @@
+2026-08-17 12:34:19.149 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:19.149 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:19.149 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:19.149 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:19.153 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:19.171 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:19.263 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:19.263 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:19.263 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:19.263 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:19.267 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:19.276 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:19.329 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:19.329 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:19.331 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:19.331 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:19.334 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:19.341 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:19.348 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:19.351 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:19.351 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:19.397 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+phase r [t1]: done (1 issuing thread), 24 rows written to /home/nbrown23/tt_traces/card-session-wormhole/rv-pairs.wormhole.csv
+
+==============================================================================
+riscvbench summary [wormhole] -- slopes only, no absolute measurement is a cost
+==============================================================================
+stack probe address: 0xFFB00798 (which load-latency row that is, the analysis
+  classifies -- tt-metal places the stack, not this program)
+
+probe              ph  variant unit     thr         cyc/n   per-instr      R^2
+loop_overhead      r   t1      -        1            1.98       0.000   0.9999
+rv_mul_indep       r   t1      RV       1          129.94       1.999   1.0000
+rv_mul_dep         r   t1      RV       1          130.07       2.001   1.0000
+rv_div             r   t1      RV       1         2114.02      33.001   1.0000
+rv_store_spread    r   t1      RV_LSU   1          332.63       5.166   1.0000
+rv_store_coalesce  r   t1      RV_LSU   1          332.95       5.171   1.0000
+
+------------------------------------------------------------------------------
+Is the instrument live? The probes with a non-trivial documented cost
+------------------------------------------------------------------------------
+  rv_mul_dep            2.001 cycles/instruction
+  rv_div               33.001 cycles/instruction
+  rv_store_spread       5.166 cycles/instruction
+
+  3 of 3 read above 1.0, so the timer resolves a real per-instruction
+  cost and a 1.000 elsewhere in this run is a finding rather than a floor.
+
+wrote 24 rows to /home/nbrown23/tt_traces/card-session-wormhole/rv-pairs.wormhole.csv
+TTRVBENCH_VALID_R: yes
+TTRVBENCH_VALID: yes
+Completed successfully on the device
+2026-08-17 12:34:19.412 | info     |    BuildKernels | JIT cache stats: 3/3 hits (100.0%) [3 cached, 0 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:19.412 | info     |    BuildKernels | JIT telemetry: 2 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:19.418 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:19.418 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:19.437 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:19.437 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:19.437 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)

@@ -1,0 +1,42 @@
+2026-08-17 12:34:10.226 | info     |          Device | Opening user mode device driver (tt_cluster.cpp:228)
+2026-08-17 12:34:10.226 | info     |             UMD | Cluster constructor started. (cluster.cpp:348)
+2026-08-17 12:34:10.227 | info     |             UMD | Creating TopologyDiscovery for architecture: wormhole_b0 (topology_discovery.cpp:95)
+2026-08-17 12:34:10.227 | info     |             UMD | Starting topology discovery. (topology_discovery.cpp:114)
+2026-08-17 12:34:10.412 | info     |             UMD | Established firmware bundle version: 19.13.2 (topology_discovery.cpp:574)
+2026-08-17 12:34:10.430 | info     |             UMD | Completed topology discovery. (topology_discovery.cpp:118)
+2026-08-17 12:34:10.520 | info     |             UMD | Opening local chip ids/PCIe ids: {0, 1}/[0, 1] and remote chip ids {2, 3} (cluster.cpp:168)
+2026-08-17 12:34:10.520 | info     |             UMD | IOMMU: disabled (cluster.cpp:142)
+2026-08-17 12:34:10.520 | info     |             UMD | KMD version: 2.11.0 (cluster.cpp:145)
+2026-08-17 12:34:10.520 | info     |             UMD | Cluster constructor completed. (cluster.cpp:520)
+2026-08-17 12:34:10.525 | info     |             UMD | Starting devices in cluster (cluster.cpp:1024)
+2026-08-17 12:34:10.535 | info     |             UMD | Starting devices in cluster completed. (cluster.cpp:1032)
+2026-08-17 12:34:10.602 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:10.602 | info     |     Distributed | Using custom mesh graph descriptor: /home/nbrown23/tt-metal-0.74/tt-metal/1x4_mesh.textproto (metal_env.cpp:404)
+2026-08-17 12:34:10.603 | info     |          Fabric | Logical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2342)
+2026-08-17 12:34:10.603 | info     |          Fabric | Physical multi-mesh adjacency: intermesh degree histogram {0:1}; intra-mesh degree histograms mesh0 {1:2, 2:2} (topology_mapper_utils.cpp:2350)
+2026-08-17 12:34:10.606 | info     |          Device | Slow dispatch mode: Using full logical grid (8, 8) (core_descriptor.cpp:220)
+2026-08-17 12:34:10.614 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:10.619 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:10.621 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:10.621 | info     |    BuildKernels | Using pre-compiled firmware from: /home/nbrown23/tt-metal-0.74/tt-metal/tt_metal/pre-compiled/15423860353964231546/ (build_env_manager.cpp:347)
+2026-08-17 12:34:10.667 | warning  |           Metal | Opening subset of mmio devices slows down UMD read/write to remote chips. If opening more devices, consider using CreateDevices API. (device_manager.cpp:261)
+nocreadbench: arch=wormhole grid=8x8 points=36 repeats=3 num_tx=64 data_addr=0x0016A000 results_addr=0x00169FA0
+nocreadbench: wrote /home/nbrown23/tt_traces/card-session-wormhole/nocread.wormhole.csv (0 failures)
+nocreadbench: highest occupancy over rest, per-trid counter = 39; trid-independent RD_REQ_SENT - RD_RESP_RECEIVED = 36 (longest burst 128)
+nocreadbench: CMD_BUF_AVAIL left its rest value in 0 of 36 points
+  VERDICT: BOUNDED AT 36 -- the initiator holds at most this many read
+  requests in flight (per-trid occupancy peaked at 39). Check it against
+  the `dist` rows: a credit limit predicts cycles_per_tx = round_trip / 36,
+  so cycles_per_tx MUST rise with hops. If the `dist` rows are flat, this
+  bound is not what caps the rate either.
+  CMD_BUF_AVAIL: DEGENERATE -- identical at rest and in every in-loop
+  sample, so the register reports nothing about the command-buffer depth.
+  Do not quote its value as a depth: it is an occupancy (reset default 0,
+  paired with CMD_BUF_OVFL), and an occupancy that never moves is silence.
+2026-08-17 12:34:10.785 | info     |    BuildKernels | JIT cache stats: 1/1 hits (100.0%) [1 cached, 107 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:207)
+2026-08-17 12:34:10.785 | info     |    BuildKernels | JIT telemetry: 3 registered TelemetryTokens (build_cache_telemetry.cpp:230)
+2026-08-17 12:34:10.791 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:513)
+2026-08-17 12:34:10.791 | info     |             UMD | Closing devices in cluster (cluster.cpp:1037)
+2026-08-17 12:34:10.808 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1046)
+2026-08-17 12:34:10.808 | info     |             UMD | Cluster destructor started. (cluster.cpp:754)
+2026-08-17 12:34:10.808 | info     |             UMD | Cluster destructor completed. (cluster.cpp:757)
