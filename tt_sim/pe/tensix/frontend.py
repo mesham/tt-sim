@@ -444,10 +444,17 @@ class WaitGate(TensixFrontendUnit):
 
         ``(reason, semaphore)``, or ``None`` when the latched wait is not in
         semaphore mode or every selected semaphore condition is satisfied.
-        Shared by both readers of those masks so they cannot drift:
-        :meth:`_note_latched_wait`, which turns it into a stall, and
-        :meth:`_tick_unheld_latched_wait`, which turns it into a live wait
-        condition with nothing held.
+        Shared by all three readers of those masks so they cannot drift:
+        :meth:`check_for_wait_condition_met`, which turns ``None`` into a
+        release; :meth:`_note_latched_wait`, which turns a reason into a
+        stall; and :meth:`_tick_unheld_latched_wait`, which turns one into a
+        live wait condition with nothing held.
+
+        A ``None`` therefore carries the release decision as well as the
+        absence of a reason, and the loop below is the whole quantifier: it
+        runs to exhaustion over *every* selected semaphore, because
+        ``SEMWAIT.md``'s condition mask says to keep waiting if **any**
+        selected semaphore is zero (C0) or at its max (C1).
 
         First unsatisfied condition wins, which is the rule the whole gate
         already attributes by rather than a new one: a cycle on which C0 and C1
@@ -529,22 +536,32 @@ class WaitGate(TensixFrontendUnit):
         )
 
     def check_for_wait_condition_met(self):
+        """Is the latched wait's condition met, so the thread may be released?
+
+        In semaphore mode this is exactly "no selected condition holds on any
+        selected semaphore", which is
+        :meth:`_latched_semaphore_reason` returning nothing. ``SEMWAIT.md``
+        tabulates the condition mask as a pair of *keep waiting* rules --
+        "**C0**: Any of the semaphores selected by ``SemaphoreMask`` have
+        ``Value == 0``", "**C1**: ... have ``Value >= Max``" -- over an
+        instruction that blocks "until **all** of the selected conditions are
+        simultaneously met". Both quantifiers matter and they are the same
+        rule from either end: the thread runs only when *every* selected
+        (semaphore, condition) pair is satisfied, so *any* one unsatisfied
+        pair holds it.
+
+        This delegates rather than repeating the walk because repeating it is
+        what went wrong: the walk used to be inlined here with its ``return
+        True`` indented into the ``for`` body, so a multi-semaphore mask only
+        ever tested the *first* selected semaphore and released the thread
+        while the rest were still unsatisfied -- silently, with no fault. That
+        is the third reader of these masks, and the drift
+        :meth:`_latched_semaphore_reason` exists to prevent; there is now one
+        walk and no way for the readers to disagree.
+        """
         assert self.latchedWaitInstruction is not None
         if self.latchedWaitInstruction.isSemaphoreMode():
-            sem_checks = self.latchedWaitInstruction.getSemaphoresToCheck()
-            for sem in sem_checks:
-                semaphore = self.backend.getSyncUnit().getSemaphore(sem)
-                if (
-                    self.latchedWaitInstruction.getConditionCheck(0)
-                    and semaphore.value == 0
-                ):
-                    return False
-                if (
-                    self.latchedWaitInstruction.getConditionCheck(1)
-                    and semaphore.value >= semaphore.max
-                ):
-                    return False
-                return True
+            return self._latched_semaphore_reason() is None
         else:
             for idx in range(15):
                 if self.latchedWaitInstruction.getConditionCheck(idx):
