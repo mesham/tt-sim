@@ -206,16 +206,50 @@ not be re-attempted.
 
 ## Toward a v2.0 release
 
-**The claim a 2.0 would be making.** As of 2026-08-12 the strongest
-honest one is: *runs real tt-metal programs unmodified on both
-architectures, with a documented-provenance timing model corroborated
-at the slope and launch level*. Everything below either removes a
-caveat from that sentence or extends it.
+**The claim a 2.0 would be making.** As of **2026-08-18**, with every
+item below closed, the strongest honest one is:
 
-**Multi-tile, which was this list's first two items, is done**
-(2026-08-12). A real grid is validated at every size on both arches,
-and workers materialise on demand with no environment variable. What
-is left is the credibility layer.
+> *Runs real tt-metal programs unmodified on both architectures, on the
+> full default grid, with a timing model of **documented provenance** —
+> zero `estimated` entries, asserted by test — corroborated against
+> silicon at the **slope** and **launch** level on both parts, and
+> **by mechanism** for NoC-bound work on both parts.*
+
+**The caveats belong inside the claim, not under it, because three of
+them are permanent.** A reader who takes the sentence above without
+these four is taking more than the evidence gives:
+
+- **The model is a floor.** Every bound is charged at its low end, by
+  rule. So it under-predicts, monotonically, wherever hardware sits
+  above a documented minimum — and it is **not cycle-accurate** and
+  does not claim to be.
+- **Mechanism-level corroboration is one leg on both arches, not
+  three.** The NoC leg is validated on Wormhole and Blackhole
+  (0.2–9.3 % against a 25 % bar). The **RV-bound** leg is
+  **Blackhole-only by construction** — Wormhole documents no CSRs, so
+  there is no `minstret` and the leg refuses rather than degrading —
+  and on its one silicon session it **FAILS**, `E_total` 15.91 %
+  against a 10 % bar. The **Tensix mechanism** leg **cannot be built at
+  all** from the counters this hardware exposes.
+- **That RV-bound failure is a single, sourced, permanent cause.** All
+  of it is the divide floor: 13.43 % of a 15.92 % error, against 2.49 %
+  for everything else, with a compensation ratio of **1.00x** so
+  nothing is concealed. It cannot be closed — a dividend-magnitude term
+  is unlicensable at every rank of the provenance ladder, proven by
+  exhaustive search of both doc trees and every vendor tree.
+- **Energy is ranking-level only, and barely beats knowing nothing.**
+  Two architectures pass all thirteen gates, but against a null model
+  that takes energy as proportional to simulated cycles the fit is
+  worth **one rank swap in nine on Wormhole and nothing at all on
+  Blackhole**. The ratios are where it earns its keep, and only on
+  Wormhole. Absolute joules are out of reach of the instrument.
+
+**Two of the items below closed by being proven impossible rather than
+by being delivered**, and that is a result rather than a gap: a
+limitation that has been searched for and bounded is worth more than
+one that is merely unmet. Multi-tile, this list's original first two
+items, is done (2026-08-12) — a real grid at every size on both arches,
+workers materialising on demand with no environment variable.
 
 0. **NoC 1 coordinate correctness — five commits, 2026-08-13/16.**
    Not on the original list; it arrived as a bug report from the
@@ -330,8 +364,11 @@ is left is the credibility layer.
    always plans from the simulator's own grid dump. Blackhole `noc1`
    shows 0 claims — nothing in tree exercises NoC 1's registry.
 
-2. **Rung-4** (§4) — **one of four legs built, 2026-08-13**, and the
-   only remaining substantial item. `perfbench/mechbench` plus
+2. **Rung-4** (§4) — **all three buildable legs exist as of
+   2026-08-18; the fourth is settled as impossible.** This is the
+   v2.0 list's last substantial item, and what is left in it is one
+   measured model gap (the divide floor, below) rather than any
+   missing instrument. `perfbench/mechbench` plus
    `tt_sim.perf.stall_attribution` partition a core's span by stall
    mechanism on both sides and report `E_total`, `E_int` and the
    compensation ratio behind five refusing gates. The synthetic
@@ -422,8 +459,10 @@ is left is the credibility layer.
    13x excess, with `THREAD_STALLS_2` and the total span unchanged and
    no pinned constant moved. That gap is a front-end issue-timing
    question.
-   **A pre-existing correctness bug was found and left alone,
-   deliberately**: `check_for_wait_condition_met`'s semaphore branch has
+   **A pre-existing correctness bug was found here and FIXED
+   2026-08-18** (`waitgate_multi_semaphore_test.py`, 14 cases, 12 of
+   which fail without the fix): `check_for_wait_condition_met`'s
+   semaphore branch had
    a misindented `return True` **inside** its `for sem in sem_checks:`
    loop, so a `SEMWAIT` selecting several semaphores only ever tests the
    first and the thread is released early — silently, no fault, the NoC
@@ -433,7 +472,18 @@ is left is the credibility layer.
    `_note_latched_wait` has the same loop with its `return` correctly at
    the `for` level, which is what makes this a typo rather than a
    design. Harmless for the single-semaphore masks every in-tree kernel
-   uses; `semaphore_mask` is 8 bits, so the reachable case is real.
+   uses; `semaphore_mask` is 8 bits, so the reachable case was real.
+   The fix **delegates to `_latched_semaphore_reason`** rather than
+   dedenting the `return`: that walk already existed and its docstring
+   already said it was there "so they cannot drift", and the bug *was*
+   that drift — a silently-diverged third reader. There is now one walk.
+   `SEMWAIT.md`'s table settles the quantifier: C0/C1 say to keep
+   waiting if **any** selected semaphore is zero / at max, the
+   contrapositive of the summary's "until **all** of the selected
+   conditions are simultaneously met", so release needs every selected
+   (semaphore, condition) pair satisfied. No pinned number moved,
+   which is the evidence the reachable case was untested rather than
+   tested-and-passing.
    **The NoC-bound leg is built, 2026-08-16** — `perfbench/nocevbench`
    plus `tt_sim.perf.noc_events`, behind six refusing gates. Two of
    three legs now exist.
@@ -467,6 +517,14 @@ is left is the credibility layer.
    useful kind.** A Blackhole p150 session, three repeats,
    `perfbench/card-sessions/2026-08-18-bh-retirebench/`. `E_total`
    **15.91 / 15.51 / 15.91 %** against a 10 % limit.
+   **It is `E_total` that fails, not `E_int`** — the interior number
+   *passes* at 15.91 % against its 25 % bar. That is not a detail: a
+   strict floor model under-charges monotonically, so every bucket errs
+   one way, `E_int` is identically equal to `E_total`, and **such a
+   model can only ever fail rung 4 through the tighter envelope bar,
+   never through the interior one the rung was designed around.**
+   Rung 4 was built to catch compensation; a floor's failure mode is
+   not compensation.
    **The compensation ratio is 1.00x** — `E_int` equals `E_total` to the
    decimal, so *nothing is hiding behind anything*: every zone errs in
    the same direction (tt-sim under-charges) and the triangle inequality
@@ -481,13 +539,40 @@ is left is the credibility layer.
    range }` (`isa_doc`, `wh_riscv#integer-unit`) is charged at its low
    end per the working rule that the model is a floor; the doc says
    "between six and 33 cycles ... dependent upon the magnitude of the
-   dividend" and the card has now *measured* that dependence — 12.409
-   cyc/instr at a 12-bit dividend, 28.365 at a 29-bit one, against 5.377
-   and 5.270 modelled. **Not to be "fixed" by charging 33**: that would
-   over-charge every small divide and break the floor property
-   everywhere else. Modelling it needs a dividend-magnitude term with
-   real provenance, and two points on a documented 6-33 range is not
-   one.
+   dividend" and the card has now *measured* that dependence —
+   **14.04 cycles per divide at a 12-bit dividend, 33.10 at a 29-bit
+   one**, against 6 modelled.
+   **THE GAP IS PERMANENT AND THAT IS NOW PROVEN, 2026-08-18.** A
+   dividend-magnitude term is **unlicensable at every rank of the
+   ladder**. Both ISA doc trees were searched exhaustively — 602 files,
+   `quotient` appears **zero** times and `dividend` exactly four, being
+   the same two sentences once per architecture. No radix, no iteration
+   rule, no bits-per-cycle, no formula, no divider in any pipeline
+   diagram; Blackhole's text is character-for-character Wormhole's.
+   Every vendor tree yielded exactly one hit, `tt_metal/hw/inc/internal/
+   mod_div_lib.h:129` — "This takes six to 33 cycles on WH/BH" — which
+   is **strictly weaker** than the ISA doc: same band, no mechanism,
+   and it drops the magnitude clause. So the term could only enter as
+   `estimated`, which is forbidden. No sweep was built, because no
+   quantity of card data can change a provenance question.
+   **The obvious curve is now excluded rather than merely unpinned.**
+   `cycles = bits + k` needs one `k` and gets 2.018 and 4.043; the
+   affine law through both points is `0.589 + 1.119*bits`, which reads
+   **1.71 at one bit** (under the documented floor of 6) and **36.40 at
+   32 bits** (over the documented cap of 33). The simplest family is
+   refuted by the band it would have to live inside. Both divide zones
+   are **bit-identical across all three repeats** while every other zone
+   moves, so the divider is an exactly reproducible function of its
+   operands — what is missing is the function, not the precision.
+   **Not to be "fixed" by charging 33**: that would over-charge every
+   small divide and break the floor property everywhere else. This
+   belongs beside the mechanism leg as a **permanent documented
+   limitation of a floor model over a `bound: range` entry**, not as a
+   deferred task.
+   **Worth raising upstream**: three instruments put silicon at or
+   fractionally *past* the published maximum — 33.10 here, `riscvbench`
+   at 33.001/33.004, a Wormhole card at 33.03. The band's top is
+   saturated, not bounding.
    **The prediction registered beforehand was half right, and the miss
    is recorded because that is the only thing that makes registering
    one worth doing.** It said `div_large` would be the single bad zone
@@ -629,8 +714,13 @@ is left is the credibility layer.
    their cost-model configuration**; comparing an instruction count to
    a card is a category error that looks like a finding.
    **Not retired, and the reason is worse than a missing session** —
-   see item 2. Rung 4's two-arch claim cannot be made, for two
-   independent reasons now rather than one.
+   see item 2. Rung 4's two-arch claim **cannot be made, and that is now
+   settled rather than pending**: the mechanism leg is a documented
+   impossibility on both parts, and the RV-bound leg is Blackhole-only
+   by construction because Wormhole documents no CSRs at all. Only the
+   NoC leg is genuinely two-arch, and it is validated on both. No
+   Wormhole session can change any of that, so this item is closed as
+   *answered*, not left open.
    **Two things the programme learned that no simulator could have
    told us.** A **board reset belongs between sessions**: `mechbench`
    failed all six runs with `mismatches=4052` immediately after a

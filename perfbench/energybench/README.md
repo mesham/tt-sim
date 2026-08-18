@@ -384,9 +384,8 @@ append-only** schema so that a term added later shifts no existing column.
 
 **Run it with an interpreter that has the trace dependencies.** The reduction
 step imports `tt_sim.trace.report` → `tt_sim.trace.dwarf` → `pyelftools`, and
-pyarrow behind it; on this box that is the venv at
-`/home/nick/projects/riscv/venv/bin/python3`, and a bare system `python3` has
-neither. Pass it as `TT_SIM_PYTHON=/path/to/venv/bin/python3`.
+pyarrow behind it, and a bare system `python3` typically has neither. Pass a
+virtualenv interpreter that does, as `TT_SIM_PYTHON=/path/to/venv/bin/python3`.
 
 The script now **proves those imports before any arm runs** and exits 4 with the
 missing module named, because the failure mode it had was the simulator-side

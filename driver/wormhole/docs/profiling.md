@@ -3474,7 +3474,7 @@ export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
 ```
 
 so `TT_METAL_HOME` silently drives the *kernel* build as well as the host build.
-The failing runs pointed at `/home/nick/projects/riscv/tt-metal`, which is pinned
+The failing runs pointed at an older tt-metal checkout, which is pinned
 at **v0.70.1**, while the venv's `TT_METAL_RUNTIME_ROOT` is the **v0.74.0** tree.
 `SrcOrder` is the *newer* API — v0.74 declares it in
 `tt_metal/hw/inc/api/compute/compute_kernel_hw_startup.h`; v0.70.1 has no such
@@ -3795,7 +3795,7 @@ TT_SIM_NUMBA=0 ...                                           # the numpy-only ar
 # arm first -- numba's on-disk cache lives beside the source, so it is per-tree
 # and a cold one is a 0.7 s handicap on whichever arm ran first.
 
-TT_METAL_HOME=/home/nick/projects/hedgehope/tt-metal-0.74/tt-metal \
+TT_METAL_HOME=/path/to/tt-metal-0.74 \
 TTSIM_ORACLE=~/projects/riscv/ttsim/oracle-bh ./optests/diff.sh matmulblock
 # check `version.txt` says v0.74.0 before reading anything into a compile break.
 ```

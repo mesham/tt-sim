@@ -35,7 +35,7 @@ Running it
 
 ::
 
-    source /home/nick/projects/riscv/venv/bin/activate   # or export the four vars
+    source /path/to/venv/bin/activate   # or export the four vars
     python3 -m driver.tests.upstream_sweep               # fast tier, both arches
     python3 -m driver.tests.upstream_sweep --tier full   # + the heavy matmuls
     python3 -m driver.tests.upstream_sweep --list        # the table, run nothing

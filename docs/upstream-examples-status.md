@@ -10,7 +10,7 @@ the in-tree `examples/` ladder cannot be.
 own expected result, and prints `RESULT: PASS` / `RESULT: FAIL`:
 
 ```bash
-source /home/nick/projects/riscv/venv/bin/activate
+source /path/to/venv/bin/activate
 python3 -m driver.tests.upstream_sweep              # fast tier, both arches, ~8 min
 python3 -m driver.tests.upstream_sweep --tier full  # + the four heavy programs
 python3 -m driver.tests.upstream_sweep --list       # the table and its coverage
@@ -26,12 +26,12 @@ differential method used to triage a failure is `optests/diff.sh` (see
 | | |
 | --- | --- |
 | tt-sim | `d094097` (2026-08-13) plus this change, which adds the gate and these docs and touches no simulator file |
-| tt-metal | `0.74` at `/home/nick/projects/hedgehope/tt-metal-0.74/tt-metal`, prebuilt `build/programming_examples/` |
-| oracle | ttsim at `/home/nick/projects/riscv/ttsim` — `oracle-wh/libttsim_wh.so`, `oracle-bh/libttsim_bh.so`. **No row needed triage** (nothing failed); it was used once, to settle `matmul_single_core`'s PCC. It is the **functional** oracle only, never a cycle oracle. |
+| tt-metal | `0.74` at `$TT_METAL_HOME`, prebuilt `build/programming_examples/` |
+| oracle | a ttsim checkout (`$TTSIM_ROOT` below) — `oracle-wh/libttsim_wh.so`, `oracle-bh/libttsim_bh.so`. **No row needed triage** (nothing failed); it was used once, to settle `matmul_single_core`'s PCC. It is the **functional** oracle only, never a cycle oracle. |
 | flow | `TT_METAL_SLOW_DISPATCH_MODE=1` (every upstream example calls `EnqueueProgram`); `TT_METAL_SIMULATOR` selects `driver/wormhole` or `driver/blackhole` |
 | worker tiles | **nothing set.** No `TT_SIM_TENSIX_COORDS`, no `TT_SIM_TENSIX_CORES`, no `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE` |
 
-**Use the right tt-metal.** `/home/nick/projects/riscv/tt-metal` is 0.70.1 and
+**Use the right tt-metal.** An older 0.70.1 checkout may also be on the box, and
 fails these examples at *compile* time with `'SrcOrder' has not been declared`,
 which looks like a simulator bug and is not one. That misreading has already cost
 this project a wrong conclusion once.
@@ -532,7 +532,7 @@ committed trace. Revisit if a routing or contention bug of bug 4's class recurs.
 ## Reproducing a single row by hand
 
 ```bash
-source /home/nick/projects/riscv/venv/bin/activate
+source /path/to/venv/bin/activate
 cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
 
 # Wormhole (the venv's default), no grid variable of any kind:
@@ -553,9 +553,10 @@ straight at `oracle-wh/libttsim_wh.so` dies with
 directory instead — which is exactly what `optests/diff.sh` does for you:
 
 ```bash
+TTSIM_ROOT=/path/to/ttsim          # the checkout holding oracle-wh/ and oracle-bh/
 mkdir -p /tmp/oracle-wh && cd /tmp/oracle-wh
-ln -sf /home/nick/projects/riscv/ttsim/oracle-wh/libttsim_wh.so .
-ln -sf /home/nick/projects/riscv/ttsim/oracle-wh/wormhole_b0_80_arch.yaml soc_descriptor.yaml
+ln -sf "$TTSIM_ROOT"/oracle-wh/libttsim_wh.so .
+ln -sf "$TTSIM_ROOT"/oracle-wh/wormhole_b0_80_arch.yaml soc_descriptor.yaml
 cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
 TT_METAL_SIMULATOR=/tmp/oracle-wh/libttsim_wh.so ./metal_example_matmul_single_core
 # -> Metalium vs Golden -- PCC = 0.9797904 / Test Passed

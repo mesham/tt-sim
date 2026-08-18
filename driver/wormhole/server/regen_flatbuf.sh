@@ -3,7 +3,10 @@
 # tt-metal schema. flatc must be installed.
 set -euo pipefail
 
-SCHEMA="${1:-/home/nick/projects/riscv/tt-metal/tt_metal/third_party/umd/device/simulation/tt_simulation_device.fbs}"
+# Defaults to the schema inside whichever tt-metal $TT_METAL_HOME points at;
+# pass a path as $1 to override. Hard-coding a checkout here only ever worked
+# on one machine.
+SCHEMA="${1:-${TT_METAL_HOME:?set TT_METAL_HOME, or pass the .fbs path as the first argument}/tt_metal/third_party/umd/device/simulation/tt_simulation_device.fbs}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/_flatbuf"
 

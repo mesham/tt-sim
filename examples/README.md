@@ -27,7 +27,7 @@ examples/
   older `TT_METAL_HOME`) at that checkout.
 - `cmake` (≥ 3.22) and `clang++-17` on `PATH`.
 - The tt-sim repo on `PYTHONPATH` and the venv's `python` for the simulator server
-  (`source /home/nick/projects/riscv/venv/bin/activate` sets these up).
+  (`source /path/to/venv/bin/activate` sets these up).
 
 ## Building an example
 
@@ -79,7 +79,7 @@ Example — run `two` on the Blackhole sim (in a **normal shell**, not a sandbox
 that would kill the spawned server):
 
 ```bash
-REPO=/home/nick/projects/riscv/tt-sim
+REPO=/path/to/tt-sim
 export TT_METAL_HOME=/path/to/tt-metal
 export TT_METAL_RUNTIME_ROOT="$TT_METAL_HOME"
 export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:$LD_LIBRARY_PATH"

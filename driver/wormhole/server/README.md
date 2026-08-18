@@ -27,7 +27,7 @@ fire-and-forget; `READ` requires exactly one response.
 ## Usage with tt-metal
 
 ```bash
-export TT_METAL_SIMULATOR=/home/nick/projects/riscv/tt-sim/driver/wormhole
+export TT_METAL_SIMULATOR=/path/to/tt-sim/driver/wormhole
 <your tt-metal program>
 ```
 

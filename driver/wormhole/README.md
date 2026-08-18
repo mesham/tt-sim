@@ -87,7 +87,7 @@ Activate the venv (which sets `TT_METAL_RUNTIME_ROOT`) and build one example wit
 then run the binary — no extra flags needed:
 
 ```bash
-source /home/nick/projects/riscv/venv/bin/activate
+source /path/to/venv/bin/activate
 
 cd examples/one/src
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release

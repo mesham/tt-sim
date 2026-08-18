@@ -21,7 +21,7 @@ Only the **slow-dispatch** launch path is supported (see Limitations).
 Activating the project venv exports the four base variables:
 
 ```bash
-source /home/nick/projects/riscv/venv/bin/activate
+source /path/to/venv/bin/activate
 ```
 
 sets:
@@ -420,7 +420,7 @@ same kind of program — build one with `cmake -B build -S . && cmake --build bu
 set via `python3 -m examples.examples_test`.
 
 ```bash
-source /home/nick/projects/riscv/venv/bin/activate
+source /path/to/venv/bin/activate
 cd "$TT_METAL_RUNTIME_ROOT/build/programming_examples"
 
 ./metal_example_add_2_integers_in_compute        # single-tile: just works
@@ -852,7 +852,7 @@ translation while its mirrors — the ones this register actually names — stay
 ```bash
 #!/usr/bin/env bash
 set -u
-source /home/nick/projects/riscv/venv/bin/activate
+source /path/to/venv/bin/activate
 cd ~/tt-sim
 
 # Both architectures, every quick upstream program, no grid variable, ~8 min.

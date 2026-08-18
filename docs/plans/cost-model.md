@@ -974,8 +974,8 @@ published column, and there is exactly one:
 
 Two group names, `ThreadConfig` and `Config`, copied verbatim into
 `ipc_group:` on each entry — the doc's names, not this file's. The ISA
-documentation was not on this machine and is not vendored anywhere under
-`/home/nick/projects` (checked); the page was fetched from the upstream
+documentation was not on this machine and is not vendored anywhere under the
+development tree (checked); the page was fetched from the upstream
 repository, and the quoted sentence was already carried in the table's own
 `note` from the original wiring, so the two agree.
 
