@@ -360,6 +360,34 @@ def test_the_math_format_corroboration_keeps_both_of_its_caveats():
             assert "null control" in text.lower(), entry.name
 
 
+def test_the_divide_corroboration_keeps_both_of_its_silicon_points():
+    """A corroboration that quoted only the 33-cycle point would misread.
+
+    On its own, "silicon costs 33 where tt-sim charges 6" reads as a model
+    defect with an obvious fix, and the obvious fix -- a dividend-magnitude
+    term -- is precisely what no document licenses. The 12-bit point is what
+    turns that reading around: with both, ``cycles = bits + k`` needs one k
+    and gets two, and the affine law through the pair leaves the documented
+    6-33 band at each end. The entry is only honest with both in it, so an
+    edit that trims it to the headline fails here.
+    """
+    text = _sections_with("corroboration")[
+        "arch_overrides.blackhole.riscv.integer_unit"
+    ]
+    assert "14.018" in text
+    assert "33.043" in text
+    assert "12-bit dividend" in text
+    assert "29-bit one" in text
+    # The refutation, and the two numbers that carry it.
+    assert "2.018" in text
+    assert "4.043" in text
+    assert "PAST THE DOCUMENTED CAP OF 33" in text
+    assert "BELOW THE DOCUMENTED FLOOR OF 6" in text
+    # And that the search for a licensing source was done and came back empty,
+    # so the floor reads as a finding rather than as an unexamined default.
+    assert "mod_div_lib.h" in text
+
+
 def test_corroborated_extras_are_exactly_the_ones_we_expect():
     """The same pinning for unit-level numbers.
 

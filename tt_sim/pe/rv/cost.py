@@ -126,6 +126,30 @@ error the SFPU wiring already caught once:
    parameter one point cannot pin. The floor stays, and the point stays
    recorded as corroboration on the YAML entry rather than becoming a charge.
 
+   **Re-checked a third time on 2026-08-18, with a second silicon point and a
+   wider hunt, and the answer got stronger rather than softer.**
+   ``perfbench/retirebench``'s two divide zones differ only in the dividend,
+   so subtracting each zone's other instructions gives **14.018 cycles/divide
+   at 12 significant bits** against **33.043 at 29** — the second reproducing
+   riscvbench's independently instrumented 33.001, which is what licenses
+   trusting the first. Two points do not fit a curve, but they do *refute*
+   one: ``cycles = bits + k`` needs a single k and gets 2.018 and 4.043, and
+   the affine law through both returns 36.40 at 32 bits and 1.71 at 1 — one
+   past the documented cap of 33 and the other under the documented floor of
+   6. So the obvious family is now excluded by the band rather than merely
+   unpinned by it. The hunt was widened past the two BabyRISCV pages to both
+   whole doc trees (``quotient`` occurs zero times; ``dividend`` four) and to
+   tt-metal, tt-llk, UMD, SFPI and the shipped firmware. It found exactly one
+   vendor restatement, ``tt_metal/hw/inc/internal/mod_div_lib.h``'s "This
+   takes six to 33 cycles on WH/BH", which is *weaker* than the ISA doc — same
+   band, no mechanism, no magnitude clause. **A dividend-magnitude term is
+   therefore not licensable at any rank of the ladder, and this is a permanent
+   property of a floor model over a documented range, not a deferred task.**
+   The same file also explains why the exposure stays small: it is a table of
+   reciprocal multiply-shift helpers, and GCC's ``rvtt-b1`` tuning strength-
+   reduces every compile-time-constant divisor, so a hardware divide reaches a
+   kernel only when the divisor is a runtime value.
+
 **What is deliberately not modelled** — each an honest gap rather than an
 omission:
 

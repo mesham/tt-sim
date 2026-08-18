@@ -1792,6 +1792,58 @@ arch_overrides:
           dividend"; one point is not the curve, and the benchmark sweeps no
           others.
 
+          A SECOND SILICON POINT ARRIVED 2026-08-18 AND IT EXCLUDES THE OBVIOUS
+          CURVE, which is more than the first one could do. THREE RUNS, ON ONE
+          CARD (a Blackhole p150; perfbench/card-sessions/2026-08-18-bh-
+          retirebench/) of perfbench/retirebench, whose ``div_small`` and
+          ``div_large`` zones differ only in the dividend -- 0xFFF and
+          0x12345678, both over divisor 3. Subtracting each zone's non-divide
+          instructions and its measured two-marker cost gives **14.018
+          cycles/divide at a 12-bit dividend** and **33.043 at a 29-bit one**.
+          The subtraction is not taken on trust: the 29-bit zone reproduces
+          riscvbench's independently instrumented 33.001 / 33.004, and a
+          Wormhole card read 33.03 at the same operand on 2026-08-17, so the
+          method is validated at the point where an independent number exists
+          and only then applied to the 12-bit zone. Both divide zones are
+          **bit-identical across all three repeats** (7036 and 6921 cycles
+          every time) while every other zone moves by up to 339, so the divider
+          is an exactly reproducible function of its operands and what is
+          missing is the function, not precision.
+
+          WHAT THE PAIR RULES OUT. One quotient bit per cycle -- the family the
+          2026-08-06 re-check called unpinned rather than excluded -- requires
+          ``cycles = bits + k`` for a single k; the two points give k = 2.018
+          and k = 4.043, so no member of that family fits. Nor does any affine
+          law: the line through both points is ``0.589 + 1.119 * bits``, which
+          returns 36.40 at a 32-bit dividend, PAST THE DOCUMENTED CAP OF 33,
+          and 1.71 at a 1-bit one, BELOW THE DOCUMENTED FLOOR OF 6. The
+          simplest candidate curves are now refuted by the band they would have
+          to live inside, rather than merely unconfirmed. Whatever the divider
+          does is non-affine in dividend width, and two points cannot say what.
+
+          THE SOURCE HUNT WAS REDONE ON 2026-08-18 AND STILL RETURNS NOTHING.
+          Both ISA doc trees were searched whole -- 1177 files, both arches,
+          including the SVG and Lua diagram sources -- for a radix, an
+          iteration rule, a bits-per-cycle, a leading-zeros term, a table or a
+          worked example: ``quotient`` appears zero times in the corpus and
+          ``dividend`` exactly four, being the two sentences already quoted
+          here, once per architecture. One VENDOR restatement exists and is
+          strictly weaker than the ISA doc -- tt-metal
+          ``tt_metal/hw/inc/internal/mod_div_lib.h``: "Fallback to division
+          instruction. This takes six to 33 cycles on WH/BH." -- the same band,
+          no mechanism, and it drops the magnitude clause entirely. So a
+          dividend-magnitude term remains unlicensable at every rank on the
+          ladder, and the floor stays.
+
+          THE VENDOR'S OWN MITIGATION IS WHY THE EXPOSURE STAYS SMALL, and it
+          is a mechanism rather than an observation. ``mod_div_lib.h`` is a
+          table of reciprocal multiply-shift helpers for the divisors tt-metal
+          actually uses, and the shipped SFPI GCC's ``rvtt-b1`` tuning already
+          strength-reduces any compile-time-constant divisor to a ``mulh``
+          sequence. A hardware divide therefore survives into a kernel only
+          when the divisor is a runtime value, which is why a whole launch
+          across the in-tree Blackhole replay guards executes 0-2 of them.
+
           THE MISPREDICT BUBBLE IS NOT TESTED BY ANY OF THIS, and conflating
           the two numbers is the mistake this paragraph exists to stop.
           ``branch_mispredict_bubble: 4`` is the SIZE of one mispredict. What

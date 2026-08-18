@@ -709,6 +709,58 @@ def test_the_divide_charge_is_the_floor_at_any_dividend_magnitude():
             assert cpu.register_file["pc"].read_uint() == 0x100 + 5 * 4
 
 
+def test_the_two_measured_dividends_are_charged_identically():
+    """The deliberate error, pinned as an equality rather than left implicit.
+
+    ``perfbench/retirebench`` measured these two operands on one Blackhole
+    card, three repeats, bit-identical each time: 0xFFF / 3 costs **14.018**
+    cycles on silicon and 0x12345678 / 3 costs **33.043**. tt-sim charges both
+    the band's floor of 6, so the pair it gets most wrong and the pair it gets
+    least wrong are indistinguishable to it -- which is the whole content of
+    "the model is a floor over a documented range".
+
+    This is the test a dividend-magnitude term would have to break. It exists
+    because no such term is licensable: no ISA doc and no vendor source states
+    a radix, an iteration rule or a dividend-to-cycles function, so any curve
+    would be fitted to card data and enter as ``estimated``, which the tables
+    forbid. If a source ever publishes the function, this assertion is the
+    place the change announces itself.
+    """
+    with _env(True):
+        programs = {
+            # 0xFFF, a 12-bit dividend: one addi materialises it.
+            0xFFF: [_addi(12, 0, 0xFFF), _addi(13, 0, 3), _div(10, 12, 13)],
+            # 0x12345678, 29 significant bits: lui + addi (0x678 < 0x800, so
+            # no sign-extension correction is needed).
+            0x12345678: [
+                _lui(12, 0x12345),
+                _addi(12, 12, 0x678),
+                _addi(13, 0, 3),
+                _div(10, 12, 13),
+            ],
+        }
+        for arch in ("wormhole", "blackhole"):
+            stalls = {}
+            for dividend, program in programs.items():
+                full = program + [_addi(11, 0, 1)]
+                # Run EXACTLY one cycle per instruction plus the floor's five
+                # stalls, and require the PC to land exactly on the end. That
+                # is what makes the equality below mean something in both
+                # directions: a dearer divide leaves the PC short, a cheaper
+                # one overshoots, and neither can report five stalls by having
+                # been clipped at the end of the run.
+                cpu, _ = _core(full, arch=arch)
+                _run(cpu, len(full) + 5)
+                assert cpu.register_file["pc"].read_uint() == 0x100 + len(full) * 4, (
+                    arch,
+                    dividend,
+                )
+                stalls[dividend] = cpu.rv_cost.stall_cycles
+            # Both the floor's five stalled cycles, and equal to each other:
+            # 8.0 and 27.0 cycles per divide short of the card, respectively.
+            assert stalls[0xFFF] == stalls[0x12345678] == 5, arch
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
