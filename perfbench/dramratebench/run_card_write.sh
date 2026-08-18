@@ -50,6 +50,8 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 
 OUT="$PWD/dramratebench-write-session"
 PREFLIGHT=0
@@ -201,6 +203,58 @@ PRED
 echo ""
 echo "$PREDICTIONS"
 
+# The block above is framed around WORMHOLE's question. Blackhole's is a
+# different one, and reading the Wormhole framing at a Blackhole part gives the
+# wrong verdict for the right numbers -- the same defect nocevbench had when it
+# quoted Blackhole's control band at a Wormhole part.
+#
+# BOTH are printed, unconditionally, rather than detected. The predictions print
+# before any device is opened (`--list` must cost nothing), so the part is not
+# known here -- and pre-registering both is stronger than picking one at
+# runtime anyway: neither can be chosen after seeing a number.
+cat <<'BHPRED'
+
+  IF THIS IS A BLACKHOLE PART, THE QUESTION IS A DIFFERENT ONE
+  ------------------------------------------------------------------
+  The block above is WORMHOLE's framing ("real and dearer" against "barrier
+  artefact"), and it does not apply on Blackhole, which already has its split:
+  a DRAM write's SERVICE LATENCY is 22 cycles against a read's 126.
+
+  What Blackhole is being asked is sharper, and it is about an ABSENCE.
+  tt-sim has NO Blackhole write rate at all: `write_bytes_per_cycle` is
+  None, so every write claim is a no-op and the write arm runs up on the
+  64 B/cycle link. That is why the simulator predicts
+
+      onechan read 44.364 B/cycle,  onechan write 60.208.  Ratio 1.357
+
+  i.e. it says a Blackhole write is 36 % FASTER than a read -- for no
+  reason except that nobody has given it a figure. That number is the
+  shape of a missing value, not of a model.
+
+  SO THE PRE-REGISTERED QUESTION HERE IS: does the card agree?
+
+    NOT FASTER  write/read at or below ~1.05. The 1.357 is then exposed as
+                the artefact it is, and this session is the FIRST constraint
+                on a value that does not currently exist. Enters as
+                corroboration for a MISSING number, which is a cleaner
+                position than correcting a wrong one.
+    FASTER      write/read at or above ~1.25, repeatably. The absence was
+                accidentally benign, and the session sizes what the figure
+                should have been.
+    BETWEEN     1.05 to 1.25. Report the level and the spread; it constrains
+                the value without settling the shape.
+
+  CAREFUL, and this is the part most likely to be got wrong: the 22-vs-126
+  split is a LATENCY, and this is an OCCUPANCY measurement. They are
+  different quantities. Agreement is not automatic and DISAGREEMENT WOULD
+  NOT FALSIFY THE SPLIT. Do not report this session as a test of it.
+
+  Everything else -- witness_ok == N, stray_writes == 0, the read rows
+  reproducing their own control, the fan-out gate -- is arch-independent
+  and applies on both parts unchanged. Those are what make the session valid
+  at all.
+BHPRED
+
 [ "$LIST" -eq 1 ] && exit 0
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
@@ -260,18 +314,24 @@ done
 # allocation failure at run time costs the card time this check does not.
 echo "   ok   write direction doubles the DRAM buffer (~384 MiB on a 12-bank part)"
 
-if [ "$SKIP_BUILD" -eq 0 ]; then
+# "A build exists" is not "the build matches the tt-metal that will be loaded".
+# This session died at rc=127 on a symbol lookup once, after the board reset,
+# because those two are different claims -- see build_provenance.sh.
+bp_check_build "$SRC" "$([ "$SKIP_BUILD" -eq 1 ] && echo skip-build || echo build)" || fail=1
+
+if [ "$fail" -eq 0 ] && [ "$SKIP_BUILD" -eq 0 ]; then
   echo "   .... building (first time ~2 min)"
   if ( cd "$SRC" && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null \
        && cmake --build build -j"$(nproc)" >/dev/null ); then
+    bp_record_build "$SRC"
     echo "   ok   build/dramratebench is current"
   else
     echo "   FAIL build failed; run cmake by hand in $SRC to see why"
     fail=1
   fi
-elif [ -x "$SRC/build/dramratebench" ]; then
+elif [ "$SKIP_BUILD" -eq 1 ] && [ -x "$SRC/build/dramratebench" ]; then
   echo "   ok   build/dramratebench exists (--skip-build)"
-else
+elif [ "$SKIP_BUILD" -eq 1 ]; then
   echo "   FAIL --skip-build but there is no build/dramratebench"
   fail=1
 fi

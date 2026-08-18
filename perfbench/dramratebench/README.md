@@ -465,12 +465,31 @@ predicted travels with what was measured.
 standard-library only, so it runs at the card:
 
 ```bash
-perfbench/dramratebench/check_run.py --read-control        # the 2026-08-17 control
-perfbench/dramratebench/check_run.py --measured run1.csv   # the write gates
+perfbench/dramratebench/check_run.py --read-control          # both pinned controls
+perfbench/dramratebench/check_run.py --read-control run1.csv # the one for its arch
+perfbench/dramratebench/check_run.py --measured run1.csv     # the write gates
 ```
 
+There is **one pinned control per architecture** and the file's own `arch=`
+selects it — Wormhole from `card-sessions/2026-08-17-wormhole-B` and
+`2026-08-17-wh-dramwrite`, Blackhole from `2026-08-17-bh-dramwrite`. A control
+that does not apply **skips, with the reason printed**, and never fails: grading
+a Blackhole run against Wormhole's pins is a category error, not a regression,
+and the first time it happened it printed sixteen confident FAILs comparing 46
+B/cycle against 22.
+
+Every pinned figure is a **band**, not a point, and its width is the measured
+spread across the sessions named beside it. Two Wormhole sessions read 20.344
+and 22.225 B/cycle at two readers and 22.127 and 21.546 at four, so those two
+bands are wide and the rest are not; the flat-band and scaling claims are pinned
+separately, because they are statements about the sweep's shape and the shape
+reproduces where individual points wobble. The Blackhole bands come from one
+session and say so — they are point pins until a second Blackhole read arm
+exists to set a spread.
+
 `check_run_test.py` drives every one of those gates **in both directions** —
-rows built to satisfy each and rows built to break it.
+rows built to satisfy each and rows built to break it, including the doctored
+files that prove a widened band still refuses a real move.
 
 ## Arguments
 

@@ -127,6 +127,127 @@ def test_read_control_needs_the_file(tmp_path):
     assert _failures(check_run.check_read_control(tmp_path / "nope.csv"))
 
 
+def test_every_pinned_control_reproduces_its_own_session():
+    """The bare invocation re-derives every arch's control, not just one."""
+    for control in check_run.CONTROLS.values():
+        assert control.csv.exists(), control.csv
+    assert _failures(check_run.check_read_control()) == []
+
+
+# --------------------------------------------------------------------------
+# The control is chosen by the FILE's arch. Grading a Blackhole run against
+# Wormhole's pins is a category error, not a regression: it once printed
+# sixteen FAILs comparing 46 B/cycle against 22 and a seventeenth saying why,
+# which is a checker reporting its own bug as the card's.
+# --------------------------------------------------------------------------
+def _skips(checks):
+    return [line for ok, line in checks if ok is None]
+
+
+def test_blackhole_session_grades_against_the_blackhole_control():
+    bh = check_run.BLACKHOLE.csv
+    checks = list(check_run.check_read_control(bh))
+    assert _failures(checks) == []
+    lines = [line for _, line in checks]
+    assert any("is a blackhole run" in line for line in lines), lines
+    # Blackhole's own band, not Wormhole's 21.50-22.20.
+    assert any("FLAT in 45.65-47.2" in line for line in lines), lines
+    assert any("120" in line for line in lines), lines
+
+
+def test_the_off_arch_control_skips_with_a_stated_reason():
+    for control, other in (
+        (check_run.BLACKHOLE, "wormhole"),
+        (check_run.WORMHOLE, "blackhole"),
+    ):
+        skipped = _skips(check_run.check_read_control(control.csv))
+        assert len(skipped) == 1, skipped
+        assert f"the {other} control does not apply" in skipped[0]
+        assert control.arch in skipped[0]
+
+
+def test_an_arch_with_no_pinned_control_skips_rather_than_failing(tmp_path):
+    path = _csv(tmp_path, _good_write_rows(), arch="quasar", name="q.csv")
+    checks = list(check_run.check_read_control(path))
+    assert _failures(checks) == []
+    assert any(
+        "no read control is pinned for arch=quasar" in line for line in _skips(checks)
+    )
+
+
+def test_a_file_with_no_arch_is_a_failure_not_a_skip(tmp_path):
+    """A skip needs a reason, and "it did not say" is not one."""
+    path = _csv(tmp_path, _good_write_rows(), name="noarch.csv")
+    lines = path.read_text().splitlines()
+    lines[0] = "# dramratebench magic=0x44524232 clock_mhz=1000 banks=12"
+    path.write_text("\n".join(lines) + "\n")
+    assert any(
+        "carries no `arch=`" in line
+        for line in _failures(check_run.check_read_control(path))
+    )
+
+
+# --------------------------------------------------------------------------
+# The re-pinned bands. Two sessions disagree by 9% at two readers and by 2.7%
+# at four, so both are pinned as bands -- and a band is only worth having if it
+# still refuses the values it was never meant to contain.
+# --------------------------------------------------------------------------
+def _wormhole_with_onechan(tmp_path, n, value, name="moved.csv"):
+    """The committed Wormhole control with one reader count overwritten."""
+    out = []
+    for line in check_run.WORMHOLE.csv.read_text().splitlines():
+        parts = line.split(",")
+        if len(parts) > 10 and parts[0] == "onechan" and parts[3] == str(n):
+            parts[10] = f"{value:.4f}"
+            line = ",".join(parts)
+        out.append(line)
+    path = tmp_path / name
+    path.write_text("\n".join(out) + "\n")
+    return path
+
+
+@pytest.mark.parametrize(
+    "n,value",
+    [
+        # n=2 spans 19.937-22.670 because two sessions read 20.344 and 22.225.
+        # Wide, and still nowhere near wide enough to hide a halving or a 15%
+        # lift -- either of which would be a real change in the endpoint.
+        (2, 11.0),
+        (2, 26.0),
+        # n=4 spans 21.114-22.570 from readings of 22.127 and 21.546.
+        (4, 18.0),
+        (4, 25.0),
+    ],
+)
+def test_a_banded_point_still_refuses_a_real_move(tmp_path, n, value):
+    doctored = _wormhole_with_onechan(tmp_path, n, value)
+    assert _failures(check_run.check_read_control(doctored))
+
+
+def test_the_jittery_points_accept_both_sessions(tmp_path):
+    """Neither session's reading may fail the other's pin. That is the defect."""
+    for n, readings in ((2, (20.344, 22.225)), (4, (22.127, 21.546))):
+        for value in readings:
+            doctored = _wormhole_with_onechan(tmp_path, n, value, f"{n}-{value}.csv")
+            assert _failures(check_run.check_read_control(doctored)) == [], (n, value)
+
+
+def test_the_flat_band_still_catches_a_sweep_that_scales(tmp_path):
+    """Widening the flat band's lower edge to 21.50 must not admit scaling."""
+    out = []
+    for line in check_run.WORMHOLE.csv.read_text().splitlines():
+        parts = line.split(",")
+        if len(parts) > 10 and parts[0] == "onechan":
+            # 22 B/cycle per reader: the concentrated arm scaling like the
+            # fanned-out one, which is the shape this gate exists to refuse.
+            parts[10] = f"{22.0 * int(parts[3]):.4f}"
+            line = ",".join(parts)
+        out.append(line)
+    path = tmp_path / "scaling.csv"
+    path.write_text("\n".join(out) + "\n")
+    assert any("FLAT" in line for line in _failures(check_run.check_read_control(path)))
+
+
 # --------------------------------------------------------------------------
 # The schema. Appending columns is safe; renaming or reordering is not.
 # --------------------------------------------------------------------------
