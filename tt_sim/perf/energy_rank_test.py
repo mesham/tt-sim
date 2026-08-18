@@ -157,12 +157,26 @@ RATES = {
 }
 
 
+#: Device cycles per launch, at 1 GHz, for the wall time :data:`RATES` implies.
+#: The real activity CSVs carry `sim_cycles` as a key column and the *measured*
+#: sessions show it tracking the card's launch rate exactly (Spearman 1.0 on both
+#: architectures), so tying the two here is the fixture matching the instrument
+#: rather than a convenience. It is what THE NULL MODEL is computed from.
+SIM_CYCLES = {label: 1e9 / rate for label, rate in RATES.items()}
+
+
 def activity_rows(labels=None, extra=None):
     rows = []
     for label, terms in ACTIVITY.items():
         if labels is not None and label not in labels:
             continue
-        row = {"label": label, "arm": label.split("-")[0], "inner": 0, "launches": 1}
+        row = {
+            "label": label,
+            "arm": label.split("-")[0],
+            "inner": 0,
+            "launches": 1,
+            "sim_cycles": SIM_CYCLES[label],
+        }
         for term in ACTIVITY_TERMS:
             row[term] = float(terms.get(term, 0))
         if extra and label in extra:
@@ -541,6 +555,68 @@ def test_thermal_gate_refuses_a_session_with_no_thermal_record_at_all():
     report = analyse(activity_rows(), rows)
     assert not gate(report, "thermal").passed
     assert "cannot show the part did not" in gate(report, "thermal").detail
+
+
+def test_thermal_gate_falls_back_to_temperature_when_no_trip_counter_exists():
+    """The Wormhole box of 2026-08-17 publishes no ``tt_therm_trip_count``.
+
+    Its sysfs carries ``aiclk``/``arcclk``/``axiclk`` and nothing else, so an
+    otherwise clean session -- 66/66 rows ok, no sample failures, arm separation
+    at ten times the noise floor -- had no trip record on any row. Refusing that
+    is refusing a driver difference rather than a measurement, so the gate falls
+    back to the temperature tt-smi reports either way.
+    """
+    rows = measured_rows(
+        health=lambda c, label: {"therm_trip_delta": None, "temp_c": 40.0}
+    )
+    result = gate(analyse(activity_rows(), rows), "thermal")
+    assert result.passed
+    # It must SAY it is the weaker evidence. A reader who takes this for a trip
+    # count has been told something the session cannot support.
+    assert "WEAKER" in result.detail
+    assert "not as" in result.detail
+
+
+def test_the_temperature_fallback_refuses_a_part_that_ran_hot():
+    rows = measured_rows(
+        health=lambda c, label: {
+            "therm_trip_delta": None,
+            "temp_c": 88.0 if label == "mm-16384" else 40.0,
+        }
+    )
+    result = gate(analyse(activity_rows(), rows), "thermal")
+    assert not result.passed
+    assert "ceiling" in result.detail
+
+
+def test_the_temperature_fallback_refuses_a_session_that_drifted():
+    """A slow climb is what a fallback most needs to catch.
+
+    No single slot is near the ceiling; the session simply heats up across it,
+    which is exactly the shape a trip counter would have caught and a ceiling
+    alone would not.
+    """
+
+    def health(cycle, label):
+        return {"therm_trip_delta": None, "temp_c": 30.0 + 12.0 * cycle}
+
+    result = gate(analyse(activity_rows(), measured_rows(health=health)), "thermal")
+    assert not result.passed
+    assert "drifted" in result.detail
+
+
+def test_the_temperature_fallback_does_not_apply_when_a_trip_counter_exists():
+    """The trip counter stays preferred, and still refuses on its own terms.
+
+    A part can throttle at a temperature the fallback would wave through, so a
+    session carrying both records must be judged on the stronger one.
+    """
+    rows = measured_rows(
+        health=lambda c, label: {"therm_trip_delta": 1.0, "temp_c": 40.0}
+    )
+    result = gate(analyse(activity_rows(), rows), "thermal")
+    assert not result.passed
+    assert "throttled" in result.detail
 
 
 # ---------------------------------------------------------------------------
@@ -1153,6 +1229,66 @@ def test_target_triviality_gate_refuses_a_session_that_is_only_a_launch_rate():
     assert not report.ok
     # The point of the gate is that NOTHING ELSE catches this session.
     assert [x.name for x in report.gates if x.refuses] == ["target_triviality"]
+
+
+def test_the_null_model_and_the_triviality_gate_do_not_answer_each_other():
+    """The gate asks whether the FIT TARGET (board power) needs any activity; the
+    null asks whether the REPORTED RANKING (per-launch energy) beats a cycle
+    count. A session can pass the first comfortably and still be matched by the
+    second, which is what both measured sessions did, so neither number may be
+    quoted as if it covered the other."""
+    report = analyse(activity_rows(), measured_rows())
+    assert report.target_triviality_r2 < 0.5
+    assert not math.isnan(report.spearman_null)
+    # Different questions, so different answers on the same session.
+    assert report.spearman_null != pytest.approx(report.target_triviality_r2)
+
+
+def test_the_null_model_is_reported_next_to_the_claim_it_has_to_beat():
+    text = render(analyse(activity_rows(), measured_rows()))
+    assert "## The null model: energy proportional to simulated cycles" in text
+    assert "what the leave-one-out claim has to beat" in text
+    assert "No coefficients, no fit, nothing from the card" in text
+
+
+def test_the_null_model_is_scale_free_so_the_units_of_sim_cycles_cannot_move_it():
+    """There is no constant fitted between cycles and joules, which is what stops
+    the null being tuned into or out of relevance."""
+    base = analyse(activity_rows(), measured_rows())
+    scaled = analyse(
+        activity_rows(
+            extra={label: {"sim_cycles": c * 1e6} for label, c in SIM_CYCLES.items()}
+        ),
+        measured_rows(),
+    )
+    assert scaled.spearman_null == pytest.approx(base.spearman_null)
+    assert sorted(scaled.null_ratio_errors.values()) == pytest.approx(
+        sorted(base.null_ratio_errors.values())
+    )
+
+
+def test_a_null_that_beats_the_fit_is_reported_and_not_suppressed():
+    """Cycle counts made proportional to the true energy, so the null is perfect.
+    Nothing here refuses -- the number is information, not a gate -- but it must
+    reach the report, because the failure mode is a headline Spearman quoted
+    without it."""
+    perfect = {label: {"sim_cycles": true_energy(label) * 1e12} for label in ACTIVITY}
+    report = analyse(activity_rows(extra=perfect), measured_rows())
+    assert report.ok
+    assert report.spearman_null == pytest.approx(1.0)
+    assert max(report.null_ratio_errors.values()) < 1e-6
+    assert "Spearman (null)          : 1.0000" in render(report)
+
+
+def test_activity_vectors_with_no_sim_cycles_say_so_rather_than_ranking_zeros():
+    """`load_activity` reads an absent column back as 0, and a null computed from
+    zeros would be a constant -- which a fit trivially 'beats'."""
+    blank = {label: {"sim_cycles": 0} for label in ACTIVITY}
+    report = analyse(activity_rows(extra=blank), measured_rows())
+    assert math.isnan(report.spearman_null)
+    assert report.null_ratio_errors == {}
+    assert any("no null model" in n for n in report.notes)
+    assert "## The null model" not in render(report)
 
 
 def test_target_triviality_threshold_is_a_threshold_and_not_a_switch():

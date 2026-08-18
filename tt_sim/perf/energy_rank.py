@@ -45,6 +45,14 @@ sample failures, no thermal trips -- and is preserved at
 that this module refuses, and it changed the arithmetic rather than only the
 guards: see ``baseline_clock`` and ``target_triviality`` below, and THE MODEL.
 
+Two more have been run since and **both fit**: a six-cycle Blackhole p150 at
+``2026-08-13-energybench-2/`` and a six-cycle Wormhole n300 at
+``2026-08-17-wh-energybench/``. The Wormhole box publishes no
+``tt_therm_trip_count``, which is where ``thermal``'s temperature fallback comes
+from, and it is the better-conditioned of the two on every axis that matters --
+~107 samples a slot against ~31, a 15x launch-rate span against 5.3x, and a
+design conditioning at 240 against 1.15e3. Read both against THE NULL MODEL.
+
 WHERE THE COEFFICIENTS LIVE, AND WHY NOT HERE
 ---------------------------------------------
 
@@ -239,8 +247,9 @@ back at 2.34e7 against a 1e6 cap. Adding a third scale makes it worse, not
 better -- thirteen workloads, a budget of ten, and **all eleven** possible
 ten-term subsets land past 3.2e16 -- because an extra scale interpolates between
 existing rows and adds no new activity direction. The same session fitted with
-the four terms its arms were designed to separate conditions at 616 (713 with
-the third scale added).
+the four terms its arms were designed to separate conditions at 598 (713 with
+the third scale added), and the 2026-08-17 Wormhole session -- same nine
+workloads, a launch-rate span of 15x rather than 5.3x -- at 240.
 
 Three rules keep this from becoming a back door:
 
@@ -277,7 +286,38 @@ rather than predicting -- with nine workloads and up to seven coefficients an
 in-sample fit will look excellent whatever the truth is.
 
 Ratio errors are reported as ``|log(predicted ratio / measured ratio)|`` over
-every workload pair, since a ranking claim is really a claim about ratios.
+every workload pair, since a ranking claim is really a claim about ratios. They
+are computed from the **leave-one-out** predictions, not the in-sample ones, so
+a ratio claim is out-of-sample in the same sense the Spearman is.
+
+THE NULL MODEL
+--------------
+
+Every number in RANKING QUALITY is also reported for a model that has **no
+energy content at all**: per-launch energy taken as proportional to the
+simulator's own cycle count, with no coefficients, no fit and nothing from the
+card. Both statistics are scale-free, so the null needs no constant and there is
+no free parameter in it to tune.
+
+It is here because the headline is easy to over-read. The fit target is board
+power, but the *reported* ranking is per-launch energy -- ``(P - P_floor)/rate``
+-- and across these arms the board power span is small against the floor while
+the launch rate varies by more than an order of magnitude. So the measured
+energy ordering is mostly an ordering by *how long the kernel took*, which the
+cycle model already predicts and which needs no energy modelling whatever.
+
+``target_triviality`` does not catch this and is not meant to: it asks whether
+the **fit target** is reproducible from the floor and the launch rate, in power
+space. The null asks whether the **reported ranking** is reproducible from the
+cycle count, in energy space. The two are independent, and measured sessions
+have passed the first comfortably (R² = 0.03) while the second matched the
+fitted model's Spearman exactly.
+
+It is reported rather than gated. A refusal needs a threshold, and there is no
+principled one -- a model that ties the null on ordering may still be well ahead
+on ratios, which is what has been observed. The honest treatment is to put both
+in front of the reader every time, so a Spearman is never quoted without the
+number it had to beat.
 
 Usage
 -----
@@ -529,6 +569,15 @@ class RankReport:
     spearman_in_sample: float = float("nan")
     spearman_loo: float = float("nan")
     ratio_errors: dict[str, float] = field(default_factory=dict)
+    #: The **null model**: per-launch energy taken as proportional to the
+    #: simulator's own cycle count, with no energy fit, no coefficients and no
+    #: card data behind it. See THE NULL MODEL. ``target_triviality`` already
+    #: asks whether the *fit target* is reproducible without activity; this asks
+    #: the harder question about the *reported ranking*, and the two do not
+    #: answer each other -- a session has passed the first at R² = 0.03 while
+    #: the second matched the fit exactly.
+    spearman_null: float = float("nan")
+    null_ratio_errors: dict[str, float] = field(default_factory=dict)
     #: The RMS of each label's across-cycle SD over the **arm** rows that
     #: entered the fit. The baseline is not in it: see :func:`noise_floor`.
     noise_floor_w: float = 0.0
@@ -574,7 +623,9 @@ class RankReport:
             "loo_predicted_energy_j": self.loo_predicted,
             "spearman_in_sample": self.spearman_in_sample,
             "spearman_loo": self.spearman_loo,
+            "spearman_null": self.spearman_null,
             "ratio_errors": self.ratio_errors,
+            "null_ratio_errors": self.null_ratio_errors,
             "noise_floor_w": self.noise_floor_w,
             "baseline_w": self.baseline_w,
             "p_floor_w": self.p_floor_w,
@@ -636,6 +687,7 @@ def load_measured(path: Path | str) -> list[dict]:
                 "aiclk_max": _optional_float(raw, "sysfs_aiclk_max"),
                 "aiclk_drift_pct": _optional_float(raw, "sysfs_aiclk_drift_pct"),
                 "therm_trip_delta": _optional_float(raw, "therm_trip_delta"),
+                "temp_c": _optional_float(raw, "temp_c"),
                 "pre_idle_w": _optional_float(raw, "pre_idle_w"),
                 "tt_smi_version": (raw.get("tt_smi_version") or "").strip(),
             }
@@ -902,21 +954,84 @@ def _schedule_gate(rows: list[dict]) -> GateResult:
     )
 
 
+#: The ceiling and the drift a temperature record has to stay inside to stand in
+#: for a trip counter. Both parts idle in the high 30s and these sessions run
+#: 36-43 C, so 70 C is far above anything observed and far below where either
+#: part throttles; 15 C is roughly twice the 7.0 C a clean 54-minute Wormhole
+#: session drifted. Neither is a published throttle point -- they are "nothing
+#: like a thermal event", which is all a fallback can honestly assert.
+TEMP_FALLBACK_CEILING_C = 70.0
+TEMP_FALLBACK_DRIFT_C = 15.0
+
+
 def _thermal_gate(rows: list[dict]) -> GateResult:
     """``tt_therm_trip_count`` must not move anywhere in the session.
 
     A part that throttled was not running the workload the activity vector
     describes, and no amount of averaging recovers that. Read from sysfs, which
     costs nothing and needs no device handle.
+
+    **The trip counter is preferred and is not always published.** The Wormhole
+    box used on 2026-08-17 exposes only ``aiclk``/``arcclk``/``axiclk``, so
+    ``therm_trip_delta`` is empty on every row of an otherwise clean session --
+    66/66 ok, no sample failures, arm separation at ten times the noise floor.
+    Refusing that is refusing a driver difference, not a measurement.
+
+    So a session with no trip record falls back to ``temp_c``, which tt-smi
+    reports either way, under its own falsifiable criterion: every slot below
+    :data:`TEMP_FALLBACK_CEILING_C` and a session-wide spread under
+    :data:`TEMP_FALLBACK_DRIFT_C`. **This is weaker evidence and the report says
+    so**: a trip counter records that the part *did not* throttle, whereas a
+    temperature merely fails to show it happening. It is not licence to skip the
+    check -- a session that heats away is still refused, and a session with
+    neither record is still refused, because "no thermal evidence at all" is the
+    thing this gate was written for.
     """
-    missing = [_describe(r) for r in rows if r.get("therm_trip_delta") is None]
+    missing = [r for r in rows if r.get("therm_trip_delta") is None]
     if missing:
+        temps = [r.get("temp_c") for r in rows]
+        if any(t is None for t in temps):
+            return GateResult(
+                "thermal",
+                False,
+                f"{len(missing)} row(s) have no tt_therm_trip_count record and "
+                f"{sum(t is None for t in temps)} have no temperature either "
+                f"({_describe(missing[0])}...): a session that cannot show the "
+                "part did not throttle cannot be differenced",
+            )
+        hot = [
+            f"{_describe(r)}: {r['temp_c']:.1f} C"
+            for r in rows
+            if r["temp_c"] > TEMP_FALLBACK_CEILING_C
+        ]
+        lo, hi = min(temps), max(temps)
+        drift = hi - lo
+        if hot:
+            return GateResult(
+                "thermal",
+                False,
+                "no trip counter, and the temperature fallback refuses: "
+                + "; ".join(hot[:4])
+                + f" is above the {TEMP_FALLBACK_CEILING_C:g} C ceiling",
+            )
+        if drift > TEMP_FALLBACK_DRIFT_C:
+            return GateResult(
+                "thermal",
+                False,
+                f"no trip counter, and the temperature fallback refuses: the "
+                f"session drifted {drift:.1f} C ({lo:.1f}-{hi:.1f}) against a "
+                f"{TEMP_FALLBACK_DRIFT_C:g} C limit, so a thermal event cannot "
+                "be ruled out",
+            )
         return GateResult(
             "thermal",
-            False,
-            f"{len(missing)} row(s) have no tt_therm_trip_count record "
-            f"({missing[0]}...): a session that cannot show the part did not "
-            "throttle cannot be differenced",
+            True,
+            f"NO trip counter on this box, so this is the WEAKER temperature "
+            f"fallback: {lo:.1f}-{hi:.1f} C, drift {drift:.1f} C, all under the "
+            f"{TEMP_FALLBACK_CEILING_C:g} C ceiling. A trip count would record "
+            "that the part did not throttle; a temperature only fails to show "
+            "it, so read this as 'nothing like a thermal event' and not as "
+            "'the part did not throttle'",
         )
     tripped = [
         f"{_describe(r)}: +{r['therm_trip_delta']:.0f}"
@@ -1558,6 +1673,38 @@ def analyse(
                 continue
             errors[f"{a}/{b}"] = abs(math.log((pa / pb) / (ya / yb)))
     report.ratio_errors = errors
+
+    # -- the null model ----------------------------------------------------
+    # Energy proportional to the simulator's cycle count: no coefficients, no
+    # fit, nothing from the card. It needs no scale factor because both the
+    # Spearman and the ratio errors are scale-free, which is the point -- there
+    # is no free parameter here to make it look good or bad. Whatever the fitted
+    # model reports has to be read against this, or a headline number is being
+    # credited to an energy model that a cycle count already had.
+    null = {
+        label: float(activity_by_label[label].get("sim_cycles") or 0.0)
+        / max(1.0, float(activity_by_label[label].get("launches") or 1))
+        for label in usable
+    }
+    if all(v > 0 for v in null.values()):
+        report.spearman_null = spearman(y_energy, [null[label] for label in usable])
+        null_errors = {}
+        for i, a in enumerate(usable):
+            for b in usable[i + 1 :]:
+                ya, yb = y_energy[i], y_energy[usable.index(b)]
+                if ya <= 0 or yb <= 0:
+                    continue
+                null_errors[f"{a}/{b}"] = abs(math.log((null[a] / null[b]) / (ya / yb)))
+        report.null_ratio_errors = null_errors
+    else:
+        # `sim_cycles` is a KEY column of the activity schema, so a real CSV
+        # always carries it; a hand-made one may not, and `load_activity` reads
+        # an absent column back as 0. Say so rather than reporting a null model
+        # computed from zeros, which would look like a model the fit had beaten.
+        report.notes.append(
+            "no null model: the activity vectors carry no non-zero sim_cycles, so "
+            "there is nothing to read the ranking numbers against"
+        )
     return report
 
 
@@ -1655,6 +1802,27 @@ def render(report: RankReport) -> str:
             f"  |log ratio error| max    : {vals[-1]:.4f}  (~x{math.exp(vals[-1]):.3f})"
         )
     lines.append("")
+    if not math.isnan(report.spearman_null):
+        lines.append("## The null model: energy proportional to simulated cycles")
+        lines.append(
+            "  No coefficients, no fit, nothing from the card. Read every number "
+            "above against these:"
+        )
+        lines.append(
+            f"  Spearman (null)          : {report.spearman_null:.4f}   "
+            "<- what the leave-one-out claim has to beat"
+        )
+        if report.null_ratio_errors:
+            nvals = sorted(report.null_ratio_errors.values())
+            nmedian = nvals[len(nvals) // 2]
+            lines.append(
+                f"  |log ratio error| median : {nmedian:.4f}  (~x{math.exp(nmedian):.3f})"
+            )
+            lines.append(
+                f"  |log ratio error| max    : {nvals[-1]:.4f}  "
+                f"(~x{math.exp(nvals[-1]):.3f})"
+            )
+        lines.append("")
     lines.append("## Per-workload energy (J/launch)")
     lines.append(f"  {'workload':<16} {'measured':>14} {'LOO predicted':>16}")
     for label in report.labels:
@@ -1740,6 +1908,10 @@ def coefficients_document(report: RankReport, sources: dict) -> str:
         lines.append(f"  {key}: {json.dumps(value)}")
     lines.append(f"  spearman_loo: {report.spearman_loo:.6f}")
     lines.append(f"  spearman_in_sample: {report.spearman_in_sample:.6f}")
+    lines.append(
+        f"  spearman_null: {report.spearman_null:.6f}  "
+        "# cycles-proportional, no fit; what spearman_loo has to beat"
+    )
     lines.append(f"  target_triviality_r2: {report.target_triviality_r2:.6f}")
     lines.append(f"  p_floor_w: {report.p_floor_w:.6f}")
     lines.append(f"  baseline_w: {report.baseline_w:.6f}  # measured idle, diagnostic")
