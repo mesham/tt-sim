@@ -1,6 +1,36 @@
 # Simulator for Tenstorrent architecture
 
-This is a software simulator for the Tenstorrent architecture in large part based upon the [Tenstorrent ISA Documentation](https://github.com/tenstorrent/tt-isa-documentation/tree/main). It provides an implementation of the **Wormhole** (the most complete), and a **Blackhole** bring-up sharing the same infrastructure — both are selected by an architecture profile (`tt_sim/arch/`) rather than a fork, so the device, NoC, tiles and the tt-metal wire bridge are all parameterised by architecture. Note that it is not cycle accurate (or intended to be), although this could be added in the future. Instead, the idea was to try and create a software similator from the public documentation to enable developers to experiment with writing TT-Metal code without needing to run on physical hardware.
+This is a software simulator for the Tenstorrent architecture in large part based upon the [Tenstorrent ISA Documentation](https://github.com/tenstorrent/tt-isa-documentation/tree/main). It implements **Wormhole** and **Blackhole**, both selected by an architecture profile (`tt_sim/arch/`) rather than a fork, so the device, NoC, tiles and the tt-metal wire bridge are all parameterised by architecture. Both run real tt-metal programs unmodified, on the full default worker grid — 72 workers on Wormhole, 130 on Blackhole. Note that it is not cycle accurate (or intended to be). The idea was to create a software simulator from the public documentation, so developers can experiment with writing TT-Metal code without needing physical hardware.
+
+### What the timing model claims, and what it does not
+
+The simulator carries a cost model of **documented provenance**: every cycle
+figure is traceable to the ISA documentation or a vendor source, there are
+**zero un-sourced estimates** (asserted by test), and it has been checked
+against real silicon. Stated precisely:
+
+> Runs real tt-metal programs unmodified on both architectures, on the full
+> default grid, with a timing model of documented provenance, corroborated
+> against silicon at the **slope** and **launch** level on both parts, and
+> **by mechanism** for NoC-bound work on both parts.
+
+Four caveats belong with that sentence rather than under it, because three of
+them are permanent:
+
+- **It is a floor.** Every bound is charged at its low end, by rule, so it
+  under-predicts wherever hardware sits above a documented minimum.
+- **Mechanism-level checking is one leg of three.** The RV-bound leg is
+  Blackhole-only (Wormhole documents no CSRs, so there is no retired-instruction
+  count) and currently fails its bar; the Tensix mechanism leg cannot be built
+  at all from the counters the hardware exposes.
+- **That failure has a single, sourced cause** — integer divide, where the
+  documentation gives only a 6–33 cycle range and no algorithm, so a
+  magnitude-dependent term cannot be sourced at any provenance.
+- **Energy is ranking-level only**, and barely beats a model that knows nothing
+  but the cycle count. Absolute joules are out of reach of the instrument.
+
+The full evidence, including what was proven *impossible* rather than merely
+left undone, is in [`ROADMAP.md`](ROADMAP.md).
 
 Optional diagnostic information can be provided by each RISC-V baby core, the NoC, the Tensix co-processor and memory, enabling tracing of the execution of a program. This is currently at the instruction and architectural state level, but could be enhanced in the future to provide feedback to developers around potential code bottlenecks or other issues.
 
@@ -8,6 +38,7 @@ This is written in Python, mainly to make it easy for people to hackaround and e
 
 ## Contents
 
+- [What the timing model claims, and what it does not](#what-the-timing-model-claims-and-what-it-does-not)
 - [Installation](#installation)
 - [Using tt-sim as a simulator for tt-metal](#using-tt-sim-as-a-simulator-for-tt-metal)
 - [Repository overview](#repository-overview)
@@ -67,7 +98,7 @@ the deadlock watchdog — see **[`driver/wormhole/README.md`](driver/wormhole/RE
 The simulator implementation is in the [tt_sim](https://github.com/mesham/tt-sim/tree/main/tt_sim) directory, with the [driver](https://github.com/mesham/tt-sim/tree/main/driver) directory providing a range of examples that illustrate running the simulator. These are individually documented, but to summarise:
 
 * [wormhole](https://github.com/mesham/tt-sim/tree/main/driver/wormhole) is where you likely want to go to. It provides an implementation of a Wormhole, currently with one DRAM tile and one Tensix block (although this is easy to expand, although will likely be slow!) It holds a set of example tt-metal programs that are built against a local tt-metal checkout and run against the simulator — exactly as they would run on hardware, only the device is the simulator. Each validates its own results, so the examples double as a test suite. See its README for how to build and run them.
-* [blackhole](https://github.com/mesham/tt-sim/tree/main/driver/blackhole) is the Blackhole bring-up: the same wire bridge and machinery as wormhole (all shared in [`tt_sim/bridge`](https://github.com/mesham/tt-sim/tree/main/tt_sim/bridge)), pointed at a Blackhole device instead. Point `TT_METAL_SIMULATOR` at `driver/blackhole` to route execution there. Currently a single Tensix + single DRAM bring-up; see its README.
+* [blackhole](https://github.com/mesham/tt-sim/tree/main/driver/blackhole) is the Blackhole driver: the same wire bridge and machinery as wormhole (all shared in [`tt_sim/bridge`](https://github.com/mesham/tt-sim/tree/main/tt_sim/bridge)), pointed at a Blackhole device instead. Point `TT_METAL_SIMULATOR` at `driver/blackhole` to route execution there. Workers are materialised on demand by the wire bridge, so a program gets exactly the grid it launches on, up to the full 130; see its README.
 * [simple](https://github.com/mesham/tt-sim/tree/main/driver/simple) are very basic examples, demonstrating the memory subsystem and running codes on a vanilla RV32IM CPU.
 
 ## Key parts of the simulator
