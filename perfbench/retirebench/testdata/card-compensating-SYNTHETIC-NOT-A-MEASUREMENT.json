@@ -1,0 +1,117 @@
+{
+  "retirebench": 1,
+  "arch": "blackhole",
+  "label": "compensating-SYNTHETIC",
+  "risc": "BRISC",
+  "core": [
+    1,
+    2
+  ],
+  "logical_core": [
+    0,
+    0
+  ],
+  "scale": 1,
+  "window": {
+    "cycles": 60914,
+    "retired": 40915
+  },
+  "zones": [
+    {
+      "index": 0,
+      "name": "marker_null",
+      "mechanism": "instrument calibration: the two-marker cost alone",
+      "reps": 0,
+      "cycles": 30,
+      "retired": 1
+    },
+    {
+      "index": 1,
+      "name": "alu_dep",
+      "mechanism": "dependent integer chain (forwarding path)",
+      "reps": 94,
+      "cycles": 6210,
+      "retired": 6208
+    },
+    {
+      "index": 2,
+      "name": "alu_ind",
+      "mechanism": "independent integer ops (issue width)",
+      "reps": 94,
+      "cycles": 1900,
+      "retired": 6398
+    },
+    {
+      "index": 3,
+      "name": "mul_dep",
+      "mechanism": "multiply result latency",
+      "reps": 47,
+      "cycles": 10665,
+      "retired": 3106
+    },
+    {
+      "index": 4,
+      "name": "mul_ind",
+      "mechanism": "multiply unit occupancy",
+      "reps": 94,
+      "cycles": 1892,
+      "retired": 6396
+    },
+    {
+      "index": 5,
+      "name": "div_small",
+      "mechanism": "divide, 12-bit dividend",
+      "reps": 31,
+      "cycles": 3170,
+      "retired": 567
+    },
+    {
+      "index": 6,
+      "name": "div_large",
+      "mechanism": "divide, 29-bit dividend",
+      "reps": 13,
+      "cycles": 1330,
+      "retired": 244
+    },
+    {
+      "index": 7,
+      "name": "load_dep",
+      "mechanism": "L1 load-use interlock (pointer chase)",
+      "reps": 12,
+      "cycles": 10800,
+      "retired": 795
+    },
+    {
+      "index": 8,
+      "name": "load_ind",
+      "mechanism": "sustained L1 load throughput",
+      "reps": 54,
+      "cycles": 1810,
+      "retired": 3621
+    },
+    {
+      "index": 9,
+      "name": "store_spread",
+      "mechanism": "L1 store throughput, non-coalescable",
+      "reps": 19,
+      "cycles": 10620,
+      "retired": 1259
+    },
+    {
+      "index": 10,
+      "name": "branch_nt",
+      "mechanism": "not-taken conditional branch",
+      "reps": 47,
+      "cycles": 6120,
+      "retired": 6114
+    },
+    {
+      "index": 11,
+      "name": "branch_t",
+      "mechanism": "taken conditional branch",
+      "reps": 47,
+      "cycles": 6260,
+      "retired": 6113
+    }
+  ]
+}

@@ -30,10 +30,13 @@ perfbench/
 │                       and on tt-sim under the same tt-metal build and compares
 │                       the two *decompositions* -- rung 4's mechanism-
 │                       attribution leg
-└── nocevbench/         mechbench's sibling: the same idea applied to data
-                        movement, via tt-metal's NoC event trace
-                        (TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1) -- rung 4's
-                        NoC-timing leg
+├── nocevbench/         mechbench's sibling: the same idea applied to data
+│                       movement, via tt-metal's NoC event trace
+│                       (TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1) -- rung 4's
+│                       NoC-timing leg
+└── retirebench/        the third sibling, and the RV-bound one: per-zone mcycle
+                        and minstret CSR deltas on one baby RISC-V -- rung 4's
+                        RV-bound leg. Blackhole only, and it refuses on Wormhole
 ```
 
 `mechbench` is not a cycle-cost probe either. It is a **comparison**: it consumes
@@ -53,6 +56,19 @@ rather than warns behind six gates. What it cannot do is state a per-packet
 flight time on hardware: every transaction event is stamped *at issue* and the
 only completion timestamp is a barrier's. See
 [`nocevbench/README.md`](nocevbench/README.md).
+
+`retirebench` is the third of the three, for the scalar core. Both sides emit the
+**identical artefact** -- a `retirebench-*.json` of per-zone `mcycle` and
+`minstret` deltas -- so one parser reads both. It is the only leg whose bucket
+*labels* are **structural** rather than named by a hardware counter: the hardware
+has no per-mechanism counter for a baby RISC-V, so each zone is built to be
+dominated by one RV mechanism and `minstret` is what makes that claim checkable
+(the two sides must retire the same instructions in the same zone, exactly, or it
+refuses). It is **Blackhole only** and refuses on Wormhole in three places rather
+than falling back to an elapsed-only envelope check -- the string `csr` does not
+appear in the WormholeB0 doc tree at all. Do not confuse it with `riscvbench`,
+which is the rung-3 *characterisation* of the same core; the two are compared
+side by side in [`retirebench/README.md`](retirebench/README.md).
 
 `energybench` is not a cycle-cost probe and does not belong to the table below.
 It measures **steady-state repeated-kernel board power** against an in-session
