@@ -46,8 +46,10 @@ BLACKHOLE_PROFILE = ArchProfile(
     # loop-bound and pointer arithmetic), Zaamo local-L1 atomics, and an F/Zfh
     # guard (floating-point is partially supported by hardware but not yet
     # modelled — the guard makes any use fail loudly). The V vector extension is
-    # TRISC2-only, so its guard is attached there.
-    baby_core_isa_extensions=("zba", "zbb", "zaamo", "zfh", "f_guard"),
+    # TRISC2-only, so its guard is attached there. Zicsr brings the CSR file
+    # (BabyRISCV/CSRs.md), including mcycle/minstret; Wormhole documents no CSRs
+    # at all, so it stays off that profile and a CSR instruction there raises.
+    baby_core_isa_extensions=("zba", "zbb", "zaamo", "zfh", "f_guard", "zicsr"),
     trisc2_isa_extensions=("v_guard",),
     # All 8 DRAM channels' worker-visible endpoints, in SoC-descriptor channel
     # order. tt-metal interleaves a buffer's tiles round-robin across every

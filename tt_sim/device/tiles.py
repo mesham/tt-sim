@@ -668,6 +668,9 @@ class EthTile(TTDeviceTile):
 
         super().__init__(coord_x, coord_y, noc0_router, noc1_router)
 
+    def get_baby_cores(self):
+        return (self.erisc,)
+
     def get_clocks(self):
         # tile_ctrl is deliberately absent: since Phase 2 it latches nothing
         # (the wall clock is read from the tile's TileClock on demand), so it
@@ -1030,6 +1033,9 @@ class TensixTile(TTDeviceTile):
         for ts in (self.ttsync_0, self.ttsync_1, self.ttsync_2):
             uid = registry.register(chip_id, coord_y, coord_x, Unit.TTSYNC)
             ts.unit_id = uid.as_tuple()
+
+    def get_baby_cores(self):
+        return (self.brisc, self.ncrisc, self.trisc0, self.trisc1, self.trisc2)
 
     def get_clocks(self):
         return self.tensix_coprocessor.getClocks() + [

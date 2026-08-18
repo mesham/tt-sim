@@ -1,6 +1,7 @@
 from tt_sim.memory.memory import MemoryStall
 from tt_sim.pe.pe import ProcessingElement
 from tt_sim.pe.rv import breakpoint as breakpoint_trap
+from tt_sim.pe.rv.isa import zicsr_isa as zicsr
 from tt_sim.pe.rv.isa.rv_isa import RV_ISA
 from tt_sim.util.conversion import conv_to_bytes, conv_to_int32, conv_to_uint32
 
@@ -674,6 +675,27 @@ class RV_I_ISA(RV_ISA):
     @classmethod
     def handle_i_misc(cls, instr, register_file, memory_space, snoop):
         type_val = (instr >> 12) & 0x7
+        if type_val != 0x0:
+            # funct3 1-3 and 5-7 are Zicsr (csrrw / csrrs / csrrc and their
+            # immediate forms), not base I. This handler used to return True for
+            # them, which claimed the instruction and executed nothing: a CSR
+            # read was a silent no-op leaving rd holding its previous value.
+            # Declining hands them to RV_ZICSR_ISA, which is attached per-arch
+            # (Blackhole only — Wormhole documents no CSRs at all) and allocates
+            # the CSR file alongside itself, so "no CSR file" means "this core
+            # has no CSRs" and is refused here rather than falling through to
+            # the unknown-instruction path. funct3 4 is not a Zicsr encoding and
+            # is declined to that path, which is the doc's UndefinedBehavior.
+            if type_val != 0x4 and getattr(register_file, "csrs", None) is None:
+                raise zicsr.NoCSRsError(
+                    f"CSR instruction {hex(instr)} at PC "
+                    f"{hex(register_file['pc'].read_uint())} on a core with no "
+                    f"CSR file. Only Blackhole baby cores have CSRs in tt-sim "
+                    f"(the WormholeB0 ISA docs describe none), so there is "
+                    f"nothing to read and no honest value to leave in rd. See "
+                    f"tt_sim/pe/rv/isa/zicsr_isa.py."
+                )
+            return False
         is_ebreak = type_val == 0x0 and ((instr >> 20) & 0x1) == 1
         if is_ebreak and breakpoint_trap.trapping_enabled():
             # A kernel asserting on itself: see tt_sim/pe/rv/breakpoint.py.

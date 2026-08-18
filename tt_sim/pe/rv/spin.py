@@ -570,6 +570,7 @@ class FirmwareSpin:
             snapshot = traj[phase][1]
             for i in range(1, len(registers)):
                 registers[i].value = snapshot[i - 1]
+            stalled_in_gap = 0
             if cost is not None:
                 # The scoreboard's turn. Its deadlines are absolute cycle
                 # numbers, so they are restored by re-basing the phase's
@@ -580,12 +581,23 @@ class FirmwareSpin:
                 # parked span costs the §I report exactly what an unparked one
                 # would.
                 counts = self.cost_counts
-                cost.spin_add_counters(
-                    _counter_advance(
-                        self.cost_loop_delta, laps, counts[phase], counts[was]
-                    )
+                advance = _counter_advance(
+                    self.cost_loop_delta, laps, counts[phase], counts[was]
                 )
+                cost.spin_add_counters(advance)
                 cost.spin_restore(self.cost_sigs[phase], cycle)
+                # ``spin_counters()[0]`` is ``stall_cycles``, incremented
+                # exactly once per tick that failed to issue.
+                stalled_in_gap = advance[0]
+            csrs = core.csrs
+            if csrs is not None:
+                # ``minstret``'s turn, for the same reason and by the same
+                # licence: the unparked run would have retired one instruction
+                # on every tick of the gap that was not a stall (the loop
+                # contains no PEStall and no unknown instruction — RECORD
+                # rejects both before a watch is ever built), so leaving these
+                # out would let parking silently deflate the retire count.
+                csrs.retired += steps - stalled_in_gap
         if core.pc_register.value != traj[phase][0]:
             # The loop exited (a watched value changed and the previous tick
             # branched out). Back to normal execution.

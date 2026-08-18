@@ -6,6 +6,7 @@ from tt_sim.pe.rv.isa.a_isa import RV_ZAAMO_ISA
 from tt_sim.pe.rv.isa.b_isa import RV_ZBA_ISA, RV_ZBB_ISA
 from tt_sim.pe.rv.isa.guard_isa import RV_F_GUARD_ISA, RV_V_GUARD_ISA
 from tt_sim.pe.rv.isa.zfh_isa import RV_ZFH_ISA
+from tt_sim.pe.rv.isa.zicsr_isa import RV_ZICSR_ISA, CSRFile
 from tt_sim.pe.rv.rv32 import RV32IM_TT
 from tt_sim.pe.rv.spin import (
     SPIN_IDLE,
@@ -29,10 +30,16 @@ ISA_EXTENSION_REGISTRY = {
     "zfh": RV_ZFH_ISA,
     "f_guard": RV_F_GUARD_ISA,
     "v_guard": RV_V_GUARD_ISA,
+    "zicsr": RV_ZICSR_ISA,
 }
 
 # Extensions that require the floating-point register file to be allocated.
 _FP_EXTENSIONS = frozenset({"zfh", "f_guard"})
+
+#: Extensions that require a CSR file. Only Zicsr does; the WormholeB0 ISA docs
+#: describe no CSRs at all, so a Wormhole core never lists it and a CSR
+#: instruction there raises (see ``RV_I_ISA.handle_i_misc``).
+_CSR_EXTENSIONS = frozenset({"zicsr"})
 
 # RISCV_DEBUG_REG_SOFT_RESET_0, in each tile's tile-control region.
 SOFT_RESET_ADDR = 0xFFB121B0
@@ -45,6 +52,14 @@ class BabyRISCVCoreType(IntEnum):
     TRISC1 = 3
     TRISC2 = 4
     ERISC = 5
+
+
+#: Cores on which ``tt_cfg_sstatus0..7`` are plain scratch CSRs. Everywhere else
+#: those addresses read a NoC Overlay stream register, per
+#: ``BlackholeA0/TensixTile/BabyRISCV/CSRs.md``, and are refused. ERISC is
+#: absent deliberately: that doc covers the Tensix tile's baby cores, and the
+#: Ethernet tile's own page does not repeat the exemption.
+_SCRATCH_SSTATUS_CORES = frozenset({BabyRISCVCoreType.BRISC, BabyRISCVCoreType.NCRISC})
 
 
 class BabyRISCV(RV32IM_TT):
@@ -139,6 +154,31 @@ class BabyRISCV(RV32IM_TT):
         )
         # Bound once: the plain RV32I tick the spin state machine drives.
         self._base_tick = super().clock_tick
+        # The CSR file, on the arches whose docs describe CSRs (Blackhole only).
+        # Allocated here rather than in RV32I because which CSRs are scratch is
+        # per *core*: tt_cfg_sstatus0..7 are software scratch on RISCV B and
+        # RISCV NC and NoC Overlay stream registers everywhere else. Two
+        # references to the one object: the ISA executors reach it through the
+        # register file, ``clock_tick`` bumps its retire count through the core.
+        if any(name in _CSR_EXTENSIONS for name in isa_extensions):
+            self.csrs = CSRFile(
+                self.register_file,
+                core_label=self.core_label,
+                scratch_sstatus=core_type in _SCRATCH_SSTATUS_CORES,
+            )
+            self.register_file.csrs = self.csrs
+
+    def bind_clock(self, tile_clock):
+        """Hand this core the owning tile's clock.
+
+        Called by ``TTDeviceTile._bind_clock``. The only thing that needs it is
+        ``mcycle`` / ``mcycleh``, which read the tile's cycle counter — the very
+        one behind ``RISCV_DEBUG_REG_WALL_CLOCK_*`` — rather than a private
+        counter free to disagree with it. A core built outside a device never
+        gets one, and its ``mcycle`` refuses rather than inventing a number.
+        """
+        if self.csrs is not None:
+            self.csrs.clock_owner = tile_clock
 
     def get_start_address(self):
         """

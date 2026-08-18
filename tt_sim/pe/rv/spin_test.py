@@ -142,7 +142,7 @@ def _env(**overrides):
                 os.environ[key] = prev
 
 
-def _make_core(program, arch=None):
+def _make_core(program, arch=None, isa_extensions=()):
     ram = DRAM(0x1000)
     tile_ctrl = TensixTileControl()  # soft-reset register reads 0: running
     memory_map = MemoryMap()
@@ -151,7 +151,9 @@ def _make_core(program, arch=None):
     visible = VisibleMemory(memory_map)
     for i, word in enumerate(program):
         ram.write(i * 4, conv_to_bytes(word))
-    core = BabyRISCV(BabyRISCVCoreType.BRISC, [visible], arch=arch)
+    core = BabyRISCV(
+        BabyRISCVCoreType.BRISC, [visible], arch=arch, isa_extensions=isa_extensions
+    )
     core.reset()
     return core, ram
 
@@ -212,6 +214,48 @@ def test_parked_skips_are_cycle_exact_including_the_loop_exit():
     assert subject_regs == control_regs
     assert subject_ram.read(MARKER, 4) == control_ram.read(MARKER, 4)
     assert subject_ram.read(MARKER, 4) == conv_to_bytes(7)
+
+
+def test_minstret_survives_a_parked_span():
+    """A parked span must not deflate the retire count either.
+
+    ``mcycle`` keeps advancing across a skipped span (it is a function of the
+    pump's cycle number), so an unrepaired ``minstret`` would make the skipped
+    iterations look like cycles in which the core retired nothing — exactly the
+    silent wrong the rest of this module exists to avoid. The skipped ticks are
+    added back from the loop's proved periodicity, so the two runs agree.
+    """
+    flag_at = 1500
+    end = 1520
+
+    def run(core, ram, skip_while_parked):
+        cycle = 0
+        while cycle < end:
+            if cycle == flag_at:
+                ram.write(FLAG, conv_to_bytes(7))
+            if (
+                skip_while_parked
+                and core.spin_parked
+                and cycle < flag_at - 1
+                and core.next_wake_cycle(cycle - 1) is None
+            ):
+                cycle = min(cycle + 37, flag_at - 1, end - 1)
+                continue
+            core.clock_tick(cycle)
+            cycle += 1
+
+    with _env(TT_SIM_FIRMWARE_IDLE="0"):
+        control, control_ram = _make_core(POLL_PROGRAM, isa_extensions=("zicsr",))
+    assert control._spin is None
+    run(control, control_ram, skip_while_parked=False)
+
+    subject, subject_ram = _make_core(POLL_PROGRAM, isa_extensions=("zicsr",))
+    run(subject, subject_ram, skip_while_parked=True)
+
+    assert subject._spin.skipped_cycles > 0, "no cycles were actually skipped"
+    assert subject.csrs.retired == control.csrs.retired
+    # And the count is a real one, not two matching zeroes.
+    assert control.csrs.retired > 1000
 
 
 def test_watched_write_unparks_and_refuses_dormancy():

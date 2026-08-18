@@ -932,6 +932,14 @@ class TTDeviceTile(DeviceTile, ABC):
         """
         return self.next_wake_cycle(0) is None
 
+    def get_baby_cores(self):
+        """The baby RISC-V cores this tile owns, in no particular order.
+
+        Empty by default — a DRAM tile has none. Tiles that do own cores
+        override it; :meth:`_bind_clock` is the only caller.
+        """
+        return ()
+
     def _bind_clock(self, tile_clock):
         """Attach the tile's :class:`TileClock` and precompute its probes.
 
@@ -948,6 +956,13 @@ class TTDeviceTile(DeviceTile, ABC):
         tile_ctrl = getattr(self, "tile_ctrl", None)
         if tile_ctrl is not None:
             tile_ctrl.clock_owner = tile_clock
+        # The baby cores get it too, for the one piece of state that is a
+        # function of the cycle number rather than of anything they do: the
+        # ``mcycle`` / ``mcycleh`` CSRs (Blackhole only). Handing them this
+        # clock is what makes those CSRs agree with the tile's
+        # ``RISCV_DEBUG_REG_WALL_CLOCK_*`` by construction.
+        for core in self.get_baby_cores():
+            core.bind_clock(tile_clock)
 
     def __init__(self, coord_x, coord_y, noc0_router, noc1_router):
         # Reference the bounds via ``self`` so an architecture whose tile coords

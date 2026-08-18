@@ -412,8 +412,13 @@ is left is the credibility layer.
    unchanged.
    **The NoC-bound leg is built, 2026-08-16** — `perfbench/nocevbench`
    plus `tt_sim.perf.noc_events`, behind six refusing gates. Two of
-   three legs now exist; only **RV-bound** is left, and it has an
-   instrument that does not exist on Wormhole (§6).
+   three legs now exist; only **RV-bound** is left. **Its instrument
+   landed 2026-08-18** — Zicsr and the Blackhole CSR file (§6), so
+   `mcycle`/`minstret` are readable from a kernel; the leg itself is
+   still unbuilt. It can never be a two-arch claim: the string `csr`
+   appears zero times in the whole `WormholeB0/` doc tree, so this leg
+   is **Blackhole-only by construction** and a CSR instruction on a
+   Wormhole core raises.
    **VALIDATED ON BOTH ARCHES AGAINST SILICON, 2026-08-17.** Six
    comparisons on a Wormhole card all pass — arms A/B/C x 256/4096 B,
    errors **0.2-9.3 %** against a 25 % bar, every partition gate green
@@ -456,9 +461,13 @@ is left is the credibility layer.
    per-class latencies are **two readings of the same intervals**, not
    independent detectors; addresses and VCs are unreachable in the
    file-dumping path; no distance arm (needs a remote L1 target).
-   **Still unverified against silicon, so the bottleneck report's
-   79.8 % NoC split on nekbone remains unverified** — this leg is what
-   would retire it, and it needs one card session.
+   **The leg's silicon verification is done; nekbone's own number is
+   not.** The card session above validated the *instrument* — its
+   synthetic arms, on both parts. The bottleneck report's **79.8 % NoC
+   split on nekbone** is a claim about a different workload, so what
+   is left is running this decomposition *on nekbone* rather than
+   building or trusting anything further. The blocker changed shape
+   rather than clearing.
 3. **Wormhole access — FOUR OF FIVE GATED ITEMS RETIRED, 2026-08-17.**
    It was a booking; it became standing access, which changed the shape
    from "one irreplaceable session" to a programme: a de-risking pass
@@ -1124,9 +1133,12 @@ from the rest, so no cross-core span is admissible.
    hardware counterpart and is *not* what the leg does. The comparison
    is tt-sim's own `noc_trace_*.json` against a card's, decomposed by
    mechanism at ± 25 %; `noc_flight_cycles` is a simulator-side
-   diagnostic only, and already contains the queueing. **The
-   bottleneck report's 79.8 % NoC split on nekbone stays unverified
-   until a card session runs this.**
+   diagnostic only, and already contains the queueing.
+   **Validated against silicon on both arches 2026-08-17** — six
+   Wormhole comparisons at 0.2–9.3 % against a 25 % bar, three on
+   Blackhole. The bottleneck report's **79.8 % NoC split on nekbone**
+   stays unverified all the same: that is this decomposition run on
+   *nekbone*, which has not happened.
 
 Thresholds: `E_total ≤ 10 %` is what nekbone already achieved, kept as
 the control against envelope regression. `E_int ≤ 25 %` is 2.5x that —
@@ -1362,10 +1374,30 @@ implements some (but not all) of V."* Corrected 2026-08-13:
   **writable**, and `mcountinhibit` cannot stop either counter. `time`
   is documented absent.
 
-**tt-sim implements no CSRs at all** in `pe/rv/`. Adding Zicsr plus
-those six registers is the prerequisite for rung 4's Blackhole-only
-per-instruction leg (§4), and is otherwise unreached by anything in
-tree.
+**Zicsr and the CSR file landed 2026-08-18** — `pe/rv/isa/zicsr_isa.py`,
+the documented Blackhole registers behind the six Zicsr instructions.
+The prerequisite for rung 4's Blackhole-only per-instruction leg (§4)
+is met; the leg itself is not built.
+**It closed a latent defect as well as adding a feature.** SYSTEM
+funct3 1-7 was *claimed* by `RV_I_ISA.handle_i_misc`, which returned
+True for every funct3 — so a CSR read executed nothing and left `rd`
+holding its previous value. Silent, not UndefinedBehavior. Real
+firmware reaches it: the pipestall replay shows **8 `cfg0`
+read-modify-writes per core**, previously no-ops, now leaving
+`cfg0 = 0x60008` (`DisLowCash` + `DisTriscCache`, set by tt-metal's
+init, with the reset `StMergeTimer = 16` intact).
+`mcycle` reads **the tile clock `RISCV_DEBUG_REG_WALL_CLOCK_*` already
+samples** rather than a private counter that could drift, and a core
+with no clock bound refuses instead of inventing one; `minstret`
+counts on the retire path only, with `spin.py` adding back a parked
+span's retires exactly so firmware-idle parking cannot deflate it.
+**Refused, deliberately**: `tt_cfg_qstatus`/`bstatus` (the queue ->
+bitmask mapping is unbuilt, and 0 would read as "coprocessor idle");
+the TRISC `tt_cfg_sstatus*` (scratch only on B/NC, elsewhere an
+unnamed overlay stream); `mhpmcounter3/4` once `mhpmevent3/4` is
+non-zero (encodings unpublished); unknown addresses. `DisCsrSync`
+serialisation is charged **nothing** — the doc gives no cycle number
+and `estimated` is forbidden.
 
 **Wormhole has no CSR path whatever** — the string `csr` appears zero
 times in the whole `WormholeB0/` doc tree, so "RV32IM-only, complete

@@ -285,7 +285,11 @@ for _op in (0x07, 0x27):  # FLH / FSH: the address register is a GPR
     _OPCODE_FLAGS[_op] = _F_RS1
 # SYSTEM (0x73) is left out on purpose: ``csrrwi`` and friends put a uimm in
 # the rs1 field, so treating it as a register read would stall on a register
-# the instruction never touches.
+# the instruction never touches. Zicsr is *executed* (see
+# ``tt_sim/pe/rv/isa/zicsr_isa.py``) but charged nothing: the ISA doc gives no
+# cycle count for a CSR instruction, and none for the frontend serialisation
+# ``cfg0``'s ``DisCsrSync`` bit controls, so there is no sourceable number to
+# charge and this repo does not invent one.
 
 #: Why a core was not able to issue this cycle. Counted per reason so a run can
 #: say where its RV time went rather than only how much there was.

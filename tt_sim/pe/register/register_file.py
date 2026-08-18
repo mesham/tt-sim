@@ -1,4 +1,12 @@
 class RegisterFile:
+    #: The owning core's :class:`~tt_sim.pe.rv.isa.zicsr_isa.CSRFile`, or ``None``
+    #: when it has no CSRs. Held here as well as on the core because the ISA
+    #: executors are handed the register file and nothing else, and ``fcsr``
+    #: already lives in this file — the CSR file aliases that entry rather than
+    #: keeping a second copy. A class attribute so nothing that builds a
+    #: register file has to know about CSRs.
+    csrs = None
+
     def __init__(self, registers, register_name_mapping):
         self.registers = registers
         self.register_name_mapping = register_name_mapping

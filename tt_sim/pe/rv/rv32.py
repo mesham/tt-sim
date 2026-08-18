@@ -91,6 +91,15 @@ REGISTER_NAME_MAPPING = {
 
 
 class RV32I(ProcessingElement):
+    #: This core's :class:`~tt_sim.pe.rv.isa.zicsr_isa.CSRFile`, or ``None`` when
+    #: the core has no CSRs — which is every core but a Blackhole baby (the
+    #: WormholeB0 ISA docs describe no CSRs at all). A class attribute so a core
+    #: without one costs an attribute read and a predicted branch per retired
+    #: instruction, and nothing else. ``BabyRISCV`` sets it, together with the
+    #: register file's reference to the same object: the ISA executors are
+    #: handed the register file, and the retire counter is bumped from here.
+    csrs = None
+
     def __init__(
         self,
         start_address,
@@ -317,6 +326,16 @@ class RV32I(ProcessingElement):
             )
 
         if not pe_stall:
+            csrs = self.csrs
+            if csrs is not None and actioned:
+                # minstret. "Retired" in tt-sim's single-step model means this
+                # tick executed an instruction some ISA claimed: a tick the cost
+                # model stalled returned above without getting here, a PEStall
+                # leaves the instruction to be re-offered later (so counting it
+                # would count it twice), and an unclaimed instruction executed
+                # nothing at all — the hardware would trap on it, and tt-sim
+                # treats it as the doc's UndefinedBehavior.
+                csrs.retired += 1
             pc.write(nextpc.read())
 
     def reset(self):
@@ -336,6 +355,11 @@ class RV32I(ProcessingElement):
         self.unknown_instructions = 0
         if self.rv_cost is not None:
             self.rv_cost.reset()
+        if self.csrs is not None:
+            # A core coming out of reset gets its CSRs back at their documented
+            # reset values (cfg0's StMergeTimer, vlenb, and a minstret that
+            # counts this run's instructions rather than the previous one's).
+            self.csrs.reset()
 
     def start(self):
         self.initialise_core()
