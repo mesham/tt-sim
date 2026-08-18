@@ -1,0 +1,73 @@
+PASS  card-1     window=71780 cycles  retirebench-blackhole-card-1.json
+      zone               cycles    retired  cyc/instr
+      marker_null            12          1     12.000
+      alu_dep              6231       6208      1.004
+      alu_ind              6423       6398      1.004
+      mul_dep              6089       3106      1.960
+      mul_ind              6418       6396      1.003
+      div_small            7036        567     12.409
+      div_large            6921        244     28.365
+      load_dep             6300        795      7.925
+      load_ind             6772       3621      1.870
+      store_spread         6841       1259      5.434
+      branch_nt            6163       6114      1.008
+      branch_t             6454       6113      1.056
+      window              71780      40915
+      unattributed          120
+PASS  card-2     window=71439 cycles  retirebench-blackhole-card-2.json
+      zone               cycles    retired  cyc/instr
+      marker_null            12          1     12.000
+      alu_dep              6233       6208      1.004
+      alu_ind              6425       6398      1.004
+      mul_dep              6088       3106      1.960
+      mul_ind              6417       6396      1.003
+      div_small            7036        567     12.409
+      div_large            6921        244     28.365
+      load_dep             6299        795      7.923
+      load_ind             6774       3621      1.871
+      store_spread         6502       1259      5.164
+      branch_nt            6158       6114      1.007
+      branch_t             6453       6113      1.056
+      window              71439      40915
+      unattributed          121
+PASS  card-3     window=71777 cycles  retirebench-blackhole-card-3.json
+      zone               cycles    retired  cyc/instr
+      marker_null            12          1     12.000
+      alu_dep              6233       6208      1.004
+      alu_ind              6423       6398      1.004
+      mul_dep              6088       3106      1.960
+      mul_ind              6418       6396      1.003
+      div_small            7036        567     12.409
+      div_large            6921        244     28.365
+      load_dep             6300        795      7.925
+      load_ind             6761       3621      1.867
+      store_spread         6841       1259      5.434
+      branch_nt            6163       6114      1.008
+      branch_t             6458       6113      1.056
+      window              71777      40915
+      unattributed          123
+
+Before sending this home, check by eye:
+  * every line above says PASS.
+  * the 3 repeats agree. They are separate runs of an identical
+    deterministic program with no data-dependent control flow, so the
+    'retired' column must be IDENTICAL across repeats -- not close,
+    identical -- and the cycle columns should be within a per cent or so.
+    A retired column that moves means something is wrong with the
+    instrument, and it is the most important thing in this directory.
+    Do NOT re-run and keep the better session; say so in the handover.
+  * 'unattributed' is small (a few hundred cycles). It is the harness's
+    own result stores between zones. A large or negative one means the
+    counter reads did not bracket what they were meant to.
+  * the zones DISAGREE with each other in cyc/instr. They are twelve
+    different instruction mixes; if they all read ~1.0 the program did
+    not run the mixes it thinks it did.
+
+Then send the WHOLE directory, stdout logs included -- they carry the
+retirebench-config line that records what each run was configured as:
+  rsync -av /home/nx09/nx09/nebriscv/tt_traces/retirebench-bh/ <home>:~/retirebench-bh/
+
+At home, per repeat:
+  python3 -m tt_sim.perf.retire_attribution \
+      --sim  <simulator artefact at the same --scale> \
+      --card /home/nx09/nx09/nebriscv/tt_traces/retirebench-bh/runs/card-1/retirebench-blackhole-card-1.json

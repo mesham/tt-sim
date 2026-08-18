@@ -463,13 +463,49 @@ is left is the credibility layer.
    back to the elapsed-only envelope check rung 4 exists to distrust:
    the string `csr` appears zero times in the whole `WormholeB0/` doc
    tree, so a CSR instruction on a Wormhole core raises.
-   **A prediction registered before any card session**: `div_large` is
-   where tt-sim charges the documented floor of 6 against silicon's
-   33.001, so the leg should show ~7 % of the span concentrated in that
-   one zone. Sizing it larger would let that single known gap dominate
-   `E_total`. Four other zones already corroborate `riscvbench`'s
-   Blackhole silicon without being fitted to it (`mul_dep` 1.954 against
-   1.985, `load_dep` 7.728 against 7.925).
+   **FIRST SILICON RESULT, 2026-08-18: it FAILS, and the failure is the
+   useful kind.** A Blackhole p150 session, three repeats,
+   `perfbench/card-sessions/2026-08-18-bh-retirebench/`. `E_total`
+   **15.91 / 15.51 / 15.91 %** against a 10 % limit.
+   **The compensation ratio is 1.00x** — `E_int` equals `E_total` to the
+   decimal, so *nothing is hiding behind anything*: every zone errs in
+   the same direction (tt-sim under-charges) and the triangle inequality
+   holds with equality. For a model built deliberately as a floor that
+   is the shape wanted, and it is the answer to the question the rung
+   exists to ask.
+   **The whole failure is the divide, and it is a deliberate modelling
+   choice arriving where it was aimed.** The two divide zones are
+   **13.43 %** of the 15.92 %; everything else totals **2.49 %**, which
+   passes both thresholds with room to spare.
+   `unit_costs.yaml`'s `divide_general: { cycles: 6, max: 33, bound:
+   range }` (`isa_doc`, `wh_riscv#integer-unit`) is charged at its low
+   end per the working rule that the model is a floor; the doc says
+   "between six and 33 cycles ... dependent upon the magnitude of the
+   dividend" and the card has now *measured* that dependence — 12.409
+   cyc/instr at a 12-bit dividend, 28.365 at a 29-bit one, against 5.377
+   and 5.270 modelled. **Not to be "fixed" by charging 33**: that would
+   over-charge every small divide and break the floor property
+   everywhere else. Modelling it needs a dividend-magnitude term with
+   real provenance, and two points on a documented 6-33 range is not
+   one.
+   **The prediction registered beforehand was half right, and the miss
+   is recorded because that is the only thing that makes registering
+   one worth doing.** It said `div_large` would be the single bad zone
+   at ~7 % of the span: measured **7.85 %**, essentially exact. It did
+   **not** predict `div_small`, which is also wrong, at 5.55 %. The
+   error is in both divide zones, not one.
+   **The instrument proved itself in the data**, which is what the
+   retired census is for: across three repeats every per-zone `minstret`
+   is *identical* — 6208, 6398, 3106, 6396, 567, 244, 795, 3621, 1259,
+   6114, 6113, window 40915 — while cycle counts move by tenths of a per
+   cent. `unattributed` is 120/121/123 cycles on a ~71,700-cycle window.
+   Four zones corroborate `riscvbench`'s Blackhole silicon without being
+   fitted to it (`mul_dep` 1.954 modelled against 1.960 measured,
+   `load_dep` 7.728 against 7.925).
+   **The Wormhole refusal fired on real Wormhole silicon**, same day, so
+   it is a tested refusal and not an asserted one: the pre-flight asks
+   the device which part it is and declines before building a kernel or
+   launching anything.
    **VALIDATED ON BOTH ARCHES AGAINST SILICON, 2026-08-17.** Six
    comparisons on a Wormhole card all pass — arms A/B/C x 256/4096 B,
    errors **0.2-9.3 %** against a 25 % bar, every partition gate green
