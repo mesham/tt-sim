@@ -405,20 +405,71 @@ is left is the credibility layer.
    hardware does and what `note_stall` structurally could not express
    — and the suite drives a real counter bank through its own MMIO
    readback into an overlapping window, asserting the gate refuses it
-   and passes a disjoint one built the same way. **Still open, and not
-   to be closed by inventing a magnitude**: tt-sim's front end never
-   calls the new hook, because its only stall hook sits on the held
-   path (`WaitGate._note_latched_wait`), so real simulator logs are
-   unchanged.
+   and passes a disjoint one built the same way. **The front end calls it as
+   of 2026-08-18.** `WaitGate._tick_unheld_latched_wait` re-evaluates a
+   latched wait on the cycles nothing is held by it, forgets it when met
+   (per `SEMWAIT.md`) and counts an unmet one as a *reason* and not a
+   stall, so the gate's refusal is now reachable from a simulated tile
+   and not only a hand-built bank — a real `TensixTile` read back
+   through its own MMIO gives `WAITING_FOR_NONZERO_SEM_1` 60 against
+   `THREAD_STALLS_1` 19. Keeping a live latch awake costs **zero extra
+   ticks**, measured on 9 replay guards run both ways: tiles do sleep
+   there, never with a live latched wait.
+   **What is still open is the MAGNITUDE, not the hook, and it is still
+   not to be closed by scaling.** tt-sim's threads reach their blocked
+   instruction almost immediately, so the un-held window barely exists
+   and `mechbench` moves **+6 cycles** on both arms against the card's
+   13x excess, with `THREAD_STALLS_2` and the total span unchanged and
+   no pinned constant moved. That gap is a front-end issue-timing
+   question.
+   **A pre-existing correctness bug was found and left alone,
+   deliberately**: `check_for_wait_condition_met`'s semaphore branch has
+   a misindented `return True` **inside** its `for sem in sem_checks:`
+   loop, so a `SEMWAIT` selecting several semaphores only ever tests the
+   first and the thread is released early — silently, no fault, the NoC
+   1 failure mode again. Reproduced: semaphores [0, 1] with C0, sem0 = 5
+   and sem1 = 0 returns True where `SEMWAIT.md` requires all selected
+   conditions to be met simultaneously. The neighbouring
+   `_note_latched_wait` has the same loop with its `return` correctly at
+   the `for` level, which is what makes this a typo rather than a
+   design. Harmless for the single-semaphore masks every in-tree kernel
+   uses; `semaphore_mask` is 8 bits, so the reachable case is real.
    **The NoC-bound leg is built, 2026-08-16** — `perfbench/nocevbench`
    plus `tt_sim.perf.noc_events`, behind six refusing gates. Two of
-   three legs now exist; only **RV-bound** is left. **Its instrument
-   landed 2026-08-18** — Zicsr and the Blackhole CSR file (§6), so
-   `mcycle`/`minstret` are readable from a kernel; the leg itself is
-   still unbuilt. It can never be a two-arch claim: the string `csr`
-   appears zero times in the whole `WormholeB0/` doc tree, so this leg
-   is **Blackhole-only by construction** and a CSR instruction on a
-   Wormhole core raises.
+   three legs now exist.
+   **The RV-bound leg is built too, 2026-08-18 — all three now exist**
+   (`perfbench/retirebench` + `tt_sim.perf.retire_attribution`, eight
+   refusing gates). Its instrument is Zicsr and the Blackhole CSR file
+   (§6), landed the same day: twelve zones on one baby RISC-V, each
+   bracketed by an `mcycle` and a `minstret` read, both sides emitting
+   the identical artefact so one parser reads each. The synthetic
+   compensating case is the leg's argument in one file: `E_total`
+   **0.91 %** either way — identical to two decimals, inside every
+   envelope threshold in this repo — against `E_int` **1.15 %**
+   agreeing and **45.48 %** compensating, ratio **49.91x**, and the
+   compensating file passes *every gate* and fails only the criterion.
+   **Its buckets are weaker than the other two legs' and it says so.**
+   Every bucket's *magnitude* is hardware-measured (an `mcycle` delta on
+   the core whose cycles it counts) and every *retired count* is too,
+   but every bucket's *mechanism label* is **structural** — there is no
+   per-mechanism counter for a baby RISC-V, so each zone is built to be
+   dominated by one mechanism. What makes the label checkable is
+   `minstret`: `retire_census_matches` demands exact per-zone equality
+   and refuses otherwise. The CPI table is **not** an independent second
+   check, unlike `nocevbench`'s latency table — once the census is
+   equalised, CPI is the partition over a per-zone constant.
+   **Blackhole-only by construction**, and it refuses in three places
+   (card pre-flight, host program, `arch_supported`) rather than falling
+   back to the elapsed-only envelope check rung 4 exists to distrust:
+   the string `csr` appears zero times in the whole `WormholeB0/` doc
+   tree, so a CSR instruction on a Wormhole core raises.
+   **A prediction registered before any card session**: `div_large` is
+   where tt-sim charges the documented floor of 6 against silicon's
+   33.001, so the leg should show ~7 % of the span concentrated in that
+   one zone. Sizing it larger would let that single known gap dominate
+   `E_total`. Four other zones already corroborate `riscvbench`'s
+   Blackhole silicon without being fitted to it (`mul_dep` 1.954 against
+   1.985, `load_dep` 7.728 against 7.925).
    **VALIDATED ON BOTH ARCHES AGAINST SILICON, 2026-08-17.** Six
    comparisons on a Wormhole card all pass — arms A/B/C x 256/4096 B,
    errors **0.2-9.3 %** against a 25 % bar, every partition gate green
@@ -1069,14 +1120,39 @@ assertions must come from the ISA docs.
 
 **Restated 2026-08-13: an *interior* match by mechanism and by zone.**
 "Instruction for instruction" is **retired as unreachable**, not
-deferred, on three independently sufficient grounds:
+deferred. It was written down as three independently sufficient
+grounds; **one of them was false and is corrected below**, so the
+retirement now rests on the remaining three — which is still more than
+it needs, and the replacement ground is better sourced than the one it
+replaces:
 
-- **No instrument.** The baby cores are RV32IM with **no Zicsr** — no
-  `mcycle`, no `minstret`. The finest report is a pair of
-  `DeviceZoneScoped*` timestamps off `RISCV_DEBUG_REG_WALL_CLOCK`.
-  tt-metal 0.74, UMD and the public ISA docs contain no PC sampler and
-  no instruction-trace buffer; the debug daisychain is documented "at
-  least five cycles stale" and every consumer of it is commented out.
+- **No instrument — CORRECTED 2026-08-18, this ground was wrong on
+  Blackhole.** It read "the baby cores are RV32IM with no Zicsr — no
+  `mcycle`, no `minstret`", with no architecture qualifier, and §6 has
+  recorded the opposite the whole time: `BabyRISCV/CSRs.md` documents
+  `0xb00 mcycle` and `0xb02 minstret` on Blackhole, and tt-sim has
+  implemented them since 2026-08-18. **True on Wormhole only** (the
+  string `csr` appears zero times in its doc tree). What survives is
+  the rest: tt-metal 0.74, UMD and the public ISA docs contain no PC
+  sampler and no instruction-trace buffer; the debug daisychain is
+  documented "at least five cycles stale" and every consumer of it is
+  commented out.
+- **No fidelity from the CSRs either, and this is the ground that
+  should have been written.** `cfg0`'s `DisCsrSync` (bit 10) is
+  documented: *while clear*, once a `csrrw`/`csrrs`/`csrrc`/`csrrwi`/
+  `csrrsi`/`csrrci` instruction leaves the frontend, the next
+  instruction does not leave until the previous one has **retired**. It
+  is clear at reset **and clear in tt-metal's own init** (the observed
+  `cfg0 = 0x60008` sets only `DisLowCash`, `DisTriscCache` and
+  `StMergeTimer`), so a CSR read is a retirement barrier on a real
+  part. Bracketing single instructions with `mcycle` reads therefore
+  destroys the very overlap it would be measuring — the same objection
+  as the marker's 28 cycles, but sourced rather than measured, and it
+  does not go away with a cheaper counter. **The counters remain right
+  for a *window*** — two reads around a region of millions of
+  instructions dilate nothing and serialise only at the boundaries,
+  which is exactly what rung 4's RV-bound leg needs and is why the
+  instrument was built.
 - **No budget.** `PROFILER_L1_OPTIONAL_MARKER_COUNT = 250` → **125
   scopes per RISC per launch**, which tt-metal's own doc states and its
   own `test_full_buffer` asserts (125 recovered from a kernel asking
