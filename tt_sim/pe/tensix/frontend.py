@@ -420,14 +420,10 @@ class WaitGate(TensixFrontendUnit):
         if latched is None:
             return
         if latched.isSemaphoreMode():
-            for sem in latched.getSemaphoresToCheck():
-                semaphore = self.backend.getSyncUnit().getSemaphore(sem)
-                if latched.getConditionCheck(0) and semaphore.value == 0:
-                    self._note_stall(cycle_num, "semaphore_empty", semaphore=sem)
-                    return
-                if latched.getConditionCheck(1) and semaphore.value >= semaphore.max:
-                    self._note_stall(cycle_num, "semaphore_full", semaphore=sem)
-                    return
+            found = self._latched_semaphore_reason()
+            if found is not None:
+                reason, sem = found
+                self._note_stall(cycle_num, reason, semaphore=sem)
             return
         cond_units = (
             WaitGate.STALLWAIT_COND_UNIT_BH
@@ -442,6 +438,82 @@ class WaitGate(TensixFrontendUnit):
                     cycle_num, "resource_wait", blocked_on=cond_units.get(idx, "")
                 )
                 return
+
+    def _latched_semaphore_reason(self):
+        """The first unsatisfied semaphore condition of the latched wait.
+
+        ``(reason, semaphore)``, or ``None`` when the latched wait is not in
+        semaphore mode or every selected semaphore condition is satisfied.
+        Shared by both readers of those masks so they cannot drift:
+        :meth:`_note_latched_wait`, which turns it into a stall, and
+        :meth:`_tick_unheld_latched_wait`, which turns it into a live wait
+        condition with nothing held.
+
+        First unsatisfied condition wins, which is the rule the whole gate
+        already attributes by rather than a new one: a cycle on which C0 and C1
+        are both unsatisfied, on different semaphores, is charged to the first.
+        The hardware's two reason counters are independent signals and would
+        both count -- the same simultaneity ``note_stall``'s docstring records
+        for stalls, unchanged here and not closed by this method.
+        """
+        latched = self.latchedWaitInstruction
+        if latched is None or not latched.isSemaphoreMode():
+            return None
+        for sem in latched.getSemaphoresToCheck():
+            semaphore = self.backend.getSyncUnit().getSemaphore(sem)
+            if latched.getConditionCheck(0) and semaphore.value == 0:
+                return "semaphore_empty", sem
+            if latched.getConditionCheck(1) and semaphore.value >= semaphore.max:
+                return "semaphore_full", sem
+        return None
+
+    def _tick_unheld_latched_wait(self, cycle_num):
+        """Re-evaluate a latched wait on a cycle with nothing held at the gate.
+
+        ``SEMWAIT.md``: "The Wait Gate will then continuously re-evaluate the
+        latched wait instruction until all of the selected conditions are
+        simultaneously met, at which point the latched wait instruction will be
+        forgotten". Re-evaluation is not conditional on anything being blocked
+        -- "the issuing thread can continue execution until one of the blocked
+        instructions is reached" -- so this is the evaluation the held path
+        does, run on the cycles the held path never sees. Two things follow,
+        and only the second is a counter:
+
+        * the latch is **forgotten** the moment its condition is met, whether
+          or not anything was ever blocked by it. tt-sim previously cleared a
+          latch only on the held path, so a wait that nothing happened to block
+          stayed armed for the rest of the run and could still block a later
+          instruction the hardware had long since forgotten the wait for;
+        * every cycle the condition is *not* met counts on the wait-condition
+          counter and **not** as a stall -- nothing is held, so the thread lost
+          no cycle. That is the counting rule
+          :meth:`~tt_sim.misc.perf_counters.TensixPerfCounters.note_wait_condition`
+          exists for, and the reason a hardware reason counter can outrun
+          ``THREAD_STALLS_n``.
+
+        Only the semaphore reasons are counted. A latched ``STALLWAIT``'s
+        conditions are the Src / pipeline ones, which ``note_wait_condition``
+        declines by design; see its docstring for why they are not latched
+        conditions in the same sense. Those cycles are therefore left
+        uncounted rather than attributed to something they are not.
+
+        One cycle per held episode is still counted by neither path, and it
+        predates this: on the tick the block mask matches, ``latch_wait`` goes
+        true *after* the point the un-held branch would have counted, and the
+        held branch does not run until the tick after. The instruction is held
+        on that cycle, so the hardware counts both a stall and the reason for
+        it. Closing it moves ``THREAD_STALLS_n`` on every workload, which is a
+        separate change from this one and is not made here.
+        """
+        if self.check_for_wait_condition_met():
+            self.latchedWaitInstruction = None
+            return
+        counters = self.perf_counters
+        if counters is None or not counters.instrn_running:
+            return
+        found = self._latched_semaphore_reason()
+        if found is not None:
+            counters.note_wait_condition(self.frontend.thread_id, found[0])
 
     def setBackendEnforcedStall(self):
         self.backend_enforced_stall = True
@@ -625,16 +697,39 @@ class WaitGate(TensixFrontendUnit):
                 return True
 
     def is_clock_idle(self):
-        """Idle with nothing latched and nothing waiting at the gate.
+        """Idle with no wait latched and nothing waiting at the gate.
 
-        ``latch_wait`` matters independently of the FIFO: a latched wait
-        re-tests its condition every cycle and clears itself when it is met,
-        which is observable. The two stall flags are deliberately *not*
-        treated as idle — they are cleared by the sync / ThCon units, which
-        report themselves busy while that is pending, so the tile stays awake
-        either way and this keeps the predicate one expression.
+        A latched wait keeps the gate awake **whether or not anything is being
+        held by it**, which is why this tests :attr:`latchedWaitInstruction`
+        and not just :attr:`latch_wait`. Per ``SEMWAIT.md`` the Wait Gate
+        "will then continuously re-evaluate the latched wait instruction until
+        all of the selected conditions are simultaneously met, at which point
+        the latched wait instruction will be forgotten" — re-evaluation is not
+        conditional on anything being blocked, and both of its outcomes are
+        observable: the latch is forgotten, and every unmet cycle counts on
+        ``WAITING_FOR_NON{ZERO,FULL}_SEM_n`` (see
+        :meth:`_tick_unheld_latched_wait`). A gate that called itself idle
+        there would let the tile sleep through exactly the cycles the counter
+        is defined over, and no placement of the increment could recover them.
+
+        The cost is bounded by the same condition it counts: the tile is held
+        awake only while a latched wait is *unsatisfied*, which is the wait's
+        real duration and nothing more — the tick that finds it satisfied
+        forgets the latch, and the dormancy decision is made against post-tick
+        state. Measured over the Blackhole replay guards, the number of extra
+        ticks this buys is zero: no tile in them ever slept with a live
+        latched wait, so it changes what the model *can* count without
+        changing what these workloads tick.
+
+        The two stall flags are deliberately *not* treated as idle — they are
+        cleared by the sync / ThCon units, which report themselves busy while
+        that is pending, so the tile stays awake either way.
         """
-        return not self.latch_wait and not self.frontend.wait_gate_instruction_fifo
+        return (
+            not self.latch_wait
+            and self.latchedWaitInstruction is None
+            and not self.frontend.wait_gate_instruction_fifo
+        )
 
     def clock_tick(self, cycle_num):
         if self.mutex_stall:
@@ -653,6 +748,10 @@ class WaitGate(TensixFrontendUnit):
                             instruction_info
                         )
                     )
+                if not self.latch_wait:
+                    # Nothing became blocked, so nothing is being held -- but
+                    # the wait is latched and the gate re-evaluates it anyway.
+                    self._tick_unheld_latched_wait(cycle_num)
             elif self.latch_wait:
                 condition_met = self.check_for_wait_condition_met()
                 if condition_met:

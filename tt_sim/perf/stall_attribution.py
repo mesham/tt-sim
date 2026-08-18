@@ -228,11 +228,13 @@ now drives ``TensixPerfCounters`` through its own hooks and its own MMIO
 readback into an overlapping state and asserts this gate refuses it -- and,
 in the other direction, passes a disjoint one built the same way. The refusal
 path is therefore reachable from the machinery rather than only from a
-hand-written CSV. What is *not* claimed: tt-sim's front end still never calls
-the new hook, because its only stall hook sits on the held path, so real
-simulator logs are unchanged and still cannot exhibit the overlap. That
-remaining gap is in ``tt_sim/pe/tensix/frontend.py`` and is recorded, not
-closed -- and closing it must not be attempted by inventing a magnitude.
+hand-written CSV. Since 2026-08-18 the front end calls the hook as well:
+``WaitGate._tick_unheld_latched_wait`` re-evaluates a latched wait on the
+cycles nothing is held by it, so a simulated window can carry the overlap
+rather than only a hand-built one. What that is **not** is a reproduction of
+the card's magnitude -- the excess is however long the modelled thread ran on
+past its ``SEMWAIT``, which on the ``mechbench`` arms is a handful of cycles
+against the card's 13x, and nothing is scaled to close the difference.
 
 The partition is therefore left exactly as it is, and the refusal is left in
 place and made *specific*: :func:`sem_overlap_findings` names the counters, the

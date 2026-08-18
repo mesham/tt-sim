@@ -331,12 +331,11 @@ class TensixPerfCounters:
 
     # -- the counting hooks ------------------------------------------------
     #
-    # ``note_stall`` and ``note_dispatch`` are called from the Tensix wait
-    # gate, which is the one place that sees every stalled cycle and every
-    # accepted instruction. Neither allocates, neither consults the trace bus,
-    # and neither can move a cycle: they are pure increments on a branch the
-    # gate had already taken. ``note_wait_condition`` is the third, and is
-    # currently uncalled by design -- see its docstring.
+    # All three are called from the Tensix wait gate, which is the one place
+    # that sees every stalled cycle, every accepted instruction and every cycle
+    # a latched wait went unmet. None allocates, none consults the trace bus,
+    # and none can move a cycle: they are pure increments on a branch the gate
+    # had already taken.
 
     def note_stall(self, thread_id, reason, src_bank=None):
         """One cycle in which ``thread_id`` made no progress at the gate.
@@ -386,16 +385,16 @@ class TensixPerfCounters:
         thread's whole stall count by 13x, which no amount of simultaneity
         between reasons can explain.
 
-        **tt-sim's Tensix front end does not call this yet.** Its only stall
-        hook is on the held path (``WaitGate._note_latched_wait`` in
-        ``tt_sim/pe/tensix/frontend.py``, reachable only under ``latch_wait``),
-        so the un-held cycles of a live latched condition are never visited.
-        That is a modelling gap in the front end, recorded here rather than
-        closed here: the fix belongs in the wait gate, and no counter magnitude
-        may be invented to stand in for it. What this method does buy is that
-        the *counter model* no longer enforces an invariant the hardware breaks,
-        so the gate that refused on silicon can be shown to refuse on state this
-        class produced.
+        The caller is ``WaitGate._tick_unheld_latched_wait``
+        (``tt_sim/pe/tensix/frontend.py``), on the branch where a wait is
+        latched and nothing is held by it -- the cycles the held-path hook
+        ``_note_latched_wait`` never sees. Every one of them is counted here
+        and *not* as a stall, so a simulated window can now carry
+        ``sem_empty_t > thread_stalls_t`` exactly as silicon's does. Nothing is
+        scaled or calibrated towards the reading above: how far a reason
+        counter runs ahead is however long the modelled thread ran past its
+        ``SEMWAIT``, and on the in-tree ``mechbench`` arms that is a handful of
+        cycles rather than 13x.
 
         Only the two semaphore reasons are accepted. The four Src conditions are
         per-instruction ownership tests evaluated on whatever is at the gate,
