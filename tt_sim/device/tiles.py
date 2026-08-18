@@ -71,14 +71,23 @@ class DramChannels:
     Owned by the **tile**, not by an NIU, because a channel is one piece of
     hardware behind two NoC interfaces — the same ownership argument
     ``NocLinkRegistry`` makes, one level down. A rate of ``None`` (the cost
-    model off, or a direction whose rate no source gives — a Blackhole DRAM
-    *write*) makes every claim in that direction a no-op, so the endpoint stays
-    exactly as contention-free as it was.
+    model off, or a direction whose rate no source gives) makes every claim in
+    that direction a no-op, so the endpoint stays exactly as contention-free as
+    it was.
 
     The rate is **per direction**, because the two arches source it two ways:
     Wormhole converts one published per-channel GB/s, which its page states for
-    reads and writes alike, while Blackhole derives a read rate from tt-metal's
-    measured dataset and has no write figure at all.
+    reads and writes alike, while Blackhole derives its figure from tt-metal's
+    measured dataset. What arrives here is the **occupancy** rate, which on
+    Blackhole is not the pair ``DramCostModel.channel_excess_cycles`` spends:
+    that arch charges a write no latency excess, because its measured write row
+    slopes at the fabric's rate rather than the channel's, and still holds the
+    channel for the write's bytes, because no latency row can see an occupancy
+    and the bytes cross the bus in either direction. Until 2026-08-17 the write
+    rate was ``None`` here, which made a Blackhole DRAM write 36% *faster* than
+    a read under concentration (60.3 B/cycle against 44.4 at four tiles on one
+    endpoint, the write arm sitting on the NoC link because nothing at the
+    endpoint held it) — the shape of an absence rather than of a model.
 
     What this is *not*: the device's own re-issue interval. ``access_latency``
     is a latency, nothing publishes the pipelining behind it, and charging 99
@@ -186,9 +195,10 @@ class DramChannels:
         occupancy either way: what can differ is which of two requests waits,
         never how long the channel is busy.
 
-        A direction with no sourced rate claims nothing — so on Blackhole a
-        write neither waits nor makes a later read wait, which under-charges
-        rather than inventing a queue out of a figure the tables refuse.
+        A direction with no sourced rate claims nothing, which under-charges
+        rather than inventing a queue out of a figure the tables refuse. Both
+        directions are sourced on both shipped arches since 2026-08-17; the
+        path stays because "absent" has to keep meaning absent.
         """
         occupancy = self.occupancy_cycles(payload_bytes, is_write)
         if not occupancy:
@@ -337,8 +347,12 @@ class DRAMEndpointNUI(NUI):
         is the same total either way and needs no second hook on the response.
 
         The direction picks the rate, and on Blackhole it picks between a
-        sourced figure and none: that arch's table derives a DRAM *read* rate
-        and declines to derive a write one.
+        sourced figure and none: that arch's table charges the LATENCY axis for
+        a DRAM *read* and declines it for a write, whose measured completion
+        time slopes at the fabric's rate rather than the channel's. The
+        occupancy axis is charged in both directions there — see
+        :meth:`_channel_wait`, which reads a different pair of rates for that
+        reason.
         """
         model = self.dram_cost
         if model is None:
@@ -445,15 +459,21 @@ class DRAMTile(TTDeviceTile):
         # piece of hardware behind two NoC interfaces, and kept apart from each
         # other because a Wormhole DRAM tile fronts two independent GDDR6
         # controllers (profile.dram_gddr_channel_size). Both rates are None
-        # with the model off; with it on, the write rate is None on Blackhole,
-        # whose table derives a read rate and declines a write one. A channel
-        # with no rate for a direction never makes anything wait in it.
+        # with the model off. With it on they are the OCCUPANCY rates, which on
+        # Blackhole are not the same pair the latency term spends: that arch
+        # charges a write no channel excess (its measured write row slopes at
+        # the fabric's rate) but does hold the channel for the write's bytes,
+        # because a latency row cannot see an occupancy and the bytes cross the
+        # bus either way. A channel with no rate for a direction never makes
+        # anything wait in it.
         self.channels = DramChannels(
-            None if latency is None else latency.channel_bytes_per_cycle_read,
+            None if latency is None else latency.channel_occupancy_bytes_per_cycle_read,
             count=profile.dram_gddr_channels_per_tile,
             channel_size=profile.dram_gddr_channel_size,
             write_bytes_per_cycle=(
-                None if latency is None else latency.channel_bytes_per_cycle_write
+                None
+                if latency is None
+                else latency.channel_occupancy_bytes_per_cycle_write
             ),
         )
 

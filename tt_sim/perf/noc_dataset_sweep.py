@@ -1259,6 +1259,15 @@ def _sourced_bandwidths(arch):
                 out["dram.channel_serialisation (B/cycle, read)"] = read
             if write is not None:
                 out["dram.channel_serialisation (B/cycle, write)"] = write
+        # The occupancy axis, where a direction the latency axis declines may
+        # still be charged: this sweep's rows are all one transaction per
+        # barrier, so nothing here can see it, and leaving it out of the table
+        # would read as "not charged at all".
+        occupancy = channel.get("write_occupancy") or {}
+        if occupancy.get("provenance") in SOURCED_PROVENANCE:
+            out["dram.channel_serialisation (B/cycle, write occupancy only)"] = (
+                occupancy.get("bytes_per_cycle")
+            )
     return out or {"(none sourced for this architecture)": ""}
 
 

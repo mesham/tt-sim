@@ -48,9 +48,14 @@
 #     the two. Both arches now, since 2026-08-12, but by two different routes
 #     and not with the same shape: Wormhole's one figure is a unit conversion
 #     of a published GB/s and is charged in both directions, while Blackhole's
-#     is a two-point secant on tt-metal's measured NoC dataset, is charged for
-#     READS ONLY, and has no write figure at all -- see its override, which
-#     says why refusing the write direction is the finding rather than a gap.
+#     is a two-point secant on tt-metal's measured NoC dataset. That figure is
+#     spent on two axes -- as a latency excess and as the channel's occupancy
+#     -- and on Blackhole they carry different directions: the latency axis is
+#     charged to READS ONLY, because the vendor's own write row shows a write's
+#     completion time does not contain the channel, while the occupancy axis is
+#     charged both ways, because no latency row can see an occupancy and a
+#     write's bytes cross the same bus. See the override and its nested
+#     ``write_occupancy``, which say why each half is a finding and not a gap.
 #     Everything else under ``dram`` -- the GB/s ``bandwidth`` block itself,
 #     ``chip_level_bandwidth`` and the end-to-end reference -- is still
 #     unconsumed.
@@ -70,9 +75,10 @@
 #           > estimated > unknown
 #
 # and an entry's provenance is the weakest provenance of any number in it.
-# ``vendor_source_derived`` is the newest rank and exists for exactly three
-# entries (``dram.access_latency``, once per arch, and Blackhole's
-# ``dram.channel_serialisation``): arithmetic on vendor numbers, which is what
+# ``vendor_source_derived`` is the newest rank and exists for exactly five
+# entries (``dram.access_latency`` once per arch, its Blackhole ``write``
+# split, Blackhole's ``dram.channel_serialisation`` and that entry's nested
+# ``write_occupancy``): arithmetic on vendor numbers, which is what
 # ``isa_doc_derived`` is to ``isa_doc``, one tier down. It requires a
 # ``derivation`` for the same reason -- a derived number is only reviewable if
 # the arithmetic is written out. Note what the rank does NOT require: a
@@ -584,6 +590,30 @@ dram:
       fraction -- which is a statement about sustained software behaviour, not
       about one transfer, and folding it in here would be an efficiency fudge
       of exactly the kind these tables refuse.
+
+      A MEASURED DISCREPANCY AGAINST THE DIRECTION-SYMMETRY OF THIS ENTRY,
+      recorded because it is worth knowing and DELIBERATELY NOT ACTED ON. The
+      24 above is charged to reads and writes alike because the page states one
+      figure for both ("reading at 24 GB/s or writing at 24 GB/s"). A Wormhole
+      card session (``2026-08-17``, dramratebench ``--dir both``, participants
+      concentrated on one endpoint, two independent runs agreeing to 0.3%, all
+      instrument gates clean) measured read 22.117 B/cycle against write 21.215
+      at 64 participants -- ratio 0.959 -- and 22.023 against 21.273 at 48,
+      ratio 0.966. The read arm lands where the page's own measured table
+      already says it does (22.2-22.3 GB/s, and 24 x the page's 0.92 achievable
+      fraction is 22.1); the write arm is a reproducible 3.4-4.1% below it.
+
+      That is one part, one operator, one day, against a PUBLISHED number, and
+      it is nowhere near enough to move one. It also cannot separate the three
+      things it could be -- a genuine write deficit at the bus, the read/write
+      turnaround this entry already names as unmodelled, or the write arm's own
+      outbound-link topology, which the instrument's own notes flag as
+      different in kind from the read arm's. What would settle it is a document
+      or a vendor dataset with a Wormhole write rate in it, and neither exists:
+      the same subtraction on ``tm_noc_latencies``' Wormhole rows returns 24.53
+      B/cycle for writes, i.e. no deficit at all and if anything a faster write.
+      So this stays a corroboration-shaped note with the sign recorded, and
+      Wormhole keeps one channel rate for both directions.
   access_latency:
     provenance: unknown
     note: >
@@ -1410,14 +1440,16 @@ arch_overrides:
           at the DRAM endpoint is slower than the fabric, by a margin the
           fabric's own rows bound.
         note: >
-          CONSUMED for reads and NOT for writes, and the asymmetry is the
-          point rather than an omission -- see the write paragraph below.
-          Charged exactly as Wormhole's is: as the *excess* over the link's
-          own serialisation (``DramCostModel.channel_excess_cycles``), so a
-          transfer's size-dependent cost is ``ceil(N / 47.0805)`` once and not
-          added to the link's, and as the channel's *occupancy*
-          (``DramChannels``), so a request arriving while the channel is
-          streaming waits. One figure on two axes, as on Wormhole.
+          CONSUMED ON TWO AXES, AND ON THIS ARCH THEY ARE NOT THE SAME SET OF
+          DIRECTIONS. Charged exactly as Wormhole's is: as the *excess* over
+          the link's own serialisation
+          (``DramCostModel.channel_excess_cycles``), so a transfer's
+          size-dependent cost is ``ceil(N / 47.0805)`` once and not added to
+          the link's, and as the channel's *occupancy* (``DramChannels``), so a
+          request arriving while the channel is streaming waits. One figure on
+          two axes, as on Wormhole -- but here the latency axis is charged to
+          READS ONLY and the occupancy axis to both, which is the whole content
+          of the two paragraphs below and of ``write_occupancy``.
 
           THE DEEP MERGE IS STILL THE HAZARD IT ALWAYS WAS. Wormhole's
           ``bytes_per_cycle: 24`` remains physically present under this key on
@@ -1427,32 +1459,39 @@ arch_overrides:
           all. ``costs_test.test_the_dram_channel_rate_is_exactly_its_own_
           derivation`` asserts both halves.
 
-          THE WRITE DIRECTION IS NOT CHARGED, and it is the one thing this
-          entry deliberately leaves on the floor. The same secant on the same
-          arch's DRAM write row gives 4096 / (523 - 454) = 59.36 B/cycle, and
-          two independent reasons say that figure is not a DRAM bound:
-
-            1. It is not separable from the fabric. This arch's four L1 slopes
-               are 60.35 / 60.59 / 60.89 / 60.83, and 59.36 is within 2.5% of
-               all of them -- so a Blackhole DRAM write runs at the rate an L1
-               write runs at, and the dataset resolves no endpoint-specific
-               limit for it. Wormhole separates cleanly (DRAM write 24.53
-               against L1 write 30.16, 19% apart), which is what a resolved
-               bound looks like and what the read direction looks like here.
-            2. It would deepen a named over-charge. ``access_latency`` is
-               derived from the read figures and is already too large for a
-               Blackhole write -- the one row in ``KNOWN_OVER_CHARGED``, whose
-               residuals run -37 to -52 across the eight sizes. Adding a write
-               channel term takes them to -45 to -54. Over-charging is the
-               direction every bound in this file is chosen to avoid, and a
-               term that makes a known over-charge worse is not a term.
+          THE WRITE DIRECTION IS NOT CHARGED AS A LATENCY, and it is the one
+          thing this entry deliberately leaves on the floor. The same secant on
+          the same arch's DRAM write row gives 4096 / (523 - 454) = 59.36
+          B/cycle, and it is not separable from the fabric: this arch's four L1
+          slopes are 60.35 / 60.59 / 60.89 / 60.83, and 59.36 is within 2.5% of
+          all of them -- so a Blackhole DRAM write's *measured completion time*
+          grows at the rate an L1 write's does, and the dataset resolves no
+          endpoint-specific limit in it. Wormhole separates cleanly (DRAM write
+          24.53 against L1 write 30.16, 19% apart), which is what a resolved
+          bound looks like and what the read direction looks like here.
 
           So the 26% read/write gap is honoured by charging one direction and
           refusing the other, never by averaging the two into a single channel
-          rate. What explains the gap is already recorded next door, in
+          latency. What explains the gap is already recorded next door, in
           ``access_latency``'s note: "a write is answered when it is accepted,
           a read when the array has been read". A write's measured time does
           not contain the array, so its slope cannot measure the array.
+
+          THE SECOND REASON THIS ENTRY USED TO GIVE IS VOID SINCE 2026-08-17
+          and is recorded rather than deleted, because it was load-bearing. It
+          read: "it would deepen a named over-charge -- ``access_latency`` is
+          derived from the read figures and is already too large for a
+          Blackhole write, the one row in ``KNOWN_OVER_CHARGED``, whose
+          residuals run -37 to -52; adding a write channel term takes them to
+          -45 to -54." ``access_latency.write`` landed that day and emptied
+          that set; the row's residuals are now +52 to +67. The argument that
+          survives is the one above, and it is about the latency axis alone.
+
+          WHICH IS NOT THE SAME AS "NO WRITE RATE", and reading it that way is
+          what left ``DramChannels.write_bytes_per_cycle`` at ``None`` on this
+          arch. This figure is spent on two axes (see the first paragraph of
+          this note) and the refusal above only reaches one of them. See
+          ``write_occupancy`` below, which charges the other.
 
           WHAT THIS COSTS IN INDEPENDENCE, stated because it is the real price.
           Rung 2 validates the model against this dataset, and this entry now
@@ -1471,6 +1510,123 @@ arch_overrides:
           not a per-GDDR6-channel figure -- ``bandwidth`` above stays
           ``unknown`` because a GB/s, a channel count and an achievable
           fraction are three things this arithmetic does not produce.
+        write_occupancy:
+          bytes_per_cycle: 47.0805
+          provenance: vendor_source_derived
+          source: tm_noc_latencies
+          derivation: >
+            The read rate above, to the digit, spent on the OCCUPANCY axis in
+            the write direction:
+
+              bytes_per_cycle = (8192 - 4096) / (665 - 578)
+                              = 47.08046 bytes per cycle,
+
+            rounded up to 47.0805 exactly as above, so the charge lands at its
+            low end. There is no second measurement and no second arithmetic
+            here -- one channel, one rate, and the working is the one already
+            written out for the read direction.
+
+            THE ONE EXTRA STEP, stated separately so it can be argued with: a
+            channel's data bus is taken to move bytes at the same rate each
+            way. That is not this project's assertion. It is what the only DRAM
+            tile page either architecture publishes says in the sentence the
+            base entry converts -- ``wh_dram#performance``: "each GDDR6 channel
+            is theoretically capable of reading at 24 GB/s **or writing at 24
+            GB/s**" -- one figure covering both directions, which is why the
+            base entry's 24 is charged both ways without anyone calling it an
+            extrapolation. Both parts front the same memory technology
+            (``BlackholeA0/README.md``: "24 DRAM tiles" exposing 32 GiB of
+            GDDR6), so what crosses architectures here is the *symmetry* of a
+            GDDR6 data bus and nothing else. The LEVEL is Blackhole's own and
+            deliberately is not carried: Wormhole's 24 stays out, which is the
+            hazard the note below and ``costs_test`` both guard.
+          note: >
+            THE OCCUPANCY AXIS ONLY. The latency axis stays refused, for the
+            reason the read entry's note gives at length: the same file's DRAM
+            *write* row slopes at 59.36 B/cycle, within 2.5% of the same arch's
+            four L1 rows, so a Blackhole DRAM write's measured completion time
+            does not contain the channel drain and charging one to it would
+            predict a steeper size dependence than the vendor measured. Rung 2
+            says the same thing in residuals: that row runs +52 / +60 / +52 /
+            +55 / +52 / +62 / +62 / +67 over 64 B..8 KiB today, a slope of
+            +1.70 cycles/KiB, and adding the excess would take it to +51 / +59
+            / +50 / +52 / +46 / +50 / +39 / +21 -- still a floor, but a row
+            that now over-slopes by more than it currently under-slopes. That
+            is a measurement refusing a term, and it is left refused.
+
+            WHY THE SAME FILE CANNOT REFUSE THIS ONE. Every DRAM row in
+            ``tm_noc_latencies`` is one transaction per barrier, and a lone
+            request never finds the channel busy, so endpoint occupancy is
+            invisible to every point in it -- in either direction. The absence
+            of a write figure here was therefore never a measurement about
+            writes; it was the latency axis's refusal, above, being read one
+            axis too far. What it produced is visible and is not a model of
+            anything: with ``DramChannels.write_bytes_per_cycle`` at ``None``
+            every write claim was a no-op, so the write arm was unqueued and
+            ran up against the DRAM tile's 64 B/cycle NoC link instead. Four
+            tiles concentrated on one endpoint, 4096 B transactions, predicted
+            60.32 B/cycle writing against 44.36 reading -- a Blackhole DRAM
+            write 36% *faster* than a read, for no reason but the absence, and
+            at a level set by a link rather than by an endpoint. With the
+            figure below the same four tiles predict 45.00 against the same
+            44.36, a ratio of 1.014.
+
+            WHY THIS IS A FLOOR AND NOT AN INVENTION, which is the test every
+            term in this file has to pass. The bytes have to cross the bus.
+            Whatever buffering makes a write's acknowledgement early -- and the
+            59.36 above is the evidence that something does -- a sustained
+            write stream still cannot leave the channel faster than the channel
+            moves bytes, so ``ceil(N / 47.0805)`` is the shortest the channel
+            can possibly be busy on their account. Same argument as the base
+            entry's, in the same direction: charged at the low end, and inert
+            for an isolated request (``claim`` answers 0 on an idle channel),
+            so no single-transfer prediction moves and rung 2's rows are
+            untouched by construction. They are: every residual above is
+            unchanged by this entry.
+
+            NOT A NEW RANK AND NOT A NEW NUMBER. This is the fifth
+            ``vendor_source_derived`` entry and the second nested one, for the
+            same reason ``access_latency.write`` is nested: it is its own claim
+            with its own working, and a write figure hanging silently off a
+            read figure's provenance is what that convention exists to prevent.
+            Unlike that one it cites the same campaign and the same two cycle
+            counts as its parent, because it *is* its parent's number -- what
+            it adds is the axis and the symmetry argument, both of which are
+            above.
+
+            CORROBORATION, WHICH IS NOT PROVENANCE, and on this entry the
+            distinction is load-bearing rather than ceremonial: nothing below
+            supplied a digit of the figure above, which was derived on
+            2026-08-12 and never saw a card. A Blackhole p150 session
+            (``2026-08-17``, dramratebench ``--dir both``, 120 participants
+            concentrated on one endpoint, two independent runs agreeing to
+            0.3%, 0 witness failures and 0 stray writes) measured read 47.159
+            B/cycle against write 46.815 -- a write/read ratio of 0.993. Two
+            readings, and only the second one licenses anything here: the
+            plateau LEVEL sits 0.17% from the 47.0805 derived above, which is
+            an independent check on a hand-derived two-point secant that had
+            never been compared to silicon; and the two DIRECTIONS measure
+            equal, which is what says the symmetry step in the derivation is
+            not merely inherited from the other part's page. Neither is a
+            source. Had the card disagreed, the entry that would have had to
+            change is this note and not the number.
+
+            For the record, and still not as a source: the modelled ratio with
+            this term in place is 1.014 at four concentrated tiles against the
+            card's 0.993, so the model now puts a Blackhole DRAM write within
+            2% of its read where it used to put it 36% ahead. The residual 2%
+            is a transient rather than a rate -- a write's flat service time is
+            22 cycles against a read's 126, so at sixteen transactions per
+            participant the write arm fills its pipeline sooner and the
+            aggregate has not yet reached the plateau both directions share.
+            Driven to saturation the two are equal by construction, which is
+            what one rate on one channel means.
+
+            NOT FOLDED IN, and the list is the parent's unchanged: the device's
+            own re-issue interval, bank conflicts, refresh windows, read/write
+            turnaround. Turnaround is the pointed one here -- a real GDDR6 bus
+            costs something to reverse, so a mixed read/write stream is
+            under-charged by this term in exactly the way it was before.
     riscv:
       # Every `corroboration` in this block is one silicon campaign:
       # perfbench/riscvbench on a Blackhole card, 2026-08-05, banked as

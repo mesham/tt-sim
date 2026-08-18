@@ -202,32 +202,36 @@ def test_derived_entries_show_their_working():
 
 def test_vendor_derived_entries_are_exactly_the_ones_we_expect():
     """``vendor_source_derived`` is arithmetic on vendor numbers — below a
-    published figure, above a guess. It exists for exactly four entries: the
+    published figure, above a guess. It exists for exactly five entries: the
     same DRAM-minus-L1 subtraction once per arch, Blackhole's DRAM channel
     rate, which is one division on two cycle counts from the same vendor's
-    measured dataset, and (since 2026-08-17) Blackhole's DRAM *write* service
-    time, which is the first of those subtractions run in the other direction
-    on the second of those datasets. Adding a fifth must be as deliberate as
-    adding an ``estimated`` one, so the list is here rather than inferred.
+    measured dataset, and (both since 2026-08-17) Blackhole's DRAM *write*
+    service time, which is the first of those subtractions run in the other
+    direction on the second of those datasets, and its DRAM write *occupancy*
+    rate, which is that same division's answer spent on the second of the two
+    axes the channel figure is spent on. Adding a sixth must be as deliberate
+    as adding an ``estimated`` one, so the list is here rather than inferred.
     Every one must also show its working, which
     :func:`test_derived_entries_show_their_working` enforces.
 
     Note what the rank does *not* ask for, because a roadmap bullet once read
     as though it did: a published *page*. Blackhole has no DRAM tile page and
-    three of these four are Blackhole DRAM entries. What it asks for is vendor
+    four of these five are Blackhole DRAM entries. What it asks for is vendor
     numbers and arithmetic written out.
 
-    The fourth is nested inside the third's entry rather than beside it, and
-    that is deliberate: it is a different subtraction on a different campaign,
-    so it carries its own ``provenance``, ``source`` and ``derivation`` and is
-    walked, checked and counted here exactly like a top-level one. A write
-    figure hanging silently off the read figure's provenance is precisely what
-    this convention exists to prevent."""
+    Two are nested inside another entry rather than sitting beside it, and that
+    is deliberate: each is its own claim, so each carries its own
+    ``provenance``, ``source`` and ``derivation`` and is walked, checked and
+    counted here exactly like a top-level one. A write figure hanging silently
+    off a read figure's provenance is precisely what this convention exists to
+    prevent — the more so for ``write_occupancy``, whose *number* is its
+    parent's to the digit and whose argument is not."""
     expected = {
         "arch_overrides.wormhole.dram.access_latency",
         "arch_overrides.blackhole.dram.access_latency",
         "arch_overrides.blackhole.dram.access_latency.write",
         "arch_overrides.blackhole.dram.channel_serialisation",
+        "arch_overrides.blackhole.dram.channel_serialisation.write_occupancy",
     }
     found = set()
     for raw in _load_raw():
@@ -625,10 +629,17 @@ def test_the_dram_channel_rate_is_exactly_its_own_derivation():
     assert abs(rate - (8192 - 4096) / (665 - 578)) < 1e-3
     # Rounded UP off that quotient, so the charge lands at its low end.
     assert rate >= (8192 - 4096) / (665 - 578)
-    # It carries no flat figure and no write figure — the write direction is
-    # refused, not merely absent, and the derivation says why.
+    # It carries no flat figure and no write figure on the LATENCY axis — that
+    # direction is refused, not merely absent, and the derivation says why.
     assert "bytes_per_cycle" not in override
     assert "bytes_per_cycle_write" not in override
+    # The OCCUPANCY axis is a separate nested entry with its own provenance,
+    # and its number is this arch's own read rate rather than the other arch's
+    # 24 — which is the same laundering check one level down.
+    occupancy = override["write_occupancy"]
+    assert occupancy["provenance"] == "vendor_source_derived"
+    assert occupancy["source"] == "tm_noc_latencies"
+    assert occupancy["bytes_per_cycle"] == rate
     # The merged view still shows Wormhole's 24 under the same key, so the
     # consumer's rule — a directional key REPLACES the flat one — is the only
     # thing standing between a Blackhole write and the wrong arch's number.

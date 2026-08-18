@@ -1042,10 +1042,31 @@ def noc_cost_model(arch):
 # that recovers Wormhole's published 24 (to +1.6 %) from the measured dataset,
 # unchanged, returns 47.0805 B/cycle on Blackhole's DRAM read row -- 22 % below
 # the same file's L1 rows, which cross the fabric and no DRAM, so the limit it
-# reads is at the endpoint. The WRITE direction is deliberately left unsourced:
-# its secant lands within 2.5 % of those same L1 rows, resolving no endpoint
-# limit, and charging it would deepen the one row then pinned in
-# ``KNOWN_OVER_CHARGED``. Hence the per-direction rates below.
+# reads is at the endpoint. The WRITE direction's own secant lands within 2.5 %
+# of those same L1 rows, resolving no endpoint limit, so it is left unsourced.
+# Hence the per-direction rates below.
+#
+# AND THE WRITE DIRECTION REJOINED ON THE OTHER AXIS ON 2026-08-17, which is
+# why there are now two pairs of rates rather than one. The figure above is
+# spent twice -- as a latency excess and as the channel's occupancy -- and the
+# refusal in the paragraph above reaches only the first. It is an argument
+# about what a *write's own completion time* contains: a Blackhole write is
+# answered when the endpoint accepts it, so its measured slope reads the fabric
+# and charging it a channel excess would over-slope a row the vendor measured.
+# It is not an argument about what the write's bytes cost the request behind
+# them, and it cannot be: every DRAM row in that campaign is one transaction
+# per barrier, so occupancy is invisible to all of them in both directions.
+# Left unsourced on both axes it produced a model in which a Blackhole DRAM
+# write was FASTER than a read (60.3 B/cycle against 44.4 at four tiles
+# concentrated on one endpoint) purely because every write claim was a no-op
+# and the arm ran up on the 64 B/cycle NoC link instead of on an endpoint at
+# all; with the term it is 45.0 against the same 44.4. ``write_occupancy``
+# charges the derived read rate on the
+# occupancy axis alone -- one channel, one rate, direction-symmetric because
+# the one DRAM tile page either arch publishes states its per-channel figure
+# for "reading at 24 GB/s or writing at 24 GB/s" -- and it is a floor twice
+# over, since the bytes have to cross the bus and an idle channel still charges
+# nothing.
 #
 # THE LATENCY BECAME PER-DIRECTION TOO ON 2026-08-17, on Blackhole only, and it
 # is what emptied that ``KNOWN_OVER_CHARGED`` set. The flat figure above is
@@ -1096,12 +1117,23 @@ class DramCostModel:
     Plus one term that is not a latency at all, and is **per direction**:
 
     * :attr:`channel_bytes_per_cycle_read` / :attr:`channel_bytes_per_cycle_write`
-      -- the channel's own rate, 24 both ways on Wormhole (a unit conversion of
-      a published per-channel GB/s) and 47.0805 for reads with **no write
-      figure** on Blackhole, whose table derives the read rate from tt-metal's
-      measured NoC dataset and declines the write direction. Spent through
+      -- the channel's own rate on the **latency** axis, 24 both ways on
+      Wormhole (a unit conversion of a published per-channel GB/s) and 47.0805
+      for reads with **no write figure** on Blackhole, whose table derives the
+      read rate from tt-metal's measured NoC dataset and declines the write
+      direction because that arch's measured write row slopes at the fabric's
+      rate rather than the channel's. Spent through
       :meth:`channel_excess_cycles`, never as an absolute serialisation,
       because the NoC link has already charged its own.
+    * :attr:`channel_occupancy_bytes_per_cycle_read` /
+      :attr:`channel_occupancy_bytes_per_cycle_write` -- the same figure on the
+      **occupancy** axis, and the reason there are two pairs. What a transfer's
+      size costs *that transfer* and what it costs *the next one* are separate
+      questions, one of which every vendor latency row answers and the other of
+      which none of them can: their DRAM points are all one transaction per
+      barrier, and a lone request never finds the channel busy. So Blackhole
+      charges a write rate here (``write_occupancy``, the derived read rate) and
+      none above. Everywhere else the two pairs are the same number.
 
     A direction with no rate is charged nothing at all rather than borrowing
     the other direction's, for the same reason an unsourced arch is charged
@@ -1186,19 +1218,46 @@ class DramCostModel:
         directional = read is not None or write is not None
         self.channel_bytes_per_cycle_read = read if directional else both
         self.channel_bytes_per_cycle_write = write if directional else both
+        #: The same rate on the **occupancy** axis, and a second pair of
+        #: attributes rather than the pair above reused, because on Blackhole
+        #: the two axes do not carry the same set of directions.
+        #:
+        #: A latency row can measure the first and structurally cannot measure
+        #: the second: every DRAM row in the vendor dataset is one transaction
+        #: per barrier, and a lone request never finds the channel busy. So the
+        #: table is allowed to charge a direction here that it refuses above,
+        #: and Blackhole's does exactly that -- its measured *write* row slopes
+        #: at the fabric's rate rather than the channel's, so a write's
+        #: completion time gets no channel excess, while its bytes still have
+        #: to cross the bus and so still occupy it. ``write_occupancy`` is that
+        #: entry, with its own provenance and its own derivation.
+        #:
+        #: Absent the key this is the latency-axis rate unchanged, which is
+        #: what both directions on Wormhole and the read direction everywhere
+        #: land on -- one figure on two axes, as before.
+        write_occupancy = channel.get("write_occupancy") or {}
+        occupancy_sourced = write_occupancy.get("provenance") in SOURCED_PROVENANCE
+        occupancy_write = (
+            write_occupancy.get("bytes_per_cycle") if occupancy_sourced else None
+        )
+        self.channel_occupancy_bytes_per_cycle_read = self.channel_bytes_per_cycle_read
+        self.channel_occupancy_bytes_per_cycle_write = (
+            self.channel_bytes_per_cycle_write
+            if occupancy_write is None
+            else occupancy_write
+        )
         #: Whether a second request is held off while the first is being
         #: serviced -- and it means the **channel data bus** only, because that
         #: is the only part of an endpoint's occupancy any source sizes. Where
         #: the channel rate is sourced this is the same
         #: :meth:`channel_serialisation_cycles` the latency term already
         #: spends, held as a resource rather than added as a delay; where it is
-        #: not (a Blackhole DRAM *write*, whose rate the table declines to
-        #: derive) that direction stays contention-free. True when *either*
-        #: direction has a rate. See :attr:`device_occupancy_modelled` for the
-        #: half that is still a gap.
+        #: not, that direction stays contention-free. True when *either*
+        #: direction has an occupancy rate. See
+        #: :attr:`device_occupancy_modelled` for the half that is still a gap.
         self.occupancy_modelled = (
-            self.channel_bytes_per_cycle_read is not None
-            or self.channel_bytes_per_cycle_write is not None
+            self.channel_occupancy_bytes_per_cycle_read is not None
+            or self.channel_occupancy_bytes_per_cycle_write is not None
         )
 
     def service_cycles_for(self, is_write=False):
@@ -1219,11 +1278,33 @@ class DramCostModel:
         return self.service_cycles_write if is_write else self.service_cycles
 
     def channel_bytes_per_cycle(self, is_write=False):
-        """The channel's rate for this direction, or ``None`` if unsourced."""
+        """The channel's rate for this direction on the LATENCY axis.
+
+        ``None`` where the table refuses it, which on Blackhole is the write
+        direction: see :meth:`channel_occupancy_bytes_per_cycle` for the axis
+        that is charged there instead.
+        """
         return (
             self.channel_bytes_per_cycle_write
             if is_write
             else self.channel_bytes_per_cycle_read
+        )
+
+    def channel_occupancy_bytes_per_cycle(self, is_write=False):
+        """The channel's rate for this direction on the OCCUPANCY axis.
+
+        The same figure as :meth:`channel_bytes_per_cycle` wherever the table
+        does not say otherwise, and the two are one number on two axes exactly
+        as they have been since 2026-08-09. Blackhole's write direction is
+        where they part: the entry's ``write_occupancy`` charges the derived
+        read rate here and the entry itself still charges nothing above,
+        because a write's measured completion time does not contain the
+        channel drain and no latency row can see an occupancy at all.
+        """
+        return (
+            self.channel_occupancy_bytes_per_cycle_write
+            if is_write
+            else self.channel_occupancy_bytes_per_cycle_read
         )
 
     def channel_serialisation_cycles(self, payload_bytes, is_write=False):

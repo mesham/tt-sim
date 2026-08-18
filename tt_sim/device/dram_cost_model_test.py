@@ -258,9 +258,12 @@ def test_the_channel_rate_is_the_published_bandwidth_at_the_published_clock():
     with _env("1"):
         model = dram_cost_model("wormhole")
     # One published figure, stated by the page for reads and writes alike, so
-    # both directions read it.
+    # both directions read it — on both axes, since nothing on this arch splits
+    # them.
     assert model.channel_bytes_per_cycle() == 24
     assert model.channel_bytes_per_cycle(is_write=True) == 24
+    assert model.channel_occupancy_bytes_per_cycle() == 24
+    assert model.channel_occupancy_bytes_per_cycle(is_write=True) == 24
 
 
 def test_the_blackhole_channel_rate_is_derived_for_reads_and_refused_for_writes():
@@ -268,17 +271,20 @@ def test_the_blackhole_channel_rate_is_derived_for_reads_and_refused_for_writes(
     GB/s to convert — but ``vendor_source_derived`` asks for arithmetic on
     vendor numbers, not for a page, so the read rate comes instead from one
     division on two of ``tm_noc_latencies``' measured cycle counts (4096 bytes
-    of extra transfer costing 87 extra cycles). The write direction is refused:
-    its own secant lands within 2.5 % of the same arch's L1 rows, so it
-    resolves no endpoint limit, and charging it would deepen the row already
-    pinned in ``KNOWN_OVER_CHARGED``.
+    of extra transfer costing 87 extra cycles). The write direction is refused
+    **on this axis**: its own secant lands within 2.5 % of the same arch's L1
+    rows, so a write's measured completion time slopes at the fabric's rate and
+    resolves no endpoint limit to charge it with. The occupancy axis is a
+    different question and is charged in both directions — see
+    ``test_the_blackhole_write_channel_is_occupied_even_though_its_latency_is_
+    not``.
 
     The check that matters is the same one it always was — that the *deep
     merge* does not launder Wormhole's 24 in. The number is still physically
     present under Blackhole's override (``costs_test`` asserts exactly that),
     and the rule that keeps it out is that a directional key replaces the flat
     one rather than falling back to it. So a Blackhole write must read
-    ``None``, not 24."""
+    ``None`` here, not 24."""
     with _env("1"):
         model = dram_cost_model("blackhole")
     rate = model.channel_bytes_per_cycle()
@@ -293,10 +299,42 @@ def test_the_blackhole_channel_rate_is_derived_for_reads_and_refused_for_writes(
     )
     # The excess over a 64 B/cycle link, which is what actually gets charged.
     assert model.channel_excess_cycles(8192, 128) == 174 - 128
-    # Writes: nothing, and emphatically not Wormhole's 24.
+    # Writes: nothing on this axis, and emphatically not Wormhole's 24.
     assert model.channel_bytes_per_cycle(is_write=True) is None
     assert model.channel_serialisation_cycles(8192, is_write=True) is None
     assert model.channel_excess_cycles(8192, 128, is_write=True) == 0
+
+
+def test_the_blackhole_write_channel_is_occupied_even_though_its_latency_is_not():
+    """The two axes, and why the same file can refuse one and not the other.
+
+    ``channel_serialisation`` is spent twice: on a transfer's own completion
+    time, and on how long the channel is then unavailable to the next request.
+    Every DRAM row in ``tm_noc_latencies`` is one transaction per barrier, so a
+    lone request never finds the channel busy and **no point in that campaign
+    can see the second axis at all**, in either direction. The refusal above is
+    therefore about the first axis only: a Blackhole write is answered when the
+    endpoint accepts it, its measured slope reads the fabric, and charging it a
+    channel excess would over-slope a row the vendor measured.
+
+    Its bytes still have to cross the bus. ``write_occupancy`` charges the
+    derived read rate here — one channel, one rate — and the figure is
+    identical to the read direction's rather than being a second derivation.
+    Left absent it made a Blackhole DRAM write *cheaper* than a read under
+    concentration, which was the shape of a missing value and not of a model.
+    """
+    with _env("1"):
+        model = dram_cost_model("blackhole")
+    read = model.channel_bytes_per_cycle()
+    # One rate, both directions, on the occupancy axis...
+    assert model.channel_occupancy_bytes_per_cycle() == read
+    assert model.channel_occupancy_bytes_per_cycle(is_write=True) == read
+    # ...and still nothing on the latency axis, which is the whole split.
+    assert model.channel_bytes_per_cycle(is_write=True) is None
+    assert model.channel_excess_cycles(8192, 128, is_write=True) == 0
+    # And it is Blackhole's own figure carried across a direction, never
+    # Wormhole's 24 carried across an architecture.
+    assert model.channel_occupancy_bytes_per_cycle(is_write=True) != 24
 
 
 def test_the_channel_is_charged_as_an_excess_over_the_link_not_as_a_second_bill():
@@ -338,16 +376,18 @@ def test_the_gaps_are_named_rather_than_implied():
 
 
 def test_occupancy_is_modelled_exactly_where_the_channel_rate_is_sourced():
-    """The flag is not a global switch, it is a per-arch and now per-direction
-    consequence: both arches source a read rate, so both hold a read off, and
-    Blackhole sources no write rate, so a Blackhole write queues behind
-    nothing. ``device_occupancy_modelled`` stays False everywhere — the array
-    behind the bus is still not a queue on either arch."""
+    """The flag is not a global switch, it is a per-arch consequence: both
+    arches source an occupancy rate in both directions, so nothing on either
+    part streams across a busy channel for free. ``device_occupancy_modelled``
+    stays False everywhere — the array behind the bus is still not a queue on
+    either arch, and neither is the *latency* axis symmetric, which is the
+    distinction the two assertions at the end keep visible."""
     with _env("1"):
         for arch in ("wormhole", "blackhole"):
             model = dram_cost_model(arch)
             assert model.occupancy_modelled is True
             assert model.device_occupancy_modelled is False
+            assert model.channel_occupancy_bytes_per_cycle(True) is not None
         assert dram_cost_model("blackhole").channel_bytes_per_cycle(True) is None
 
 
@@ -360,8 +400,13 @@ def test_the_channel_occupancy_is_the_serialisation_and_not_a_second_number():
     with _env("1"):
         model = dram_cost_model("wormhole")
         channels = Wormhole().dram_tiles[0].channels
+    assert channels.bytes_per_cycle == model.channel_occupancy_bytes_per_cycle()
+    assert channels.write_bytes_per_cycle == model.channel_occupancy_bytes_per_cycle(
+        True
+    )
+    # On this arch the occupancy axis and the latency axis are the same number,
+    # which is what "one figure on two axes" means where nothing splits them.
     assert channels.bytes_per_cycle == model.channel_bytes_per_cycle()
-    assert channels.write_bytes_per_cycle == model.channel_bytes_per_cycle(True)
     for size in (32, 64, 256, 1024, 4096, 8192):
         assert channels.occupancy_cycles(size) == model.channel_serialisation_cycles(
             size
@@ -386,20 +431,31 @@ def test_an_idle_channel_charges_nothing_so_a_lone_request_cannot_move():
 def test_a_channel_with_no_sourced_rate_never_makes_anything_wait():
     """Asserted on the mechanism rather than on an arch, so it stays true for
     the next architecture — or the next direction — whose rate is unsourced.
-    Blackhole is now the *directional* case: its reads queue and its writes do
-    not, because its table derives one rate and refuses the other."""
+    No shipped arch is that case any more: Blackhole's write direction was,
+    until ``write_occupancy`` gave the occupancy axis the read rate on
+    2026-08-17, so the second half of this test now pins the *opposite*
+    property — that a Blackhole write does hold the channel, and holds it for
+    exactly as long as a read of the same size."""
     channels = DramChannels(None)
     assert channels.occupancy_cycles(8192) is None
     assert channels.claim(0, 8192) == 0
     assert channels.claim(0, 8192) == 0
     assert channels.claims == 0
+    # One direction unsourced is still a live path, and still inert.
+    half = DramChannels(24, write_bytes_per_cycle=None)
+    assert half.occupancy_cycles(8192, is_write=True) is None
+    assert half.claim(0, 8192, is_write=True) == 0
+    assert half.claims == 0
     with _env("1"):
         bh = Blackhole().dram_tiles[0].channels
     assert bh.bytes_per_cycle is not None
-    assert bh.write_bytes_per_cycle is None
-    assert bh.occupancy_cycles(8192, is_write=True) is None
+    assert bh.write_bytes_per_cycle == bh.bytes_per_cycle
+    assert bh.occupancy_cycles(8192, is_write=True) == bh.occupancy_cycles(8192)
+    # An idle channel still charges nothing, so no lone write can move.
     assert bh.claim(0, 8192, is_write=True) == 0
-    assert bh.claims == 0
+    # The one behind it waits for the bytes to cross the bus.
+    assert bh.claim(0, 8192, is_write=True) == bh.occupancy_cycles(8192, is_write=True)
+    assert bh.claims == 2
 
 
 def test_the_two_nocs_share_one_set_of_channels_because_the_hardware_does():
