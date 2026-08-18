@@ -4,12 +4,26 @@ The apparatus and the protocol for asking **which workload costs more energy,
 and roughly by how much**: the harness, the card protocol, the simulator-side
 activity vector, and the analysis that consumes the data.
 
-It fits no coefficients today. One card session has now been collected — a
-Blackhole p150, 2026-08-13, preserved in `perfbench/card-sessions/` — and it is
-a **sound measurement that the analysis refuses**, for a reason it names and an
-operator can act on. What it taught is written up in [what the first collected
-session changed](#what-the-first-collected-session-changed-2026-08-13), and it
-changed the arithmetic, not just the guards.
+**Three card sessions have been collected and two of them fit**, on two
+different architectures, both preserved under `perfbench/card-sessions/`:
+
+| session | part | gates | LOO Spearman | null | ratio median | ratio max |
+| --- | --- | --- | --- | --- | --- | --- |
+| `2026-08-13-energybench` | Blackhole p150 | **refused** (`repeats`) | — | — | — | — |
+| `2026-08-13-energybench-2` | Blackhole p150 | 13/13 | 0.867 | **0.867** | ×1.98 | ×4.48 |
+| `2026-08-17-wh-energybench` | Wormhole n300 | 13/13 | **0.900** | 0.800 | **×1.22** | **×1.65** |
+
+The **null** column is the number every other column has to be read against: a
+model with no energy content at all, taking per-launch energy as proportional to
+the simulator's cycle count. On Blackhole the fitted four-term model **does not
+beat it on ordering** — see [the null model](#the-null-model-and-what-it-costs-the-headline).
+Where the fit does earn its keep is the **ratios**, and only on Wormhole.
+
+The first session is kept because it is a **sound measurement that the analysis
+refuses**, for a reason it names and an operator can act on. What it taught is
+written up in [what the first collected session
+changed](#what-the-first-collected-session-changed-2026-08-13), and it changed
+the arithmetic, not just the guards.
 
 ## What is achievable, stated up front
 
@@ -462,6 +476,37 @@ at inner 32 has `MAT` 2,117 and `SFPU` 3, `sfpu` at inner 32 has `MAT` 1,326 and
 > that fix the `mm` arm is fitted against `matrix_arith_cycles`, which the
 > `sfpu` arm does not move.
 
+### What it produced, 2026-08-17, Wormhole, cost model on
+
+At the **card's own** inner counts, one launch per run, `--scales "1 4"` — the
+same nine workloads the Blackhole session used, so the two are directly
+comparable:
+
+```
+     label  cycles    instr    disp     nocB   txn     MAT MATarith    SFPU PACK   THC  rvstall txstall  flight
+    idle-0    5599    11316      27        0     0       1        1       3    0     0     6449       0       0
+ rv-200000 1605699  4787315      27        0     0       1        1       3    0     0  3230950       0       0
+  noc-4096 1783399  4261977      27  8388608  8192       1        1       3    0     0  4644789       0 1646592
+   mm-4096  282399  1009418  393671     6144     6  270341   262148       3    2 20530   392318  505823    1206
+ sfpu-4096  786699  2670321 2138707    12288     6  167942        4  524292    2    51  1252923  781149    1461
+ rv-800000 6405699 19114546      27        0     0       1        1       3    0     0 12903724       0       0
+ noc-16384 7116397 17012895      27 33554432 32768       1        1       3    0     0 18558860       0 6586368
+  mm-16384 1105699  3982308 1573319     6144     6 1081349  1048580       3    2 81970  1535937 2017247    1206
+sfpu-16384 3121399 10623094 8553043    12288     6  671750        4 2097156    2    51  4973639 3115869    1461
+```
+
+The separation the design was built for survives at card scale, and one column
+is worth checking first: **`MATarith` is 4 on both `sfpu` rows and 262,148 →
+1,048,580 on the `mm` rows**, so the fix that freed `sfpu_busy_cycles`
+[below](#the-sfpu-arm-was-not-running-on-the-matrix-unit-2026-08-13) holds on
+Wormhole too and was not a Blackhole accident. `MAT` still moves on the `sfpu`
+arm — 167,942 → 671,750 — which is the dest bookkeeping, and exactly why the
+`mm` arm is fitted against the arithmetic column rather than the occupancy one.
+
+**The nine runs took 2 h 39 m of simulator time** — 22.2M simulated cycles at
+~2,330 cycles/s — which is what the [inner-count warning](#the-simulator-side)
+above means in practice. `sfpu-16384` alone is 45 minutes of it.
+
 ### The `sfpu` arm was not running on the Matrix Unit (2026-08-13)
 
 The first fitted session put **`sfpu_busy_cycles` at exactly 0** — clamped on the
@@ -506,13 +551,16 @@ because that is the right number for a performance reader; the term was
 partitions `MatrixUnit.OPCODE_TO_HANDLER` exactly — a Matrix opcode added later
 fails until somebody has said which kind it is.
 
-**Both card activity CSVs predate this and carry no `matrix_arith_cycles`
-column.** They read back with it at zero, so the designed fit drops it and names
-it in a note rather than quietly refitting the old column. Refitting the
-2026-08-13 session needs its activity vectors re-reduced, which means re-running
-the arms at the card's inner counts — about 22M simulator cycles, roughly seven
-hours at the ~900 cycles/s these arms run at. Until then that session has no
-`mm` direction.
+The card activity CSVs were re-reduced afterwards and **both now carry the
+column**, so both fits have an `mm` direction. The mechanism that made that safe
+is worth keeping in view: the term was **appended** to the schema rather than
+redefined, so a CSV collected before it reads back with the column at zero, the
+designed fit drops it and *names it in a note* — a stale file loses the term
+loudly instead of quietly refitting the old one.
+
+Re-reducing costs a full re-run of the arms at the card's inner counts: about
+22M simulator cycles, which measured out at **2 h 39 m** on the Wormhole side at
+~2,330 cycles/s. Budget for that before changing a term, not after.
 
 ## The analysis
 
@@ -526,8 +574,19 @@ python3 -m tt_sim.perf.energy_rank \
 python3 -m tt_sim.perf.energy_rank \
     --activity perfbench/energybench/activity-sim-blackhole-card.csv \
     --measured perfbench/card-sessions/2026-08-13-energybench/power.csv
-# -> identifiability PASSES (6 coefficients, cond 616); repeats REFUSES
+# -> identifiability PASSES (6 coefficients, cond 598); repeats REFUSES
 #    ('rv-800000' has 2 usable cycles of 3); exit status 1.
+
+# The two that fit. Each activity CSV joins only with its own architecture's
+# session, because the labels are shared but the vectors are not.
+python3 -m tt_sim.perf.energy_rank \
+    --activity perfbench/energybench/activity-sim-blackhole-card.csv \
+    --measured perfbench/card-sessions/2026-08-13-energybench-2/power.csv
+# -> 13/13 gates; LOO Spearman 0.8667, null 0.8667; ratios x1.98 / x4.48.
+python3 -m tt_sim.perf.energy_rank \
+    --activity perfbench/energybench/activity-sim-wormhole-card.csv \
+    --measured perfbench/card-sessions/2026-08-17-wh-energybench/power.csv
+# -> 13/13 gates; LOO Spearman 0.9000, null 0.8000; ratios x1.22 / x1.65.
 ```
 
 ### The gates
@@ -747,7 +806,7 @@ Two changes, and they are the same change:
 
 `P_floor` and `c_launch` are distinguishable here in principle because the launch
 rates vary 5.3×, and empirically because that design's condition number is 4.7 —
-**616** for the full six-coefficient design against this session's own activity
+**598** for the full six-coefficient design against this session's own activity
 vectors — against a 1e6 cap, checked by `identifiability`, not assumed, and not
 worked around.
 
@@ -890,13 +949,93 @@ trustworthy point in any fit. Separating them needs an arm that launches without
 executing firmware, which does not exist.
 
 `P_floor` and `c_launch` are a different pair and they *are* separable in
-principle, because the launch rate varies 5.3× across the arms. Empirically, on
-the first collected session's rates, the floor-and-launch design alone has a
-condition number of **4.7** and the full six-coefficient design — the four
-designed terms plus launch and floor, against that session's own activity vectors
-— **616**, against a `--max-cond` of 1e6. That is a fact about that session's
-rates, checked by the `identifiability` gate rather than assumed, and a session
-whose arms all launched at the same rate would be refused there.
+principle, because the launch rate varies across the arms — 5.3× on Blackhole,
+15× on Wormhole. Empirically the full six-coefficient design — the four designed
+terms plus launch and floor, against each session's own activity vectors —
+conditions at **1.15e3** on the Blackhole session and **240** on the Wormhole
+one, against a `--max-cond` of 1e6. Those are facts about each session's rates,
+checked by the `identifiability` gate rather than assumed, and a session whose
+arms all launched at the same rate would be refused there. The wider rate span
+is most of why Wormhole conditions almost 5× better.
+
+### The null model, and what it costs the headline
+
+Every ranking number is now reported beside a model with **no energy content at
+all**: per-launch energy taken as proportional to the simulator's own cycle
+count. No coefficients, no fit, nothing from the card. Both statistics are
+scale-free, so the null needs no constant and there is no parameter in it to
+tune.
+
+It exists because the headline is easy to over-read. The fit target is board
+power, but the *reported* ranking is per-launch energy, `(P − P_floor)/rate`,
+and across these arms the power span is small against the floor — 2.9 W over a
+fitted 30.1 W on Wormhole — while the launch rate varies 15×. So the measured
+energy ordering is mostly an ordering by **how long the kernel took**, which the
+cycle model already predicts and which needs no energy modelling whatever.
+
+On both collected sessions:
+
+| | Blackhole p150 | Wormhole n300 |
+| --- | --- | --- |
+| LOO Spearman, fitted | 0.8667 | 0.9000 |
+| Spearman, null | **0.8667** | 0.8000 |
+| ratio median, fitted (LOO) | ×1.98 | **×1.22** |
+| ratio median, null | ×2.36 | ×2.15 |
+| ratio max, fitted (LOO) | ×4.48 | **×1.65** |
+| ratio max, null | ×8.37 | ×8.43 |
+
+Read plainly: **on ordering the fit is worth one rank swap on Wormhole and
+nothing at all on Blackhole.** Where it is clearly worth something is the
+**ratios**, and there only on Wormhole — ×1.65 worst case against the null's
+×8.43, a factor of five. That is the opposite of what the Blackhole write-up
+expected, which said the ratios were the part the data did *not* support.
+
+Two consequences worth stating:
+
+* **`target_triviality` does not catch this and is not meant to.** That gate asks
+  whether the *fit target* is reproducible from the floor and the launch rate, in
+  power space; the null asks whether the *reported ranking* is reproducible from
+  the cycle count, in energy space. They are independent, and the Wormhole
+  session passes the first at R² = 0.03 while the null matches four fifths of
+  the second.
+* **It is reported, not gated.** A refusal needs a threshold and there is no
+  principled one — a model that ties the null on ordering is still well ahead on
+  ratios, which is exactly what Blackhole did. The honest treatment is to put
+  both in front of the reader every time, so a Spearman is never quoted without
+  the number it had to beat.
+
+One genuinely positive result falls out of the same arithmetic and is easy to
+miss because it is not about energy: **the cycle model orders these nine
+workloads by wall time exactly right on both architectures** — Spearman 1.0000
+between simulated cycles and the card's measured launch rate, on Wormhole and on
+Blackhole. That needed no fitting, no coefficients and no card-side calibration,
+and it is a stronger claim than anything the energy fit makes.
+
+### The four coefficients landed within 1.7× of each other on two parts
+
+Not designed for, not fitted jointly, and worth recording:
+
+| term | Blackhole p150 | Wormhole n300 | apart |
+| --- | --- | --- | --- |
+| `noc_bytes_total` | 1.033e-10 | 7.275e-11 | 1.42× |
+| `matrix_arith_cycles` | 2.968e-09 | 3.903e-09 | 1.32× |
+| `sfpu_busy_cycles` | 9.068e-10 | 8.811e-10 | 1.03× |
+| `instr_retired` | 4.146e-10 | 2.392e-10 | 1.73× |
+| `P_floor` (W) | 67.02 | 30.10 | 2.23× |
+| `c_launch` | 0 (clamped) | 0 (clamped) | — |
+
+Two different parts, two sessions three days apart, two independent simulator
+runs and two separate NNLS fits, each of which was free to clamp any term to
+zero — and did clamp `c_launch` on both. Nothing in either fit knew about the
+other.
+
+**This is corroboration, not validation.** The two fits share a design, a term
+set and an arms table, so an error in any of those is common to both and this
+comparison cannot see it; and the parts differ in process and clock, so exact
+agreement was never the expectation either. What it does say is that the
+per-unit numbers are not fitting session noise — noise would not land four
+coefficients this close twice — while the board floors, which *should* differ
+between a p150 and an n300, differ by 2.2×.
 
 ## The coefficients are quarantined, on purpose
 
@@ -940,16 +1079,17 @@ no values in it.
 
 ## What this will and will not be able to claim
 
-**Will**, once a card session **passes the gates** — one has now been collected
-and it does not, for a reason it names:
+**Will**, and now does — two sessions pass every gate, on two architectures:
 
 * that tt-sim orders these workloads by energy the way the board does, with a
   stated leave-one-out rank correlation;
 * how far off the *ratios* are, per pair, with a median and a worst case;
 * a per-term fitted coefficient set with a written record of what it was fitted
   to, usable for comparing two candidate schedules of the same shape;
-* an evidenced negative — that the ordering is *not* reproduced — which is a
-  real result and the one this design is most likely to deliver first.
+* an evidenced negative — that the ordering is *not* reproduced, or is
+  reproduced no better than [a cycle count already
+  did](#the-null-model-and-what-it-costs-the-headline). Both are real results,
+  and the second is the one that actually arrived.
 
 **Will not**, ever, on this instrument:
 
@@ -967,10 +1107,16 @@ and it does not, for a reason it names:
 * a value for `c_launch`. It is collinear with the firmware instruction count
   and with the fitted floor, and at 0.05 W of noise on synthetic data it goes to
   the non-negativity boundary. Read it as a lower bound, never as a number;
-* on the evidence of the one session collected, the **within-arm 4× ratio** for
-  every arm: one of the four moved less than the noise floor and none of the
-  four moved by the 3 floors the set as a whole clears. More interleave cycles
-  is the only lever, and it has not been pulled yet.
+* the **within-arm 4× ratio**, on either session, *in board power*. Wormhole is
+  the better of the two and still only clears the noise floor on one arm of
+  four: `mm` +1.076 W = 2.46 floors, `sfpu` +0.285 W = 0.65, `rv` +0.227 W =
+  0.52, `noc` +0.158 W = 0.36, against a 0.437 W floor. The reported *energy*
+  ordering does get all four pairs right, but that is the launch rate doing the
+  work — see [the null model](#the-null-model-and-what-it-costs-the-headline) —
+  and it must not be quoted as the board resolving 4× more work as 4× more
+  power. It does not;
+* an ordering claim that beats a cycle count, on the evidence so far. Blackhole
+  ties its null exactly and Wormhole beats it by one rank swap in nine.
 
 One more, worth stating because it is the most tempting mistake: the coefficients
 are fitted to **steady-state repeated-kernel board power under sustained load**,

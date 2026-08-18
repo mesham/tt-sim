@@ -564,17 +564,68 @@ is left is the credibility layer.
    (~70 min) pre-release. Coverage is stated honestly by `--list`: 15
    programs value-checked by themselves, 1 by the gate, **5
    completion-only** because upstream ships no self-check.
-5. **Energy, at ranking level — FIRST RESULT 2026-08-13.** All
-   thirteen gates pass on a six-cycle Blackhole p150 session and
-   `perfbench/energybench` reports **leave-one-out Spearman 0.867**
-   (in-sample 0.950), with all four within-arm pairs ordering
-   correctly. All four designed activity terms are identified —
-   `noc_bytes_total` 1.03e-10, `matrix_arith_cycles` 2.97e-09,
-   `sfpu_busy_cycles` 9.07e-10, `instr_retired` 4.15e-10 J per unit,
-   over a fitted busy-state floor of 67.02 W. Sessions preserved at
-   `perfbench/card-sessions/2026-08-13-energybench{,-2}/`.
-   **The headline number went DOWN as the model got right, and 0.867 is
-   the one that stands.** It read 0.900 against a *contaminated* matrix
+5. **Energy, at ranking level — TWO ARCHITECTURES 2026-08-17, and the
+   headline is smaller than it looked.** All thirteen gates pass on a
+   six-cycle Blackhole p150 session (**LOO Spearman 0.867**) and on a
+   six-cycle Wormhole n300 one (**0.900**), with all four within-arm
+   pairs ordering correctly on both and all four designed terms
+   identified. Sessions at
+   `perfbench/card-sessions/2026-08-13-energybench{,-2}/` and
+   `2026-08-17-wh-energybench/`.
+   **Both numbers now report a null model beside them, and it changes
+   the reading.** Taking per-launch energy as proportional to the
+   simulator's *cycle count* — no coefficients, no fit, nothing from
+   the card — scores **0.867 on Blackhole and 0.800 on Wormhole**. So
+   the four-term energy fit is worth **one rank swap in nine on
+   Wormhole and nothing at all on Blackhole**. The reason is
+   structural: the fit target is board power, but the reported ranking
+   is `(P − P_floor)/rate`, and the power span is small against the
+   floor (2.9 W over 30.1 W) while the launch rate varies 15×, so the
+   measured energy ordering is largely an ordering by *how long the
+   kernel took*. `target_triviality` cannot see this — it asks the
+   question in power space, and Wormhole passes it at R² = 0.032 — so
+   `spearman_null` is now computed, rendered next to the claim, written
+   into the JSON and the coefficient record, and covered by five tests.
+   It is **reported, not gated**: a refusal needs a threshold and there
+   is none to justify, since a model that ties the null on ordering can
+   still be well ahead on ratios, which is exactly what happened.
+   **Where the fit does earn its keep is the ratios, and only on
+   Wormhole**: median |log ratio error| ×1.22, worst ×1.65, against the
+   null's ×2.15 / ×8.43 — a factor of five on the worst case. Blackhole
+   manages ×1.98 / ×4.48 against ×2.36 / ×8.37, a much thinner margin.
+   That inverts the Blackhole write-up, which had recorded the ratios
+   as the part the data did *not* support.
+   **A stronger result falls out of the same arithmetic and is not
+   about energy at all**: simulated cycles order these nine workloads
+   against the card's measured launch rate at **Spearman 1.0000 on both
+   architectures**, with no fitting, no coefficients and no card-side
+   calibration. The cycle model's wall-time ordering is on firmer
+   ground than anything the energy fit claims.
+   **The four fitted coefficients landed within 1.7× of each other on
+   two different parts** — `noc_bytes_total` 1.03e-10 / 7.27e-11,
+   `matrix_arith_cycles` 2.97e-09 / 3.90e-09, `sfpu_busy_cycles`
+   9.07e-10 / 8.81e-10, `instr_retired` 4.15e-10 / 2.39e-10 J per unit
+   (BH / WH) — over floors that differ as the parts do, 67.02 W against
+   30.10 W. Two sessions three days apart, two independent simulator
+   runs, two separate NNLS fits each free to clamp any term to zero (and
+   both did clamp `c_launch`). This is **corroboration, not
+   validation**: the fits share a design, a term set and an arms table,
+   so a fault in any of those is common to both and invisible here.
+   **The Wormhole session is the better instrument** — ~107 samples per
+   slot against ~31, a 15× launch-rate span against 5.3×, and a design
+   conditioning at 240 against 1.15e3 — and it is what the thermal
+   gate's temperature fallback was built for, since that box publishes
+   no `tt_therm_trip_count`. Its activity vectors cost 2 h 39 m of
+   simulator time for 22.2M cycles at ~2,330 cycles/s.
+   **What neither session supports is the within-arm 4× ratio in board
+   power.** On Wormhole, the better of the two, only `mm` clears the
+   noise floor (+1.076 W = 2.46 floors); `sfpu` +0.285, `rv` +0.227 and
+   `noc` +0.158 W are all under it. The energy ordering does get all
+   four pairs right, but that is the launch rate doing the work and it
+   must not be quoted as the board resolving 4× the work as 4× the
+   power.
+   **On Blackhole the headline went DOWN as the model got right, and
+   0.867 is the one that stands.** It read 0.900 against a *contaminated* matrix
    column, then 0.950 with that column *missing entirely* (a
    three-term model in which the `mm` arm had no characteristic term at
    all), and 0.867 once the corrected `matrix_arith_cycles` column
@@ -583,10 +634,15 @@ is left is the credibility layer.
    entry exists to record. The LOO/in-sample gap widened with the
    correct model too (0.867 against 0.950), so more of the apparent
    agreement is fitting than the earlier figures suggested.
-   **What it does not support**: the ratios. Median `|log ratio error|`
-   0.68 (x1.98), worst 1.50 (x4.48) — worse than the contaminated
-   model's x1.77. This is an *ordering* claim; how much more is not
-   established. `c_launch` remains clamped at the NNLS boundary, the
+   **What that session does not support**: its ratios. Median
+   `|log ratio error|` 0.68 (x1.98), worst 1.50 (x4.48) — worse than
+   the contaminated model's x1.77, and only a thin margin over its own
+   null. Wormhole is where the ratios hold up. **Whether that is the
+   architecture or the instrument is not established** — the sessions
+   differ in both, and Blackhole's sampled a third as often over a
+   launch-rate span a third as wide, which is the cheaper hypothesis
+   and is testable by re-running Blackhole at the Wormhole session's
+   settings. `c_launch` remains clamped at the NNLS boundary, the
    predicted collinearity with the ~14,600 firmware instructions every
    launch pays; `idle-0`'s measured energy is **negative** and dropping
    it moved the earlier fit 0.900 -> 0.857, so it stays the least
@@ -669,23 +725,62 @@ possible:
 
 ## 1. DRAM residue
 
-Endpoint occupancy closed 2026-08-09 and Blackhole's channel read rate
-2026-08-12; both are in `docs/plans/cost-model.md`. What survives here
-is what would otherwise be re-litigated:
+Endpoint occupancy closed 2026-08-09, Blackhole's channel read rate
+2026-08-12 and its write *occupancy* 2026-08-17; the first two are in
+`docs/plans/cost-model.md`. What survives here is what would otherwise
+be re-litigated:
 
 - **The device's own re-issue interval stays `unknown` and uncharged.**
   Charging `access_latency` as occupancy would assert 0.32 B/cycle
   against the 24 published on the same page.
 - **A tt-sim DRAM tile fronts two GDDR6 channels**, so one queue per
   *tile* over-charges. Each physical channel has its own watermark.
-- **Blackhole's DRAM *write* rate is deliberately uncharged.** Its
-  secant lands within 2.5 % of the same arch's L1 rows, so the vendor
-  dataset resolves no DRAM-specific write bound, and charging it would
-  deepen `KNOWN_OVER_CHARGED`. `dram.bandwidth` — the GB/s spec block —
-  is still `unknown`, still needs a document, and now gates nothing.
-- The BH DRAM-write over-charge (8 negative residuals, −12 to −28,
-  pinned in `KNOWN_OVER_CHARGED`) — splitting `access_latency` by
-  request action still rests on one arch's data.
+- **Blackhole's DRAM *write* rate was uncharged on ONE axis too many —
+  fixed 2026-08-17.** The channel figure is spent on two: a latency
+  excess and the channel's occupancy. The refusal is an argument about
+  the first only — the measured write row slopes at 59.36 B/cycle,
+  within 2.5 % of the same file's four L1 rows, so a write's
+  *completion* does not contain the channel drain. It says nothing
+  about what those bytes cost the request behind them, and **cannot**:
+  every DRAM row in `tm_noc_latencies` is one transaction per barrier,
+  so occupancy is invisible to all of them in *both* directions. A new
+  nested `write_occupancy: 47.0805` (`vendor_source_derived`) charges
+  the second axis — the read rate's own `(8192−4096)/(665−578)`, to
+  the digit, no second measurement — resting on one extra step stated
+  separately so it can be argued with: a GDDR6 data bus moves bytes at
+  the same rate each way, which is the **vendor's** claim, from the
+  same DRAM page sentence that licenses charging Wormhole's 24 both
+  ways. Only the *symmetry* crosses architectures; the level is
+  Blackhole's own, and `costs_test` still asserts Wormhole's 24 cannot
+  reach it. **The latency axis stays refused, with numbers**: charging
+  it would take the rung-2 BH DRAM-write residuals from +52…+67 to
+  +51…+21 (≈ −3.8 cycles/KiB), turning a mildly under-sloped row into
+  a worse over-sloped one. The entry's *second* old reason — that it
+  would deepen `KNOWN_OVER_CHARGED` — is void, since the earlier
+  `access_latency.write` work emptied that set; it is recorded rather
+  than deleted. Effect: a BH DRAM write stops being 36 % cheaper than
+  a read. Modelled read/write at 4 tiles on one endpoint goes
+  **1.360 → 1.014** against a card's 0.993 (2.1 % out, from 37 %);
+  driven to saturation the two are equal by construction, verified
+  directly — 16×4096 B on one channel finishes at cycle 696 in either
+  direction on Blackhole and 1368 on Wormhole. Every one of the 42
+  committed replay guards is **byte-identical** in total cycles on both
+  arches, and rung 2 is unmoved to the cycle, because the term is inert
+  for one-transaction rows by construction; the BH claims and waits do
+  move underneath (`pad_multi_core` 1024→3072 claims, 48→240 waits),
+  just never on a critical path at the pump's 100-cycle granularity.
+  `dram.bandwidth` — the GB/s spec block — is still `unknown`, still
+  needs a document, and gates nothing.
+- **Wormhole's own write deficit is now recorded and declined.** Its
+  modelled write sits 3.8 % above its card's, which the base note
+  states as a discrepancy rather than acting on — there is no vendor
+  row that resolves it.
+- **The BH DRAM-write over-charge is gone.** It was 8 negative
+  residuals (−12 to −28) pinned in `KNOWN_OVER_CHARGED`; splitting
+  `access_latency` by request action closed them and **that set is now
+  empty**, asserted rather than described — no row on either arch
+  over-charges today, and one appearing is a change somebody has to
+  make deliberately. The split still rests on one arch's data.
 - The BH `l1_local_cycles = 88` rung-1 anomaly (54 cycles
   unexplained) — rung 1 cannot fully pass on BH until explained.
 - Bank conflicts / refresh windows — no DRAM bank model, nothing
