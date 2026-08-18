@@ -39,6 +39,8 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 REPO="$(cd "$HERE/../.." && pwd)"
 SRC="$HERE/src"
 
@@ -137,11 +139,17 @@ else
   echo "         the comparison measures nothing. Do not use this for a result." >&2
 fi
 
+# This tree is shared with nocevbench/run_card.sh; poisoning it here would be
+# discovered there, on a card, after a board reset.
 if [ ! -x "$SRC/build/nocevbench" ]; then
   echo "== building nocevbench"
+  bp_require_build "$SRC"
   ( cd "$SRC" \
     && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)" ) || exit 1
+  bp_record_build "$SRC"
+else
+  bp_require_build "$SRC" skip-build
 fi
 
 echo "== arm $ARM on $ARCH, workers $TT_SIM_TENSIX_COORDS"

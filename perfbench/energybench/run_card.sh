@@ -81,6 +81,8 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 PY="${TT_SIM_PYTHON:-python3}"
 
 ARMS="idle rv noc mm sfpu"
@@ -265,10 +267,17 @@ export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
 export LD_LIBRARY_PATH="$TT_METAL_HOME/build/lib:${LD_LIBRARY_PATH:-}"
 
 BIN="${ENERGYBENCH_BIN:-$SRC/build/energybench}"
+# ENERGYBENCH_BIN points at a binary this script did not build (the stub test
+# uses it), so it owns its own provenance and is left alone.
 if [ -z "${ENERGYBENCH_BIN:-}" ] && [ ! -x "$BIN" ]; then
+  bp_require_build "$SRC"
   echo "[build] $SRC"
   ( cd "$SRC" && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build build -j >/dev/null ) || {
     echo "build failed" >&2; exit 1; }
+  bp_record_build "$SRC"
+elif [ -z "${ENERGYBENCH_BIN:-}" ]; then
+  # Never rebuilt once it exists, so check it every run.
+  bp_require_build "$SRC" skip-build
 fi
 
 mkdir -p "$OUT/raw" || exit 2

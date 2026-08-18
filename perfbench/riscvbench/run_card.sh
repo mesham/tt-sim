@@ -39,6 +39,8 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 
 BLOCKS="${RVBENCH_BLOCKS:-32}"
 
@@ -76,8 +78,14 @@ mkdir -p "$OUT" || exit 2
 
 if [ ! -x build/riscvbench ]; then
   echo "== building riscvbench (this is most of the runtime, ~15 min)"
+  bp_require_build "$SRC"
   cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null || exit 1
   cmake --build build -j >/dev/null || exit 1
+  bp_record_build "$SRC"
+else
+  # An existing binary is never rebuilt here, so which tt-metal it was made
+  # against has to be checked on every run and not only on the run that made it.
+  bp_require_build "$SRC" skip-build
 fi
 
 LOG="$OUT/riscvbench-run.log"

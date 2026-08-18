@@ -143,7 +143,7 @@ measured responded. The rule is now stated once, in one place, and tested:
 before a session:
 
 ```bash
-perfbench/card_session_verdicts_test.sh     # 69 checks, no card needed
+perfbench/card_session_verdicts_test.sh     # 112 checks, no card needed
 ```
 
 **About 105 minutes cold**, of which ~70 is building the five programs; about 40
@@ -171,6 +171,34 @@ created"*. That failed eight of the then-ten probes on 2026-08-09, and only
 recognises a foreign cache and discards it (a build tree is derived and always
 safe to throw away), so the exclude is a second line of defence rather than the
 only one — but it also saves rsyncing several MB of object files each time.
+
+### Which tt-metal a build tree was made against
+
+A build tree that was generated *here* but against a **different** tt-metal
+survives that check and still yields a binary that cannot run. A Wormhole write
+session on 2026-08-17 died at `rc=127` **after the board reset**:
+
+```
+./build/dramratebench: symbol lookup error: undefined symbol:
+  tt::tt_metal::CreateKernel(Program&, const string&, ...)
+```
+
+`TT_METAL_HOME` had been repointed between sessions while `src/build/CMakeCache.txt`
+still held the old checkout's absolute paths. cmake reused the cache, so the
+binary compiled against one tt-metal's headers and ran against another's library.
+The pre-flight had said `ok build/dramratebench is current` — it checked that a
+build *existed*, which is a different claim.
+
+`build_provenance.sh` is that claim, made checkable. It stamps every build tree
+with the tt-metal root and revision it was made against, reads a legacy tree's
+provenance out of its `CMakeCache.txt` so trees a card box already has are
+covered too, and **refuses** on a mismatch with both paths and the `rm -rf` named.
+A revision change inside the *same* checkout warns when the runner will rebuild
+and refuses under `--skip-build`, where nothing would pick it up. Every runner
+that builds calls it — the card ones, the two session scripts, and the simulator
+ones, which share the same `src/build/` trees and would otherwise poison them.
+`card_session_verdicts_test.sh` exercises it in both directions and asserts the
+runner list is complete.
 
 Two steps are *analysis*, not collection, and they do need `tt_sim/`:
 

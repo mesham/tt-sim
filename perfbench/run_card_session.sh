@@ -45,6 +45,8 @@ REPO="$(cd "$PB/.." && pwd)"
 # feeds it the 2026-08-09 Blackhole CSVs and asserts it calls them degenerate.
 # shellcheck source=card_session_verdicts.sh
 . "$PB/card_session_verdicts.sh"
+# shellcheck source=build_provenance.sh
+. "$PB/build_provenance.sh"
 
 ARCH=""
 OUT=""
@@ -346,6 +348,15 @@ build_once() { # dir, binary
     say "   discarding a build tree generated elsewhere (rsync'd CMakeCache)"
     rm -rf "$1/build"
   fi
+  # A tree generated HERE but against a different tt-metal passes the check
+  # above and still produces a binary that cannot run: cmake reuses the cache,
+  # the headers come from one checkout and the library from the other. That is
+  # a question about what the operator meant, not a derived artefact to discard
+  # quietly, so it refuses -- see build_provenance.sh.
+  local bp_out bp_rc=0
+  bp_out="$(bp_check_build "$1")" || bp_rc=1
+  say "$bp_out"
+  [ "$bp_rc" -eq 0 ] || return 1
   ( cd "$1" && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 \
       && cmake --build build -j >/dev/null 2>&1 ) || {
     # A second chance from scratch: a cache can also be stale in ways the path
@@ -355,6 +366,7 @@ build_once() { # dir, binary
     ( cd "$1" && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null \
         && cmake --build build -j >/dev/null ) || return 1
   }
+  bp_record_build "$1"
   # Stamp the binary even when the link was a no-op. Kernel sources are JIT'd at
   # run time and never enter the host binary, so cmake leaves its timestamp
   # alone and the check above would fire again every session.

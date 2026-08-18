@@ -30,6 +30,8 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 
 ARMS=0
 ROUNDS=2
@@ -243,6 +245,11 @@ else
   echo "   ok   build present or will be built"
 fi
 
+# "Present or will be built" says nothing about WHICH tt-metal it was built
+# against, and cmake will happily reuse a cache pointing at another one.
+bp_check_build "$SRC" "$([ "$SKIP_BUILD" -eq 1 ] && echo skip-build || echo build)" \
+  || preflight_fail=1
+
 if [ "$preflight_fail" -ne 0 ]; then
   echo ""
   echo "PRE-FLIGHT FAILED -- no card time spent. Fix the above and re-run."
@@ -255,6 +262,7 @@ if [ "$SKIP_BUILD" -eq 0 ] || [ ! -x "$SRC/build/nocreadbench" ]; then
   ( cd "$SRC" \
     && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)" ) >/dev/null || { echo "BUILD FAILED"; exit 1; }
+  bp_record_build "$SRC"
   echo "   built"
 fi
 

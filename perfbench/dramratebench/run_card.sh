@@ -18,6 +18,8 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 
 # Arguments before the environment, so that `--help` answers on a box that has
 # no tt-metal yet -- which is the box an operator reads it on.
@@ -52,8 +54,14 @@ fi
 
 cd "$SRC" || exit 2
 if [ ! -x build/dramratebench ]; then
+  bp_require_build "$SRC"
   cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null || exit 1
   cmake --build build -j >/dev/null || exit 1
+  bp_record_build "$SRC"
+else
+  # An existing binary is never rebuilt here, so which tt-metal it was made
+  # against has to be checked on every run and not only on the run that made it.
+  bp_require_build "$SRC" skip-build
 fi
 
 LOG="$SRC/dramratebench-run.log"

@@ -495,5 +495,148 @@ r="$(dram_verdict "$TMP/dram.out" "$TMP/dram_alien.csv")"
 check "dram on an unknown schema" UNCLEAR "$r"
 
 echo
+echo "== build provenance: which tt-metal a build tree was made against"
+
+# The failure this replays: TT_METAL_HOME was changed between sessions while
+# src/build/CMakeCache.txt still held the old checkout's paths. cmake reused the
+# cache, the binary compiled against one tt-metal and ran against another, and
+# the session died at rc=127 on a symbol lookup AFTER the board reset. The
+# pre-flight had said "ok build/dramratebench is current" -- it checked that a
+# build existed, which is a different claim.
+#
+# No tt-metal and no cmake are needed to test it: the check reads a stamp or a
+# CMakeCache, and both are text.
+# shellcheck source=build_provenance.sh
+. "$PB/build_provenance.sh"
+
+BPT="$TMP/bp"
+mkdir -p "$BPT"
+
+# Two "checkouts". METAL_A is a real git repo so the revision half of the check
+# has something to read; METAL_B is a plain directory, which is the case where
+# only the path can be compared.
+METAL_A="$BPT/tt-metal-a"
+METAL_B="$BPT/tt-metal-b"
+mkdir -p "$METAL_A/build/lib" "$METAL_B/build/lib"
+( cd "$METAL_A" && git init -q . && git -c user.email=t@t -c user.name=t commit -q \
+    --allow-empty -m one ) >/dev/null 2>&1
+REV_A="$(git -C "$METAL_A" rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
+
+bp_tree() { # <name> [stamped-root] [stamped-rev] -- a src dir with a build tree
+  local dir="$BPT/$1"
+  mkdir -p "$dir/build"
+  # Every build tree has a cache, and it names tt-metal's dependency configs.
+  printf 'CMAKE_CACHEFILE_DIR:INTERNAL=%s/build\numd_DIR:PATH=%s/build/lib/cmake/umd\n' \
+    "$dir" "${2:-$METAL_A}" > "$dir/build/CMakeCache.txt"
+  if [ -n "${3:-}" ]; then
+    printf 'root=%s\nrev=%s\n' "${2:-$METAL_A}" "$3" > "$dir/build/$BP_STAMP_NAME"
+  fi
+  printf '%s\n' "$dir"
+}
+
+bp_out=""
+bp_try() { # <src-dir> [mode] -- with TT_METAL_HOME already exported
+  bp_out="$(bp_check_build "$@" 2>&1)" && bp_rc=0 || bp_rc=1
+}
+
+check_rc() { # description, expected rc, actual rc
+  if [ "$3" = "$2" ]; then
+    pass=$((pass + 1)); printf 'ok   %-58s rc=%s\n' "$1" "$3"
+  else
+    fail=$((fail + 1)); printf 'FAIL %-58s want rc=%s, got rc=%s\n     %s\n' "$1" "$2" "$3" "$bp_out"
+  fi
+}
+
+unset TT_METAL_RUNTIME_ROOT
+export TT_METAL_HOME="$METAL_A"
+
+t="$(bp_tree matching "$METAL_A" "$REV_A")"
+bp_try "$t"
+check_rc "a tree built against the configured tt-metal" 0 "$bp_rc"
+
+# THE DEFECT. Same tree, TT_METAL_HOME moved.
+export TT_METAL_HOME="$METAL_B"
+bp_try "$t"
+check_rc "the same tree once TT_METAL_HOME moved" 1 "$bp_rc"
+check_says "the refusal names the tt-metal it was built against" "$METAL_A" "$bp_out"
+check_says "the refusal names the tt-metal now configured" "$METAL_B" "$bp_out"
+check_says "the refusal tells the operator what to remove" "rm -rf $t/build" "$bp_out"
+
+# A tree from before the stamp existed is still checkable: cmake caches the
+# config dir of every tt-metal dependency TT::Metalium pulls in. Waving legacy
+# trees through would exempt exactly the trees a card box already has.
+legacy="$(bp_tree legacy "$METAL_A")"
+bp_try "$legacy"
+check_rc "an unstamped tree, read from its CMakeCache, mismatching" 1 "$bp_rc"
+export TT_METAL_HOME="$METAL_A"
+bp_try "$legacy"
+check_rc "an unstamped tree, read from its CMakeCache, matching" 0 "$bp_rc"
+
+# `/x/tt-metal` and `/x/tt-metal/` are one checkout. A path-string compare that
+# called them different would refuse every correct session instead.
+export TT_METAL_HOME="$METAL_A/"
+bp_try "$t"
+check_rc "a trailing slash is not a different checkout" 0 "$bp_rc"
+export TT_METAL_HOME="$METAL_A"
+
+# TT_METAL_RUNTIME_ROOT is what the CMakeLists actually prefer, so it must be
+# what is checked -- otherwise the check reads a variable cmake ignored.
+export TT_METAL_RUNTIME_ROOT="$METAL_B"
+bp_try "$t"
+check_rc "TT_METAL_RUNTIME_ROOT wins over TT_METAL_HOME, as cmake does" 1 "$bp_rc"
+unset TT_METAL_RUNTIME_ROOT
+
+# Same checkout, moved on. A rebuild picks the new headers up, so it warns; with
+# the build skipped nothing picks it up and the old binary meets the new
+# library, which is the rc=127 failure one release apart instead of one path.
+moved="$(bp_tree moved "$METAL_A" 0000000000)"
+bp_try "$moved"
+check_rc "the same checkout at a different rev, rebuilding" 0 "$bp_rc"
+check_says "a rev change warns and says the rebuild covers it" "rebuild below" "$bp_out"
+bp_try "$moved" skip-build
+check_rc "the same checkout at a different rev, --skip-build" 1 "$bp_rc"
+check_says "the --skip-build refusal names the remedy" "without --skip-build" "$bp_out"
+
+# Nothing to check against is a failure, not a pass by absence.
+unset TT_METAL_HOME
+bp_try "$t"
+check_rc "no TT_METAL_HOME and no TT_METAL_RUNTIME_ROOT" 1 "$bp_rc"
+export TT_METAL_HOME="$METAL_A"
+
+# A tree that does not exist yet cannot be stale.
+bp_try "$BPT/never-built"
+check_rc "no build tree yet" 0 "$bp_rc"
+
+# The stamp is what makes the revision half work, so record-then-check must
+# round-trip -- including the revision, which no CMakeCache carries.
+fresh="$BPT/fresh"
+mkdir -p "$fresh/build"
+bp_record_build "$fresh"
+check_says "a recorded stamp names the checkout" "root=$METAL_A" "$(cat "$fresh/build/$BP_STAMP_NAME")"
+check_says "a recorded stamp names the revision" "rev=$REV_A" "$(cat "$fresh/build/$BP_STAMP_NAME")"
+bp_try "$fresh"
+check_rc "a freshly recorded tree checks clean" 0 "$bp_rc"
+export TT_METAL_HOME="$METAL_B"
+bp_try "$fresh"
+check_rc "a freshly recorded tree refuses the other checkout" 1 "$bp_rc"
+
+# Every card runner must actually call it. A library nothing sources is a
+# library that fixes nothing, and the list of runners is the thing that was
+# wrong before: the check existed nowhere rather than in some places.
+for r in dramratebench/run_card.sh dramratebench/run_card_write.sh \
+         nocbench/run_card.sh nocevbench/run_card.sh nocreadbench/run_card.sh \
+         mechbench/run_card.sh riscvbench/run_card.sh tensixbench/run_card.sh \
+         energybench/run_card.sh run_card_session.sh run_paper_session.sh \
+         run.sh mechbench/run_sim.sh nocevbench/run_sim.sh; do
+  if grep -q 'build_provenance.sh' "$PB/$r" \
+     && grep -qE 'bp_(check|require)_build' "$PB/$r" \
+     && grep -q 'bp_record_build' "$PB/$r"; then
+    pass=$((pass + 1)); printf 'ok   %-58s sources and calls it\n' "$r"
+  else
+    fail=$((fail + 1)); printf 'FAIL %-58s does not check its build provenance\n' "$r"
+  fi
+done
+
+echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

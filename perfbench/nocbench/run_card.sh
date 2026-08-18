@@ -19,6 +19,8 @@ set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 OUT="${NOCBENCH_OUT:-$PWD}"
 
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
@@ -33,8 +35,14 @@ unset TT_METAL_SIMULATOR || true
 cd "$SRC"
 if [ ! -x build/nocbench ]; then
   echo "== building nocbench"
+  bp_require_build "$SRC"
   cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null
   cmake --build build -j >/dev/null
+  bp_record_build "$SRC"
+else
+  # An existing binary is never rebuilt here, so which tt-metal it was made
+  # against has to be checked on every run and not only on the run that made it.
+  bp_require_build "$SRC" skip-build
 fi
 
 echo "== 1/3  dumping this card's core map"

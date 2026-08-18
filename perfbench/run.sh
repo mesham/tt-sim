@@ -30,6 +30,10 @@ for arg in "$@"; do
 done
 
 SRC="$REPO/perfbench/$NAME/src"
+# The sim runners share their build/ trees with the card runners, so a tree
+# poisoned here shows up there. Same check, same library.
+# shellcheck source=build_provenance.sh
+. "$REPO/perfbench/build_provenance.sh"
 [ -d "$SRC" ] || { echo "no perfbench program at $SRC" >&2; exit 2; }
 
 ARCH="${TT_SIM_ARCH:-blackhole}"
@@ -58,8 +62,12 @@ VENV="${TT_SIM_VENV:-$REPO/../venv}"
 
 cd "$SRC" || exit 2
 if [ ! -x build/"$NAME" ]; then
+  bp_require_build "$SRC"
   cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null || exit 1
   cmake --build build -j >/dev/null || exit 1
+  bp_record_build "$SRC"
+else
+  bp_require_build "$SRC" skip-build
 fi
 
 # Tag the server this run spawns, and clear tagged servers left by runs that

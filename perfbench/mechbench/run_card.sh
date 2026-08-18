@@ -32,6 +32,8 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 
 OUT="$PWD/mechbench-session"
 TILES=256
@@ -115,11 +117,17 @@ fi
 # card runner: the sim side cannot reproduce the failure.
 export TT_METAL_SLOW_DISPATCH_MODE="${TT_METAL_SLOW_DISPATCH_MODE:-1}"
 
+# Which tt-metal the tree was made against, before cmake gets to reuse a cache
+# that still points at a different one -- see build_provenance.sh.
 if [ "$SKIP_BUILD" -eq 0 ] || [ ! -x "$SRC/build/mechbench" ]; then
+  bp_require_build "$SRC"
   echo "== building (tt-metal supplies every flag; nothing to configure)"
   ( cd "$SRC" \
     && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)" ) || { echo "BUILD FAILED"; exit 1; }
+  bp_record_build "$SRC"
+else
+  bp_require_build "$SRC" skip-build
 fi
 
 mkdir -p "$OUT/runs"

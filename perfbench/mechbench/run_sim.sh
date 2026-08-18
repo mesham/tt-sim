@@ -28,6 +28,8 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 REPO="$(cd "$HERE/../.." && pwd)"
 SRC="$HERE/src"
 
@@ -84,11 +86,17 @@ else
   echo "WARNING: cost model off -- Src-ownership columns will be absent, not zero" >&2
 fi
 
+# This tree is shared with mechbench/run_card.sh; poisoning it here would be
+# discovered there, on a card, after a board reset.
 if [ ! -x "$SRC/build/mechbench" ]; then
   echo "== building mechbench"
+  bp_require_build "$SRC"
   ( cd "$SRC" \
     && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)" ) || exit 1
+  bp_record_build "$SRC"
+else
+  bp_require_build "$SRC" skip-build
 fi
 
 mkdir -p "$OUT"

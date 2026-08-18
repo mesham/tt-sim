@@ -45,6 +45,8 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$HERE/src"
+# shellcheck source=../build_provenance.sh
+. "$HERE/../build_provenance.sh"
 
 OUT="$PWD/nocevbench-session"
 ARMS="A"
@@ -207,6 +209,12 @@ else
   echo "   ok   check_arm.py is present; every run will be checked against its arm"
 fi
 
+# Which tt-metal the build tree was made against. cmake reuses a cache that
+# still points at a previous checkout, so an existing tree is not evidence that
+# it matches the library this run will load -- see build_provenance.sh.
+bp_check_build "$SRC" "$([ "$SKIP_BUILD" -eq 1 ] && echo skip-build || echo build)" \
+  || preflight_fail=1
+
 if [ "$preflight_fail" -ne 0 ]; then
   echo ""
   echo "PRE-FLIGHT FAILED -- no card time spent. Fix the above and re-run."
@@ -219,6 +227,7 @@ if [ "$SKIP_BUILD" -eq 0 ] || [ ! -x "$SRC/build/nocevbench" ]; then
   ( cd "$SRC" \
     && cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)" ) || { echo "BUILD FAILED"; exit 1; }
+  bp_record_build "$SRC"
 fi
 
 # ---------------------------------------------------------------------------
