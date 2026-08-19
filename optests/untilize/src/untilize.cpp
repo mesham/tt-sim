@@ -24,10 +24,43 @@
 // bytes against ttsim.
 //
 // Add an op: append a phase in the compute kernel and bump NUM_OPS.
+//
+// Two run modes, same binary:
+//   (no argument)  16-bit DEST, the default. All three ops pass on tt-sim and
+//                  match ttsim; this is what `optests/diff.sh untilize` runs and
+//                  what `driver/wormhole/server/untilize_replay_test.py` freezes.
+//   `fp32`         `fp32_dest_acc_en` on, every CB still Float16_b -- a 32-bit
+//                  DEST feeding a 16-bit output format. All three ops pass
+//                  here too, and must keep passing: this arm is the regression
+//                  test for the pack out of a 32-bit DEST.
+//
+//                  What it caught. tt-sim used to take the DEST read width
+//                  from the pack source format, so with a 16-bit format it
+//                  read DEST 16 bits at a time and most of the output was
+//                  never written -- 896, 960, 896 elements of 1024 wrong on
+//                  Wormhole and 896, 960, 960 on Blackhole, op 0 landing only
+//                  the top-left 8 rows x 16 columns. That op 0 -- the *tiled
+//                  control* -- failed too was the point: the fault was not in
+//                  untilize but in the pack, which every op here shares. The
+//                  width is `PCK_DEST_RD_CTRL_Read_32b_data`, which tt-metal
+//                  sets to `is_32b_format || is_fp32_dest_acc_en` -- so a
+//                  16-bit format does not imply a 16-bit DEST read.
+//                  Reported by the tt-xftn compiler team as `gemm_bf16_check`
+//                  giving `errors=4096 of 4096` on tt-sim Wormhole while both
+//                  cards passed it, from a `ComputeConfig{.fp32_dest_acc_en
+//                  = true}` over Float16_b CBs.
+//
+//                  Nothing in the tree reached this before: every other tt-sim
+//                  program that sets `fp32_dest_acc_en` (optests/transpose,
+//                  optests/sfpumath, examples/five-fp) makes its CBs Float32, so
+//                  DEST and the output format are both 32-bit and the
+//                  conversion this exercises never happens. The unit-level
+//                  pin is tt_sim/pe/tensix/pack_dest_rd_ctrl_test.py.
 
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
@@ -61,6 +94,12 @@ static float ramp(uint32_t j) {
 }
 
 int main(int argc, char** argv) {
+    // `fp32` selects a 32-bit DEST (`fp32_dest_acc_en`) while leaving every CB
+    // Float16_b -- see the header comment. The golden is unchanged: bf16
+    // operands accumulated in fp32 and packed back to bf16 is still exact.
+    const bool fp32_dest = (argc > 1 && std::strcmp(argv[1], "fp32") == 0);
+    printf("dest accumulate: %s\n", fp32_dest ? "fp32 (32-bit DEST, Float16_b CBs)" : "fp16 (default)");
+
     IDevice* device = CreateDevice(0);
     Program program = CreateProgram();
     constexpr CoreCoord core = {0, 0};
@@ -124,7 +163,10 @@ int main(int argc, char** argv) {
     SetRuntimeArgs(program, writer, core, {dst_dram->address(), NUM_OPS});
 
     CreateKernel(
-        program, "kernels/compute/compute_kernel.cpp", core, ComputeConfig{.math_fidelity = MathFidelity::HiFi4});
+        program,
+        "kernels/compute/compute_kernel.cpp",
+        core,
+        ComputeConfig{.math_fidelity = MathFidelity::HiFi4, .fp32_dest_acc_en = fp32_dest});
 
     tt::tt_metal::detail::LaunchProgram(device, program, true, true);
 

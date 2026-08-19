@@ -36,6 +36,10 @@ class PackerUnit(TensixBackendUnit):
             self.inputSourceAddr = 0
             self.inputSourceStride = 0
             self.inDataFormat = None
+            # PCK_DEST_RD_CTRL_Read_32b_data: whether Dst is read 32 bits at a
+            # time. This is *not* implied by inDataFormat -- see
+            # PackerUnit.handle_pacr.
+            self.readDst32b = False
             self.byteAddress = 0
             # The first datastream (before any Last/Flush has run) still needs a
             # fresh output address computed from config; without this the very
@@ -304,6 +308,20 @@ class PackerUnit(TensixBackendUnit):
             )
 
             self.packerI[i].inDataFormat = DataFormat(in_df)
+
+            # How wide a Dst read is. A single global register (not per-packer
+            # section), zero out of reset, and the only thing that decides it on
+            # hardware -- ttsim reads Dst through `read_dst32b` when it is set
+            # and `read_dst16b` when it is not, whatever the data formats say.
+            # tt-metal's `_llk_pack_hw_configure_` /
+            # `reconfig_packer_data_format` set it to
+            # `is_32b_format || is_fp32_dest_acc_en`, so it is *implied* by a
+            # 32-bit In_data_format but not equivalent to it: with
+            # `fp32_dest_acc_en` over 16-bit circular buffers the pack source
+            # format is 16-bit while Dst is still read 32 bits at a time.
+            self.packerI[i].readDst32b = bool(
+                self.getConfigValue(stateID, "PCK_DEST_RD_CTRL_Read_32b_data")
+            )
 
             match in_df & 3:
                 case 0:
@@ -722,7 +740,13 @@ class PackerUnit(TensixBackendUnit):
                     # Edge-masked out: a zero datum is emitted and Dst is not read
                     datum = 0
                 else:
-                    if DATA_FORMAT_TO_BITS[self.packerI[i].inDataFormat] == 32:
+                    # The read width comes from PCK_DEST_RD_CTRL_Read_32b_data,
+                    # never from the data format: `fp32_dest_acc_en` over 16-bit
+                    # circular buffers leaves the pack source format 16-bit
+                    # while Dst still has to be read 32 bits at a time. Reading
+                    # 16 bits there returns only the high half of every other
+                    # Dst row and leaves most of the tile unwritten.
+                    if self.packerI[i].readDst32b:
                         raw_datum = self.backend.getDst().getDst32b(row, col)
                     else:
                         raw_datum = self.backend.getDst().getDst16b(row, col)
@@ -732,6 +756,7 @@ class PackerUnit(TensixBackendUnit):
                         self.packerI[i].inDataFormat,
                         self.packerI[i].outDataFormat,
                         raw_datum,
+                        self.packerI[i].readDst32b,
                     )
 
                 self.backend.addressable_memory.write(
@@ -756,7 +781,39 @@ class PackerUnit(TensixBackendUnit):
             # survived.
             self.packerI[i].byteAddress = addr
 
-    def formatConversion(self, stateID, inDataFormat, outDataFormat, raw_datum):
+    def bf16ToOutFormat(self, bf16_data, outDataFormat):
+        """The pack's late conversion out of a bf16 datum.
+
+        Shared by the two ways one arrives at bf16: a 16-bit Dst read of a bf16
+        Dst, and the fp32 narrowing a 32-bit Dst read does first.
+        """
+        match outDataFormat:
+            case DataFormat.FP32:
+                return bf16_data << 16
+            case DataFormat.BF16:
+                return bf16_data
+            case DataFormat.FP16:
+                return DataFormatConversions.FP32ToFP16(bf16_data << 16)
+            case _:
+                raise NotImplementedError()
+
+    def formatConversion(
+        self, stateID, inDataFormat, outDataFormat, raw_datum, read32b=False
+    ):
+        if read32b and DATA_FORMAT_TO_BITS[inDataFormat] != 32:
+            # A 32-bit Dst read under a narrower pack source format: what
+            # `fp32_dest_acc_en` over 16-bit circular buffers produces. Dst
+            # holds fp32, so the packer narrows it to the source format first
+            # (ttsim's `intermediate_format` step) and only then runs the usual
+            # source -> output conversion below.
+            if inDataFormat == DataFormat.BF16:
+                return self.bf16ToOutFormat(
+                    DataFormatConversions.FP32InDstToBF16(raw_datum), outDataFormat
+                )
+            raise NotImplementedError(
+                "32-bit Dst read (PCK_DEST_RD_CTRL_Read_32b_data) with pack source "
+                f"format {DATA_FORMAT_TO_NAME[inDataFormat]} is not modelled"
+            )
         match inDataFormat:
             case DataFormat.FP32:
                 fp32_data = DataFormatConversions.FP32InDstToFP32(raw_datum)
@@ -772,16 +829,9 @@ class PackerUnit(TensixBackendUnit):
             case DataFormat.TF32:
                 raise NotImplementedError()
             case DataFormat.BF16:
-                bf16_data = DataFormatConversions.BF16InDstToBF16(raw_datum)
-                match outDataFormat:
-                    case DataFormat.FP32:
-                        return bf16_data << 16
-                    case DataFormat.BF16:
-                        return bf16_data
-                    case DataFormat.FP16:
-                        return DataFormatConversions.FP32ToFP16(bf16_data << 16)
-                    case _:
-                        raise NotImplementedError()
+                return self.bf16ToOutFormat(
+                    DataFormatConversions.BF16InDstToBF16(raw_datum), outDataFormat
+                )
             case DataFormat.FP16:
                 match outDataFormat:
                     case DataFormat.FP32:

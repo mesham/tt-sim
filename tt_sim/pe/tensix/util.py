@@ -326,6 +326,25 @@ class DataFormatConversions:
         return (hi << 16) | lo
 
     @classmethod
+    def FP32InDstToBF16(cls, x):
+        """A 32-bit Dst datum narrowed to bf16, as the packer narrows it.
+
+        The path `fp32_dest_acc_en` over bf16 circular buffers takes: Dst holds
+        fp32 (in the rearranged Dst layout) while the pack source format is
+        bf16, so PCK_DEST_RD_CTRL_Read_32b_data reads 32 bits and the packer
+        narrows. Follows ttsim's `intermediate_format == 5` arm of the
+        `PCK_DEST_RD_CTRL_Read_32b_data` pack path: NaN saturated to infinity,
+        round-to-nearest into 16 bits, then a flush of the result's denormals
+        to +0. Note the rounding -- unlike ``FP32ToBF16``, which is the Src/Dst
+        write path and truncates.
+        """
+        x = DataFormatConversions.FP32InDstToFP32(x)
+        if (x & 0x7FFFFFFF) > 0x7F800000:
+            x = (x & 0x80000000) | 0x7F800000
+        x = (x + 0x8000) >> 16
+        return 0 if (x & 0x7FFF) < 0x80 else x
+
+    @classmethod
     def BF16InDstToBF16(cls, x):
         # dst contained sign,man(7b),exp(8b),
         # rearrange this to sign,exp(8b),man(7b)
