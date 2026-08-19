@@ -708,7 +708,7 @@ the zone markers, and when that buffer fills it pushes it to DRAM
 reaches the artefact only because tt-metal's own filter for it
 (`impl/profiler/profiler.cpp:780`) still excludes the string
 `PROFILER-NOC-QUICK-SEND`, which no device code has emitted since the rename —
-so it leaks into every trace whose kernel issues more than roughly 150
+so it leaks into every trace whose kernel issues more than roughly 120
 transactions on a RISC.
 
 Until 2026-08-19 this leg counted every zone endpoint and declined such a

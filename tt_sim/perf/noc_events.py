@@ -252,7 +252,9 @@ KERNEL_ZONE_SUFFIX = "-KERNEL"
 #: tt-metal tree; the zone was renamed to ``PROFILER-NOC-QUICK-PUSH`` and the
 #: filter did not follow. So the profiler's own flush zone leaks into every
 #: ``noc_trace_*.json`` whose kernel fills the buffer, which is every capture
-#: past roughly 150 transactions on a RISC.
+#: past roughly 120 transactions on a RISC (a 512-uint32 vector, wIndex
+#: resetting to CUSTOM_MARKERS=12, DISPATCH_HEADROOM_SIZE=16, 4 uint32 per
+#: record; our own capture's first flush is at record 122).
 PROFILER_PUSH_ZONE = "PROFILER-NOC-QUICK-PUSH"
 
 #: ``NocEventType`` names (``event_metadata.hpp:15``) that open a *read* wait

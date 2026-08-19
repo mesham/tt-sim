@@ -35,7 +35,7 @@ Their contract is [`docs/trace-schema.md`](docs/trace-schema.md),
 frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 As of 2026-08-19 they have used it in anger and reported back, which is
 where the work of the last week came from: see **"What the first
-external consumer found"** below, and note that three of the four
+external consumer found"** below, and note that four of the five
 reports were tt-sim answering confidently and wrongly rather than
 answering slowly or imprecisely.
 
@@ -957,26 +957,32 @@ code.**
 
 **The v2.0 list above is closed** — every item delivered or proven
 impossible, 2026-08-18 — and what has landed since came from none of
-the lists in this file. Seven things landed in the week after, and
-**four arrived as reports from the compiler team using tt-sim in
+the lists in this file. Eight things landed in the week after, and
+**five arrived as reports from the compiler team using tt-sim in
 anger** rather than from anything planned here: the multicast corner
-order (below), the `prologue` misreading and the single-window gate
-(§4 point 4), and the request for a version marker that became
-`tt_sim/behaviour.py`. Each report is dated in the source it touched.
+order and the packer's DEST read width (both below), the `prologue`
+misreading and the single-window gate (§4 point 4), and the request for
+a version marker that became `tt_sim/behaviour.py`. Each report is
+dated in the source it touched.
 
-**Three of them were tt-sim returning a confident, plausible, wrong
+**Four of them were tt-sim returning a confident, plausible, wrong
 answer** — the failure mode that consumer ranks above cycle accuracy,
 in their own words as recorded in the v3 working note: *"the failures
 that cost us most were the ones where a simulator returned a confident,
 plausible, wrong answer. A tool that told us 'I do not model this'
-would have been worth more than one that passed."* The three: a
+would have been worth more than one that passed."* The four: a
 multicast suite running green against a simulator that delivered the
 packet to **nobody**; a `prologue` bucket reading **91.89 %** of a span
-as setup when it was a `cb_wait_front` on the compute pipeline; and a
-gate reporting **five program executions** where there was one kernel
-launch and four profiler flushes. **Not one of the three was a
-cycle-count error.** That is the through-line, and it is the strongest
-evidence this file holds about what the next release should be about.
+as setup when it was a `cb_wait_front` on the compute pipeline; a gate
+reporting **five program executions** where there was one kernel launch
+and four profiler flushes; and a packer that read DEST at half width
+and wrote a quarter of the output tile. **Not one of the four was a
+cycle-count error.** The packer one is the odd member and worth
+separating: it was *loud* — the consumer's own check failed — but it
+pointed at the wrong culprit, so it cost them a diagnosis of their own
+correct code rather than costing them nothing at all. That is the
+through-line, and it is the strongest evidence this file holds about
+what the next release should be about.
 `docs/plans/v3.md` is a working note, not a commitment, and its two
 strands — **observability** and **loudness** — were named before any of
 this landed; what follows is what happened, not what was planned.
@@ -1086,6 +1092,81 @@ this landed; what follows is what happened, not what was planned.
    remembering: **any test asserting on device state after N cycles is
    pinned to the cost model's current charges**, and it will fail on
    the day one of them changes rather than on the day it was written.
+
+5. **The packer read DEST at half width whenever DEST was wider than
+   the pack format — the most serious defect of the set, closed
+   2026-08-19** (`5a4ffaf`). Reported as `gemm_bf16_check` returning
+   `errors=4096 of 4096` on tt-sim Wormhole while both real cards passed
+   it. **The report was right and the diagnosis was wrong**: not a bf16
+   `tilize_block` / `untilize_block` divergence. Their other
+   conclusion — that it was not their own paging work — was right, but
+   the reasoning behind it was not; see below.
+   **One register decides the width and tt-sim was not reading it.**
+   tt-metal's `reconfig_packer_data_format` sets
+   `PCK_DEST_RD_CTRL_Read_32b_data = is_32b_format || is_fp32_dest_acc_en`
+   (`tt-llk/tt_llk_wormhole_b0/common/inc/cpack_common.h:620`, and `:457`
+   in `set_packer_config`, which `_llk_pack_hw_configure_` reaches via
+   `configure_pack`; Blackhole's `:528` / `:458` are character-identical),
+   so `ComputeConfig{.fp32_dest_acc_en = true}` over **Float16_b**
+   circular buffers — bf16 storage with fp32 accumulation, the ordinary
+   GEMM configuration — leaves DEST holding
+   32-bit values while the pack *source* format is 16-bit. tt-sim chose
+   its DEST accessor from `DATA_FORMAT_TO_BITS[inDataFormat]` alone and
+   so read DEST 16 bits at a time. **The field was declared in both
+   `tensix_backend_cfg.yaml` (`:1553`) and
+   `tensix_backend_cfg_blackhole.yaml` (`:237`) and referenced by no
+   Python in the tree** — a config-table entry nothing read, which is a
+   shape worth grepping both tables for.
+   Symptom as reported: only **1024 of 4096** output elements nonzero,
+   rows `r%4 ∈ {0,1}` × columns `c%32 < 16` — most of the buffer never
+   written — with a clean device close, exit 1 and no `TT_FATAL`.
+   **How it was localised is the transferable part.** Flipping the flag
+   on tt-sim's own `optests/untilize` failed all three ops **including
+   op 0, the tiled `pack_tile` control that shares no untilize code at
+   all**, which is what ruled out tilize: a fault that hits the control
+   is not in the code the control avoids. And `examples/banks` — 24
+   pages over all 12 Wormhole banks — passing ruled out paging
+   *independently* of the consumer's own control, which had only shown
+   that the fault survived `page_size == size`, necessary but not
+   sufficient. Two negative results, each from a program that already
+   existed.
+   **The fix**: read the register; narrow fp32 → bf16 on the way out
+   with **round-to-nearest** (`FP32InDstToBF16` — NaN saturated to
+   infinity, denormal results flushed to +0 — deliberately *not* the
+   truncating `FP32ToBF16` used on the Src/Dst write path); and refuse
+   rather than guess for a 32-bit read under fp16, the one pair tt-metal
+   answers with `Round_10b_mant` (`cpack_common.h:468`, `:630`) — a bit
+   tt-sim does not model. Validated **bit-for-bit against ttsim**
+   on the fp32 arm, 3072 bf16 elements, both architectures — the
+   rounding choice was not one to trust on our own reading. Pinned by
+   `tt_sim/pe/tensix/pack_dest_rd_ctrl_test.py` and by a new `fp32` arm
+   on `optests/untilize`; written up for the consumer in
+   `docs/plans/v3-bf16-handoff.md`.
+   **Why it survived**: every in-tree program that sets
+   `fp32_dest_acc_en` — `optests/transpose`, `optests/sfpumath`,
+   `examples/five-fp`, and there are exactly those three — makes its CBs
+   **Float32**, so DEST and output width agree and the conversion never
+   happens. bf16 storage with fp32 accumulation had **zero coverage**.
+   The suite was written by the same people with the same assumptions as
+   the simulator, so it tested the configurations we already believed
+   in; this one needed somebody else's workload.
+   **One trap worth recording, because it would silently weaken any
+   future test here.** `Adj32` maps a 32-bit DEST row onto a pair of
+   16-bit rows, and for rows 0–7 the 16-bit read lands on the fp32
+   datum's **high half** — bit-identical to that value's truncated bf16,
+   so right whenever the value is exact in bf16 — and the bug is
+   **invisible**. Row 8 is the first row where the two disagree: a
+   16-bit read there returns the *low* half of 32-bit row 0. That is why
+   the unit test reads only from row 8, and a test on low rows would
+   have passed against the broken simulator.
+   **The shorthand for the fold is loose; the exact form is the one to
+   trust.** Both the handoff note and the test's docstring say a 32-bit
+   row `r` folds onto 16-bit rows `2r` / `2r+8`, which is exact only
+   where `r` is a multiple of 8. `DstRegister.adj32` implements
+   `((r & 0x1F8) << 1) | (r & 0x207)`, paired with `+8` — the identity
+   for rows 0–7, then 8-row blocks spaced 16 apart. The consequence
+   above holds either way, and it is the consequence the test depends
+   on.
 
 The other three landed elsewhere in this file: DRAM page-to-bank
 distribution, and the host-DMA rate refused alongside it, are in §1;
@@ -1611,7 +1692,7 @@ from the rest, so no cross-core span is admissible.
    occurrence of that string in the whole tt-metal tree — the zone was
    renamed to `PROFILER-NOC-QUICK-PUSH`
    (`tt_metal/tools/profiler/kernel_profiler.hpp:409`) and the filter
-   never followed, so it leaks into every capture past roughly 150
+   never followed, so it leaks into every capture past roughly 120
    transactions on a RISC. (Both verified by grep against the 0.74
    checkout; worth raising upstream.) Windows are now identified **by
    name**, and a flush is **charged to its own `profiler` bucket**
