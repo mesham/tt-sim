@@ -158,6 +158,81 @@ Any such term would have to be invented or measured, and measurement is
 corroboration here, never provenance. Treat DRAM as a flat per-channel pipe at
 the published rate.
 
+## Compute-kernel init ordering: a partial oracle, not a blind one
+
+**The claim this answers:** "both simulators are blind to init ordering". Measured,
+that is too strong. tt-sim catches the init-ordering faults that change the
+configuration its units read, and misses the ones that do not — three of each in
+the six perturbations below. Which half you are in is predictable, and stated
+below.
+
+Measured live against tt-sim over the wire bridge (tt-metal 0.74, Wormhole,
+`examples/four` = `binary_op_init_common` + `add_tiles_init` + `add_tiles` +
+`pack_tile`; `examples/five` = `init_sfpu` + `add_int_tile_init` + an SFPU op).
+Each row is one edit to the compute kernel, rebuilt through the normal JIT path:
+
+| perturbation | tt-sim result |
+| --- | --- |
+| four: `copy_tile_init` inserted between `add_tiles_init` and `add_tiles` | **caught** — 254 of 256 elements wrong |
+| four: `add_tiles_init` omitted | **caught** — `[UNIT STALL]` names the blocked unpacker at ~16k cycles, `[DEADLOCK]` every 50k thereafter (fixed 2026-08-19; it was silent before) |
+| four: `add_tiles_init` called *before* `binary_op_init_common` | **missed** — passes, 256/256 correct |
+| five: `init_sfpu` omitted | **caught** — fails |
+| five: `add_int_tile_init` omitted | **missed** — passes |
+| five: the two inits swapped | **missed** — passes |
+
+**Why the split falls exactly there.** An `*_init()` is, at the hardware level, a
+burst of writes to Tensix backend configuration, address modifiers and the MOP
+(macro-op) expander configuration. tt-sim models all three. So a reordering that
+leaves a *different* value in one of them at the moment an op reads it changes
+tt-sim's answer, and a reordering that leaves the *same* values does not.
+
+The first caught row is the sharp case. `mop_cfg[0..8]` is a single per-thread
+register file at `TENSIX_MOP_CFG_BASE`; `ckernel_template::program()` writes all
+nine unconditionally with no dirty check, and `run()` is `static` and
+argument-free — it executes whatever was programmed last. `copy_tile_init`
+programs the unpacker macro for A only, where `add_tiles_init` had programmed it
+for A and B, so the following `add_tiles` unpacks no SrcB. That is architecturally
+guaranteed last-writer-wins, tt-sim reproduces it, and it is the mechanism behind
+this fault class's deadlocks: with no SrcB dvalid the matrix unit waits forever
+and the consumer blocks on `cb_reserve_back`. The model is pinned by
+`tt_sim/pe/tensix/mop_clobber_test.py`, in both directions — a clobber changes
+the expansion, an unrelated write to the same bank does not — so the "caught"
+rows above cannot rot into "missed" without a test going red.
+
+The missed rows are the ones where the config state after the sequence is
+*identical* either way. `add_tiles_init` before `binary_op_init_common` is an
+ERROR under tt-metal's own contract — `compute_kernel_hw_startup.h` says the
+startup call "should be called exactly once at the very beginning of the kernel,
+before any operation-specific initialization functions", and the LLK sanitizer's
+state machine encodes it as `"First transition must be INITIAL -> CONFIGURED"`.
+But the violation is about *when the MMIO writes land relative to unit idleness*
+("almost exclusively require the idle state of the execution units that should be
+configured ... unsafe to call this function in the middle of a kernel execution"),
+and tt-sim's configuration writes land instantly. It has no schedule in which the
+write is late, so it always sees the lucky one. That is the same missing guarantee
+recorded in `ROADMAP.md` §6 as "config-write ordering", seen from the other end.
+
+**No guard is offered for the missed rows, deliberately.** The rule that is
+violated is stated over the LLK C++ API — *which* `*_init` was called for *which*
+op — and tt-sim observes only the Tensix instruction stream. In the missed rows
+that stream contains the same instructions in a different order and leaves the
+same state, so no instruction-level predicate separates them from a correct
+program without inferring the API-level intent behind each write. A guard resting
+on that inference would fire on correct kernels, and would be switched off.
+
+**Use the oracle that sits at the right level.** tt-metal ships one:
+`TT_METAL_LLK_SANITIZER=1` (with `TT_METAL_LLK_SANITIZER_ERROR`, on by default)
+turns on `llk::san`, a per-thread state machine over
+`INITIAL -> CONFIGURED -> INITIALIZED[Op] -> EXECUTED[Op]` that matches an init's
+arguments against its op's and reports the source line of both. It is off by
+default and its coverage is incomplete in a way that matters here: the tracked
+`Operation` enum (`tt_metal/tt-llk/common/sanitizer/types.h`) currently lists only
+`UnpackA`, `UnpackABMatmul`, `UnpackUntilize`, `EltwiseUnaryDatacopy`, `Matmul`,
+`Pack` and `PackUntilize` — **no eltwise-binary entry and no SFPU entries at all**.
+An FPU-binary-then-SFPU init sequence is therefore outside what it checks today.
+Adding those entries is a far cheaper fix than a simulator guard, and it is the
+only place the check can be made without guessing.
+
 ## What is *not* on this page
 
 Known-unreached functional edges — conditions the simulator does not model
