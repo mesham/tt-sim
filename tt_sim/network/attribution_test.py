@@ -23,6 +23,7 @@ pytest.
 """
 
 import shutil
+import struct
 import subprocess
 import sys
 import textwrap
@@ -32,7 +33,9 @@ import pytest
 from tt_sim.network.alignment import NoCAlignmentError
 from tt_sim.network.attribution import (
     Issuer,
+    Source,
     attach_provenance,
+    describe_page,
     describe_source,
     find_issuer,
     provenance,
@@ -461,6 +464,210 @@ def test_an_unproved_elf_is_never_named(tmp_path, monkeypatch):
     assert source.chain == []
     assert "no ELF proved resident for BRISC" in source.note
     assert "TT_SIM_PROFILE_ELFS" in source.note
+
+
+# --- 6. the page size, read out of the live cb_interface ---------------------
+#
+# The page size is not on the wire (the protocol carries addresses and payloads,
+# never buffer layouts) and there is no Tensix register holding it. It is
+# recovered from the firmware's ``cb_interface`` array in the issuing core's
+# local memory. These numbers are the ones a real ``matmul_block`` run puts
+# there: a 4-page CB of 2048-byte bfloat16 tiles at L1 0x19c40.
+_CB_SIZE, _CB_LIMIT, _CB_PAGE, _CB_PAGES = 0x2000, 0x1BC40, 0x800, 4
+_CB_START = _CB_LIMIT - _CB_SIZE
+
+
+def _cb_blob(index=0, fields=None, unit=1, count=32):
+    """A synthetic ``cb_interface``, one buffer configured at ``index``.
+
+    ``fields`` overrides the eight-word entry outright, which is how the
+    "a struct we cannot check out is not decoded" case is written.
+    """
+    if fields is None:
+        fields = (
+            _CB_SIZE // unit,
+            _CB_LIMIT // unit,
+            _CB_PAGE // unit,
+            _CB_PAGES,
+            _CB_START // unit,
+            _CB_START // unit,
+            0,
+            0,
+        )
+    blob = bytearray(32 * count)
+    struct.pack_into("<8I", blob, 32 * index, *fields)
+    return bytes(blob)
+
+
+class _BlobMemory:
+    """The issuing core's local memory, serving one array at one address."""
+
+    def __init__(self, base, blob):
+        self.base, self.blob = base, blob
+        self.reads = []
+
+    def read(self, addr, size):
+        self.reads.append((addr, size))
+        if addr != self.base:
+            raise ValueError(f"unmapped read at {hex(addr)}")
+        return self.blob[:size]
+
+
+@pytest.fixture(scope="module")
+def cb_elf(tmp_path_factory):
+    """A host ELF carrying a ``cb_interface`` symbol of the firmware's shape.
+
+    Only the symbol table is used -- the array's address and size -- so a host
+    ``gcc`` build stands in for a RISC-V firmware ELF exactly, and the test
+    stays honest about *how* the address is found: by symbol, never by
+    scanning memory for something that looks plausible.
+    """
+    if shutil.which("gcc") is None:
+        pytest.skip("no gcc to build a cb_interface fixture")
+    tmp = tmp_path_factory.mktemp("cb_elf")
+    src = tmp / "fw.c"
+    src.write_text(
+        textwrap.dedent(
+            """
+            struct CBInterface { unsigned w[8]; };
+            struct CBInterface cb_interface[32] = {{{1}}};
+            int main(void) { return (int)cb_interface[0].w[0]; }
+            """
+        )
+    )
+    out = tmp / "fw.elf"
+    proc = subprocess.run(["gcc", "-g", "-o", str(out), str(src)], capture_output=True)
+    if proc.returncode != 0:
+        pytest.skip(f"gcc could not build the fixture: {proc.stderr.decode()[:200]}")
+    return out
+
+
+def _cb_symbol_address(path):
+    from elftools.elf.elffile import ELFFile
+
+    with open(path, "rb") as handle:
+        table = ELFFile(handle).get_section_by_name(".symtab")
+        for symbol in table.iter_symbols():
+            if symbol.name == "cb_interface" and symbol["st_size"]:
+                return int(symbol["st_value"])
+    pytest.skip("fixture has no cb_interface symbol")
+
+
+def _page_line(core, blob, cb_elf, addrs):
+    base = _cb_symbol_address(cb_elf)
+    memory = _BlobMemory(base, blob)
+    source = Source("", [], "", "", "", elfs=(("firmware", str(cb_elf)),))
+    line = describe_page(Issuer(core, 0x100, memory), source, addrs)
+    return line, memory
+
+
+def test_the_page_size_is_read_out_of_the_circular_buffer(cb_elf):
+    """The number the message was missing: 2048 bytes a page, in decimal,
+    with the buffer it came from named so a reader knows how far to trust it."""
+    line, memory = _page_line("NCRISC", _cb_blob(), cb_elf, (("destination", 0x1A440),))
+    assert "CB page: destination 0x1a440 is in CB 0" in line, line
+    assert "4 pages of 2048 bytes" in line, line
+    assert "over 0x19c40..0x1bc3f" in line, line
+    assert "cb_interface[0] in NCRISC's local memory" in line, line
+    # ...and it really was read from the symbol's address, not guessed.
+    assert memory.reads == [(_cb_symbol_address(cb_elf), 32 * 32)], memory.reads
+
+
+def test_the_compute_cores_16_byte_units_are_converted(cb_elf):
+    """``circular_buffer_init.h`` shifts every address field right by 4 when
+    compiling for a TRISC, so the identical buffer is stored 16x smaller
+    there. The byte answer must not change with which core asked."""
+    same = {}
+    for core, unit in (("NCRISC", 1), ("TRISC1", 16)):
+        line, _ = _page_line(
+            core, _cb_blob(unit=unit), cb_elf, (("destination", 0x1A440),)
+        )
+        same[core] = line.replace(core, "<core>")
+    assert same["NCRISC"] == same["TRISC1"], same
+    assert "4 pages of 2048 bytes" in same["NCRISC"], same
+
+
+def test_the_buffer_must_actually_contain_the_address(cb_elf):
+    """A page size lifted from whichever buffer happened to be configured
+    would be a plausible, wrong number. Only containment justifies it."""
+    line, _ = _page_line(
+        "NCRISC", _cb_blob(), cb_elf, (("destination", 0x30000), ("source", 0x40000))
+    )
+    assert "covers either address" in line, line
+    assert "page size not visible to the simulator" in line, line
+    assert "pages of" not in line, line
+
+
+def test_an_entry_that_does_not_check_out_is_not_decoded(cb_elf):
+    """tt-metal owns ``LocalCBInterface`` and this repo pins no version of it,
+    so the entry is *verified* rather than trusted: the pointers have to lie
+    inside the extent the first two words describe and be set at all, the size
+    has to be a whole number of pages, and the extent has to fit in an L1.
+    Every fixture below spans the address being looked up, so without the
+    checks each would print a confident wrong number instead of nothing.
+    """
+    unreadable_pointers = (
+        _CB_SIZE,
+        _CB_LIMIT,
+        _CB_PAGE,
+        _CB_PAGES,
+        0xDEADBEEF,
+        0xDEADBEEF,
+        0,
+        0,
+    )
+    part_page = (_CB_SIZE, _CB_LIMIT, 0x600, _CB_PAGES, _CB_START, _CB_START, 0, 0)
+    # An extent no L1 could hold, and an entry the firmware never wrote a
+    # pointer into: both still span the address, and neither is a buffer.
+    beyond_l1 = (0x400000, 0x419C40, _CB_PAGE, 0x800, _CB_START, _CB_START, 0, 0)
+    never_set_up = (_CB_SIZE, _CB_LIMIT, _CB_PAGE, _CB_PAGES, 0, 0, 0, 0)
+    for fields in (unreadable_pointers, part_page, beyond_l1, never_set_up):
+        line, _ = _page_line(
+            "NCRISC", _cb_blob(fields=fields), cb_elf, (("destination", 0x1A440),)
+        )
+        assert "page size not visible to the simulator" in line, (fields, line)
+        assert "pages of" not in line, (fields, line)
+
+
+def test_the_absence_is_stated_rather_than_left_silent():
+    """Every path says something. A reader who is told nothing keeps looking
+    for a number that was never there."""
+    hostile = Source("", [], "", "", "", elfs=())
+    line = describe_page(Issuer("BRISC", 0x100, None), hostile, ())
+    assert "no ELF proved resident for BRISC" in line, line
+    assert "page size not visible to the simulator" in line, line
+
+
+def test_describe_page_never_raises():
+    """It runs while an exception is being built."""
+
+    class Hostile:
+        def read(self, addr, size):
+            raise MemoryError("no")
+
+    cases = [
+        (Issuer("BRISC", 0, None), Source("", [], "", "", "", elfs=(("f", "/nope"),))),
+        (Issuer("BRISC", 0, Hostile()), Source("", [], "", "", "", elfs=())),
+        (
+            Issuer("", 0, object()),
+            Source("", [], "", "", "", elfs=(("f", "/dev/null"),)),
+        ),
+    ]
+    for issuer, source in cases:
+        line = describe_page(issuer, source, (("destination", 1),))
+        assert "page size not visible to the simulator" in line, line
+
+
+def test_a_real_failure_carries_a_page_line(dram_mid):
+    """End to end: the line is part of the message a real misaligned transfer
+    produces, and it is appended -- the first line is still byte-identical."""
+    program, _ = _noc_read_program(dram_mid, 0x1010, 0x2000)
+    _device, exc = _run_program(program)
+    message = str(exc)
+    assert "\n  CB page: " in message, message
+    # The call-site attribution keeps its place under the PC it belongs to.
+    assert message.index("Transfer: ") < message.index("CB page: ")
+    assert message.index("CB page: ") < message.index("Issued by: ")
 
 
 def main():
