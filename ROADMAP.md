@@ -118,6 +118,51 @@ not be re-attempted.
 - **Cython, PyPy, C extension** — recorded so they aren't
   re-litigated: build step breaks hackability; numpy interop; last
   resort, respectively.
+- **A C++ core called from Python — SCOPED AND DECLINED 2026-08-18, on
+  a profile.** The question was whether porting "key parts" to C++ with
+  bindings would be faster. **It would, and not by enough to be worth
+  what it costs — and "key parts" is not on offer.** Profiling
+  `matmulblock` (cost model on, 6.0M calls) gives self time
+  `pe/tensix` **29.9 %**, builtins 19.8 %, `pe/rv` **17.1 %**, stdlib
+  and import 14.4 %, `device` 5.5 %, `memory` 4.1 %, `pe/register`
+  3.4 %, `util` 2.6 %, everything else under 1 % each.
+  **There is no hotspot**: the hottest single function is
+  `rv32.clock_tick` at **6.2 %**, and the work is spread over ~5,600
+  functions — the signature of interpreter overhead rather than of a
+  hot kernel. So Amdahl decides it. Porting `pe/rv` alone caps at
+  **1.21x**; `pe/tensix` alone at **1.43x**; both at 1.9x. A real win
+  needs `pe/tensix` + `pe/rv` + `device` + `memory` + `register` — the
+  whole simulator core — which at a realistic 20–30x on ported code
+  lands near **5x**, maybe 10–12x on long runs as import cost
+  amortises.
+  **And that specific set is exactly what cannot be cut apart**, for
+  the reason already recorded against Numba: those subsystems interlock
+  through shared mutable state every cycle, so a boundary between them
+  means either porting the state model too or paying a crossing per
+  memory access. A per-`clock_tick` boundary is affordable (~1–2 %); a
+  per-access one eats the whole gain. What *does* work is the shape
+  already in the tree — a leaf kernel with array-shaped work and no
+  state-model interaction, like the Numba FPU kernels — and the profile
+  shows no further candidate of that shape carrying enough time.
+  Weighed against ~5x: a build step, a near-total rewrite, and the
+  property the README names as the reason the project exists.
+- **Pump striding — CLOSED 2026-08-18, no headroom left.** Measured
+  across six replay guards: strides land within a handful of cycles of
+  the Tensix tile's *dormant* count every time (`matmulblock` 3,186
+  against 3,188; `four` 95,479 against 95,518). **The pump strides
+  exactly when the compute tile is idle and never misses one.**
+  Strided share tracks how busy that tile is — `dramtop` **0 %** (tile
+  awake 100 % of cycles), `loopback` 11.2 %, `six` 13.0 %,
+  `matmulblock` 18.0 %, `sfpumath` 30.7 %, `four` **88.9 %** — and the
+  payoff is real where it applies: `four` runs at **45,586 cycles/s**
+  against ~3.6–6k for the compute-bound guards.
+  So the remaining cost is **doing the work on a busy tile, not walking
+  idle cycles**, and no scheduling change can reach it. The 12x spread
+  between idle-dominated and compute-dominated guards is entirely
+  inside the Tensix backends, which is the `pe/tensix` 29.9 % above and
+  caps at 1.43x on its own. (A first pass at this measurement read
+  **0 %** everywhere; it had sampled the wrong pump object. The numbers
+  here are from the pump that actually ran the cycles.)
 - **Making the Numba warm-up cheaper** — **declined 2026-08-08 on
   measurement.** It is ~800 ms per process of which only **~30 ms is
   the on-disk cache**: ~450 ms is `import numba` and ~350 ms is
