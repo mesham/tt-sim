@@ -693,10 +693,39 @@ Per core, buckets that telescope to the kernel zone span by construction:
 | `read_wait` / `write_wait` | **data transfer** — the barrier spin, `START` to `END` |
 | `other_wait` | semaphore waits, full barriers, flushes |
 | `local` | a barrier `END` to the next event — the core's own work |
+| `profiler` | the device profiler flushing **its own** buffer — the instrument, not your kernel |
 | `prologue` | `ZONE_START` to the first NoC event — **not a setup cost**, see below |
 
 So *"is this phase bound by command issue or by bytes on the channel"* is
 `issue` against `read_wait + write_wait`, per core, as percentages of span.
+
+**The profiler flushes mid-kernel, and it used to look like a second launch.**
+Worth knowing because it decides whether a long capture is decomposable at all.
+The device profiler writes NoC events into the same per-RISC L1 marker buffer as
+the zone markers, and when that buffer fills it pushes it to DRAM
+(`kernel_profiler::quick_push()`) — bracketing itself in a
+`PROFILER-NOC-QUICK-PUSH` zone **nested inside your kernel zone**. That zone
+reaches the artefact only because tt-metal's own filter for it
+(`impl/profiler/profiler.cpp:780`) still excludes the string
+`PROFILER-NOC-QUICK-SEND`, which no device code has emitted since the rename —
+so it leaks into every trace whose kernel issues more than roughly 150
+transactions on a RISC.
+
+Until 2026-08-19 this leg counted every zone endpoint and declined such a
+capture as `single_window` — "5 `ZONE_START`, expected exactly one". That was
+the instrument being misread, not a property of the workload: the 16-core
+Blackhole `gemm_256_check` pair that surfaced it carries **exactly one kernel
+window on all 32 of its streams**, with 0–4 flushes nested inside. Those
+captures decompose now, and each flush (~190 cycles: ~24 for the markers plus
+~165 for the DMA and its posted-write flush) is charged to the `profiler`
+bucket, so it does not inflate `issue`. A per-stream `note:` gives the count and
+the cycles. **Subtract `profiler` if you want the uninstrumented span.**
+
+What is still refused, and rightly: **two kernel launches in one comparison** —
+more than one `*-KERNEL` zone or more than one `run_host_id`, which is what
+globbing a directory or passing two `--sim` paths produces. Each program
+execution writes its own `noc_trace_dev*_ID*.json`; decompose them one at a
+time. They are separate spans and this leg will not blend them into one number.
 
 **Five things to know before you rely on it**, none of which are fixable by us:
 
@@ -758,6 +787,7 @@ costs on one. Measured, Blackhole, by the compiler team on 2026-08-18:
 | workload | cores | wall |
 | --- | --- | --- |
 | `gemm_128_check` | 4 | **~2 minutes** |
+| `gemm_256_check` | 16 | **hours** (decomposes; see above) |
 | `gemm_512_check` | 32 | **> 3.5 hours**, not complete |
 
 So "0.5 ms of device span" is minutes on a handful of cores and an overnight job
@@ -1015,3 +1045,97 @@ does not depend on the shell it was launched from — `--translated` is the only
 way to get the translated configuration, and it points the host at
 `driver/<arch>/cluster_descriptor.yaml` from this repo. It cleans up only the
 simulator servers it started (§3.1).
+
+---
+
+## 7. Asserting on what this tt-sim guarantees
+
+If your suite depends on tt-sim modelling something *correctly*, make it say so.
+A green run against a simulator that is blind to the thing under test is not a
+pass — it is a pass-shaped absence of evidence, and it is indistinguishable from
+a real one after the fact.
+
+This bit us for real. Until 2026-08-19 tt-sim enumerated a NoC multicast
+rectangle **without reference to which NoC it was issued on**. A correctly
+encoded NoC 1 multicast — corners high-first, which is what silicon requires —
+decoded to an empty rectangle, so nothing was delivered and the sender's write
+barrier retired immediately. Every such run finished green with exact numerical
+results. A consumer whose compiler emitted that encoding had no way to tell
+their multicast suite from a suite that was testing nothing.
+
+### 7.1 What to assert on, and why it is not a version number
+
+`tt_sim/behaviour.py` publishes named **behaviours**: one per thing tt-sim used
+to get silently wrong and now does not. A version number would not have helped —
+`>= 0.7.3` encodes a fact about our release history, not the fact your suite
+actually depends on — so what is published is the guarantee itself, under a name
+that never changes meaning.
+
+```python
+# In your suite's session setup (conftest.py, SetUpTestSuite, ...):
+from tt_sim.behaviour import require
+
+require("noc1-multicast-corner-order")
+```
+
+`require` raises `UnsupportedBehaviour` against a tt-sim that lacks the
+behaviour, naming what is missing and what that build *does* guarantee.
+`supports(*names) -> bool` is the non-raising form if you would rather skip than
+fail.
+
+Against a tt-sim older than this mechanism the `import` itself fails with
+`ImportError` — still loud, still at session setup, still before any result is
+collected, which is the property that matters. Do not soften that into a
+`try: ... except ImportError: pass`; a checkout with no `tt_sim/behaviour.py`
+is exactly the checkout whose results you cannot trust.
+
+The module imports nothing else from tt-sim and nothing outside the standard
+library, so this costs no simulator construction and works from a checkout that
+has never been run.
+
+### 7.2 From a shell, a Makefile, or a C++ harness
+
+```bash
+# Exits 0 if every named behaviour is guaranteed, 1 otherwise (names on stderr).
+python3 -m tt_sim.behaviour --require noc1-multicast-corner-order
+
+# What this build guarantees, one name per line — worth recording alongside a
+# run's results, so a later reader knows what the run was capable of catching.
+python3 -m tt_sim.behaviour
+python3 -m tt_sim.behaviour --verbose     # ...with the full guarantee text
+```
+
+### 7.3 What is published today
+
+| name | guarantee, in one line |
+| --- | --- |
+| `noc1-multicast-corner-order` | A multicast whose rectangle corners are ordered for the wrong NoC raises, instead of silently reaching every destination or none (§4.6 is the related, different check). |
+| `riscv-ebreak-halts` | `ebreak` — what a kernel `ASSERT()`, an `LLK_ASSERT` and `__builtin_trap()` all lower to — stops the core and raises, instead of being decoded as a no-op. |
+| `noc-transfer-alignment` | A NoC transfer whose source and destination are not congruent in the low bits the path requires raises, instead of producing the skewed data hardware would. |
+
+`python3 -m tt_sim.behaviour --verbose` is the authoritative version of this
+table; the guarantees there say exactly what a run will observably do, including
+the environment variable that switches each check back off.
+
+### 7.4 The guarantee behind the guarantee
+
+A capability list that nobody is forced to update becomes a lie, and it would be
+a worse lie than having no list — you would be asserting on a name that no longer
+means anything. Two guards in `tt_sim/behaviour_test.py` hold it to the code:
+
+* every entry names the test that pins its guarantee, and that test has to
+  exist; and
+* every exception class anywhere under `tt_sim/` must be either published as a
+  behaviour or explicitly declined in `_NOT_A_GUARANTEE` **with a reason**. That
+  list is derived by parsing the source tree, not maintained by hand, so a new
+  loudness guard turns the suite red until somebody has decided in writing
+  whether you would want to assert on it.
+
+Each guard's own regression suite also asserts that its marker is still
+published, so withdrawing a name breaks the tests for the thing the name is
+about.
+
+**Adding one** (for tt-sim maintainers): append a `Behaviour` to `_BEHAVIOURS`
+in `tt_sim/behaviour.py` with a `guarantee` written in terms a consumer can
+observe from outside, `since` set to the day it lands, and `pinned_by` pointing
+at the test; then add a `require("<name>")` assertion to that test's module.

@@ -21,6 +21,7 @@ import pytest
 
 from tt_sim.arch.blackhole import BLACKHOLE_PROFILE
 from tt_sim.arch.wormhole import WORMHOLE_PROFILE
+from tt_sim.behaviour import require
 from tt_sim.network.alignment import (
     DISABLE_ENV_VAR,
     L1_CONGRUENCE,
@@ -192,6 +193,18 @@ def test_noc_read_and_write_paths_are_checked():
     initiator.cmd_ctrl = 1
     with pytest.raises(NoCAlignmentError, match="write"):
         initiator.initiate()
+
+
+def test_the_behaviour_marker_for_this_guard_is_published():
+    """The guard and the name external suites assert on live and die together.
+
+    ``tt_sim.behaviour`` publishes ``noc-transfer-alignment`` so a consumer's suite can refuse
+    to run against a tt-sim that lacks this check rather than collect another
+    set of green results that exercised nothing. Deleting the registry entry
+    therefore has to turn *this* suite red — a marker quietly withdrawn is
+    exactly the failure the marker exists to prevent.
+    """
+    require("noc-transfer-alignment")
 
 
 def main():

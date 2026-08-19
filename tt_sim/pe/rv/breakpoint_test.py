@@ -14,6 +14,7 @@ a failed assertion compiles to.
 
 import pytest
 
+from tt_sim.behaviour import require
 from tt_sim.pe.rv import breakpoint as breakpoint_trap
 from tt_sim.pe.rv.breakpoint import RiscvBreakpoint
 from tt_sim.pe.rv.isa.i_isa import RV_I_ISA
@@ -84,3 +85,15 @@ def test_env_var_truthiness(monkeypatch):
         assert breakpoint_trap.refresh_from_env() is True
     monkeypatch.delenv(breakpoint_trap.IGNORE_ENV_VAR)
     assert breakpoint_trap.refresh_from_env() is True
+
+
+def test_the_behaviour_marker_for_this_guard_is_published():
+    """The guard and the name external suites assert on live and die together.
+
+    ``tt_sim.behaviour`` publishes ``riscv-ebreak-halts`` so a consumer's suite can refuse
+    to run against a tt-sim that lacks this check rather than collect another
+    set of green results that exercised nothing. Deleting the registry entry
+    therefore has to turn *this* suite red — a marker quietly withdrawn is
+    exactly the failure the marker exists to prevent.
+    """
+    require("riscv-ebreak-halts")
