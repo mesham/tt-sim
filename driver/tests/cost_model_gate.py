@@ -131,7 +131,10 @@ BUDGET_INDEPENDENT = (VALUE_PUMPED,)
 
 #: The classification validated by hand at this tree state. Discovery drives the
 #: run; this is the tripwire that stops a reclassification happening silently.
-BASELINE_TREE = "24403ae (+ the Wormhole poll-until-DONE guard conversion, + the multi-bank DRAM guard)"
+BASELINE_TREE = (
+    "24403ae (+ the Wormhole poll-until-DONE guard conversion, + the multi-bank "
+    "DRAM guard, + the fp32-DEST untilize guards)"
+)
 BASELINE = {
     # Pumps to DONE and then asserts values (each page read back from its own
     # bank's coordinate), so its verdict cannot depend on how many cycles the
@@ -166,6 +169,9 @@ BASELINE = {
     "blackhole/two": VALUE_POLL_BUDGET,
     "blackhole/twolaunch": VALUE_PUMPED,
     "blackhole/untilize": VALUE_PUMPED,
+    # The same op test with fp32_dest_acc_en over Float16_b CBs — a 32-bit DEST
+    # under a 16-bit pack format. Its own trace, same pump-to-DONE shape.
+    "blackhole/untilize_fp32": VALUE_PUMPED,
     "blackhole/where": VALUE_PUMPED,
     "wormhole/noc_tile_transfer": VALUE_PUMPED,
     "wormhole/examples": VALUE_PUMPED,
@@ -181,6 +187,7 @@ BASELINE = {
     "wormhole/tilize": VALUE_PUMPED,
     "wormhole/transpose": VALUE_PUMPED,
     "wormhole/untilize": VALUE_PUMPED,
+    "wormhole/untilize_fp32": VALUE_PUMPED,
 }
 
 #: Budget-dependent guards the prover does not drive, and why. Kept as prose

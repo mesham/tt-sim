@@ -32,7 +32,12 @@
 //   `fp32`         `fp32_dest_acc_en` on, every CB still Float16_b -- a 32-bit
 //                  DEST feeding a 16-bit output format. All three ops pass
 //                  here too, and must keep passing: this arm is the regression
-//                  test for the pack out of a 32-bit DEST.
+//                  test for the pack out of a 32-bit DEST. `UNTILIZE_FP32=1`
+//                  in the environment selects the same arm, which is how
+//                  `optests/diff.sh` -- it passes no arguments -- runs and
+//                  records it; the recorded wire trace is frozen per
+//                  architecture as `traces/untilize_fp32.trace` and replayed
+//                  by `driver/<arch>/server/untilize_fp32_replay_test.py`.
 //
 //                  What it caught. tt-sim used to take the DEST read width
 //                  from the pack source format, so with a 16-bit format it
@@ -60,6 +65,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <tt-metalium/host_api.hpp>
@@ -97,7 +103,14 @@ int main(int argc, char** argv) {
     // `fp32` selects a 32-bit DEST (`fp32_dest_acc_en`) while leaving every CB
     // Float16_b -- see the header comment. The golden is unchanged: bf16
     // operands accumulated in fp32 and packed back to bf16 is still exact.
-    const bool fp32_dest = (argc > 1 && std::strcmp(argv[1], "fp32") == 0);
+    //
+    // `UNTILIZE_FP32=1` in the environment selects the same arm, because
+    // `optests/diff.sh` runs `./build/<name>` with no arguments -- an env var
+    // is the only handle it, and the trace capture that piggybacks on it
+    // (`TT_SIM_RECORD=...`), has on the arm.
+    const char* fp32_env = std::getenv("UNTILIZE_FP32");
+    const bool fp32_dest = (argc > 1 && std::strcmp(argv[1], "fp32") == 0) ||
+                           (fp32_env != nullptr && fp32_env[0] != '\0' && std::strcmp(fp32_env, "0") != 0);
     printf("dest accumulate: %s\n", fp32_dest ? "fp32 (32-bit DEST, Float16_b CBs)" : "fp16 (default)");
 
     IDevice* device = CreateDevice(0);
