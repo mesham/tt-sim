@@ -11,10 +11,27 @@ shape for it: ``0.7.3`` tells you which build you have, never whether that build
 has the fix, and a consumer who pins ``>= 0.7.3`` has encoded a fact about our
 release history into their test suite rather than a fact about what they need.
 
-So what is published here is **behaviour**, one named guarantee per thing tt-sim
-used to get silently wrong and now does not. A name means the same thing
-forever; it is either present or it is not; and asserting on it says what the
-suite actually depends on.
+So what is published here is **behaviour**: named guarantees an outside suite
+may depend on. A name means the same thing forever; it is either present or it
+is not; and asserting on it says what the suite actually depends on.
+
+Most entries are of one shape — tt-sim used to get something silently wrong and
+now refuses it — and for a long time that was the whole registry. It is
+deliberately not the definition. ``dram-interleaved-bank-distinctness`` is a
+**modelling property**: nothing raises, no environment variable switches it off,
+and there is no exception class behind it. It is here because the test it
+replaces was one an outside consumer was writing *by hand* — deriving, from our
+internals and our shipped SoC descriptors, that DRAM banks are separate stores
+at separate coordinates — in order to trust their own gate. That derivation is
+precisely what this registry exists to absorb: the question a consumer needs
+answered is "can a run against this build see the thing I am testing?", and a
+substrate that is missing makes a suite vacuous just as surely as a guard that
+does not fire. So the bar for an entry is that a consumer would otherwise have
+to establish it themselves, not that something throws.
+
+The difference does change how such an entry is *used*, and the guarantee text
+says so: a property marker tells you the substrate is there, it does not tell
+you when you have broken your own kernel.
 
 Asserting on it
 ---------------
@@ -130,6 +147,36 @@ _BEHAVIOURS = (
         ),
         since="2026-08-04",
         pinned_by="tt_sim.pe.rv.breakpoint_test:test_ebreak_names_the_core_and_pc",
+    ),
+    Behaviour(
+        name="dram-interleaved-bank-distinctness",
+        guarantee=(
+            "Every DRAM bank tt-metal can interleave a buffer over is separate "
+            "storage reachable at its own NoC 0 coordinate: 12 banks on "
+            "Wormhole (6 channels x two 1 GiB dram_views), 8 on Blackhole (8 "
+            "channels x one view), counted from the shipped "
+            "driver/<arch>/soc_descriptor.yaml. A write to one bank is "
+            "invisible in every other; each bank's descriptor coordinate is a "
+            "distinct cell that resolves to its own channel's tile (including "
+            "the second worker-visible endpoint of a Wormhole channel); and "
+            "each channel is modelled whole, so every view's range is backed. "
+            "A host scatter and a kernel gather that disagree about page size, "
+            "bank count or a bank's coordinate therefore corrupt data, as they "
+            "do on silicon, instead of aliasing onto one flat store and coming "
+            "back right. NOT covered: which page lands in which bank — that "
+            "arithmetic is tt-metal's on both sides (host "
+            "WriteToDeviceInterleavedContiguous, device InterleavedAddrGen) and "
+            "never tt-sim's — nor bank ordering, nor any claim about a "
+            "descriptor you supply yourself. Unlike the other entries here, "
+            "nothing raises and no environment variable disables it: this is a "
+            "modelling property, so it says the substrate your gate needs is "
+            "present, not that you will be told when your kernel is wrong."
+        ),
+        since="2026-08-19",
+        pinned_by=(
+            "tt_sim.device.dram_banks_test:"
+            "test_every_bank_is_its_own_storage_at_its_own_coordinate"
+        ),
     ),
     Behaviour(
         name="noc-transfer-alignment",

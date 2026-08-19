@@ -1112,10 +1112,26 @@ python3 -m tt_sim.behaviour --verbose     # ...with the full guarantee text
 | `noc1-multicast-corner-order` | A multicast whose rectangle corners are ordered for the wrong NoC raises, instead of silently reaching every destination or none (§4.6 is the related, different check). |
 | `riscv-ebreak-halts` | `ebreak` — what a kernel `ASSERT()`, an `LLK_ASSERT` and `__builtin_trap()` all lower to — stops the core and raises, instead of being decoded as a no-op. |
 | `noc-transfer-alignment` | A NoC transfer whose source and destination are not congruent in the low bits the path requires raises, instead of producing the skewed data hardware would. |
+| `dram-interleaved-bank-distinctness` | Every DRAM bank an interleaved buffer can land in is separate storage at its own NoC coordinate — 12 on Wormhole, 8 on Blackhole — so a page-size or bank-count disagreement corrupts, instead of aliasing onto one flat store and coming back right. |
 
 `python3 -m tt_sim.behaviour --verbose` is the authoritative version of this
 table; the guarantees there say exactly what a run will observably do, including
 the environment variable that switches each check back off.
+
+The last of those is a different shape from the other three, and worth reading
+in full (`--verbose`) before you pin a gate to it. The first three are guards:
+tt-sim used to be silently wrong, and now raises. `dram-interleaved-bank-distinctness`
+is a **modelling property** — nothing raises, and nothing switches it off. It is
+published because it is the fact an interleaved-DRAM gate has to establish
+before its results mean anything, and the alternative was every consumer
+deriving it by hand from our internals. What it does **not** cover is the
+page → bank distribution itself: that arithmetic is tt-metal's on both sides
+(`WriteToDeviceInterleavedContiguous` on the host, `InterleavedAddrGen` in the
+kernel), so tt-sim guarantees only that the banks those two land pages in are
+genuinely apart — which is what makes a disagreement between them show up as
+corruption rather than as a clean pass. Bank *order* is not asserted either, and
+neither is anything about an SoC descriptor you supply yourself: the counts are
+read from the shipped `driver/<arch>/soc_descriptor.yaml`.
 
 ### 7.4 The guarantee behind the guarantee
 
@@ -1138,4 +1154,8 @@ about.
 **Adding one** (for tt-sim maintainers): append a `Behaviour` to `_BEHAVIOURS`
 in `tt_sim/behaviour.py` with a `guarantee` written in terms a consumer can
 observe from outside, `since` set to the day it lands, and `pinned_by` pointing
-at the test; then add a `require("<name>")` assertion to that test's module.
+at the test; then add a `require("<name>")` assertion to that test's module. An
+entry does not have to be a guard — the bar is that a consumer would otherwise
+have to establish the fact by hand against our internals — but one that is not
+must say so in its own guarantee text, because "nothing raises" changes what
+asserting on it buys the reader.
