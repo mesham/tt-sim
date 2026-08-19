@@ -418,6 +418,29 @@ def test_discovery_finds_one_elf_per_core(tmp_path):
     assert all(d.how == "recent" for d in found.elfs)
 
 
+def test_discovery_can_be_scoped_to_one_unit(tmp_path):
+    """Identification parses up to ``VERIFY_LIMIT`` ELFs per unit and role, so
+    a caller that wants one core's ELF -- ``tt_sim.network.attribution``,
+    naming the kernel behind a rejected NoC transfer -- must be able to say so
+    rather than pay for a whole-device scan on a fatal error path."""
+    roots = [_fake_cache(tmp_path, "matmul")]
+    found = elfdisc.discover(env={}, roots=roots, units={"TRISC1"})
+    assert {d.unit for d in found.elfs} == {"TRISC1"}
+    # ...and the unscoped call is unchanged.
+    assert {d.unit for d in elfdisc.discover(env={}, roots=roots).elfs} == set(
+        elfdisc.RISC_TO_UNIT.values()
+    )
+
+
+def test_explicit_elfs_are_scoped_too(tmp_path):
+    a, b = tmp_path / "brisc.elf", tmp_path / "ncrisc.elf"
+    a.write_bytes(b"\x00")
+    b.write_bytes(b"\x00")
+    spec = f"BRISC:{a},NCRISC:{b}"
+    found = elfdisc.discover(env={"TT_SIM_PROFILE_ELFS": spec}, units={"NCRISC"})
+    assert [d.unit for d in found.elfs] == ["NCRISC"]
+
+
 def test_firmware_is_discovered_alongside_the_kernel(tmp_path):
     """A data-movement core spends most of a run inside firmware's launch
     and barrier loops; kernel-only discovery leaves the biggest rows bare."""
@@ -584,3 +607,47 @@ def test_no_cache_is_a_stated_note_not_a_crash():
     found = elfdisc.discover(env={"TT_METAL_CACHE": "/nonexistent-cache"}, roots=None)
     if not found.elfs:
         assert found.note, "a run that could not attribute must say why"
+
+
+# ---------------------------------------------------------------------------
+# 5. The inline chain (diagnostics, as opposed to profiling)
+# ---------------------------------------------------------------------------
+
+
+def test_the_inline_chain_runs_outermost_to_innermost(dwarf_elf):
+    """``function_at`` answers with the innermost inlined name, which is the
+    right answer for a profile and the wrong one for a diagnostic: at a NoC
+    store the innermost frame is always the register-write helper, which is
+    true of every transfer ever issued and identifies none of them. The chain
+    above it is what names the call the kernel actually made."""
+    index = DwarfIndex()
+    index.load(dwarf_elf, unit="TRISC1")
+    pcs = sorted(index._by_unit["TRISC1"])
+    chains = [index.inline_chain(pc, "TRISC1") for pc in pcs]
+    nested = [c for c in chains if len(c) > 1]
+    assert nested, "the fixture inlines; some PC must have a chain"
+    for chain in nested:
+        # Outermost first: every entry's range contains the next one's.
+        widths = []
+        for name in chain:
+            spans = [f for f in index._funcs["TRISC1"] if f[2] == name]
+            widths.append(max(f[1] - f[0] for f in spans))
+        assert widths == sorted(widths, reverse=True), chain
+        # The innermost entry is what function_at would have returned alone.
+        assert chain[-1] == index.function_at(pcs[chains.index(chain)], "TRISC1")
+
+
+def test_the_inline_chain_is_empty_off_the_end():
+    assert DwarfIndex().inline_chain(0x1234, "TRISC1") == []
+
+
+def test_the_inline_chain_keeps_the_outermost_frame_when_capped(dwarf_elf):
+    index = DwarfIndex()
+    index.load(dwarf_elf, unit="TRISC1")
+    for pc in sorted(index._by_unit["TRISC1"]):
+        full = index.inline_chain(pc, "TRISC1", limit=99)
+        capped = index.inline_chain(pc, "TRISC1", limit=2)
+        assert len(capped) <= 2
+        if full:
+            assert capped[0] == full[0]
+            assert capped[-1] == full[-1]

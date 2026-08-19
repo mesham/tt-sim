@@ -200,6 +200,7 @@ def discover(
     verifier=None,
     searcher=None,
     roots: list[Path] | None = None,
+    units: set[str] | None = None,
 ) -> Discovery:
     """Pick the firmware and kernel ELF for each baby core.
 
@@ -208,12 +209,17 @@ def discover(
     rather than failing the candidate. ``searcher(blob) -> int | None``
     finds a byte string anywhere in resident memory and is what recovers a
     relocated kernel's load bias. Both are optional.
+
+    ``units`` restricts the search to those unit names. Identification parses
+    up to ``VERIFY_LIMIT`` candidate ELFs *per unit and role*, so a caller
+    that wants one core's ELF (``tt_sim.network.attribution``, naming the
+    kernel behind a rejected transfer) pays a tenth of a whole-device scan.
     """
     env = os.environ if env is None else env
 
     explicit = env.get("TT_SIM_PROFILE_ELFS", "").strip()
     if explicit:
-        return _from_explicit(explicit)
+        return _from_explicit(explicit, units)
 
     search = roots if roots is not None else cache_roots(env)
     if not search:
@@ -227,6 +233,8 @@ def discover(
     by_key = _candidates(search)
     result = Discovery(roots=[str(r) for r in search])
     for (unit, role), paths in sorted(by_key.items()):
+        if units is not None and unit not in units:
+            continue
         ranked = _rank(paths, since)
         if not ranked:
             continue
@@ -255,7 +263,7 @@ def discover(
     return result
 
 
-def _from_explicit(spec: str) -> Discovery:
+def _from_explicit(spec: str, units: set[str] | None = None) -> Discovery:
     """``TT_SIM_PROFILE_ELFS=BRISC:/a.elf,TRISC2:/b.elf`` — or a bare
     comma-separated path list, in which case the unit comes from the
     filename. A trailing ``@0x1234`` sets an explicit load bias."""
@@ -273,6 +281,8 @@ def _from_explicit(spec: str) -> Discovery:
             path_str = item
             unit = RISC_TO_UNIT.get(Path(item).name.split(".")[0], "")
         if not unit:
+            continue
+        if units is not None and unit not in units:
             continue
         result.elfs.append(Discovered(unit, Path(path_str), "explicit", bias=bias))
     return result

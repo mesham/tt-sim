@@ -301,6 +301,42 @@ class DwarfIndex:
                 return name
         return ""
 
+    def inline_chain(
+        self, pc: int, unit: str | None = None, limit: int = 6
+    ) -> list[str]:
+        """Every named range covering ``pc``, outermost first.
+
+        :meth:`function_at` answers with the innermost name, which is the right
+        answer for a profile (attribute the cycle to the code that spent it)
+        and the wrong one for a *diagnostic*: on an LTO'd tt-metal kernel the
+        innermost frame at a NoC store is always ``NOC_CMD_BUF_WRITE_REG``,
+        which is true of every NoC transfer ever issued and so identifies
+        none of them. The chain above it — ``... > noc_async_write<> >
+        ncrisc_noc_fast_write<0> > NOC_CMD_BUF_WRITE_REG`` — is what names the
+        API call the kernel actually made, which is what a caller trying to
+        find *which* transfer misbehaved needs.
+
+        Ranges of equal width (a wrapper inlined into exactly its own callee's
+        extent, which templated dataflow headers produce constantly) keep the
+        order the flattened function table gives, since nothing in DWARF's
+        flattened form recovers their nesting. ``limit`` caps the returned
+        depth from the innermost end, keeping the outermost entry.
+        """
+        for key in (unit, None) if unit is not None else (None,):
+            funcs = self._funcs.get(key, [])
+            covers = [f for f in funcs if f[0] <= pc < f[1]]
+            if not covers:
+                continue
+            covers.sort(key=lambda f: (-(f[1] - f[0]), f[0]))
+            names: list[str] = []
+            for _low, _high, name in covers:
+                if not names or names[-1] != name:
+                    names.append(name)
+            if len(names) > limit:
+                names = names[:1] + names[len(names) - (limit - 1) :]
+            return names
+        return []
+
     def units(self) -> list[str]:
         return sorted(u for u in self._by_unit if u is not None)
 
