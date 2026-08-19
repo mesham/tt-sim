@@ -332,6 +332,34 @@ architecture's NoC byte-enable span.
 | --- | --- |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS` | Set truthy (`1`/`true`/`yes`/`on`) to turn alignment checking off. Off by default, i.e. **checking is on**. |
 
+### Multicast rectangle corner order
+
+A broadcast names its destinations as a `Start` corner and an `End` corner, and
+which corner goes in which field depends on the NoC: each NoC's coordinates
+increment along its own direction of data flow (NoC 0 rightwards/downwards, NoC 1
+leftwards/upwards), so the corners are always written `Start ≤ End` *in that
+NoC's own coordinates*. Coordinate translation gives both NoCs one shared range
+that increments with NoC 0's flow, so — in the ISA docs' words — "when performing
+broadcasts, StartX ↔ EndX need to be swapped by software, and likewise
+StartY ↔ EndY" ([`WormholeB0/NoC/Coordinates.md`](https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/NoC/Coordinates.md)).
+
+| Coordinate space | NoC 0 | NoC 1 |
+| --- | --- | --- |
+| translated (what tt-metal puts on the wire) | `Start ≤ End` | `Start ≥ End` |
+| raw NoC coordinates | `Start ≤ End` | `Start ≤ End` |
+
+tt-metal's `Device::get_noc_multicast_encoding` performs exactly that swap for
+`noc_index == 1`, and its watcher enforces the same table. Getting it wrong is
+silent on silicon in the worst way: the span wraps the torus rather than being
+empty, so the packet reaches tiles the kernel never counted in `num_dests` and
+`noc_async_write_barrier` never retires. A violation raises
+`MulticastOrderError` naming the NoC, both corners, the required order and the
+axis that broke it.
+
+| Env var | Effect |
+| --- | --- |
+| `TT_SIM_DISABLE_MULTICAST_ORDER_CHECKS` | Set truthy (`1`/`true`/`yes`/`on`) to turn multicast corner-order checking off. Off by default, i.e. **checking is on**. |
+
 ## Tensix performance counters
 
 `RISCV_DEBUG_REG_PERF_CNT_*` is modelled (`tt_sim/misc/perf_counters.py`), so a

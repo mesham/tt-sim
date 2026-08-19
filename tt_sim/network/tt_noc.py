@@ -6,8 +6,13 @@ from tt_sim.device.clock import Clockable
 from tt_sim.memory.mem_mapable import MemMapable
 from tt_sim.network.alignment import (
     L1_CONGRUENCE,
+    NoCAlignmentError,
     check_congruence,
     congruence_for_read,
+)
+from tt_sim.network.multicast_order import (
+    check_corner_order,
+    rectangle_destinations,
 )
 from tt_sim.network.noc_coords import WormholeNocCoords
 from tt_sim.perf.model import noc_cost_model
@@ -577,14 +582,30 @@ class NUI(MemMapable, Clockable):
             )
 
         def _check_alignment(self, modulus, src_addr, dst_addr, *, path):
-            check_congruence(
-                modulus,
-                src_addr,
-                dst_addr,
-                path=path,
-                noc_number=self.nui.noc_number,
-                initiator=self.nui.id_pair,
-            )
+            try:
+                check_congruence(
+                    modulus,
+                    src_addr,
+                    dst_addr,
+                    path=path,
+                    noc_number=self.nui.noc_number,
+                    initiator=self.nui.id_pair,
+                )
+            except NoCAlignmentError as exc:
+                # *Which* transfer failed -- its size, transaction id, and the
+                # core, PC and kernel line that issued it -- attached in the
+                # ``except`` clause rather than passed as arguments, for the
+                # reason ``NoCCoordinateError``'s docstring gives above: this
+                # runs per NoC transaction with checking on by default, so the
+                # description must cost nothing on the path where nothing is
+                # wrong (and, measurably, it does not -- a ``try`` block is
+                # free until it catches). The exception object is enriched in
+                # place, so type, identity and traceback are unchanged and the
+                # set of programs that raise is exactly what it was.
+                from tt_sim.network.attribution import attach_provenance
+
+                attach_provenance(exc, self, src_addr, dst_addr)
+                raise
 
         def handle_read_transfer(self):
             noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
@@ -878,6 +899,11 @@ class NUI(MemMapable, Clockable):
             per destination. The master's ``REQS_OUTSTANDING`` counter
             (and the per-trid FIFO) is bumped by ``num_dests`` so the
             kernel's ``noc_async_write_barrier`` waits for all N ACKs.
+
+            **Which corner goes in which field depends on the NoC**, and
+            getting it wrong is a hang on silicon that used to be silent
+            here — see :mod:`tt_sim.network.multicast_order` for the rule,
+            its sources, and the check that now enforces it.
             """
             noc_packet_transaction_id = extract_bits(self.packet_tag, 4, 10)
 
@@ -888,11 +914,16 @@ class NUI(MemMapable, Clockable):
                 y_end,
             ) = self.nui.noc_coord_strategy.broadcast_coords(self)
 
-            destinations = [
-                (x, y)
-                for x in range(x_start, x_end + 1)
-                for y in range(y_start, y_end + 1)
-            ]
+            check_corner_order(
+                x_start,
+                y_start,
+                x_end,
+                y_end,
+                descending=self.nui.broadcast_corners_descend,
+                noc_number=self.nui.noc_number,
+                initiator=self.nui.id_pair,
+            )
+            destinations = rectangle_destinations(x_start, y_start, x_end, y_end)
             num_dests = len(destinations)
 
             if noc_cmd_resp_marked:
@@ -1283,6 +1314,17 @@ class NUI(MemMapable, Clockable):
         #: Untranslated NoC 1 deliberately leaves it ``False``: there the keys
         #: are two conventions at once and no single rule is right for both.
         self.keys_mirror_grid_cells = False
+        #: Whether a broadcast rectangle reaching this NIU's command registers
+        #: is written **high corner first**. ``False`` everywhere except a NoC 1
+        #: addressed in *translated* coordinates: a NoC's own coordinates
+        #: increment along its own direction of data flow, but the translated
+        #: space is shared by both NoCs and increments with NoC 0's, so on NoC 1
+        #: software has to swap the corners (``WormholeB0/NoC/Coordinates.md``,
+        #: "Coordinate Translation"). Set by
+        #: ``TT_Device._register_tile_internals``; see
+        #: :mod:`tt_sim.network.multicast_order` for the full rule and its
+        #: sources.
+        self.broadcast_corners_descend = False
         self.generate_NIU_and_NoC_config()
         self.generate_NoC_node_id()
         self.request_initiators = [

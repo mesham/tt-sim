@@ -420,6 +420,14 @@ class TT_Device(Device):
             nui1.keys_mirror_grid_cells = (
                 not self.profile.translated_coords_off_physical_grid
             )
+            # ...and translation is also what decides which way round a
+            # broadcast rectangle's corners go. The translated range is shared
+            # by both NoCs and increments with NoC 0's data flow, so a NoC 1
+            # broadcast is written high corner first; untranslated, NoC 1's own
+            # coordinates already increment with its own flow and the corners
+            # ascend as on NoC 0. See
+            # :mod:`tt_sim.network.multicast_order`.
+            nui1.broadcast_corners_descend = True
         self._check_noc1_shadowing(tile, nui1, primary, noc1_source, register_mirror)
         nui0.set_noc_directory(self.noc_0_directory)
         nui1.set_noc_directory(self.noc_1_directory)
