@@ -59,6 +59,8 @@ bucket           the interval from ...
 ``other_wait``   a single-event blocking call (``FULL_BARRIER``,
                  ``SEMAPHORE_WAIT``, ``WRITE_FLUSH``, ...) to the next event
 ``local``        a barrier END to the next event -- the core's own work
+``profiler``     a ``PROFILER-NOC-QUICK-PUSH`` ZONE_START to the next event
+                 outside that push -- **the instrument, not the kernel**
 ===============  =========================================================
 
 The buckets telescope to ``ZONE_END - ZONE_START`` **by construction**, which
@@ -68,6 +70,51 @@ something. It also makes :func:`gate_partition_closes` a live test rather than
 a formality: a negative interval means the timestamps are not monotonic, which
 the 44-bit wall clock and its non-atomic high/low read pair can genuinely
 produce.
+
+One kernel zone, and the profiler's own zone nested inside it
+------------------------------------------------------------
+
+A stream's zone endpoints are **not** all launches. tt-metal wraps the kernel
+in ``BRISC-KERNEL`` / ``NCRISC-KERNEL``, and *nested inside that* the device
+profiler emits its own ``PROFILER-NOC-QUICK-PUSH`` pair every time the per-RISC
+L1 marker buffer fills and is flushed to DRAM. ``recordNocEvent`` calls
+``flush_to_dram_if_full`` **before** it records, so on a kernel that issues more
+transactions than the buffer holds the push repeats through the run.
+
+This is why this leg used to refuse real workloads. ``gate_single_window``
+counted *every* ``ZONE_START`` and read "5 starts" as five program executions,
+when the stream held one kernel window and four buffer flushes. Reported by the
+compiler team on 2026-08-19: a 16-core Blackhole ``gemm_256_check`` pair, every
+one of the 32 streams refused as ``single_window``; all 32 in fact carry exactly
+one ``*-KERNEL`` pair, with the kernel ``ZONE_START`` the first record and the
+``ZONE_END`` the last, no record outside it, and 0-4 strictly nested pushes.
+The window was never in doubt; the gate was reading the instrument.
+
+**The push is charged to its own bucket rather than absorbed.** A push costs
+~190 cycles on that capture -- ~24 for the two markers and ~165 for the DMA and
+its posted-write flush -- and it is instrumentation the capture added, not work
+the kernel asked for. Folding it into ``issue`` (which is where it would land,
+since a push is triggered from inside the issue path) would charge the *model*
+for the difference between how tt-sim and a card execute the profiler's own
+DRAM write. That is the mirror of the argument against a ``pre_first_event_wait``
+bucket below: this one belongs in the partition precisely because **both** sides
+can fill it, from the same firmware doing the same thing.
+
+The bucket runs from the push's ``ZONE_START`` to the next event outside the
+push, because the ``ZONE_END`` marker is written *before* the flush is issued
+(``kernel_profiler.hpp:414`` marks the end; the ``profiler_noc_async_write_posted``
+and ``profiler_noc_async_flush_posted_write`` are at ``:455``). It is therefore
+an **upper** bound: on the ordinary path the next event is the very transaction
+whose recording triggered the push, but a push from ``quick_push_if_linked``
+could return into kernel work before the next recorded event. On the reference
+capture the interval is 161-166 cycles in all 112 pushes, which is the flush and
+nothing else.
+
+Any *other* nested zone -- a ``DeviceZoneScopedN`` a consumer put in their own
+dataflow kernel -- is passed through transparently: its endpoints open no
+bucket, the intervals telescope across it, and the time stays in whichever
+bucket the enclosing kernel work opened, which is where it belongs. The report
+names any such zone in a note so it is not a silent pass-through.
 
 ``prologue`` is unattributed time, not setup time
 ------------------------------------------------
@@ -184,7 +231,29 @@ MECHANISMS = (
     "write_wait",
     "other_wait",
     "local",
+    "profiler",
 )
+
+#: Suffix of the zone tt-metal wraps a data-movement kernel in --
+#: ``BRISC-KERNEL`` / ``NCRISC-KERNEL``. This, and not "any zone endpoint", is
+#: what bounds the span: a stream can carry *nested* zones as well (see
+#: :data:`PROFILER_PUSH_ZONE`), and counting those as launches is what made this
+#: leg refuse every multi-core capture put to it.
+KERNEL_ZONE_SUFFIX = "-KERNEL"
+
+#: The device profiler's own zone, emitted by ``kernel_profiler::quick_push()``
+#: (``tt_metal/tools/profiler/kernel_profiler.hpp:409``) when the per-RISC L1
+#: marker buffer fills mid-kernel and has to be flushed to DRAM.
+#:
+#: **It is in the artefact by an upstream oversight, not by design.**
+#: ``convertNocTracePacketsToJson`` (``impl/profiler/profiler.cpp:780``) filters
+#: zone endpoints and explicitly excludes ``"PROFILER-NOC-QUICK-SEND"`` -- a name
+#: **no device code emits**. It is the only occurrence of that string in the
+#: tt-metal tree; the zone was renamed to ``PROFILER-NOC-QUICK-PUSH`` and the
+#: filter did not follow. So the profiler's own flush zone leaks into every
+#: ``noc_trace_*.json`` whose kernel fills the buffer, which is every capture
+#: past roughly 150 transactions on a RISC.
+PROFILER_PUSH_ZONE = "PROFILER-NOC-QUICK-PUSH"
 
 #: ``NocEventType`` names (``event_metadata.hpp:15``) that open a *read* wait
 #: and close it. Only these two carry completion-side timing.
@@ -332,6 +401,38 @@ def load_traces(paths):
     return out
 
 
+def is_kernel_zone(event):
+    """Is ``event`` an endpoint of the *kernel* zone, the one that bounds the span?
+
+    A zone record with no name at all is treated as the kernel zone: the only
+    producers of one are this module's own tests and hand-built fixtures, and
+    refusing them would be pedantry about a field the real artefact always sets.
+    """
+    return event.kind == "zone" and (
+        event.zone.endswith(KERNEL_ZONE_SUFFIX) or not event.zone
+    )
+
+
+def is_profiler_push_zone(event):
+    """Is ``event`` an endpoint of the profiler's own buffer-flush zone?"""
+    return event.kind == "zone" and event.zone == PROFILER_PUSH_ZONE
+
+
+def is_transparent_zone(event):
+    """A nested zone that is neither the kernel's nor the profiler's.
+
+    A consumer's own ``DeviceZoneScopedN`` inside a dataflow kernel. Its
+    endpoints are dropped before the partition so the intervals telescope
+    across them and the time stays in the enclosing bucket -- which is correct,
+    because unlike a profiler flush that time *is* the kernel's work.
+    """
+    return (
+        event.kind == "zone"
+        and not is_kernel_zone(event)
+        and not is_profiler_push_zone(event)
+    )
+
+
 @dataclass
 class Stream:
     """Every event one RISC on one core recorded, in timestamp order."""
@@ -354,15 +455,35 @@ class Stream:
 
     @property
     def zone_starts(self):
+        """``ZONE_START`` of the **kernel** zone only.
+
+        Deliberately not "every zone endpoint": the profiler's own
+        :data:`PROFILER_PUSH_ZONE` nests inside the kernel zone and counting it
+        here is what refused every real workload. See the module docstring.
+        """
         return [
-            e for e in self.events if e.kind == "zone" and e.zone_phase == "ZONE_START"
+            e for e in self.events if is_kernel_zone(e) and e.zone_phase == "ZONE_START"
         ]
 
     @property
     def zone_ends(self):
         return [
-            e for e in self.events if e.kind == "zone" and e.zone_phase == "ZONE_END"
+            e for e in self.events if is_kernel_zone(e) and e.zone_phase == "ZONE_END"
         ]
+
+    @property
+    def profiler_pushes(self):
+        """How many times the profiler flushed its L1 buffer inside this stream."""
+        return sum(
+            1
+            for e in self.events
+            if is_profiler_push_zone(e) and e.zone_phase == "ZONE_START"
+        )
+
+    @property
+    def nested_zone_names(self):
+        """Names of any nested zone this module passes through transparently."""
+        return sorted({e.zone for e in self.events if is_transparent_zone(e)})
 
     @property
     def noc_events(self):
@@ -401,8 +522,16 @@ def group_by_stream(events):
 
 
 def _bucket_for(event):
-    """Which bucket the interval *opened by* ``event`` belongs in."""
+    """Which bucket the interval *opened by* ``event`` belongs in.
+
+    Only ever called on a kernel or profiler-push zone record: transparent
+    nested zones are dropped by :func:`partition_events` first, because
+    returning ``None`` for them would drop the interval they open and break
+    closure rather than telescoping across them.
+    """
     if event.kind == "zone":
+        if is_profiler_push_zone(event):
+            return "profiler"
         return "prologue" if event.zone_phase == "ZONE_START" else None
     if event.type == READ_BARRIER_START:
         return "read_wait"
@@ -415,13 +544,24 @@ def _bucket_for(event):
     return "issue"
 
 
+def partition_events(stream):
+    """``stream``'s events with transparent nested zone endpoints removed.
+
+    Removed rather than ignored: an ignored record would leave the interval it
+    opens unattributed, and the buckets would then fail to close.
+    """
+    return [e for e in stream.events if not is_transparent_zone(e)]
+
+
 def partition(stream):
     """Cut ``stream``'s kernel zone into :data:`MECHANISMS`.
 
     Every interval between consecutive events is attributed to the event that
     opened it, so the buckets telescope to the zone span exactly -- **but only
-    if ``ZONE_START`` really is the stream's first event and ``ZONE_END`` its
-    last**. Nothing is filtered to make that true. Filtering out an event that
+    if the kernel's ``ZONE_START`` really is the stream's first event and its
+    ``ZONE_END`` the last**. No *NoC* event is filtered to make that true;
+    the only records dropped are transparent nested zone endpoints, which
+    telescoping passes straight through. Filtering out an event that
     fell outside the zone would quietly repair a non-monotonic stream, and
     catching exactly that is what :func:`gate_partition_closes` is for: with the
     events left where they are, a zone endpoint out of place makes the buckets
@@ -430,7 +570,8 @@ def partition(stream):
     part = dict.fromkeys(MECHANISMS, 0)
     if len(stream.zone_starts) != 1 or len(stream.zone_ends) != 1:
         return part
-    for current, following in zip(stream.events, stream.events[1:]):
+    events = partition_events(stream)
+    for current, following in zip(events, events[1:]):
         bucket = _bucket_for(current)
         if bucket is None:
             continue
@@ -457,6 +598,42 @@ def prologue_note(part, span, side):
         "unlikely to be setup -- a blocking dependency wait before the first NoC "
         "event (cb_wait_front on a producer's output) is recorded nowhere and "
         "falls into prologue. Do not read it as an initialisation cost."
+    )
+
+
+def profiler_note(stream, part, span, side):
+    """A note when the device profiler flushed inside ``side``'s span, else ``None``.
+
+    Always emitted when a push happened, at any size. A reader comparing two
+    captures needs to know that one of them carries more of the instrument than
+    the other, and "1.24 % of the span" is only small until it is the size of
+    the effect being measured.
+    """
+    pushes = stream.profiler_pushes
+    if not pushes:
+        return None
+    cycles = part.get("profiler", 0)
+    share = f", {100.0 * cycles / span:.2f} % of the span" if span > 0 else ""
+    return (
+        f"{side}: the device profiler flushed its own L1 marker buffer to DRAM "
+        f"{pushes} time(s) inside this span, costing {cycles} cycles{share}. That "
+        "is the instrument, not the kernel -- it is in the `profiler` bucket so it "
+        "does not inflate `issue`, and it is an upper bound (the flush's DMA runs "
+        "after the zone's own END marker). Subtract it for the uninstrumented span."
+    )
+
+
+def nested_zone_note(stream, side):
+    """A note naming any nested zone passed through transparently, else ``None``."""
+    names = stream.nested_zone_names
+    if not names:
+        return None
+    return (
+        f"{side}: nested zone(s) {', '.join(names)} inside the kernel zone were "
+        "passed through: their endpoints open no bucket and the time stays in "
+        "whichever bucket the surrounding kernel work opened. If one of them "
+        "brackets something that is not the kernel's own work, this partition "
+        "attributes it to the kernel."
     )
 
 
@@ -723,27 +900,51 @@ def gate_events_present(sim, hw):
 
 
 def gate_single_window(sim, hw):
-    """One launch and one zone episode per stream, on both sides.
+    """One **kernel launch** per stream, on both sides.
 
     The JSON is written per program-execution UID, so more than one
-    ``run_host_id`` or more than one ``ZONE_START`` means two runs were
-    concatenated. Averaging across them is averaging across two different
-    device states.
+    ``run_host_id`` or more than one ``*-KERNEL`` zone means two runs were
+    concatenated -- by globbing a directory, or by a caller passing two
+    ``--sim`` paths. Averaging across them is averaging across two different
+    device states, and it stays refused: each execution has its own artefact and
+    its own span, and they are separate measurements, not two halves of one.
+
+    **What this gate no longer refuses.** It used to count *every* zone
+    endpoint, and the profiler's own ``PROFILER-NOC-QUICK-PUSH`` pairs nest
+    inside the kernel zone (see :data:`PROFILER_PUSH_ZONE`), so any capture long
+    enough to fill the L1 marker buffer was reported as "5 ZONE_START, expected
+    one" and declined. That was a misreading of the instrument, not a property
+    of the workload: those streams carry one window each. They now decompose,
+    with the flushes charged to the ``profiler`` bucket.
     """
     problems = []
     for label, side in _sides(sim, hw):
         if len(side.runs_seen) > 1:
-            problems.append(f"{label} spans run host IDs {sorted(side.runs_seen)}")
-        if len(side.zone_starts) != 1 or len(side.zone_ends) != 1:
             problems.append(
-                f"{label} has {len(side.zone_starts)} ZONE_START / "
-                f"{len(side.zone_ends)} ZONE_END, expected exactly one of each"
+                f"{label} {side.label} spans run host IDs "
+                f"{sorted(side.runs_seen)} -- that is more than one program "
+                "execution in one comparison"
+            )
+        starts, ends = side.zone_starts, side.zone_ends
+        if len(starts) != 1 or len(ends) != 1:
+            names = sorted({e.zone for e in starts + ends if e.zone}) or ["unnamed"]
+            problems.append(
+                f"{label} {side.label} has {len(starts)} kernel ZONE_START / "
+                f"{len(ends)} ZONE_END ({', '.join(names)}), expected one of each. "
+                f"Nested profiler flushes are not counted here and are not the "
+                f"cause ({side.profiler_pushes} seen). Each program execution "
+                "writes its own noc_trace_dev*_ID*.json: decompose them one at a "
+                "time. They are separate spans and this leg will not blend them"
             )
     if problems:
         return GateResult("single_window", False, "; ".join(problems))
     detail = f"sim span {sim.span} cycles"
+    if sim.profiler_pushes:
+        detail += f" ({sim.profiler_pushes} profiler flush(es) nested inside it)"
     if hw is not None:
         detail += f", card span {hw.span} cycles"
+        if hw.profiler_pushes:
+            detail += f" ({hw.profiler_pushes} profiler flush(es))"
     return GateResult("single_window", True, detail)
 
 
@@ -1017,6 +1218,8 @@ class StreamReport:
     hw_span: int = 0
     sim_classes: dict = field(default_factory=dict)
     unbarriered: int = 0
+    sim_pushes: int = 0
+    hw_pushes: int = 0
     notes: list = field(default_factory=list)
 
     @property
@@ -1051,6 +1254,8 @@ class StreamReport:
             "latency_classes_sim": [c.to_dict() for c in self.sim_classes.values()],
             "latency_comparisons": [latency.to_dict() for latency in self.latencies],
             "unbarriered_transactions": self.unbarriered,
+            "sim_profiler_pushes": self.sim_pushes,
+            "hw_profiler_pushes": self.hw_pushes,
             "passed": self.passed,
             "notes": self.notes,
         }
@@ -1080,9 +1285,14 @@ def analyse_stream(sim, hw, mapped=False, expect_arm=None, peer=None):
 
     report.sim_span = sim.span
     report.sim_partition = partition(sim)
-    note = prologue_note(report.sim_partition, report.sim_span, "sim")
-    if note:
-        report.notes.append(note)
+    report.sim_pushes = sim.profiler_pushes
+    for note in (
+        prologue_note(report.sim_partition, report.sim_span, "sim"),
+        profiler_note(sim, report.sim_partition, report.sim_span, "sim"),
+        nested_zone_note(sim, "sim"),
+    ):
+        if note:
+            report.notes.append(note)
     report.sim_classes, report.unbarriered = latency_classes(sim)
     if report.unbarriered:
         report.notes.append(
@@ -1097,9 +1307,20 @@ def analyse_stream(sim, hw, mapped=False, expect_arm=None, peer=None):
 
     report.hw_span = hw.span
     report.hw_partition = partition(hw)
-    note = prologue_note(report.hw_partition, report.hw_span, "card")
-    if note:
-        report.notes.append(note)
+    report.hw_pushes = hw.profiler_pushes
+    for note in (
+        prologue_note(report.hw_partition, report.hw_span, "card"),
+        profiler_note(hw, report.hw_partition, report.hw_span, "card"),
+        nested_zone_note(hw, "card"),
+    ):
+        if note:
+            report.notes.append(note)
+    if report.sim_pushes != report.hw_pushes:
+        report.notes.append(
+            f"sim flushed the profiler buffer {report.sim_pushes} time(s), card "
+            f"{report.hw_pushes} -- the two spans carry different amounts of the "
+            "instrument, and the `profiler` bucket is where that difference sits"
+        )
     hw_classes, hw_unbarriered = latency_classes(hw)
     if hw_unbarriered != report.unbarriered:
         report.notes.append(

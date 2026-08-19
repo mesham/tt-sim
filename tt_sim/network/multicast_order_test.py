@@ -25,6 +25,7 @@ independently of the check, so turning the check off does not put it back.
 
 import pytest
 
+from tt_sim.behaviour import require
 from tt_sim.device.blackhole import Blackhole
 from tt_sim.device.wormhole import Wormhole
 from tt_sim.network.multicast_order import (
@@ -98,9 +99,17 @@ def _rectangle(device, noc, *, descending):
     return (low[0], low[1], high[0], high[1])
 
 
+#: Cycles to let a multicast land before reading destinations. 64 is enough
+#: with the cost model OFF, and NOT enough with it ON -- a charged NoC flight
+#: delivered 1 of 3 destinations in 64 cycles and all 3 by 128. The negative
+#: tests assert an EMPTY result, so this must also be long enough that "nothing
+#: arrived" means it never will; 1024 is 8x the observed requirement.
+_SETTLE_CYCLES = 1024
+
+
 def _received(device, coords):
     """Which of ``coords`` have the payload sitting at the destination address."""
-    device.clocks[0].run(64)
+    device.clocks[0].run(_SETTLE_CYCLES)
     return [
         c for c in coords if bytes(device.read(c, _L1_DST, len(_PAYLOAD))) == _PAYLOAD
     ]
@@ -290,3 +299,15 @@ def test_disabling_the_check_does_not_undo_the_enumeration_fix():
         assert _received(device, _WH_ROW) == _WH_ROW
     finally:
         set_checking_enabled(True)
+
+
+def test_the_behaviour_marker_for_this_guard_is_published():
+    """The guard and the name external suites assert on live and die together.
+
+    ``tt_sim.behaviour`` publishes ``noc1-multicast-corner-order`` so a consumer's suite can refuse
+    to run against a tt-sim that lacks this check rather than collect another
+    set of green results that exercised nothing. Deleting the registry entry
+    therefore has to turn *this* suite red — a marker quietly withdrawn is
+    exactly the failure the marker exists to prevent.
+    """
+    require("noc1-multicast-corner-order")

@@ -1,12 +1,30 @@
 # nocevbench testdata
 
-Three NoC event traces. **One is a measurement. Two are not.**
+Four NoC event traces. **Two are measurements. Two are not.**
 
 | file | what it is |
 | --- | --- |
 | `sim-blackhole-4096.json` | **Real.** `nocevbench 4096 8` against tt-sim's Blackhole, 2026-08-16, `TT_SIM_COST_MODEL=1`, `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1`, tt-metal 0.74. Unmodified. |
+| `sim-gemm256-16core-brisc-EXTRACT.json` | **Real, and a reduced extract.** See below. |
 | `card-agreeing-SYNTHETIC-NOT-A-MEASUREMENT.json` | **Synthetic.** No card session for this leg exists. |
 | `card-compensating-SYNTHETIC-NOT-A-MEASUREMENT.json` | **Synthetic.** Likewise. |
+
+## `sim-gemm256-16core-brisc-EXTRACT.json`
+
+**A reduced extract, and the reduction is the only thing done to it.** The
+source is the compiler team's 16-core Blackhole `gemm_256_check` capture of
+2026-08-19 (the pre-slab half), 2.94 MB and 11,872 records across 32 streams.
+Checking that in whole is not worth 2.94 MB for what it guards, so this file is
+the **140 records of one stream** — BRISC on core `(1, 2)` — copied out
+verbatim, in their original order, with no field altered and nothing rescaled.
+Every number it yields is a real number from that run.
+
+It is here because it is the input this leg used to **decline**. All 32 of that
+capture's streams were refused as `single_window`, on the grounds of "2 to 5
+`ZONE_START`, expected exactly one" — which was the device profiler's own
+`PROFILER-NOC-QUICK-PUSH` flush zone nesting inside the kernel zone, not a
+second launch. This stream carries exactly that: one `BRISC-KERNEL` pair
+spanning 60,754 cycles, and one flush inside it costing 183 cycles.
 
 The two synthetic files are stamped `NOT-A-MEASUREMENT` in their filenames, and
 nothing in this repo may quote a number from them as a property of hardware.

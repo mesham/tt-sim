@@ -22,6 +22,7 @@ import pytest
 from tt_sim.perf.noc_events import (
     ARM_NOC_PAIRING,
     MECHANISMS,
+    PROFILER_PUSH_ZONE,
     PROLOGUE_CAVEAT,
     PROLOGUE_DOMINATES,
     TOLERANCE,
@@ -47,6 +48,7 @@ from tt_sim.perf.noc_events import (
 
 TESTDATA = Path(__file__).resolve().parents[2] / "perfbench" / "nocevbench" / "testdata"
 SIM = TESTDATA / "sim-blackhole-4096.json"
+GEMM256 = TESTDATA / "sim-gemm256-16core-brisc-EXTRACT.json"
 CARD_AGREE = TESTDATA / "card-agreeing-SYNTHETIC-NOT-A-MEASUREMENT.json"
 CARD_COMP = TESTDATA / "card-compensating-SYNTHETIC-NOT-A-MEASUREMENT.json"
 
@@ -62,8 +64,13 @@ def rec(ts, **kw):
     return out
 
 
-def zone(ts, phase, proc="NCRISC"):
-    return rec(ts, proc=proc, zone="NCRISC-KERNEL", zone_phase=phase)
+def zone(ts, phase, proc="NCRISC", name=None):
+    return rec(ts, proc=proc, zone=name or f"{proc}-KERNEL", zone_phase=phase)
+
+
+def push(ts, phase, proc="NCRISC"):
+    """One endpoint of the device profiler's own L1-buffer flush zone."""
+    return zone(ts, phase, proc, name=PROFILER_PUSH_ZONE)
 
 
 def noc(ts, kind, proc="NCRISC", num_bytes=0, nocname="NOC_1"):
@@ -154,6 +161,7 @@ def test_every_bucket_is_opened_by_the_event_it_names():
         "write_wait": 0,
         "other_wait": 0,
         "local": 20,  # READ_BARRIER_END -> ZONE_END
+        "profiler": 0,
     }
 
 
@@ -688,11 +696,19 @@ def test_the_prologue_caveat_is_unconditional_in_both_render_modes():
         assert "prologue *" in text  # the row itself carries the marker
 
 
-def test_the_partition_stays_the_compared_six_buckets():
+def test_the_partition_stays_the_compared_seven_buckets():
     """The refusal, pinned. A ``pre_first_event_wait`` bucket is recoverable
     only simulator-side, so adding it to *this* tuple would put a bucket the
     card cannot fill into E_int. If a future change adds one, it must move this
-    guard deliberately."""
+    guard deliberately.
+
+    ``profiler`` was added deliberately, on 2026-08-19, and passes that test:
+    the profiler's own ``PROFILER-NOC-QUICK-PUSH`` flush is recorded by the same
+    firmware in the same artefact on **both** sides, so E_int compares like with
+    like. It is here rather than inside ``issue`` because a push is triggered
+    from the issue path, and folding it in would charge the model for the
+    difference between how a card and tt-sim execute the *instrument's* own DRAM
+    write."""
     assert MECHANISMS == (
         "prologue",
         "issue",
@@ -700,7 +716,152 @@ def test_the_partition_stays_the_compared_six_buckets():
         "write_wait",
         "other_wait",
         "local",
+        "profiler",
     )
     for report in analyse(load_trace(SIM), None):
         assert set(report.sim_partition) == set(MECHANISMS)
         assert sum(report.sim_partition.values()) == report.sim_span
+
+
+# ---------------------------------------------------------------------------
+# The profiler's own zone, nested inside the kernel zone
+# ---------------------------------------------------------------------------
+#
+# ``kernel_profiler::quick_push()`` flushes the per-RISC L1 marker buffer to
+# DRAM when it fills mid-kernel, and brackets itself in a
+# ``PROFILER-NOC-QUICK-PUSH`` zone that reaches the artefact because tt-metal's
+# own filter still names the zone's old spelling. Counting those endpoints as
+# launches is what made this leg decline every real workload put to it: the
+# 16-core ``gemm_256_check`` pair of 2026-08-19 refused all 32 streams on both
+# halves, all of which carry exactly one kernel window.
+
+
+def push_stream(pushes=1, proc="NCRISC"):
+    """A read kernel whose profiler flushed ``pushes`` times mid-kernel.
+
+    Shaped like the real capture: the push sits between two issue events,
+    because ``recordNocEvent`` flushes *before* it records.
+    """
+    records = [zone(0, "ZONE_START", proc), noc(100, "READ", proc, 4096)]
+    ts = 100
+    for _ in range(pushes):
+        ts += 110  # workload's own inter-issue interval
+        records.append(push(ts, "ZONE_START", proc))
+        records.append(push(ts + 24, "ZONE_END", proc))  # the two markers
+        ts += 190  # the markers plus the DMA and its posted-write flush
+        records.append(noc(ts, "READ", proc, 4096))
+    records.append(noc(ts + 10, "READ_BARRIER_START", proc))
+    records.append(noc(ts + 110, "READ_BARRIER_END", proc))
+    records.append(zone(ts + 130, "ZONE_END", proc))
+    return records
+
+
+def test_the_profiler_s_own_flush_is_not_a_second_launch():
+    """The refusal this leg used to give a real 16-core capture. Five zone
+    starts on one stream were one kernel window and four buffer flushes."""
+    stream = stream_of(push_stream(pushes=4))
+    assert stream.profiler_pushes == 4
+    assert len(stream.zone_starts) == 1
+    gate = gate_single_window(stream, None)
+    assert gate.passed, gate.detail
+    assert "4 profiler flush(es)" in gate.detail
+
+
+def test_the_flush_is_bucketed_apart_from_issue_not_folded_into_it():
+    """A push is triggered from inside the issue path, so absorbing it would
+    charge the model for how the *instrument* executes its own DRAM write."""
+    part = partition(stream_of(push_stream(pushes=2)))
+    # the push's own ZONE_START to the next event outside it: 24 cycles of
+    # markers, then 166 for the DMA the ZONE_END marker precedes
+    assert part["profiler"] == 2 * 190
+    # the workload's inter-issue intervals, and nothing of the push
+    assert part["issue"] == 110 + 110 + 10
+    assert sum(part.values()) == stream_of(push_stream(pushes=2)).span
+
+
+def test_a_stream_with_flushes_still_closes_and_never_goes_negative():
+    for pushes in (0, 1, 4):
+        stream = stream_of(push_stream(pushes=pushes))
+        part = partition(stream)
+        assert sum(part.values()) == stream.span, pushes
+        assert min(part.values()) >= 0
+        assert gate_partition_closes(stream, None).passed
+
+
+def test_the_flush_is_noted_at_any_size():
+    """Not gated on a share threshold: a reader comparing two captures has to
+    know one of them carries more of the instrument than the other."""
+    report = analyse(_load(push_stream(pushes=3)), None)[0]
+    assert report.sim_pushes == 3
+    note = next(n for n in report.notes if "flushed its own L1 marker buffer" in n)
+    assert "3 time(s)" in note
+    assert "upper bound" in note
+
+
+def test_two_real_kernel_launches_are_still_refused_and_told_what_to_do():
+    """The gate that matters is unchanged: two *kernel* zones in one file are
+    two program executions and will not be blended, flushes or no flushes."""
+    records = push_stream(pushes=1) + [
+        zone(5000, "ZONE_START"),
+        noc(5010, "READ", num_bytes=4096),
+        noc(5020, "READ_BARRIER_START"),
+        noc(5120, "READ_BARRIER_END"),
+        zone(5140, "ZONE_END"),
+    ]
+    gate = gate_single_window(stream_of(records), None)
+    assert not gate.passed
+    assert "2 kernel ZONE_START" in gate.detail
+    assert "NCRISC-KERNEL" in gate.detail
+    assert "one at a time" in gate.detail
+    assert "1 seen" in gate.detail  # the flush is named as NOT the cause
+
+
+def test_a_consumers_own_nested_zone_is_passed_through_and_named():
+    """Unlike a profiler flush, a ``DeviceZoneScopedN`` brackets the kernel's
+    own work, so its time stays in the enclosing bucket rather than moving to a
+    bucket of its own -- but the pass-through is never silent."""
+    records = [
+        zone(0, "ZONE_START"),
+        noc(10, "READ", num_bytes=4096),
+        zone(20, "ZONE_START", name="MY-INNER-ZONE"),
+        zone(60, "ZONE_END", name="MY-INNER-ZONE"),
+        noc(110, "READ_BARRIER_START"),
+        noc(210, "READ_BARRIER_END"),
+        zone(230, "ZONE_END"),
+    ]
+    stream = stream_of(records)
+    assert stream.nested_zone_names == ["MY-INNER-ZONE"]
+    part = partition(stream)
+    assert sum(part.values()) == stream.span == 230
+    assert part["issue"] == 100  # READ -> READ_BARRIER_START, straight through
+    assert part["profiler"] == 0
+    report = analyse(_load(records), None)[0]
+    assert any("MY-INNER-ZONE" in n for n in report.notes)
+
+
+# ---------------------------------------------------------------------------
+# The reduced real extract
+# ---------------------------------------------------------------------------
+
+
+def test_the_real_16_core_capture_decomposes_rather_than_refusing():
+    """One BRISC stream of the 2026-08-19 ``gemm_256_check`` pair, unmodified.
+    Every one of that capture's 32 streams was declined as ``single_window``;
+    this is the shape of the input that did it."""
+    reports = analyse(load_trace(GEMM256), None)
+    assert len(reports) == 1
+    report = reports[0]
+    assert not report.refused, [g.detail for g in report.gates if not g.passed]
+    assert report.sim_span == 60754
+    assert report.sim_pushes == 1
+    assert sum(report.sim_partition.values()) == report.sim_span
+    assert report.sim_partition["profiler"] == 183
+    assert report.sim_partition["issue"] == 9202
+
+
+def test_the_real_extract_carries_a_genuine_profiler_flush():
+    """Guards the extract itself: if it were re-cut without a flush in it, the
+    test above would pass for the wrong reason."""
+    events = load_trace(GEMM256)
+    names = {e.zone for e in events if e.kind == "zone"}
+    assert names == {"BRISC-KERNEL", PROFILER_PUSH_ZONE}
