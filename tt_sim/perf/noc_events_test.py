@@ -21,6 +21,9 @@ import pytest
 
 from tt_sim.perf.noc_events import (
     ARM_NOC_PAIRING,
+    MECHANISMS,
+    PROLOGUE_CAVEAT,
+    PROLOGUE_DOMINATES,
     TOLERANCE,
     analyse,
     census,
@@ -38,6 +41,7 @@ from tt_sim.perf.noc_events import (
     main,
     parse_core_map,
     partition,
+    prologue_note,
     render,
 )
 
@@ -594,3 +598,109 @@ def test_check_arm_still_refuses_a_peer_it_never_addressed():
     }
     problems, _ = module.check("C", _arm_c_trace((4, 4), (4, 4)), config)
     assert any("did not go to the core the arm names" in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# ``prologue`` is unattributed time, not setup time
+#
+# The defect these guard is a reading error, not an arithmetic one: a writer
+# kernel that blocks in ``cb_wait_front`` before its first NoC transaction shows
+# 92 % ``prologue``, and nothing in the artefact says so. The caveat therefore
+# has to be unconditional, and the loud line has to fire on exactly that shape.
+# ---------------------------------------------------------------------------
+
+
+def writer_stream(prologue=6370, proc="BRISC"):
+    """The gemm_128 writer shape: a long blocking wait, then a short burst.
+
+    ``cb_wait_front`` emits nothing, so the whole wait is one interval from
+    ``ZONE_START`` to the first ``WRITE_``.
+    """
+    return [
+        zone(0, "ZONE_START", proc),
+        noc(prologue, "WRITE_", proc, 4096, "NOC_0"),
+        noc(prologue + 196, "WRITE_BARRIER_START", proc, nocname="NOC_0"),
+        noc(prologue + 308, "WRITE_BARRIER_END", proc, nocname="NOC_0"),
+        zone(prologue + 562, "ZONE_END", proc),
+    ]
+
+
+def test_a_blocking_dependency_wait_lands_entirely_in_prologue():
+    """The finding itself, pinned: the partition still closes, and the wait is
+    indistinguishable from setup by arithmetic alone -- which is why the report
+    has to say it in words."""
+    stream = stream_of(writer_stream())
+    part = partition(stream)
+    assert stream.span == 6932
+    assert part["prologue"] == 6370
+    assert sum(part.values()) == stream.span
+    assert 0.9189 == pytest.approx(part["prologue"] / stream.span, abs=5e-5)
+
+
+def test_prologue_dominating_raises_a_note_naming_the_side():
+    report = analyse(_load(writer_stream()), None)[0]
+    assert not report.refused
+    note = next(n for n in report.notes if "prologue" in n)
+    assert note.startswith("sim: ")
+    assert "91.89 %" in note
+    assert "cb_wait_front" in note
+    assert "not read it as an initialisation cost" in note
+
+
+def test_a_small_prologue_raises_no_note():
+    """The other direction: the checked-in artefact's prologue is 0.34 % and
+    1.91 %, so a note there would be noise that trains a reader to ignore it."""
+    for report in analyse(load_trace(SIM), None):
+        assert not any("prologue is" in n for n in report.notes), report.notes
+
+
+def test_the_note_threshold_is_the_documented_constant():
+    """Straddle :data:`PROLOGUE_DOMINATES` rather than trusting a magic 25 %."""
+    span = 1000
+    under = int(span * PROLOGUE_DOMINATES) - 1
+    over = int(span * PROLOGUE_DOMINATES) + 1
+    # span is prologue + 562 of tail in the builder, so size the wait directly.
+    assert prologue_note({"prologue": under}, span, "sim") is None
+    assert prologue_note({"prologue": over}, span, "sim") is not None
+    assert prologue_note({"prologue": 100}, 0, "sim") is None
+
+
+def test_the_card_side_gets_its_own_note():
+    """A dependency-bound *card* stream must be named as the card's, not the
+    simulator's -- which side stalled is the actionable half."""
+    sim = writer_stream(prologue=100, proc="NCRISC")
+    card = writer_stream(prologue=6370, proc="NCRISC")
+    report = analyse(_load(sim), _load(card))[0]
+    assert not report.refused, report.gates
+    assert any(n.startswith("card: prologue") for n in report.notes)
+    assert not any(n.startswith("sim: prologue") for n in report.notes)
+
+
+def test_the_prologue_caveat_is_unconditional_in_both_render_modes():
+    """It appears even when the number is small: a small prologue is a smaller
+    upper bound on setup, not proof that it *is* setup."""
+    head = PROLOGUE_CAVEAT[0]
+    decompose = render(analyse(load_trace(SIM), None), decompose_only=True)
+    comparison = render(analyse(load_trace(SIM), load_trace(CARD_AGREE)))
+    for text in (decompose, comparison):
+        assert head in text
+        assert "not comparable across cores" in text
+        assert "prologue *" in text  # the row itself carries the marker
+
+
+def test_the_partition_stays_the_compared_six_buckets():
+    """The refusal, pinned. A ``pre_first_event_wait`` bucket is recoverable
+    only simulator-side, so adding it to *this* tuple would put a bucket the
+    card cannot fill into E_int. If a future change adds one, it must move this
+    guard deliberately."""
+    assert MECHANISMS == (
+        "prologue",
+        "issue",
+        "read_wait",
+        "write_wait",
+        "other_wait",
+        "local",
+    )
+    for report in analyse(load_trace(SIM), None):
+        assert set(report.sim_partition) == set(MECHANISMS)
+        assert sum(report.sim_partition.values()) == report.sim_span

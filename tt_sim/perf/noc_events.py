@@ -51,7 +51,8 @@ interval is attributed by **the event that opened it**:
 ===============  =========================================================
 bucket           the interval from ...
 ===============  =========================================================
-``prologue``     ``ZONE_START`` to the first NoC event
+``prologue``     ``ZONE_START`` to the first NoC event -- **not a setup cost**,
+                 see below
 ``issue``        a transaction-issuing event to the next event
 ``read_wait``    ``READ_BARRIER_START`` to ``READ_BARRIER_END``
 ``write_wait``   ``WRITE_BARRIER_START`` to ``WRITE_BARRIER_END``
@@ -67,6 +68,71 @@ something. It also makes :func:`gate_partition_closes` a live test rather than
 a formality: a negative interval means the timestamps are not monotonic, which
 the 44-bit wall clock and its non-atomic high/low read pair can genuinely
 produce.
+
+``prologue`` is unattributed time, not setup time
+------------------------------------------------
+
+This is the one bucket whose name flatters it, and the correction belongs next
+to the definition rather than in a footnote. ``prologue`` is defined purely
+mechanically -- ``ZONE_START`` to the *first NoC event* -- and **anything at all
+the core did in that interval lands in it**, including a blocking wait.
+
+The reason is structural and cannot be fixed on this side. Every bucket except
+this one is opened by a recorded event, and a wait that emits no event therefore
+has no interval to attach to. ``cb_wait_front`` / ``cb_reserve_back`` emit
+nothing: the artefact carries exactly ``ZONE_START``/``ZONE_END`` and the
+``NocEventType`` records, and a circular-buffer wait is neither. So a kernel
+whose body is "read four ``get_arg_val`` arguments, ``cb_wait_front`` for the
+compute kernel's first output tile, then ``noc_async_write``" spends its
+entire dependency wait inside ``prologue``, indistinguishable from address
+arithmetic.
+
+Reported by this leg's first external consumer on a 4-core ``gemm_128``,
+2026-08-18: a writer kernel with ``prologue`` at **91.89 %** of a 6,932-cycle
+span. No semaphore anywhere in the build; it was ``cb_wait_front(2, 1)`` waiting
+on the compute pipeline.
+
+**Reader/writer asymmetry: ``prologue`` is not comparable across cores.** Where
+a core sits in the pipeline decides what its ``prologue`` contains. A reader at
+the head has nothing upstream of it -- a few argument reads and a
+``cb_reserve_back`` on an empty CB that cannot block -- so its ``prologue``
+really is setup, tens of cycles. A writer at the tail cannot start until its
+producer has produced, so its ``prologue`` is that producer's whole latency.
+Ranking cores by ``prologue``, or summing it across a grid, therefore adds
+quantities that are not the same quantity.
+
+Read ``prologue`` as **"time before the first NoC event, cause unknown"**. It
+is an *upper* bound on setup and nothing more; a large value is evidence of a
+dependency, not of expensive initialisation. :data:`PROLOGUE_DOMINATES` is the
+share above which the report says so out loud, per stream.
+
+**No tt-metal flag recovers the split for these streams.** Checked against
+tt-metal 0.74 rather than assumed. The dataflow ``cb_wait_front`` /
+``cb_reserve_back`` (``tt_metal/hw/inc/api/dataflow/dataflow_api.h:473``,
+``:403``) carry only a watcher ``WAYPOINT`` -- a four-character string stored
+into a mailbox slot and overwritten by the next waypoint, with no timestamp and
+no path into any artefact -- and ``NocEventType``
+(``tools/profiler/event_metadata.hpp:15``) has no CB member at all. The
+comparison worth drawing is ``noc_semaphore_wait`` (``dataflow_api.h:1929``),
+which *does* record ``SEMAPHORE_WAIT``, which is why ``other_wait`` exists and
+``prologue`` cannot be split the same way. The one opt-in that measures a CB
+wait, ``TT_METAL_PROFILER_SUM=1``, instruments the **compute** side only
+(``DeviceZoneScopedSumN1("CB-COMPUTE-WAIT-FRONT")`` in
+``hw/ckernels/*/metal/llk_io/llk_io_unpack.h``), emits a single accumulated
+cycle *total* per RISC per op into ``profile_log_device.csv`` with the op's
+timestamp rather than the wait's, and is dropped outright by
+``convertNocTracePacketsToJson`` (it is a ``ZONE_TOTAL``, which that filter does
+not admit). So it neither reaches this artefact nor describes the interval in
+question.
+
+**Why there is no ``pre_first_event_wait`` bucket splitting the two.** Not for
+want of asking -- the consumer suggested exactly that. It is refused because
+the split is not recoverable *on the card*, and a bucket only the simulator can
+fill would silently break the comparison this module exists for: the card's
+share of it would be zero by construction and ``E_int`` would charge the model
+for an artefact of instrumentation. tt-sim does know more here (a baby core
+polling L1 is recognised by :mod:`tt_sim.pe.rv.spin`), but that knowledge has no
+counterpart in ``noc_trace_*.json``, so it stays out of the partition.
 
 The criterion is the same as the sibling leg's, with this leg's own stated
 tolerance:
@@ -90,6 +156,25 @@ from pathlib import Path
 #: This leg's stated tolerance, from ROADMAP §4 point 4. Applied to ``E_total``,
 #: to ``E_int`` and to every transaction class's mean observed latency.
 TOLERANCE = 0.25
+
+#: Share of a stream's span above which ``prologue`` is called out as a probable
+#: dependency wait rather than setup. A heuristic for the *warning* only -- the
+#: caveat under the table is unconditional, because a small ``prologue`` is not
+#: proof of setup either, only a smaller upper bound on it. A quarter of a
+#: data-movement kernel's span spent before its first NoC transaction is not
+#: plausibly address arithmetic, which is what makes it worth a line of its own.
+PROLOGUE_DOMINATES = 0.25
+
+#: What ``prologue`` actually contains, said wherever the number is shown. See
+#: the module docstring for the full argument.
+PROLOGUE_CAVEAT = (
+    "prologue is ZONE_START to the first NoC event -- NOT a setup cost. A",
+    "blocking wait that emits no event (cb_wait_front / cb_reserve_back on a",
+    "producer's output) has no bucket of its own and lands here. A core at the",
+    "END of a pipeline shows its upstream dependency as prologue, so prologue",
+    "is not comparable across cores. Read it as time before the first NoC",
+    "event, cause unknown.",
+)
 
 #: Buckets, in report order. See the module docstring for what opens each.
 MECHANISMS = (
@@ -351,6 +436,28 @@ def partition(stream):
             continue
         part[bucket] += following.timestamp - current.timestamp
     return part
+
+
+def prologue_note(part, span, side):
+    """A note when ``prologue`` dominates ``side``'s span, else ``None``.
+
+    Emitted per side rather than per report because the two sides are separate
+    measurements: a card stream can be dependency-bound while the simulator's is
+    not, and saying which one it was is the actionable half. It is a *note*, not
+    a gate -- a dependency wait is a true property of the workload, not a defect
+    in either side's timing, so refusing the stream over it would be wrong.
+    """
+    if span <= 0:
+        return None
+    share = part.get("prologue", 0) / span
+    if share <= PROLOGUE_DOMINATES:
+        return None
+    return (
+        f"{side}: prologue is {100.0 * share:.2f} % of the span. That is very "
+        "unlikely to be setup -- a blocking dependency wait before the first NoC "
+        "event (cb_wait_front on a producer's output) is recorded nowhere and "
+        "falls into prologue. Do not read it as an initialisation cost."
+    )
 
 
 def partition_closes(part, span):
@@ -973,6 +1080,9 @@ def analyse_stream(sim, hw, mapped=False, expect_arm=None, peer=None):
 
     report.sim_span = sim.span
     report.sim_partition = partition(sim)
+    note = prologue_note(report.sim_partition, report.sim_span, "sim")
+    if note:
+        report.notes.append(note)
     report.sim_classes, report.unbarriered = latency_classes(sim)
     if report.unbarriered:
         report.notes.append(
@@ -987,6 +1097,9 @@ def analyse_stream(sim, hw, mapped=False, expect_arm=None, peer=None):
 
     report.hw_span = hw.span
     report.hw_partition = partition(hw)
+    note = prologue_note(report.hw_partition, report.hw_span, "card")
+    if note:
+        report.notes.append(note)
     hw_classes, hw_unbarriered = latency_classes(hw)
     if hw_unbarriered != report.unbarriered:
         report.notes.append(
@@ -1043,6 +1156,18 @@ def _pct(x):
     return f"{100.0 * x:.2f} %"
 
 
+def _label(name):
+    """Bucket name as shown, starred where the number needs its caveat read."""
+    return f"{name} *" if name == "prologue" else name
+
+
+def _caveat_lines():
+    """The standing ``prologue`` caveat, indented under a mechanism table."""
+    return [
+        f"  {'*' if i == 0 else ' '} {line}" for i, line in enumerate(PROLOGUE_CAVEAT)
+    ]
+
+
 def render(reports, decompose_only=False, internal=None):
     out = []
     out.append("tt-sim NoC timing vs a card's NoC event trace, by mechanism")
@@ -1067,10 +1192,13 @@ def render(reports, decompose_only=False, internal=None):
             span = max(1, report.sim_span)
             for name in MECHANISMS:
                 value = report.sim_partition[name]
-                out.append(f"  {name:<16}{value:>14}{100.0 * value / span:>11.2f} %")
+                out.append(
+                    f"  {_label(name):<16}{value:>14}{100.0 * value / span:>11.2f} %"
+                )
             out.append(
                 f"  {'TOTAL':<16}{sum(report.sim_partition.values()):>14}{100.0:>11.2f} %"
             )
+            out.extend(_caveat_lines())
             out.append("")
             out.append(
                 "  observed issue-to-barrier-end latency (NOT a per-packet flight time)"
@@ -1099,10 +1227,13 @@ def render(reports, decompose_only=False, internal=None):
         )
         denom = max(1, report.hw_span)
         for name in MECHANISMS:
-            s, h = report.sim_partition[name], report.hw_partition[name]
+            sim_value, hw_value = report.sim_partition[name], report.hw_partition[name]
             out.append(
-                f"  {name:<16}{s:>12}{h:>12}{abs(s - h):>12}{100.0 * abs(s - h) / denom:>9.2f} %"
+                f"  {_label(name):<16}{sim_value:>12}{hw_value:>12}"
+                f"{abs(sim_value - hw_value):>12}"
+                f"{100.0 * abs(sim_value - hw_value) / denom:>9.2f} %"
             )
+        out.extend(_caveat_lines())
         out.append("")
         comparison = report.comparison
         ratio = (
