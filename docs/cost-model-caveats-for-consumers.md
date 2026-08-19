@@ -1,0 +1,99 @@
+# Cost-model caveats for consumers
+
+**Audience:** anyone weighing a codegen or scheduling decision against tt-sim's
+cycle model — the compiler team first among them. It is the companion to
+[`docs/trace-schema.md`](trace-schema.md): that document says what the outputs
+*mean*, this one says where they are *known to be wrong*, and by how much.
+
+Everything here is measured against real silicon and permanent unless the entry
+says otherwise. A caveat that is merely suspected does not belong on this page.
+
+## The model is a floor, by rule
+
+Every bound in the cost tables is charged at its **low end**. Where the
+documentation gives a range, tt-sim charges the minimum. So the model
+**under-predicts**, monotonically, and never over-predicts — which makes a
+tt-sim cycle count a *lower bound* on hardware, not an estimate of it.
+
+This is deliberate: it keeps un-sourced numbers out of the tables, and it means
+a disagreement with silicon always has a known sign. It also means the size of
+the gap varies by instruction, and the one below is the largest known.
+
+## Integer divide is under-charged by up to 5x
+
+**tt-sim charges 6 cycles. Silicon delivers up to ~33.**
+
+Measured on a Blackhole p150, three repeats, bit-identical across all three
+(`perfbench/card-sessions/2026-08-18-bh-retirebench/`):
+
+| dividend | significant bits | cycles per divide, measured |
+| --- | --- | --- |
+| `0xFFF` | 12 | **14.04** |
+| `0x12345678` | 29 | **33.10** |
+
+Two further instruments agree at the top end: `perfbench/riscvbench` reads
+33.001 / 33.004 on Blackhole and 33.03 on a Wormhole card.
+
+**What this means for codegen.** Any decision weighed against tt-sim's cost
+model under-weights integer division, by a factor rising with the magnitude of
+the dividend. If a transformation trades divides against almost anything else,
+tt-sim will under-state the cost of keeping them.
+
+**It only bites for runtime divisors.** `tt_metal/hw/inc/internal/mod_div_lib.h`
+is a table of reciprocal multiply-shift helpers, and SFPI's GCC tuning
+strength-reduces every compile-time-constant divisor, so a hardware divide
+reaches a kernel only when the divisor is not known at compile time. A
+constant-divisor division is not affected by this caveat at all.
+
+**It cannot be fixed, and that is established rather than assumed.** The ISA
+documentation gives a 6–33 cycle range and the words "dependent upon the
+magnitude of the dividend", and nothing else: no radix, no per-bit rule, no
+formula, no worked example. Both architecture doc trees were searched
+exhaustively — 602 files, `quotient` appears zero times and `dividend` four,
+being the same two sentences once per architecture. Every vendor tree yielded
+one hit, `mod_div_lib.h:129`, which is strictly weaker still. A
+magnitude-dependent term is therefore unlicensable at every rank of tt-sim's
+provenance ladder, and the tables forbid un-sourced entries.
+
+The obvious curves are excluded rather than merely unpinned: `cycles = bits + k`
+needs a single `k` and gets 2.018 at 12 bits against 4.043 at 29, and the affine
+law through both points reads 1.71 cycles at one bit (below the documented floor
+of six) and 36.40 at 32 (above the documented cap of 33).
+
+**Tracked upstream.** [`docs/upstream/divide-cycle-cap-report.md`](upstream/divide-cycle-cap-report.md)
+is a drafted report asking Tenstorrent to state the rule. If it is answered,
+this caveat lifts and the model gains a real term; until then, design around it.
+
+## Mechanism-level attribution is validated for NoC work only
+
+tt-sim's per-mechanism cycle attribution (rung 4) has three legs. Only one is
+validated against silicon on both architectures:
+
+| leg | status |
+| --- | --- |
+| NoC-bound | **validated on both**, 0.2–9.3 % against a 25 % bar |
+| RV-bound | Blackhole only; **fails** its bar, entirely on the divide above |
+| Tensix mechanism | **cannot be built** from the counters this hardware exposes |
+
+So a NoC-bound attribution is corroborated; a per-mechanism split of Tensix
+work is the model's own opinion, not a checked one. The RV-bound leg's failure
+has the single cause above and is 2.49 % once the divide zones are removed.
+
+## Energy figures are ranking-level and weak
+
+`perfbench/energybench` fits energy coefficients that pass thirteen gates on two
+architectures — but against a null model that takes energy as proportional to
+simulated cycles, the fit is worth **one rank swap in nine on Wormhole and
+nothing at all on Blackhole**. The ratios are better than the null, and only on
+Wormhole.
+
+Absolute joules are out of reach of the instrument (board-level power at ~1 Hz).
+Do not use these coefficients to compare anything but workloads of the same
+shape, and never quote them as energy costs.
+
+## What is *not* on this page
+
+Known-unreached functional edges — conditions the simulator does not model
+because no kernel has reached them — are in `ROADMAP.md` §6. They are not
+cost-model caveats: they are places the simulator would raise rather than
+quietly mis-model, which is a different risk and one you would notice.

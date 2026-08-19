@@ -4,6 +4,12 @@
 a change to any field name or meaning described here is a breaking
 change and comes with a version bump.
 
+Its companion is
+[`cost-model-caveats-for-consumers.md`](cost-model-caveats-for-consumers.md):
+this document says what the fields *mean*, that one says where the cycle
+numbers are *known to be wrong*, and by how much. Read both before weighing a
+decision against a tt-sim cycle count.
+
 This is the contract between tt-sim and the tools you build on top of
 it. It is written for someone who will never read tt-sim's source: it
 says what each field means, what unit it is in, and whether you can rely

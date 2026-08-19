@@ -516,6 +516,7 @@ All are read from the environment and work in this tt-metal-driven flow.
 | `TT_SIM_PUMP_STRIDE=0` | disable the pump's time-skipping (on by default) — see below |
 | `TT_SIM_COST_MODEL=1` | charge each op the cycle cost the ISA-doc tables give it (off by default) — see below |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS=1` | accept NoC transfers whose source and destination addresses are not congruent, which hardware treats as undefined behaviour |
+| `TT_SIM_DISABLE_MULTICAST_ORDER_CHECKS=1` | accept multicast rectangles whose corners are ordered against the direction of data flow of the NoC they are issued on, which hardware resolves as a torus wrap-around and which hangs `noc_async_write_barrier` |
 | `TT_SIM_NOC1_SHADOW=warn\|error\|off` | what to do when a live Tensix worker is unreachable on NoC 1 because a mirror registration took its canonical coord (default `warn`, one line per coordinate on stderr) — see below |
 | `TT_SIM_NUMBA=0` / `=1` | never / always use the optional compiled FPU kernel, overriding the call threshold — see below |
 | `TT_SIM_NUMBA_THRESHOLD=N` | MVMULs to run before compiling the FPU kernel (default 512) |
@@ -626,6 +627,147 @@ compute result is wrong. Full table: `driver/wormhole/README.md`.
 
 Nine `TT_SIM_TRACE_*` writers produce machine-readable output for downstream
 tooling. See **`driver/wormhole/docs/profiling.md`** for the full walkthrough.
+
+### 4.3a Where your cycles went: the NoC event trace
+
+**This is the section to point an outside consumer at.** It needs no tt-sim
+knowledge, no patch to your program, and no card.
+
+`TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` is **tt-metal's own** instrumentation,
+not ours. It force-enables the device profiler and injects
+`-DPROFILE_NOC_EVENTS=1` into every kernel compile, and the device side writes
+an 8-byte record per NoC transaction into the ordinary per-RISC profiler L1
+vector — the *same* buffer the zone markers use. It works against tt-sim on both
+architectures, unmodified:
+
+```bash
+export TT_METAL_HOME=/path/to/tt-metal
+export TT_METAL_SIMULATOR=/path/to/tt-sim/driver/blackhole   # or .../wormhole
+export TT_METAL_SLOW_DISPATCH_MODE=1
+export TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1
+
+# STRONGLY RECOMMENDED: give each run its own artefact directory (see below).
+export TT_METAL_PROFILER_DIR=/tmp/mycapture-before
+
+./your_program
+# -> $TT_METAL_PROFILER_DIR/.logs/noc_trace_dev0_ID0.json
+#    (plus topology.json, cluster_coordinates.json alongside it)
+```
+
+**Where the artefact actually lands, because this is easy to get wrong.** It is
+**not** written next to your program. tt-metal writes it to
+`get_profiler_logs_dir()`, which is:
+
+| `TT_METAL_PROFILER_DIR` | output directory |
+| --- | --- |
+| unset (default) | `$TT_METAL_HOME/generated/profiler/.logs/` |
+| set | `$TT_METAL_PROFILER_DIR/.logs/` |
+
+(`tt_metal/impl/profiler/profiler_paths.hpp`.) A program can therefore finish
+cleanly, report success, and leave nothing beside itself — the capture worked,
+you are looking in the wrong place.
+
+**The default directory is shared, so two concurrent runs overwrite each
+other's trace.** This bites a before/after comparison in particular. Two ways
+out, and the first is better:
+
+- **Set `TT_METAL_PROFILER_DIR` per run.** Then the runs are fully independent
+  and can proceed **in parallel** — tt-sim itself is concurrency-safe, because
+  UMD picks a random free port per process (`simulation_host.cpp`, 50000–59999,
+  guarded by `is_port_free`), so several simulator servers coexist happily.
+- Or serialise the runs and copy the artefacts out between them.
+
+Then decompose that core's span by mechanism, with no card data and no
+simulator-quality criterion:
+
+```bash
+python3 -m tt_sim.perf.noc_events --sim .logs/noc_trace_dev0_ID0.json \
+    --decompose-only --report report.txt --json report.json
+```
+
+Per core, buckets that telescope to the kernel zone span by construction:
+
+| bucket | what it is |
+| --- | --- |
+| `issue` | **NoC command issue** — between an issuing event and the next event |
+| `read_wait` / `write_wait` | **data transfer** — the barrier spin, `START` to `END` |
+| `other_wait` | semaphore waits, full barriers, flushes |
+| `local` | a barrier `END` to the next event — the core's own work |
+| `prologue` | `ZONE_START` to the first NoC event — **not a setup cost**, see below |
+
+So *"is this phase bound by command issue or by bytes on the channel"* is
+`issue` against `read_wait + write_wait`, per core, as percentages of span.
+
+**Five things to know before you rely on it**, none of which are fixable by us:
+
+- **Every transaction event is stamped at ISSUE.** There is no per-transaction
+  completion timestamp anywhere in the artefact — the only completion-side
+  timing is a barrier's `START`/`END` pair. So `issue` is wall time between
+  events and carries whatever else the issuing core did in between; it is not a
+  modelled per-command cost.
+- `read_wait`/`write_wait` and the per-class latency table are **two readings of
+  the same intervals**, not independent measurements.
+- **Multicast counts as one command**, correctly: the events come from
+  tt-metal's kernel-side instrumentation, one stamp per
+  `noc_async_write_multicast`, even though tt-sim internally fans a multicast out
+  into one unicast write per destination. Link occupancy is separately charged as
+  a de-duplicated tree.
+- Recording is **BRISC/NCRISC only**, and firmware traffic is excluded, so the
+  streams are exactly your two data-movement kernels. Addresses and virtual
+  channels are unreachable in this path.
+- **`prologue` is unattributed time, not setup time — and it can be almost all
+  of the span.** Every other bucket is opened by a recorded event; `prologue` is
+  just "`ZONE_START` to the first NoC event", so whatever the core did in that
+  interval lands there. **A circular-buffer wait emits no event at all** — the
+  artefact carries `ZONE_START`/`ZONE_END` and NoC transaction records, and
+  `cb_wait_front` / `cb_reserve_back` are neither — so a kernel that blocks on
+  its producer before its first `noc_async_write` books that entire wait as
+  `prologue`, indistinguishable from address arithmetic. Measured by an outside
+  consumer on a 4-core `gemm_128`: a writer kernel at **91.89 % `prologue`**,
+  which was `cb_wait_front` on the compute pipeline, not initialisation.
+  - **So `prologue` is not comparable across cores.** Where a core sits in the
+    pipeline decides what its `prologue` contains. A *reader* at the head has
+    nothing upstream — argument reads and a `cb_reserve_back` on an empty CB
+    that cannot block — so tens of cycles, genuinely setup. A *writer* at the
+    tail cannot start until its producer produced, so its `prologue` is that
+    producer's whole latency. Ranking cores by `prologue`, or summing it across
+    a grid, adds quantities that are not the same quantity.
+  - **No tt-metal flag fixes this**, checked rather than assumed (0.74). The
+    dataflow `cb_wait_front` / `cb_reserve_back` carry only a watcher
+    `WAYPOINT` — a 4-character string in a mailbox slot, overwritten by the next
+    one, never timestamped, and it reaches no artefact. `NocEventType` has no CB
+    member; `noc_semaphore_wait` *does* record one, which is why `other_wait`
+    exists and this does not. `TT_METAL_PROFILER_SUM=1` does measure CB waits,
+    but only on the **compute** side, only as one accumulated cycle total per
+    RISC per op in `profile_log_device.csv`, stamped with the op's time rather
+    than the wait's — and it is filtered out of `noc_trace_*.json` entirely.
+  - Read it as **"time before the first NoC event, cause unknown"**: an upper
+    bound on setup, never an estimate of it. The report stars the row, prints
+    this caveat under every table, and adds a per-stream `note:` when `prologue`
+    exceeds a quarter of the span. There is deliberately **no separate
+    "dependency wait" bucket**: the split is not recoverable from the card's
+    artefact, and a bucket only the simulator could fill would break the
+    sim-versus-card comparison the same partition is used for.
+
+**Sizing a run, because device cycles alone will mislead you.** tt-sim costs
+roughly 3.6–6k simulated cycles/s *when one Tensix tile is busy* — but the pump
+ticks every materialised worker, so **wall time scales with cores as well as
+cycles**. A span of N cycles on M cores costs about M times what the same span
+costs on one. Measured, Blackhole, by the compiler team on 2026-08-18:
+
+| workload | cores | wall |
+| --- | --- | --- |
+| `gemm_128_check` | 4 | **~2 minutes** |
+| `gemm_512_check` | 32 | **> 3.5 hours**, not complete |
+
+So "0.5 ms of device span" is minutes on a handful of cores and an overnight job
+on a full grid. **Size by cores x cycles, not cycles.** If you only need the
+*shape* of a decomposition, a smaller core count usually answers it and returns
+the same day.
+
+Before weighing a decision on these numbers, read
+[`docs/cost-model-caveats-for-consumers.md`](cost-model-caveats-for-consumers.md)
+— it says where the cycle model is *known* to be wrong, and by how much.
 
 ### 4.4 Deadlock watchdog
 
