@@ -91,6 +91,73 @@ Absolute joules are out of reach of the instrument (board-level power at ~1 Hz).
 Do not use these coefficients to compare anything but workloads of the same
 shape, and never quote them as energy costs.
 
+## DRAM page-to-bank assignment: the correctness half is visible, the host-side bandwidth half is not
+
+This one splits, and the two halves have opposite answers. Read both.
+
+**A wrong-bank page lands wrong in tt-sim too, and you will see it.** tt-metal
+spreads an interleaved buffer's pages round-robin over the device's DRAM banks
+— 12 on Wormhole (6 channels x 2 `dram_view`s), 8 on Blackhole (8 channels x 1)
+— and the host's scatter and the kernel's gather compute the landing site
+*independently*. The host does it in `WriteToDeviceInterleavedContiguous`
+(`bank = page % num_banks`, `addr = base + (page / num_banks) *
+aligned_page_size`, sent to that bank's own worker core); the kernel does it in
+`InterleavedAddrGen<true>::get_noc_addr`, from the JIT define `NUM_DRAM_BANKS`
+and the `dram_bank_to_noc_xy` / `bank_to_dram_offset` tables the host wrote into
+L1 at init. Nothing cross-checks the two. Since `bank(byte) = (byte_offset /
+page_size) % num_banks`, changing the page size moves every byte to a different
+bank — while leaving every address a legal address, so the failure is silently
+wrong data rather than a fault.
+
+tt-sim reproduces that exactly. It holds each bank as separate storage at its
+own NoC coordinate, and it executes the kernel's real address arithmetic rather
+than a model of it, so a page computed into the wrong bank reads the wrong
+bytes here for the same reason it does on silicon. `examples/banks` is the
+standing check: 24 pages walked with `InterleavedAddrGen`, correct on both
+architectures. Give that kernel a page size the host did not allocate with and
+Wormhole tt-sim returns `errors=3072 of 6144` — no crash, no `TT_FATAL`, clean
+device close, the signature the bug wears on hardware. The corruption begins at
+page 12, exactly the first bank wrap, which is where the page size first enters
+the address at all.
+
+The reason to say this loudly is that it is easy to have the opposite
+impression, and the impression is well-founded elsewhere: a functional
+simulator that flattens DRAM to one store passes every such test, and tt-metal's
+own emulation runner carries a comment
+(`tt_metal/impl/emulation/emulated_program_runner.cpp`) recording that without
+the pow2/non-pow2 bank defines, "non-pow2 bank counts (12 on WH-N150) silently
+fall through to a 0-bit shift and every page lands in bank 0". tt-sim is not on
+that path — it drives the real JIT build — but nothing in the example suite
+demonstrated it until `banks` existed, because every other example allocates a
+single-page buffer and reaches it with `get_noc_addr_from_bank_id<true>(0, ...)`.
+
+**Host-to-device transfer bandwidth is not modelled at all.** If your symptom is
+a *rate* on the host link — "our buffers cap host-to-device at 1.89 GB/s against
+a 5.81 measured ceiling" — tt-sim has nothing to say about it, and will not
+grow anything to say. Host traffic arrives over UMD's simulation wire protocol
+as `WRITE`/`READ` messages that are applied to device memory immediately; there
+is no PCIe tile (`tt_sim/bridge/cores.py` stubs it to zeros) and no host-DMA
+term anywhere in `tt_sim/perf/`. A tt-sim cycle count covers device-side work
+only, and a host transfer costs zero of them. Do not read a tt-sim run as
+evidence about that ceiling in either direction.
+
+The device-side sibling of the same question *is* modelled, and needs nothing
+new: DRAM traffic concentrated on one bank contends where traffic spread over
+many does not, because each channel carries an occupancy
+(`DramChannels` in `tt_sim/device/tiles.py`, at the rate
+`dram.channel_serialisation.bytes_per_cycle`). So a kernel whose buffer collapsed
+into one bank will show the serialisation in its *own* DRAM reads and writes.
+That is the axis `perfbench/dramratebench` and `tt_sim/perf/dram_rate_sweep.py`
+already exercise.
+
+**Bank-internal timing is not modelled and has no route to being modelled.**
+Bank conflicts, row hit/miss, precharge and refresh windows are absent from the
+public ISA documentation for both architectures — the word "bank" never appears
+in a DRAM context in either tree, and Blackhole has no DRAM tile page at all.
+Any such term would have to be invented or measured, and measurement is
+corroboration here, never provenance. Treat DRAM as a flat per-channel pipe at
+the published rate.
+
 ## What is *not* on this page
 
 Known-unreached functional edges — conditions the simulator does not model

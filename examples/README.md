@@ -160,6 +160,7 @@ Each `<name>/src/` is a host program (`<name>.cpp`), a `CMakeLists.txt`, and a
 * **nine** — two-tile: a producer tile runs reader+compute+sender, a consumer tile runs the writer, with a CB bridged across tiles over the NoC (needs the two-tile coords above).
 * **pipestall** — two-tile, and the only example whose *point* is timing: `nine` plus a reverse credit semaphore, so the producer's Tensix backs up behind the consumer core. Three environment knobs (`PIPESTALL_DELAY`, `PIPESTALL_CREDITS`, `PIPESTALL_OUT_DEPTH`) set how long the producer's unpacker legitimately blocks. It is the workload the per-unit stall detector's threshold is calibrated against — see `tt_sim/device/deadlock.py`.
 * **loopback** — Int32 copy DRAM→DRAM through the TRISC/pack path (`copy_tile` → `pack_tile`), chunked.
+* **banks** — the only example whose DRAM buffers span more than one bank. Every other entry above allocates a single-page DRAM buffer and reaches it with `get_noc_addr_from_bank_id<true>(0, ...)` — bank 0, hardcoded — so a simulator modelling DRAM as one flat store would pass the whole table. `banks` pages its buffers and walks them with `InterleavedAddrGen`, whose device-side `page_id % NUM_DRAM_BANKS` / `bank_to_dram_offset[]` / `dram_bank_to_noc_xy[]` arithmetic only meets the host's scatter if each bank is genuinely separate storage at its own coordinate. Runs on both arches (12 Wormhole banks, 8 Blackhole); see `docs/cost-model-caveats-for-consumers.md`.
 
 ## Writing a new example
 

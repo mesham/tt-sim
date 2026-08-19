@@ -93,6 +93,16 @@ EXAMPLES = [
         },
     ),
     ("loopback", "loopback", "1-1", {}),
+    # The only example that spans more than one DRAM bank. Every other entry
+    # allocates a single-page DRAM buffer and reaches it with
+    # `get_noc_addr_from_bank_id<true>(0, ...)` — bank 0, hardcoded — so a
+    # simulator modelling DRAM as one flat bank would pass this whole table.
+    # `banks` pages its buffers and walks them with `InterleavedAddrGen`, whose
+    # device-side `page_id % NUM_DRAM_BANKS` / `bank_to_dram_offset[]` /
+    # `dram_bank_to_noc_xy[]` arithmetic only lands on the host's bytes if each
+    # bank is genuinely separate storage at its own coordinate. See the note at
+    # the top of examples/banks/src/banks.cpp.
+    ("banks", "banks", "1-1", {}),
 ]
 
 

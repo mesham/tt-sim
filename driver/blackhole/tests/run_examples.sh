@@ -68,6 +68,7 @@ SUCCESS="Completed successfully on the device"
 declare -A COORDS=(
   [one]="1-2"   [two]="1-2"     [three]="1-2"  [four]="1-2"  [four-fp]="1-2"
   [five]="1-2"  [five-fp]="1-2" [six]="1-2"    [eight]="1-2" [loopback]="1-2"
+  [banks]="1-2"
   [nine]="1-2,2-2" [pipestall]="1-2,2-2" [pipestall-2page]="1-2,2-2"
 )
 # A case whose name is not an example directory: which directory it runs, and
@@ -79,7 +80,7 @@ declare -A COORDS=(
 # guard of their own and would clobber the canonical example's trace.
 declare -A DIRS=([pipestall-2page]="pipestall")
 declare -A ENVS=([pipestall-2page]="PIPESTALL_OUT_DEPTH=2 PIPESTALL_CREDITS=1 PIPESTALL_DELAY=1000")
-ORDER=(one two three four four-fp five five-fp six eight nine pipestall pipestall-2page loopback)
+ORDER=(one two three four four-fp five five-fp six eight nine pipestall pipestall-2page loopback banks)
 [ "${#SELECT[@]}" -gt 0 ] && ORDER=("${SELECT[@]}")
 [ "$RECORD" -eq 1 ] && mkdir -p "$TRACES"
 

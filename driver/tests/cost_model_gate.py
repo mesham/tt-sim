@@ -131,8 +131,12 @@ BUDGET_INDEPENDENT = (VALUE_PUMPED,)
 
 #: The classification validated by hand at this tree state. Discovery drives the
 #: run; this is the tripwire that stops a reclassification happening silently.
-BASELINE_TREE = "24403ae (+ the Wormhole poll-until-DONE guard conversion)"
+BASELINE_TREE = "24403ae (+ the Wormhole poll-until-DONE guard conversion, + the multi-bank DRAM guard)"
 BASELINE = {
+    # Pumps to DONE and then asserts values (each page read back from its own
+    # bank's coordinate), so its verdict cannot depend on how many cycles the
+    # recorded conversation happened to allow.
+    "blackhole/banks": VALUE_PUMPED,
     "blackhole/dramtop": VALUE_POLL_BUDGET,
     "blackhole/eight": VALUE_PUMPED,
     "blackhole/five": VALUE_PUMPED,
