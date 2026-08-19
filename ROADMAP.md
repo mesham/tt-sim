@@ -33,6 +33,11 @@ drive kernels through tt-sim to trace where cycles go — instruction
 mix, data movement, stalls — and generate more efficient code from it.
 Their contract is [`docs/trace-schema.md`](docs/trace-schema.md),
 frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
+As of 2026-08-19 they have used it in anger and reported back, which is
+where the work of the last week came from: see **"What the first
+external consumer found"** below, and note that three of the four
+reports were tt-sim answering confidently and wrongly rather than
+answering slowly or imprecisely.
 
 ---
 
@@ -41,9 +46,12 @@ frozen at `SCHEMA_VERSION` 4 — schema changes are breaking from here.
 Items 1–8 map to the detail sections §1–§8. **Do not renumber** —
 other docs cite these numbers.
 
-The live load-bearing work is the **"Toward a v2.0 release"** list
-below, not this one: Tier 1 cleared on 2026-08-12 and Tier 2's
-remaining half needs hardware, not code.
+The live load-bearing work is no longer this list *or* the
+**"Toward a v2.0 release"** list below: Tier 1 cleared on 2026-08-12,
+Tier 2's remaining half needs hardware rather than code, and the v2.0
+list closed on 2026-08-18 with every item delivered or proven
+impossible. What has landed since is in **"What the first external
+consumer found"**, and none of it was planned in either list.
 
 ### Tier 1 — cleared 2026-08-12
 
@@ -685,6 +693,15 @@ workers materialising on demand with no environment variable.
    is left is running this decomposition *on nekbone* rather than
    building or trusting anything further. The blocker changed shape
    rather than clearing.
+   **And its first real external capture broke it in two places,
+   2026-08-19 — both in the reader, not the model.** The single-window
+   gate was counting the profiler's own flush zone as a launch and
+   refused all 32 streams of a legitimate 16-core Blackhole capture,
+   and `prologue` was being read as a setup cost when it is
+   `ZONE_START`-to-first-NoC-event and swallows any wait that emits no
+   event. Both are written up in §4 point 4, including why the split
+   the consumer asked for is refused rather than built. Neither moved a
+   modelled cycle; both moved what the leg *says*.
 3. **Wormhole access — FOUR OF FIVE GATED ITEMS RETIRED, 2026-08-17.**
    It was a booking; it became standing access, which changed the shape
    from "one irreplaceable session" to a programme: a de-risking pass
@@ -936,6 +953,144 @@ materialising **unused** workers). Each was caught by an agent told to
 verify the premise first-hand. **Prose here drifts from code; check the
 code.**
 
+## What the first external consumer found
+
+**The v2.0 list above is closed** — every item delivered or proven
+impossible, 2026-08-18 — and what has landed since came from none of
+the lists in this file. Seven things landed in the week after, and
+**four arrived as reports from the compiler team using tt-sim in
+anger** rather than from anything planned here: the multicast corner
+order (below), the `prologue` misreading and the single-window gate
+(§4 point 4), and the request for a version marker that became
+`tt_sim/behaviour.py`. Each report is dated in the source it touched.
+
+**Three of them were tt-sim returning a confident, plausible, wrong
+answer** — the failure mode that consumer ranks above cycle accuracy,
+in their own words as recorded in the v3 working note: *"the failures
+that cost us most were the ones where a simulator returned a confident,
+plausible, wrong answer. A tool that told us 'I do not model this'
+would have been worth more than one that passed."* The three: a
+multicast suite running green against a simulator that delivered the
+packet to **nobody**; a `prologue` bucket reading **91.89 %** of a span
+as setup when it was a `cb_wait_front` on the compute pipeline; and a
+gate reporting **five program executions** where there was one kernel
+launch and four profiler flushes. **Not one of the three was a
+cycle-count error.** That is the through-line, and it is the strongest
+evidence this file holds about what the next release should be about.
+`docs/plans/v3.md` is a working note, not a commitment, and its two
+strands — **observability** and **loudness** — were named before any of
+this landed; what follows is what happened, not what was planned.
+
+1. **Multicast corner order — a correctness defect, closed 2026-08-19**
+   (`c541127`). The ISA docs require a broadcast rectangle's corners
+   **swapped** on a NoC addressed in translated coordinates, because
+   translation does not change the direction of data flow
+   (`WormholeB0/NoC/Coordinates.md`, "Coordinate Translation";
+   `BlackholeA0/NoC/Coordinates.md` says the same), and `MemoryMap.md`
+   resolves a reversed rectangle as a **torus wrap** rather than as the
+   empty set — so the packet lands on tiles the kernel never counted in
+   `num_dests`, the ACK count cannot match, and
+   `noc_async_write_barrier` spins for ever. That is the silicon
+   symptom the compiler team reported. tt-metal does the swap in
+   `Device::get_noc_multicast_encoding`
+   (`tt_metal/impl/device/device.cpp:692`, the comment saying why at
+   `:696` in the 0.74 tree); the kernel-side `get_noc_multicast_addr`
+   passes its arguments straight through, which is why the swap is so
+   easy to omit.
+   tt-sim enumerated the corners literally — `range(start, end + 1)` —
+   so there were **three silent cases**. A rectangle mis-ordered for
+   its NoC reached *everyone* and produced exactly the right answer
+   (green here, hang on the card). A reversed one reached *nobody*, so
+   the barrier retired having sent nothing. And, the case that matters
+   most, a **correctly-encoded translated NoC 1 multicast — which is
+   required to descend — also reached nobody**: a live mismodel of
+   correct code, not merely a failure to catch a bug.
+   **Two changes, deliberately separate.** `rectangle_destinations`
+   takes the closed interval whichever order the corners arrive in and
+   **has no off switch**, because it is what makes correct code work;
+   `check_corner_order` raises `MulticastOrderError` and does
+   (`TT_SIM_DISABLE_MULTICAST_ORDER_CHECKS`, following
+   `TT_SIM_DISABLE_ALIGNMENT_CHECKS`). A test asserts that disabling
+   the guard does not undo the enumeration fix. The guard is
+   deliberately **stricter than tt-metal's own watcher**, which skips
+   the ordering check for Tensix-to-Tensix multicasts because the wrap
+   is *legal* there: legal is not intended, and tt-sim cannot deliver a
+   wrapped span at all, so such a multicast would be mismodelled
+   silently today. If one is ever wanted, the answer is to model the
+   wrap, not to lower this to a warning.
+2. **`NoCAlignmentError` now names the transfer** (`72ab5e1`,
+   `2f21f3b`). Two addresses and the rule they broke is enough to know
+   a program has a bug and not enough to know where. The message now
+   carries the transfer's size and transaction id, the address spans,
+   the issuing core and its PC, the kernel function and source line
+   (via `tt_sim.trace.elfdisc` + `DwarfIndex`), and the **circular
+   buffer the L1 end lands in together with its page size** — the
+   number that says whether a shard was split below tile granularity.
+   **All of it is recovered at raise time, not recorded per transfer.**
+   `NUI.write` calls `RequestInitiator.initiate` synchronously, so the
+   issuer is a few frames up the Python stack when the check fires;
+   alignment checking is on by default, so anything recorded per
+   transfer would be paid for by every transfer in every run and read
+   only by the ones that fail. `tt_sim/network/attribution.py` is
+   imported *inside* the `except` clause, so a run that never faults
+   never imports the describer, and the exception is enriched in place
+   so type, identity and traceback are unchanged.
+   **Three limits are stated rather than papered over.** Only
+   byte-verified ELFs name a function — a confidently wrong name on a
+   fatal error is worse than none. The page size comes from the
+   firmware's `cb_interface` array in the issuing core's local memory
+   (located by symbol, never by scanning, and decoded only when the
+   decode is self-consistent), so a tt-metal layout change costs the
+   line and not its truthfulness. And the buffer's **name** is not
+   recoverable at all: tt-metal's allocator lives on the host and is
+   never described to the simulator, so the address range is reported
+   instead.
+3. **Named behaviour markers an outside suite can assert on**
+   (`b38b8ee`, `tt_sim/behaviour.py`). The compiler team asked for a
+   version marker to pin. A version number says which build you have,
+   never whether that build has the fix, and a consumer who pins one
+   has encoded our release history into their test suite instead of
+   what they actually depend on. What is published instead is
+   **behaviour** — `require("noc1-multicast-corner-order")` raises
+   `UnsupportedBehaviour`, `supports()` is the non-raising form, and
+   `python3 -m tt_sim.behaviour` lists or checks from a shell. Against
+   a tt-sim older than the module the import fails, which is the same
+   outcome at the same moment. Three guarantees are published today —
+   `noc1-multicast-corner-order`, `noc-transfer-alignment` and
+   `riscv-ebreak-halts` — each naming what a run against this build
+   will do and what it used to do instead.
+   **The registry resists decay structurally**, which is the part worth
+   keeping. Forward: every entry names the test that pins it and
+   `behaviour_test.py` imports that module and looks the function up,
+   so no guarantee outlives its check. Backward: the same test
+   **AST-parses every non-test module under `tt_sim/`** for exception
+   classes and requires each one to be either registered or listed in
+   `_NOT_A_GUARANTEE` *with a reason* — so adding a loudness guard
+   turns the suite red until somebody has decided, in writing, whether
+   an outside consumer would want to assert on it. The declined list is
+   itself a record: `UnitWedgedError` is declined because the deadlock
+   watchdog's false-positive rate has not been argued, and
+   `UnmodelledTileRegisterError` / `UnmodelledCSRError` because the set
+   they cover moves with every release, so neither is a stable promise.
+4. **A fixed cycle budget in a test is a latent cost-model failure**
+   (`4283579`). `multicast_order_test.py` shipped in `c541127` with a
+   64-cycle settle budget before reading the destinations. That is
+   enough with the cost model **off** and not with it **on**: a charged
+   NoC flight delivered **1 of 3** destinations by cycle 64 and all 3
+   by 128. The cost-model gate is what caught it — it runs
+   `pytest tt_sim -q` under `TT_SIM_COST_MODEL=1`
+   (`driver/tests/cost_model_gate.py`) precisely so the model-on
+   configuration cannot rot. The budget is now 1024, 8x the observed
+   requirement and long enough that the negative tests' empty result
+   means "never" rather than "not yet". The general form is worth
+   remembering: **any test asserting on device state after N cycles is
+   pinned to the cost model's current charges**, and it will fail on
+   the day one of them changes rather than on the day it was written.
+
+The other three landed elsewhere in this file: DRAM page-to-bank
+distribution, and the host-DMA rate refused alongside it, are in §1;
+the two `noc_events` corrections are in §4 point 4.
+
 ## Working rules
 
 These apply across every item below and are enforced by tests where
@@ -1014,8 +1169,60 @@ be re-litigated:
   make deliberately. The split still rests on one arch's data.
 - The BH `l1_local_cycles = 88` rung-1 anomaly (54 cycles
   unexplained) — rung 1 cannot fully pass on BH until explained.
-- Bank conflicts / refresh windows — no DRAM bank model, nothing
-  published; long-term.
+- **Page-to-bank *distribution* is modelled and was untested; bank
+  *timing* is neither, and they are different questions.** The
+  distribution question is the compiler team's, and answering it
+  sharpened it: their symptom is not bank *conflicts* but page
+  *distribution*, which is a tt-metal software decision rather than a
+  hardware property. tt-metal
+  spreads an interleaved buffer's pages round-robin over the DRAM banks
+  (12 on Wormhole — 6 channels x 2 `dram_view`s — and 8 on Blackhole);
+  the **host** computes the landing bank in
+  `WriteToDeviceInterleavedContiguous` and the **kernel** recomputes it
+  in `InterleavedAddrGen<true>::get_noc_addr` from the `NUM_DRAM_BANKS`
+  JIT define and the tables the host wrote into L1, and *nothing
+  cross-checks the two*. Since `bank(byte) = (offset / page_size) %
+  num_banks`, a wrong page size moves every byte to a different bank
+  while leaving every address legal — silently wrong data, not a fault.
+  tt-sim reproduces that: it holds each bank as separate storage at its
+  own NoC coordinate and **executes the kernel's real address
+  arithmetic as RV32**, so a page computed into the wrong bank reads
+  the wrong bytes here for the same reason it does on silicon. Give
+  `examples/banks`' kernel a page size the host did not allocate with
+  and Wormhole tt-sim returns `errors=3072 of 6144` — no crash, no
+  `TT_FATAL`, clean device close — with the corruption starting at
+  **page 12, the first bank wrap**, which is where the page size first
+  enters the address at all.
+  **This was a coverage gap, not a modelling gap, and it is now
+  closed** (2026-08-19, `9b11f2f`). Every prior example allocated a
+  *single-page* DRAM buffer and reached it with
+  `get_noc_addr_from_bank_id<true>(0, ...)` — bank 0, hardcoded — so a
+  simulator that flattened DRAM to one store would have replayed the
+  whole suite green. `examples/banks` (24 pages x 1 KiB, walked with
+  `InterleavedAddrGen`, both arches) and
+  `driver/blackhole/server/banks_replay_test.py` close it; the guard
+  reads the destination back **bank by bank**, at each bank's own
+  coordinate and within-bank offset, because reading it as one
+  contiguous range could not tell the two layouts apart.
+  **The host-side half is refused, and stays refused.** The
+  1.89-vs-5.81 GB/s figure quoted at us is a **PCIe/host-DMA rate**,
+  which tt-sim cannot see by construction: there is no PCIe tile
+  (`tt_sim/bridge/cores.py` stubs it to zeros), no host-DMA term in
+  `tt_sim/perf/`, and a host `WRITE`/`READ` off the wire is applied to
+  device memory immediately at zero cycles. A tt-sim run is not
+  evidence about that ceiling in *either* direction. The device-side
+  sibling — traffic collapsed onto one bank contending where spread
+  traffic does not — needs nothing new, since each channel already
+  carries an occupancy (`DramChannels` in `tt_sim/device/tiles.py`).
+  Both halves are written up for consumers in
+  `docs/cost-model-caveats-for-consumers.md`.
+  **Bank-internal timing has no route to provenance**: bank conflicts,
+  row hit/miss, precharge and refresh windows are absent from the
+  public ISA docs for both parts (Blackhole has no DRAM tile page at
+  all), so any such term would have to be invented or measured — and
+  measurement is `corroboration` here, never provenance. Treat DRAM as
+  a flat per-channel pipe at the published rate. Long-term, and not by
+  measurement.
 - **The 2-reader dip is not noise.** In the 2026-08-12 sweep two of
   three repeats land on *exactly* 100.0 cycles/tx (51,204 and 51,196)
   and the third at 88.9, where every point in the 2026-08-09 session
@@ -1386,6 +1593,64 @@ from the rest, so no cross-core span is admissible.
    Blackhole. The bottleneck report's **79.8 % NoC split on nekbone**
    stays unverified all the same: that is this decomposition run on
    *nekbone*, which has not happened.
+   **Two corrections landed 2026-08-19, both from a consumer's own
+   capture, and neither moved a modelled cycle.**
+   *(a) `gate_single_window` was reading the instrument, not the
+   workload.* It counted every `ZONE_START` as a program execution,
+   including `PROFILER-NOC-QUICK-PUSH` — the device profiler's own
+   flush zone, nested inside the kernel zone and emitted every time the
+   per-RISC L1 marker buffer fills, because `recordNocEvent` calls
+   `flush_to_dram_if_full` *before* it records. A 16-core Blackhole
+   `gemm_256_check` pair had all **32 streams refused** as
+   `single_window` when all 32 in fact carry exactly one `*-KERNEL`
+   pair, kernel `ZONE_START` first and `ZONE_END` last, with 0–4
+   strictly nested pushes. **The zone is in the artefact by an upstream
+   bug**: `convertNocTracePacketsToJson` filters the string
+   `"PROFILER-NOC-QUICK-SEND"`
+   (`tt_metal/impl/profiler/profiler.cpp:780`), which is the **only**
+   occurrence of that string in the whole tt-metal tree — the zone was
+   renamed to `PROFILER-NOC-QUICK-PUSH`
+   (`tt_metal/tools/profiler/kernel_profiler.hpp:409`) and the filter
+   never followed, so it leaks into every capture past roughly 150
+   transactions on a RISC. (Both verified by grep against the 0.74
+   checkout; worth raising upstream.) Windows are now identified **by
+   name**, and a flush is **charged to its own `profiler` bucket**
+   rather than absorbed into `issue`: it is instrumentation the capture
+   added, and folding it in would charge the model for the difference
+   between how tt-sim and a card execute the profiler's own DRAM write.
+   It belongs in the partition because **both sides can fill it**,
+   which is the test for whether a bucket belongs at all. The bucket is
+   an *upper* bound — the `ZONE_END` marker is written before the flush
+   is issued — and reads 161–166 cycles in all 112 pushes on the
+   reference capture.
+   *(b) `prologue` is caveated, not split.* It is defined mechanically
+   as `ZONE_START` to the first NoC event, so **anything the core did
+   in that interval lands in it, including a blocking wait**. A
+   consumer's 4-core `gemm_128` writer kernel read `prologue` at
+   **91.89 %** of a 6,932-cycle span with no semaphore anywhere in the
+   build: it was `cb_wait_front(2, 1)` waiting on the compute pipeline.
+   The asymmetry is structural — `cb_wait_front` / `cb_reserve_back`
+   carry only a watcher `WAYPOINT` (four characters into a mailbox
+   slot, no timestamp, no path into any artefact) and `NocEventType`
+   has no CB member, whereas `noc_semaphore_wait`
+   (`dataflow_api.h:1929`) does `RECORD_NOC_EVENT(SEMAPHORE_WAIT)`,
+   which is exactly why `other_wait` exists and `prologue` cannot be
+   split the same way. `TT_METAL_PROFILER_SUM=1` instruments the
+   *compute* side only and is dropped by the JSON converter, so no
+   tt-metal flag recovers the split for these streams (checked against
+   0.74 rather than assumed).
+   **tt-sim could fill the bucket from its own internals and refused.**
+   It does know more here — `tt_sim.pe.rv.spin` recognises a baby core
+   polling L1 — but a `pre_first_event_wait` bucket only the simulator
+   can populate makes the card's share **zero by construction** and
+   charges the model, through `E_int`, for an artefact of
+   instrumentation. The consumer asked for precisely that split; the
+   refusal is the same test the `profiler` bucket passes, applied the
+   other way. Read `prologue` as *"time before the first NoC event,
+   cause unknown"* — an upper bound on setup and nothing more — and
+   never rank or sum it across cores: a reader at the head of a
+   pipeline has genuine setup there, a writer at the tail has its
+   producer's whole latency, and those are not the same quantity.
 
 Thresholds: `E_total ≤ 10 %` is what nekbone already achieved, kept as
 the control against envelope regression. `E_int ≤ 25 %` is 2.5x that —
