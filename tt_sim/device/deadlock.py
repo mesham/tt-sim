@@ -1014,17 +1014,30 @@ class DeadlockDetector:
             tile_label = f"tile={coord} " if len(self.tile_cores) > 1 else ""
             lines.append(f"  {tile_label}{core.core_type.name}: {where}{extra}")
 
+        # NIU_MST_REQS_OUTSTANDING_ID(i) at 16..31 and
+        # NIU_MST_WRITE_REQS_OUTGOING_ID(i) at 32..47 are not "reads" and
+        # "writes": per `WormholeB0/NoC/Counters.md` the first counts every
+        # request still awaiting a response (reads, non-posted writes and
+        # atomics alike -- it is what a trid write barrier spins on), and the
+        # second counts writes whose payload has not yet been read out of this
+        # tile's L1, which tt-sim does synchronously and so should never see
+        # standing at a sample. Saying so is the difference between a line that
+        # names the stall and one that sends the reader after the wrong half of
+        # the NoC.
         for coord, idx, nui in self.nuis:
-            outstanding_reads = 0
-            outstanding_writes = 0
-            for i in range(16):
-                outstanding_reads += nui.nui_counters[16 + i]
-                outstanding_writes += nui.nui_counters[32 + i]
-            if outstanding_reads or outstanding_writes:
+            awaiting_response = sum(nui.nui_counters[16 + i] for i in range(16))
+            payload_in_l1 = sum(nui.nui_counters[32 + i] for i in range(16))
+            if awaiting_response or payload_in_l1:
+                still_reading = (
+                    f", {payload_in_l1} write payload(s) not yet read out of L1"
+                    if payload_in_l1
+                    else ""
+                )
                 lines.append(
                     f"  NoC tile={coord} nui={idx}: "
-                    f"{outstanding_reads} read(s), {outstanding_writes} write(s) "
-                    f"outstanding ({len(nui.outstanding_noc_requests)} unresolved)"
+                    f"{awaiting_response} request(s) awaiting a response"
+                    f"{still_reading} "
+                    f"({len(nui.outstanding_noc_requests)} unresolved)"
                 )
 
         for coord, tile, _cores in self.tile_cores:

@@ -765,8 +765,18 @@ class NUI(MemMapable, Clockable):
                     num_chunks,
                 )
 
+            # Up as software writes NOC_CMD_CTRL, by the packet count, and back
+            # down once each packet's payload has been read out of L1 -- not on
+            # the acknowledgement, which is a different counter's business
+            # entirely (`WormholeB0/NoC/Counters.md`, "Write requests with
+            # NOC_CMD_WR_INLINE=false"). Per transaction ID, because that is
+            # what `ncrisc_noc_nonposted_write_with_transaction_id_sent` polls;
+            # slot 0 was hardcoded here while the matching decrement used the
+            # real ID, so the pair did not describe the same counter.
             self.nui.nui_counters.increment(
                 NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
+                + noc_packet_transaction_id,
+                num_chunks,
             )
 
             self.nui.nui_counters.increment(
@@ -841,8 +851,12 @@ class NUI(MemMapable, Clockable):
                     NUI.NUICounters.CounterNames.NIU_MST_POSTED_WR_DATA_WORD_SENT,
                     total_size / 4,
                 )
+            # Every chunk's payload has now left L1 (we read it synchronously,
+            # above), so the counter comes back down by exactly what it went up.
             self.nui.nui_counters.decrement(
                 NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
+                + noc_packet_transaction_id,
+                num_chunks,
             )
 
             if self.nui.snoop:
@@ -969,7 +983,21 @@ class NUI(MemMapable, Clockable):
                 path="L1 -> L1 multicast write",
             )
 
+            # A broadcast is still one non-inline write as far as the initiating
+            # NIU is concerned -- one command, one payload read out of L1, the
+            # fan-out done by the routers -- so WRITE_REQS_OUTGOING goes up by
+            # one and comes back down when that read completes, whatever
+            # ``num_dests`` is. (It is the acknowledgements that are per
+            # destination, and they are REQS_OUTSTANDING's business.)
+            outgoing = (
+                NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
+                + noc_packet_transaction_id
+            )
+            if not noc_cmd_wr_inline:
+                self.nui.nui_counters.increment(outgoing)
             data = self.nui.attached_memory.read(self.target_addr_low, self.at_len_be)
+            if not noc_cmd_wr_inline:
+                self.nui.nui_counters.decrement(outgoing)
 
             # One packet leaves this NIU however wide the rectangle is -- the
             # routers do the splitting -- so the injection port is claimed once
@@ -1779,10 +1807,18 @@ class NUI(MemMapable, Clockable):
                     issue_cycle=noc_request.issue_cycle,
                 )
 
-                self.nui_counters.decrement(
-                    NUI.NUICounters.CounterNames.NIU_MST_WRITE_REQS_OUTGOING_ID_0
-                    + noc_request.request_id
-                )
+                # NB: no NIU_MST_WRITE_REQS_OUTGOING decrement here. That
+                # counter tracks payload still to be read *out of this tile's
+                # L1*, and comes back down at the initiating NIU as soon as the
+                # read completes -- long before any acknowledgement, and for
+                # posted writes which are never acknowledged at all. Decrementing
+                # it here had no matching increment anywhere, so it walked one
+                # step below zero per ACK: a state hardware cannot represent,
+                # which made NOC_STATUS_READ_REG on the counter (what
+                # `noc_async_writes_flushed` on a trid compiles to) raise
+                # OverflowError out of `conv_to_bytes`. See
+                # `WormholeB0/NoC/Counters.md` and
+                # `tt_sim/network/noc_counter_accounting_test.py`.
                 _noc_cmd_wr_inline, noc_cmd_resp_marked = (
                     self.take_outstanding_noc_request(noc_request)
                 )
