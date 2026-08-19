@@ -112,6 +112,35 @@ def _loop(instructions, body_instruction=NOP):
     return body + encoded.to_bytes(4, "little")
 
 
+def _phase_loop():
+    """A three-instruction loop whose registers *move* but get nowhere.
+
+    ``x1 += 1; x1 -= 1; jal .-8``. Every cycle changes a register, so a
+    signature built from the register file *as sampled* changes whenever two
+    samples land on different phases of the loop — which is every sample here,
+    the loop period (3) not dividing the sample interval (100). That is the
+    shape of every real poll loop: the measured one behind the
+    ``add_tiles_init`` hang was ``lw`` / ``slli`` / ``srli`` / ``beq`` on an
+    unchanged flag, whose one live register alternated between 0x1 and 0x10000
+    for ever. The loop makes no progress by any reading, and the watchdog must
+    say so.
+    """
+    return INC + b"\x93\x80\xf0\xff" + _jal_back(8)  # addi x1, x1, -1
+
+
+def _jal_back(offset):
+    """``jal x0, -offset`` — the J-type encoding, as a 4-byte instruction."""
+    imm = (-offset) & 0x1FFFFF
+    encoded = (
+        ((imm >> 20) & 0x1) << 31
+        | ((imm >> 1) & 0x3FF) << 21
+        | ((imm >> 11) & 0x1) << 20
+        | ((imm >> 12) & 0xFF) << 12
+        | 0x6F
+    )
+    return encoded.to_bytes(4, "little")
+
+
 def _spin_across_a_bucket_boundary():
     """A four-instruction loop placed so it straddles a 64-byte PC bucket.
 
@@ -177,6 +206,97 @@ def test_spinning_wedge_still_reported_with_firmware_idle_off(
     err = capsys.readouterr().err
     assert "[DEADLOCK" in err, err
     assert "BRISC: oscillating in [0x38, 0x44]" in err, err
+
+
+@DEVICES
+def test_fires_on_a_poll_loop_whose_registers_only_change_phase(
+    capsys, device_class, monkeypatch
+):
+    """The silent hang: a whole device polling, with registers moving.
+
+    Measured on ``examples/four`` with ``add_tiles_init`` deleted — both
+    unpackers wedged on a Src bank the matrix unit never hands back, all five
+    baby cores in poll loops behind them, and the watchdog silent for 500,000
+    cycles because one register on one core changed *phase* every sample. The
+    register component of the signature is a footprint over the sample window
+    for exactly this reason: the set of states a spin cycles through holds
+    still even though the file sampled at any one instant does not.
+
+    Firmware-loop recognition is off here on purpose: parked, the core stops
+    executing and its registers freeze, which hides the very aliasing this
+    pins.
+    """
+    monkeypatch.setenv("TT_SIM_FIRMWARE_IDLE", "0")
+    device, coord, _detector = _device_with_watchdog(device_class)
+    _launch_brisc(device, coord, _phase_loop())
+
+    device.run(6 * THRESHOLD)
+
+    err = capsys.readouterr().err
+    assert "[DEADLOCK" in err, err
+    assert "BRISC: oscillating in [0x0, 0x8]" in err, err
+
+
+@DEVICES
+def test_register_phase_is_not_read_as_progress(device_class, monkeypatch):
+    """The mechanism behind the test above, white-box, in both directions.
+
+    The instantaneous register file of the spinning core differs from sample to
+    sample — that is what kept the watchdog quiet — while the *set* of states
+    over the window saturates and then holds still. If this ever inverts, the
+    signature has gone back to reading loop phase as progress.
+    """
+    monkeypatch.setenv("TT_SIM_FIRMWARE_IDLE", "0")
+    device, coord, detector = _device_with_watchdog(device_class)
+    _launch_brisc(device, coord, _phase_loop())
+    key = (coord, BabyRISCVCoreType.BRISC)
+
+    instantaneous, windows = [], []
+    inner = detector._sample
+
+    def recording(cycle):
+        instantaneous.append(tuple(r.value for r in detector.data_registers[key]))
+        result = inner(cycle)
+        windows.append(frozenset(detector.reg_windows[key]))
+        return result
+
+    detector._sample = recording
+    device.run(4 * THRESHOLD)
+
+    # Sampled at the cadence the signature uses, the file is never twice the
+    # same...
+    assert len(set(instantaneous[2:])) > 1
+    # ...but the footprint over the window settles and stays settled.
+    assert len(set(windows[-8:])) == 1
+
+
+@DEVICES
+def test_deadlock_report_names_the_unit_and_what_it_waits_on(
+    capsys, device_class, monkeypatch
+):
+    """The other half of the deliverable: the report has to be worth reading.
+
+    On the measured hang the five cores are all polling, which on its own says
+    only "everything is waiting". What makes it actionable is the line naming
+    the blocked unit, the instruction it latched and the Src bank it is waiting
+    to be handed back — the same vocabulary ``[UNIT STALL]`` uses. Only
+    ``blocked_on`` is stubbed: driving a real unpacker into the blocked state
+    takes a compute kernel, and what is under test here is the report.
+    """
+    monkeypatch.setenv("TT_SIM_FIRMWARE_IDLE", "0")
+    device, coord, _detector = _device_with_watchdog(device_class)
+    tile = device.tile_directory[coord]
+    unpacker = tile.tensix_coprocessor.getBackend().unpacker_units[0]
+    monkeypatch.setattr(unpacker, "blocked_on", lambda: (0, "UNPACR", "SrcA", 0))
+    _launch_brisc(device, coord, _phase_loop())
+
+    device.run(6 * THRESHOLD)
+
+    err = capsys.readouterr().err
+    assert "[DEADLOCK" in err, err
+    assert (
+        "Unpacker 0 blocked on UNPACR from thread 0: waiting for SrcA bank 0" in err
+    ), err
 
 
 @DEVICES

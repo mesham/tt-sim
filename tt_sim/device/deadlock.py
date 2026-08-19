@@ -25,11 +25,54 @@ that ran for 25 minutes at 95 % CPU — see
 
 A footprint alone would be too eager — a small loop that is genuinely computing
 also revisits its own buckets — so the signature carries each active core's
-**register file** beside it. That is the difference between the two: a core
-doing work moves a register every iteration, a core polling an unchanged flag
-re-loads the same value into the same register for ever. A stall is reported
-only when *nothing* moved: no new code, no register, no NoC counter, no Tensix
-thread state, for the whole window.
+**register state** beside it. That is the difference between the two: a core
+doing work reaches register values it has never held before, a core polling an
+unchanged flag cycles round the same handful for ever. A stall is reported
+only when *nothing* moved: no new code, no new register state, no NoC counter,
+no Tensix thread state, for the whole window.
+
+**Register state is a footprint too, and for the same reason the PC is.** The
+register component used to be the register file *as sampled*, compared
+bit-for-bit against the previous sample, on the argument that "a core polling
+an unchanged flag re-loads the same value into the same register for ever, so
+its register file is bit-identical sample to sample". That argument is wrong,
+and wrong in the silent direction. A poll loop is several instructions long
+and each of them leaves a different register file behind, so what the sample
+sees is the loop's *phase*, not its progress — and unless the loop period
+happens to divide the sample interval, consecutive samples land on different
+phases and the signature changes for ever. Measured on the hang below, the two
+polling cores' one live register alternated between 0x1 and 0x10000 (a
+``lw``/``slli``/``srli``/``beq`` flag test) and between 0xFFFFFFFF, 0 and
+0xFFFFFF80: state moving every sample, nothing progressing. So the same window
+the PC footprint uses is kept for register state, and the signature carries the
+*set* of states seen over it. A spin's set saturates at its own phases and then
+holds still; a working loop reaches a value it has never held before at every
+sample. (A spin with more distinct phases than the window keeps rotating and is
+read as progress — a false negative, which is the direction this check is
+allowed to fail in.)
+
+That was not a hypothetical. ``examples/four`` with ``add_tiles_init`` deleted
+— one line, rebuilt through the normal JIT path — wedges both unpackers on a
+Src bank the matrix unit never hands back, and every one of the five baby cores
+ends up in a poll loop waiting on the thread behind it. It is a total,
+permanent, whole-device stall, and the watchdog watched it for 5 minutes of
+wall clock and 500,000 simulated cycles without a word, because one register on
+one core changed phase every sample. Reported by a consumer as "hangs
+indefinitely, no diagnostic", which is the worst thing a simulator can do: it
+is indistinguishable from a slow run. It now reports every 50,000 cycles,
+naming the polling cores and — the part worth reading — the two unpackers and
+the Src banks they are waiting for.
+
+**Checked in the false-positive direction, which is the one that matters when
+a silent check is made to speak.** Every offline replay guard on both
+architectures (14 Wormhole, 31 Blackhole), each with and without
+``TT_SIM_COST_MODEL``; ``driver/tests/upstream_sweep --tier fast`` (17 tt-metal
+programs x 2 architectures, ``RESULT: PASS``); and both live example suites,
+15/15 Wormhole and 14/14 Blackhole. Not one report that was not there before. The only
+``[DEADLOCK]`` any of them prints is the four on Blackhole's ``pad_multi_core``
+guard, and those are **unchanged cycle for cycle** by this — an idle stretch
+between recorded host messages with every core parked in the firmware go-wait,
+which the pre-change watchdog reported identically.
 
 The limit is loops longer than the confirmation window can walk: a long
 straight-line loop keeps reaching buckets it has not been in yet right to the
@@ -55,10 +98,10 @@ resolution a 50,000-cycle window can use. Two consequences, both deliberate:
   clears the threshold is *confirmed* by re-taking the signature on
   ``_CONFIRM_TICKS`` consecutive ticks before anything is printed. A genuinely
   wedged device passes trivially (nothing changes at all); a core that is
-  actually retiring instructions moves its PC within a handful of cycles and
-  aborts the confirmation. The confirmation also refills the recent-PC window
-  with consecutive-cycle PCs, so the report reads exactly as it did when the
-  detector polled every cycle.
+  actually working reaches code it has not been in, or a register state it has
+  not held, within a handful of cycles and aborts the confirmation. The
+  confirmation also refills the recent-PC window with consecutive-cycle PCs, so
+  the report reads exactly as it did when the detector polled every cycle.
 
 The window is measured in **simulated cycles**, not in pump ticks. The
 detector keeps the two from drifting by naming its own wake cycle:
@@ -214,10 +257,12 @@ What changed is what the report *says* and how often it says it.
   that lets a user decide in seconds without waiting for teardown: a deep
   pipeline recovers and prints it, a wedge never does.
 
-So the verdict a user acts on is always one of the two follow-up lines —
-``[UNIT STALL CLEARED]`` (recovered; it was the pipeline) or ``[UNIT WEDGED]``
-(cannot recover; it is the bug) — and ``[UNIT STALL]`` itself only says where
-to look. Neither the threshold nor the terminal check moved.
+So the verdict a user acts on is always one of the follow-up lines —
+``[UNIT STALL CLEARED]`` (recovered; it was the pipeline), ``[UNIT WEDGED]``
+(cannot recover; it is the bug), or ``[DEADLOCK]`` (the whole device stopped
+behind it, so the launch never ends and the first two can never arrive) — and
+``[UNIT STALL]`` itself only says where to look. Neither the threshold nor the
+terminal check moved.
 
 **The terminal wedge, which is a proof rather than a heuristic.** What
 separates the ``UNPACR_NOP`` deadlock from a slow pipeline is not duration but
@@ -280,12 +325,15 @@ _SAMPLES_PER_WINDOW = 8
 # stall is reported — the anti-aliasing guard described in the module docstring.
 _CONFIRM_TICKS = 64
 # Of those ticks, how many must pass with no core reaching a PC bucket it has
-# not already been in. "The PC moved" cannot be the confirmation criterion,
-# because a spinning core's PC moves every cycle — what separates a spin from
-# progress is that a spin's *code footprint* stops growing, and it stops within
-# one trip round the loop. A loop longer than this many instructions keeps
-# adding buckets to the end of the window and is read as progress, which is the
-# documented limit of the check.
+# not already been in, or a register state it has not already held. "The PC
+# moved" cannot be the confirmation criterion, because a spinning core's PC
+# moves every cycle — and neither can "a register moved", because a spinning
+# core's registers move every cycle too. What separates a spin from progress is
+# that a spin's *footprint*, in code and in data alike, stops growing, and it
+# stops within one trip round the loop. A loop longer than this many
+# instructions keeps reaching new buckets and new states right to the end of
+# the window and is read as progress, which is the documented limit of the
+# check.
 _CONFIRM_SETTLE_TICKS = _CONFIRM_TICKS // 2
 # Cycles a blocked unit must stay blocked *after* its whole tile has gone into
 # soft reset before the wedge is called terminal. Only covers a backend
@@ -424,10 +472,21 @@ class DeadlockDetector:
         #: Per core, the architectural registers worth hashing: everything bar
         #: PC / next-PC. Resolved once at registration.
         self.data_registers = {}
+        #: Per core, the register states seen at the last _RECENT_PC_WINDOW
+        #: *sampled* ticks — the core's data footprint, and the signature's
+        #: register component. The same window as ``pc_windows`` and for the
+        #: same reason: a single sampled register file says which *phase* of a
+        #: poll loop the sample landed on, and phase moves every sample. See
+        #: the module docstring.
+        self.reg_windows = {}
         #: During a confirmation burst, per core, the buckets visited so far
         #: (seeded from ``pc_windows``). Growth means the core is walking new
         #: code, i.e. it is not spinning.
         self._confirm_seen = {}
+        #: The same, for register states (seeded from ``reg_windows``). Growth
+        #: means the core is reaching values it has never held, i.e. it is
+        #: computing rather than cycling round a poll loop's phases.
+        self._confirm_reg_seen = {}
         self._confirm_quiet = 0
         self._next_unit_arm = 0
 
@@ -457,6 +516,7 @@ class DeadlockDetector:
         for core in cores:
             self.recent_pcs[(coord, core.core_type)] = deque(maxlen=_RECENT_PC_WINDOW)
             self.pc_windows[(coord, core.core_type)] = deque(maxlen=_RECENT_PC_WINDOW)
+            self.reg_windows[(coord, core.core_type)] = deque(maxlen=_RECENT_PC_WINDOW)
             # PC and next-PC live in the same register list as the GPRs, and
             # they move on every cycle whatever the core is doing — including a
             # spin. They are the footprint's job; hashing them here would make
@@ -478,6 +538,7 @@ class DeadlockDetector:
         self.stall_since = cycle
         self._confirm_left = None
         self._confirm_seen = {}
+        self._confirm_reg_seen = {}
         self._confirm_quiet = 0
         self._next_full_sample = cycle if self.enabled else float("inf")
         # ``_next_unit_arm`` is deliberately not reset here, for the same reason
@@ -567,21 +628,34 @@ class DeadlockDetector:
                 if get_nth_bit(reset_val, bit) == 1:
                     self.recent_pcs[key].clear()
                     self.pc_windows[key].clear()
+                    self.reg_windows[key].clear()
                 else:
                     pc = conv_to_uint32(core.register_file["pc"].read())
                     self.recent_pcs[key].append(pc)
                     bucket = pc // _PC_BUCKET_BYTES
+                    # ``Register.value`` is a plain ``bytes`` attribute (see
+                    # ``pe/register/register.py``), so a core's whole data state
+                    # is ~34 attribute reads.
+                    state = tuple(r.value for r in self.data_registers[key])
                     if confirming:
                         # Judge growth against what this core had already been
-                        # seen in, so re-walking its own loop is not growth.
+                        # seen in, so re-walking its own loop — in code or in
+                        # data — is not growth.
                         seen = self._confirm_seen.setdefault(
                             key, set(self.pc_windows[key])
                         )
                         if bucket not in seen:
                             seen.add(bucket)
                             footprint_grew = True
+                        seen_state = self._confirm_reg_seen.setdefault(
+                            key, set(self.reg_windows[key])
+                        )
+                        if state not in seen_state:
+                            seen_state.add(state)
+                            footprint_grew = True
                     else:
                         self.pc_windows[key].append(bucket)
+                        self.reg_windows[key].append(state)
                     active.append((coord, core, pc))
 
         if not active:
@@ -605,18 +679,20 @@ class DeadlockDetector:
             for coord, core, pc in active
         )
         # Architectural register state, which is what keeps the footprint rule
-        # from calling a working loop a deadlock. A core computing something
-        # moves a register every iteration however small its loop is; a core
-        # polling an unchanged flag re-loads the same value into the same
-        # register for ever, so its register file is bit-identical sample to
-        # sample. ``Register.value`` is a plain ``bytes`` attribute (see
-        # ``pe/register/register.py``), so this is ~34 attribute reads per
-        # active core per sample and nothing on the per-cycle path.
+        # from calling a working loop a deadlock — and which is a footprint
+        # itself, over the same window, for the same reason. A core computing
+        # something reaches a register state it has never held, at every sample
+        # however small its loop is; a core cycling round a poll loop revisits
+        # the same handful of states for ever, so the *set* of them holds still
+        # even though the file sampled at any one instant does not. Comparing
+        # the instantaneous file instead read a poll loop's phase as progress
+        # and kept the watchdog silent through whole-device stalls — see the
+        # module docstring.
         reg_sig = tuple(
             (
                 coord,
                 core.core_type,
-                tuple(r.value for r in self.data_registers[(coord, core.core_type)]),
+                frozenset(self.reg_windows[(coord, core.core_type)]),
             )
             for coord, core, _pc in active
         )
@@ -646,10 +722,11 @@ class DeadlockDetector:
 
         if confirming:
             # Cycle-by-cycle confirmation. The criterion is not "the PC did not
-            # move" — a spinning core's PC moves every cycle — but "no core
-            # reached code it had not already been in". A spin's footprint stops
-            # growing within one trip round its loop; a core walking new
-            # instructions keeps adding buckets right to the end of the burst.
+            # move" — a spinning core's PC moves every cycle, and so do its
+            # registers — but "no core reached code it had not already been in,
+            # or a register state it had not already held". A spin's footprint
+            # stops growing within one trip round its loop; a core doing work
+            # keeps adding buckets and states right to the end of the burst.
             self._confirm_left -= 1
             self._confirm_quiet = 0 if footprint_grew else self._confirm_quiet + 1
             if self._confirm_left > 0:
@@ -658,6 +735,7 @@ class DeadlockDetector:
             settled = self._confirm_quiet >= _CONFIRM_SETTLE_TICKS
             self._confirm_left = None
             self._confirm_seen = {}
+            self._confirm_reg_seen = {}
             self._confirm_quiet = 0
             if not settled:
                 # Still reaching new code: sampling had aliased, and this is a
@@ -676,6 +754,7 @@ class DeadlockDetector:
             # printing anything.
             self._confirm_left = _CONFIRM_TICKS
             self._confirm_seen = {}
+            self._confirm_reg_seen = {}
             self._confirm_quiet = 0
             self._schedule(cycle, cycle + 1)
         else:
@@ -851,6 +930,9 @@ class DeadlockDetector:
                     "      nothing is wrong.",
                     "    * [UNIT WEDGED], at the end of the launch — it never can.",
                     "      That one is a proof, and is the one to act on.",
+                    "    * [DEADLOCK] — the whole device stopped with it. Then",
+                    "      the launch never ends, so neither line above can ever",
+                    "      arrive, and this unit is where to look.",
                     "  Reported once per unit per waited-on instruction, so this",
                     "  will not repeat however long the run is.",
                     "  (TT_SIM_UNIT_STALL=0 to disable, "
