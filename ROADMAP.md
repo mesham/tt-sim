@@ -1947,25 +1947,27 @@ fails loudly today. Grep for `NotImplementedError` in the named files.
   resident operand tiles (`cb_wait_front` hoisted, no `cb_pop_front`)
   diverges from silicon on a shape no in-tree example uses
   (`docs/plans/tensix-cost-benchmark.md`).
-- **`SEMPOST` above a semaphore's `MaxValue` is silent** — tt-sim
-  saturates at 15 and carries on, which is exactly the functional model
-  in the ISA documentation (`SEMPOST.md`, `SyncUnit.md`: the per-
-  semaphore `MaxValue` is a `SEMWAIT` comparison threshold, not a
-  post-side limit). **ttsim stops dead** on the same instruction with
-  `NonContractualBehavior: tensix_sempost: sem=N sem_max=N`. Nothing is
-  arithmetically wrong here — the divergence is that a kernel which has
-  gone out of contract keeps running and quietly returns garbage.
-  Reachable today: a compute kernel that hoists `tile_regs_acquire()`
-  out of its output-tile loop removes the math thread's only
-  back-pressure, so the moment anything slows the packer down, math
-  over-posts MATH_PACK and wraps onto a DEST bank the packer has not
-  drained. `optests/hoistacquire`'s `stall` mode is the reproduction:
-  both simulators change behaviour at the same amount of back-pressure,
-  tt-sim by corrupting the output and ttsim by refusing to continue. A
-  fix is an opt-in check in `backends/sync.py` (`handle_sempost` /
-  `handle_semget`, which have the `max` to hand and ignore it) plus a
-  decision about whether it warns or raises; found 2026-08-20 while
-  building `optests/hoistacquire`.
+- ~~**`SEMPOST` above a semaphore's `MaxValue` is silent**~~ — fixed
+  2026-08-20, `tt_sim/pe/tensix/semaphore_contract.py`, behaviour
+  `tensix-semaphore-bounds`. tt-sim's `SEMPOST` still saturates at 15
+  exactly as `SEMPOST.md` says, and `Max` still has no effect on the
+  arithmetic (`SEMINIT.md`: "only subsequently used by `SEMWAIT`");
+  what is new is that a post *to or past* a `Max` some `SEMINIT`
+  declared raises `SemaphoreContractError` instead of returning numbers
+  that are decided by tt-sim's interleaving. `Max` is `SEMWAIT` C1's
+  threshold and nothing else, so reaching it proves the producer
+  issued past its own gate. Posts at 15 and gets at 0 — where the
+  hardware itself discards the operation, and both tt-metal's LLK and
+  ttsim assert — raise on the Tensix instructions and on the
+  memory-mapped RISC-V path alike. Deliberately *not* checked, because
+  working tt-metal kernels do both (377 times across the in-tree
+  corpus): a post above `Max` on a semaphore no `SEMINIT` configured,
+  and one through the memory-mapped write, where a core polls with `lw`
+  and C1 is unavailable to it. ttsim splits it in the same two places.
+  `optests/hoistacquire`'s `stall 50` was silent corruption on both
+  arches and now stops with ttsim's own numbers (`sem=2 sem_max=2`);
+  nothing else in the corpus moves. `TT_SIM_DISABLE_SEMAPHORE_CHECKS=1`
+  restores the old silence.
 
 **NoC** (`tt_sim/network/tt_noc.py`):
 - Register coverage: many offsets beyond the basic counter set, the
