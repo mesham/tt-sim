@@ -957,30 +957,34 @@ code.**
 
 **The v2.0 list above is closed** — every item delivered or proven
 impossible, 2026-08-18 — and what has landed since came from none of
-the lists in this file. Eight things landed in the week after, and
-**five arrived as reports from the compiler team using tt-sim in
+the lists in this file. Nine things landed in the week after, and
+**six arrived as reports from the compiler team using tt-sim in
 anger** rather than from anything planned here: the multicast corner
-order and the packer's DEST read width (both below), the `prologue`
-misreading and the single-window gate (§4 point 4), and the request for
-a version marker that became `tt_sim/behaviour.py`. Each report is
+order, the packer's DEST read width and the packer's *dropped* Dst wait
+(all three below), the `prologue` misreading and the single-window gate
+(§4 point 4), and the request for a version marker that became
+`tt_sim/behaviour.py`. Each report is
 dated in the source it touched.
 
-**Four of them were tt-sim returning a confident, plausible, wrong
+**Five of them were tt-sim returning a confident, plausible, wrong
 answer** — the failure mode that consumer ranks above cycle accuracy,
 in their own words as recorded in the v3 working note: *"the failures
 that cost us most were the ones where a simulator returned a confident,
 plausible, wrong answer. A tool that told us 'I do not model this'
-would have been worth more than one that passed."* The four: a
+would have been worth more than one that passed."* The five: a
 multicast suite running green against a simulator that delivered the
 packet to **nobody**; a `prologue` bucket reading **91.89 %** of a span
 as setup when it was a `cb_wait_front` on the compute pipeline; a gate
 reporting **five program executions** where there was one kernel launch
-and four profiler flushes; and a packer that read DEST at half width
-and wrote a quarter of the output tile. **Not one of the four was a
-cycle-count error.** The packer one is the odd member and worth
-separating: it was *loud* — the consumer's own check failed — but it
-pointed at the wrong culprit, so it cost them a diagnosis of their own
-correct code rather than costing them nothing at all. That is the
+and four profiler flushes; a packer that read DEST at half width
+and wrote a quarter of the output tile; and a packer that stopped
+waiting for the math thread at all, because one instruction walked past
+its Wait Gate and took the wait with it. **Not one of the five was a
+cycle-count error.** The DEST-read-width one is the odd member and
+worth separating: it was *loud* — the consumer's own check failed — but
+it pointed at the wrong culprit, so it cost them a diagnosis of their
+own correct code rather than costing them nothing at all. The dropped
+wait cost them the same diagnosis twice over, for the same reason. That is the
 through-line, and it is the strongest evidence this file holds about
 what the next release should be about.
 `docs/plans/v3.md` is a working note, not a commitment, and its two
@@ -1167,6 +1171,68 @@ this landed; what follows is what happened, not what was planned.
    for rows 0–7, then 8-row blocks spaced 16 apart. The consequence
    above holds either way, and it is the consequence the test depends
    on.
+
+6. **A `STALLWAIT` walked past an unsatisfied `SEMWAIT` and took the
+   wait with it — closed 2026-08-20.** Reported as a single-core K=2
+   GEMM going from `errors=0` to `errors=320 of 1024` — 232 of 1024 in
+   `optests/packuntilizeinit`, the in-tree reproduction — when
+   `pack_untilize_dest_init<1, 1>(ocb)` moved from before `matmul_init`
+   to after `tile_regs_wait()` — a call that compiles to nothing on the
+   UNPACK and MATH builds, so the move changes only the PACK thread's
+   own instruction order. Both forms are correct on an n300 card and
+   both are correct on ttsim.
+   **The rule is one row of a table in the ISA docs.**
+   `STALLWAIT.md`'s "exact set of instructions blocked from starting by
+   each bit" gives `STALLWAIT` a tick in **all nine** block-mask
+   columns, on Wormhole and Blackhole alike, and it is the only
+   instruction whose row is: every other row names the units its bit is
+   about, which is what tt-sim's Wait Gate modelled — by the
+   instruction's `ex_resource`. `STALLWAIT`'s is `SYNC`, so only B1
+   caught it. `tile_regs_wait()` is
+   `SEMWAIT(B0, MATH_PACK, wait-while-zero)`, and the first instruction
+   `_llk_init_packer_dest_offset_registers_` issues is
+   `STALLWAIT(STALL_TDMA | STALL_THCON, PACK)` — so with the late init
+   that `STALLWAIT` sailed through the gate, **overwrote** the latched
+   `SEMWAIT` (`SEMWAIT.md`: "latching of the new `SEMWAIT` will cause
+   the previous wait to be forgotten" — true of `SEMWAIT`, which is why
+   `STALLWAIT` is immune), and its own condition, "packer pipeline
+   empty", was met immediately. The `PACR`s that followed no longer
+   waited for the math thread at all.
+   **Measured, not argued:** with the fix out, the packer's first
+   untilize `PACR` issued at cycle 6049 and the math's
+   `SEMPOST(MATH_PACK)` at 6108 — the pack ran *59 cycles before* the
+   post that was supposed to release it, over a Dst row whose next
+   write, one MVMUL later at cycle 6054, was the one that made it
+   correct (six more row-writes followed). The early form has the same
+   `SEMPOST` at 6107 and the same `PACR` at 6123, in the right order.
+   Every other piece of packer state was identical between the two
+   forms — read width, source format, config `stateID`, every generated
+   Dst address, every `PACR` argument — which is what makes this a
+   pure ordering fault and what had previously sent the diagnosis
+   towards the packer's configuration.
+   **Two co-factors, and both follow from the mechanism**: **K >= 2**
+   (with one `matmul_tiles` there is nothing left to accumulate, so an
+   early read still sees the final value) and operands **tilized on
+   device**, which is a timing co-factor rather than a semantic one:
+   with the operands taken already tiled from DRAM the unguarded read
+   happens to land after the math has finished anyway, so the dropped
+   wait costs nothing. The corrupted values look like a
+   column-stride error rather than a partial sum, because a HiFi4
+   accumulation passes *through* a state where the row holds every
+   other datum — a shape worth remembering before reading an
+   interleaving fault as an addressing one.
+   **The fix** is one early return in `WaitGate.LatchedInstruction`,
+   plus the table row it names; `optests/packuntilizeinit` is the
+   end-to-end reproduction,
+   `tt_sim/pe/tensix/waitgate_stallwait_blocked_test.py` pins the
+   mechanism without needing tt-metal or the oracle, and
+   `tensix-latched-wait-survives-stallwait` publishes it as a behaviour
+   marker for the consumer who reported it. The rule is
+   arch-independent and applies on Blackhole too, where all 32 replay
+   guards are unmoved; *this kernel* is separately blocked there, since
+   that arch takes the `llk_math_reconfig_remap` path in the same init,
+   which ttsim calls `UnimplementedFunctionality` and tt-sim does not
+   finish.
 
 The other three landed elsewhere in this file: DRAM page-to-bank
 distribution, and the host-DMA rate refused alongside it, are in §1;
@@ -1881,6 +1947,25 @@ fails loudly today. Grep for `NotImplementedError` in the named files.
   resident operand tiles (`cb_wait_front` hoisted, no `cb_pop_front`)
   diverges from silicon on a shape no in-tree example uses
   (`docs/plans/tensix-cost-benchmark.md`).
+- **`SEMPOST` above a semaphore's `MaxValue` is silent** — tt-sim
+  saturates at 15 and carries on, which is exactly the functional model
+  in the ISA documentation (`SEMPOST.md`, `SyncUnit.md`: the per-
+  semaphore `MaxValue` is a `SEMWAIT` comparison threshold, not a
+  post-side limit). **ttsim stops dead** on the same instruction with
+  `NonContractualBehavior: tensix_sempost: sem=N sem_max=N`. Nothing is
+  arithmetically wrong here — the divergence is that a kernel which has
+  gone out of contract keeps running and quietly returns garbage.
+  Reachable today: a compute kernel that hoists `tile_regs_acquire()`
+  out of its output-tile loop removes the math thread's only
+  back-pressure, so the moment anything slows the packer down, math
+  over-posts MATH_PACK and wraps onto a DEST bank the packer has not
+  drained. `optests/hoistacquire`'s `stall` mode is the reproduction:
+  both simulators change behaviour at the same amount of back-pressure,
+  tt-sim by corrupting the output and ttsim by refusing to continue. A
+  fix is an opt-in check in `backends/sync.py` (`handle_sempost` /
+  `handle_semget`, which have the `max` to hand and ignore it) plus a
+  decision about whether it warns or raises; found 2026-08-20 while
+  building `optests/hoistacquire`.
 
 **NoC** (`tt_sim/network/tt_noc.py`):
 - Register coverage: many offsets beyond the basic counter set, the
