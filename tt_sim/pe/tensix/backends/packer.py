@@ -257,8 +257,17 @@ class PackerUnit(TensixBackendUnit):
                 "Blackhole that init runs MATH(_llk_math_reconfig_remap_), which "
                 "spins on the MATH_PACK semaphore until the pack it is racing has "
                 "finished, so a PACK thread already past tile_regs_wait() issues "
-                "this PACR before MATH ever writes the bits. Move "
-                "pack_untilize_dest_init ahead of the math"
+                "this PACR before MATH ever writes the bits. "
+                "THIS IS A tt-sim LIMIT, NOT A VERDICT ON YOUR KERNEL: a real "
+                "Blackhole p150b runs this shape and returns correct results "
+                "(measured 2026-08-20, four configurations, errors=0), so the "
+                "encoding is unrunnable in simulation and unspecified on "
+                "hardware rather than wrong. To get past it here, hoist "
+                "pack_untilize_dest_init ahead of the math -- which is also "
+                "where tt-metal's API contract puts every *_init, and is the "
+                "only way to configure the remap, since llk_math_reconfig_remap "
+                "has no standalone call site. Leave pack_untilize_uninit where "
+                "it is"
             )
         if packMask not in (0, 1, 3):
             raise NotImplementedError(
