@@ -220,6 +220,13 @@ class PackerUnit(TensixBackendUnit):
         hardware and unlike ttsim, applies ``Adj16``/``Adj32`` to every Dst
         access, so the hardware's physical stride of 8 through the remapped
         layout is the logical stride of 16 modelled here.
+
+        Strided *without* those two config bits is a different matter, and it is
+        refused below rather than guessed. Nothing specifies it: there is no
+        Blackhole PACR page, and ttsim declines the identical combination
+        ("We currently require strided mode to be tied to the swizzle_32b and
+        remap_addrs features"). Reaching it means the kernel is out of contract
+        rather than that a mode is missing — see the refusal's own note.
         """
         if not self.backend.blackhole:
             return 0
@@ -231,12 +238,27 @@ class PackerUnit(TensixBackendUnit):
             # ttsim ties strided mode to both DEST_ACCESS_CFG bits and refuses
             # otherwise; without the remap the stride is not 16 and there is no
             # reference for what it would be.
+            #
+            # The message names the cause as well as the condition, because the
+            # only way a real kernel gets here is a *late*
+            # ``pack_untilize_dest_init``, and the condition alone reads like a
+            # missing tt-sim feature when it is a missing config write. See
+            # docs/cost-model-caveats-for-consumers.md, "pack_untilize_dest on
+            # Blackhole", for the measured trace.
             raise NotImplementedError(
                 "PACR DST_ACCESS_STRIDED_MODE with DEST_ACCESS_CFG remap_addrs="
                 f"{int(dst.dest_remap_addrs)} swizzle_32b={int(dst.dest_swizzle_32b)} "
                 "is not modelled; the stride-of-16 Dst read is only defined with "
-                "both set (tt-metal always sets them together, in "
-                "_llk_math_reconfig_remap_)"
+                "both set, and nothing specifies what it would be otherwise "
+                "(ttsim refuses the same instruction: 'we currently require "
+                "strided mode to be tied to the swizzle_32b and remap_addrs "
+                "features'). This is reached by a kernel calling "
+                "pack_untilize_dest_init AFTER its math rather than before: on "
+                "Blackhole that init runs MATH(_llk_math_reconfig_remap_), which "
+                "spins on the MATH_PACK semaphore until the pack it is racing has "
+                "finished, so a PACK thread already past tile_regs_wait() issues "
+                "this PACR before MATH ever writes the bits. Move "
+                "pack_untilize_dest_init ahead of the math"
             )
         if packMask not in (0, 1, 3):
             raise NotImplementedError(

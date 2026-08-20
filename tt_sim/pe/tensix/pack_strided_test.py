@@ -265,10 +265,23 @@ def test_strided_without_the_dest_access_cfg_gates_raises():
     ttsim ties strided mode to both ``DEST_ACCESS_CFG`` bits and refuses
     otherwise; without the remap the stride is not 16 rows and there is no
     reference for what it would be.
+
+    The message is pinned as well as the exception. The only way a real kernel
+    reaches this is a ``pack_untilize_dest_init`` issued *after* its math --
+    ``MATH(_llk_math_reconfig_remap_)`` then spins on the MATH_PACK semaphore
+    behind the very pack it is meant to configure, so the two bits are still
+    clear when PACK issues the PACR. Stating only the condition sends the
+    reader looking for a missing tt-sim mode instead of a missing config write,
+    which is what happened the first time (`optests/packuntilizeinit` on
+    Blackhole); the fix belongs in the kernel.
     """
     with _packer(remap=False) as (backend, _):
-        with pytest.raises(NotImplementedError, match="DEST_ACCESS_CFG"):
+        with pytest.raises(NotImplementedError, match="DEST_ACCESS_CFG") as excinfo:
             _pacr(backend, dst_access_mode=1, read_intf_sel=0x3)
+        message = str(excinfo.value)
+        assert "pack_untilize_dest_init AFTER its math" in message
+        assert "_llk_math_reconfig_remap_" in message
+        assert "MATH_PACK" in message
 
 
 def test_strided_with_a_non_contiguous_interface_mask_raises():

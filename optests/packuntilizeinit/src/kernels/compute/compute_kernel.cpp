@@ -21,6 +21,9 @@
 //       control: it must stay green, or the test is measuring something else.
 //   KT -- the number of `matmul_tiles` accumulated into DEST tile 0. KT=1 is
 //       the co-factor control.
+//   REMAP_EARLY=1 -- Blackhole only: keep the init late but hoist its MATH arm
+//       (see the `#define` below). The only form in which the late init runs
+//       on Blackhole; on Wormhole the arm does not exist and this is a no-op.
 //
 // A[k] = SCALE[k] * identity and B[k] is one ramp tile, so the output is
 // exactly (SCALE[0] + ... ) * B in row-major order, with 1024 distinct values
@@ -46,6 +49,20 @@ constexpr auto cb_out = tt::CBIndex::c_16;   // untilized output, row-major
 #endif
 #ifndef KT
 #define KT 2
+#endif
+// Blackhole only: split `pack_untilize_dest_init`'s MATH arm out of the late
+// call and hoist it. On Blackhole the init expands to
+// `MATH(llk_math_reconfig_remap(true))` -- setting DEST_ACCESS_CFG's
+// remap_addrs + swizzle_32b, which are what make the packer's DEST read stride
+// 16 rows -- and `_llk_math_reconfig_remap_` opens by spinning on the
+// MATH_PACK semaphore. Issued late, that spin waits on the very pack it is
+// meant to configure, so PACK (already past `tile_regs_wait`) reaches the
+// untilize PACR with the bits still clear; both tt-sim and ttsim then refuse
+// the instruction, since strided DEST access without the remap is specified
+// nowhere. tt-metal's own escape hatch is the `configure_remap` template
+// parameter: configure the remap once, up front, and pass `false` late.
+#ifndef REMAP_EARLY
+#define REMAP_EARLY 0
 #endif
 #ifndef NUM_OUT
 #define NUM_OUT 1
@@ -86,7 +103,7 @@ void kernel_main() {
 
     for (uint32_t o = 0; o < NUM_OUT; o++) {
         cb_reserve_back(cb_out, 1);
-#if !INIT_LATE
+#if !INIT_LATE || REMAP_EARLY
         pack_untilize_dest_init<1, 1>(cb_out);
 #endif
         matmul_init(cb_a, cb_b, 0);
@@ -97,7 +114,13 @@ void kernel_main() {
         tile_regs_commit();
         tile_regs_wait();
 #if INIT_LATE
+#if REMAP_EARLY
+        // Same late call, minus the MATH arm the hoisted init already ran.
+        pack_untilize_dest_init<1, 1, false /*narrow_row*/, TILE_C_DIM, false /*dense*/, false /*configure_remap*/>(
+            cb_out);
+#else
         pack_untilize_dest_init<1, 1>(cb_out);
+#endif
 #endif
         pack_untilize_dest<1, 1>(cb_out, 1, 0);
         tile_regs_release();

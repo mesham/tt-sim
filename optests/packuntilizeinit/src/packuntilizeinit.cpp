@@ -27,7 +27,11 @@
 //   `k <n>`        set the number of accumulating `matmul_tiles` (default 2).
 //                  `k 1` is the co-factor control: with one matmul into DEST
 //                  the late init is reported harmless.
-// `early` and `k` compose, e.g. `./build/packuntilizeinit early k 1`.
+//   `remapearly`   Blackhole: keep the init late, but hoist its MATH arm --
+//                  an early `pack_untilize_dest_init<1, 1>` plus a late one
+//                  with `configure_remap = false`. This is the *only* form in
+//                  which the late init runs on Blackhole at all; see below.
+// The modes compose, e.g. `./build/packuntilizeinit early k 1`.
 //
 // A[k] = SCALE[k] * identity and B[k] is one ramp tile of 1024 distinct,
 // exactly representable bfloat16 values, so the untilized 32x32 output is
@@ -51,12 +55,45 @@
 //   Wormhole   late K=1 errors=0          errors=0
 //   Blackhole  either   times out         UnimplementedFunctionality
 //
-// (Since the Wait Gate fix, Blackhole no longer times out: tt-sim reaches the
-// `pack_untilize_dest` PACR and refuses it with a named `NotImplementedError`
-// -- `DST_ACCESS_STRIDED_MODE` without the `DEST_ACCESS_CFG` remap -- where
-// ttsim refuses the same instruction as `UnimplementedFunctionality`. Both
-// simulators still decline the kernel, so Blackhole remains out of scope for
-// this op test; it now declines loudly instead of hanging.)
+// Blackhole, re-measured 2026-08-20 (and no longer a timeout -- the Wait Gate
+// fix got it as far as the instruction):
+//
+//   form          tt-sim                         ttsim (oracle)
+//   early         errors=0, hex 3e003e01...      errors=0, same hex
+//   remapearly    errors=0, same hex             errors=0, same hex
+//   late          NotImplementedError            UnimplementedFunctionality
+//                 (PACR DST_ACCESS_STRIDED_MODE  (tensix_pacr:
+//                  ... remap_addrs=0)             dst_access_mode=1
+//                                                 swizzle_32b=0)
+//
+// So `pack_untilize_dest` itself is not the problem on Blackhole -- it runs,
+// bit-exact against ttsim, in both forms where the DEST remap is established
+// before the pack. What does not run is the *late* form, and it does not run
+// on the LLK's own terms. On Blackhole (only) `pack_untilize_dest_init`
+// expands to a MATH arm, `llk_math_reconfig_remap(true)`, which sets
+// `DEST_ACCESS_CFG`'s `remap_addrs` + `swizzle_32b` -- the bits that make the
+// packer's DEST read stride 16 rows. `_llk_math_reconfig_remap_` opens with
+// `tensix_sync()` and `while (semaphore_read(semaphore::MATH_PACK) > 0) {}`,
+// so issued after `tile_regs_commit()` it blocks on the semaphore that only
+// the *next* pack will release, while PACK -- already past `tile_regs_wait()`
+// -- walks into the untilize PACR with the bits still clear. Traced: in the
+// early form MATH issues two `RMWCIB`s to `DEST_ACCESS_CFG` (0x2 then 0x3)
+// before the PACR; in the late form the register is never written and TRISC1
+// is still spinning at 0xb594 (`lw a5, 0x24(a2)` -- PC-buffer word 9,
+// `MATH_PACK`) when the PACR issues.
+//
+// Neither simulator invents an address sequence for strided DEST access
+// without the remap, and neither should: BlackholeA0 has no PACR page and no
+// Packers chapter in the public ISA docs at all, and ttsim's source states the
+// rule outright ("We currently require strided mode to be tied to the
+// swizzle_32b and remap_addrs features", TENSIX_EXECUTE_PACR). The fix is in
+// the kernel, and tt-metal ships it: `remapearly` above, i.e. the
+// `configure_remap = false` template parameter, which passes on both
+// simulators with the same hex as `early`.
+//
+// The Wormhole defect below and this are therefore *not* the same bug: that
+// one was tt-sim's, and was fixed; this one is a kernel out of contract on an
+// arch-specific arm.
 //
 // **Fixed the same day**: the Wait Gate let the `STALLWAIT` that opens
 // `_llk_init_packer_dest_offset_registers_` walk past the still-unsatisfied
@@ -70,10 +107,11 @@
 //
 // ttsim passing both forms, on the same compiled kernels, is what made this a
 // tt-sim defect rather than a kernel that is out of contract. (Blackhole is a
-// separate matter: `pack_untilize_dest_init` takes the `llk_math_reconfig_remap`
-// arm there, which ttsim declares unimplemented and which tt-sim does not
-// finish -- neither simulator has an answer, so Blackhole is not evidence
-// either way and this op test is a Wormhole one until that is untangled.)
+// separate matter, untangled 2026-08-20 -- see the status table above. The
+// default `diff.sh packuntilizeinit` run stays a Wormhole one, because the
+// late form it exercises is out of contract on Blackhole; `early` and
+// `remapearly` are the Blackhole-runnable forms and both are bit-exact
+// against ttsim there.)
 //
 // What the failure is *not*, measured rather than argued: the packer's latched
 // state is bit-identical between the two forms -- `PCK_DEST_RD_CTRL_Read_32b_data`,
@@ -127,11 +165,14 @@ static float ramp(uint32_t j) {
 
 int main(int argc, char** argv) {
     bool init_late = true;
+    bool remap_early = false;
     uint32_t kt = 2;
     uint32_t num_out = 1;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "early") == 0) {
             init_late = false;
+        } else if (std::strcmp(argv[i], "remapearly") == 0) {
+            remap_early = true;
         } else if (std::strcmp(argv[i], "k") == 0 && i + 1 < argc) {
             kt = static_cast<uint32_t>(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "n") == 0 && i + 1 < argc) {
@@ -143,8 +184,11 @@ int main(int argc, char** argv) {
         return 2;
     }
     printf(
-        "pack_untilize_dest_init %s the math, K = %u accumulating matmul_tiles, %u output tile(s)\n",
-        init_late ? "AFTER (the reported defect)" : "before (control)", kt, num_out);
+        "pack_untilize_dest_init %s the math%s, K = %u accumulating matmul_tiles, %u output tile(s)\n",
+        init_late ? "AFTER (the reported defect)" : "before (control)",
+        (init_late && remap_early) ? " (Blackhole DEST remap hoisted, configure_remap = false)" : "",
+        kt,
+        num_out);
 
     IDevice* device = CreateDevice(0);
     Program program = CreateProgram();
@@ -224,7 +268,11 @@ int main(int argc, char** argv) {
         ComputeConfig{
             .math_fidelity = MathFidelity::HiFi4,
             .fp32_dest_acc_en = true,
-            .defines = {{"INIT_LATE", init_late ? "1" : "0"}, {"KT", std::to_string(kt)}, {"NUM_OUT", std::to_string(num_out)}}});
+            .defines = {
+                {"INIT_LATE", init_late ? "1" : "0"},
+                {"REMAP_EARLY", remap_early ? "1" : "0"},
+                {"KT", std::to_string(kt)},
+                {"NUM_OUT", std::to_string(num_out)}}});
 
     tt::tt_metal::detail::LaunchProgram(device, program, true, true);
 
