@@ -233,6 +233,95 @@ An FPU-binary-then-SFPU init sequence is therefore outside what it checks today.
 Adding those entries is a far cheaper fix than a simulator guard, and it is the
 only place the check can be made without guessing.
 
+**It runs against tt-sim — but only from 2026-08-20.** The sanitizer reports
+through DPRINT, and DPRINT could not start on tt-sim before that date: every
+run with it enabled aborted in `TT_THROW: Timed out writing init magic`
+(`dprint_server.cpp:147`) because tt-sim's stand-in cores zero-filled host
+reads, so the host could never read back the magic word it had just written.
+If you tried the sanitizer against tt-sim and it would not start, that was
+this, and it is fixed; see
+[`docs/running-tt-metal-on-the-simulator.md`](running-tt-metal-on-the-simulator.md)
+§4.7, including what DPRINT costs in wall time.
+
+## `pack_untilize_dest` on Blackhole: it works, but the init must precede the math
+
+**The claim this answers:** "`pack_untilize_dest` cannot run on Blackhole".
+Measured, that is wrong in general and right in one specific, diagnosable case.
+
+`pack_untilize_dest` runs on Blackhole today and is bit-exact against ttsim:
+`optests/diff.sh untilize` (whose op 2 *is* `copy_tile` → `pack_untilize_dest`)
+passes on Blackhole, 1536 elements, and `optests/packuntilizeinit early` — the
+same K=2 bf16 GEMM the compiler team reported, with the init in the position
+tt-metal requires — returns `errors=0 of 1024` on both simulators with an
+identical result hex. The `DST_ACCESS_STRIDED_MODE` Dst read that
+`pack_untilize_dest` needs is modelled (`tt_sim/pe/tensix/backends/packer.py`,
+pinned by `tt_sim/pe/tensix/pack_strided_test.py`).
+
+**What does not run is the late-init form, and it does not run on hardware's
+terms either.** On Blackhole — and only on Blackhole — `pack_untilize_dest_init`
+expands to a MATH-thread arm that Wormhole does not have
+(`tt_metal/hw/inc/api/compute/pack_untilize.h`, `#ifdef ARCH_BLACKHOLE`):
+`llk_math_reconfig_remap(true)`, which sets `DEST_ACCESS_CFG_remap_addrs` and
+`DEST_ACCESS_CFG_swizzle_32b`. Those two bits are what make the packer's Dst
+read stride 16 rows; without them the pack has no defined addressing at all.
+And `_llk_math_reconfig_remap_` opens with
+
+```c
+tensix_sync();
+while (semaphore_read(semaphore::MATH_PACK) > 0) {};  // wait for previous packs
+```
+
+so if the init is issued after `tile_regs_commit()`, MATH blocks on the
+semaphore that only the *following* pack will release, while PACK — already past
+`tile_regs_wait()` — walks straight into the untilize PACR. The config write
+never lands before the pack that needs it. Traced in tt-sim: in the early form
+MATH issues two `RMWCIB`s to `DEST_ACCESS_CFG` (`0x2` then `0x3`) before the
+PACR; in the late form the register is never touched and TRISC1 is still
+spinning at `0xb594` (`lw a5, 0x24(a2)` — PC-buffer word 9, `MATH_PACK`) when
+PACK issues the PACR.
+
+**Both simulators refuse it, for the same reason, on the same instruction.**
+
+| | on the late-init PACR |
+| --- | --- |
+| ttsim (vendor) | `UnimplementedFunctionality: tensix_pacr: dst_access_mode=1 swizzle_32b=0` |
+| tt-sim | `NotImplementedError: PACR DST_ACCESS_STRIDED_MODE with DEST_ACCESS_CFG remap_addrs=0 swizzle_32b=0 …` |
+
+ttsim's source states the rule outright: *"We currently require strided mode to
+be tied to the swizzle_32b and remap_addrs features"* (`TENSIX_EXECUTE_PACR`).
+The public ISA documentation cannot settle it either way — **BlackholeA0 has no
+PACR page and no Packers chapter at all**; `BlackholeA0/…/Dst.md` says only that
+the two bits "also affect how packers address `Dst`", and links to pages that do
+not exist in the tree. So the strided address sequence *without* the remap is
+neither specified nor referenced anywhere, and tt-sim refuses rather than invent
+one — an invented address sequence would return plausible, silently wrong data,
+which is the one outcome worse than stopping.
+
+**What to do about it, measured.** Put `pack_untilize_dest_init` before the
+math, which is where tt-metal's own API contract puts every `*_init`. If a
+generator must emit it late, tt-metal ships the escape hatch: configure the
+remap once up front, then spell the late call
+
+```c
+pack_untilize_dest_init<1, 1, false /*narrow_row*/, TILE_C_DIM,
+                        false /*dense*/, false /*configure_remap*/>(cb_out);
+```
+
+— that last template parameter exists for exactly this ("Pass
+`configure_remap = false` only when the caller has already configured BH DEST
+remap"). Both are verified rather than suggested:
+`optests/packuntilizeinit remapearly` keeps the reported late-init shape,
+hoisting only the MATH arm, and returns `errors=0 of 1024` with the same result
+hex as `early` on tt-sim *and* on ttsim, on Blackhole.
+
+**This is not a cost-model caveat and not a cycle-count risk**; it is listed here
+because it is the shape a consumer meets first: a GEMM that passes on Wormhole
+and stops dead on Blackhole, with an error naming a Tensix mode rather than the
+line of kernel source that has to move. The Wormhole side of the same op test is
+a genuine tt-sim defect and was fixed (`optests/packuntilizeinit`, the Wait Gate
+`STALLWAIT`/`SEMWAIT` fix); the Blackhole side is not the same bug wearing a
+different hat.
+
 ## What is *not* on this page
 
 Known-unreached functional edges — conditions the simulator does not model

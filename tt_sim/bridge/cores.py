@@ -1,23 +1,110 @@
 """Core implementations used by the fabric.
 
-``NullCore`` swallows writes and returns zeros (proven enough for tt-metal
-device init). ``TensixCore`` and ``DramCore`` are thin shims over ``Device``
-that route the wire's translated NoC coords to the corresponding tt-sim
-unified coord.
+``NullCore`` and ``DeferredTensixCore`` are stand-ins for a tile the simulator
+has not built: they swallow writes and answer reads out of a ``_WriteShadow``
+— the host's own bytes back, zeros for anything untouched, ``RUN_MSG_DONE``
+for the go message. ``TensixCore`` and ``DramCore`` are thin shims over
+``Device`` that route the wire's translated NoC coords to the corresponding
+tt-sim unified coord.
 
 The ``--mock-tensix`` CLI flag in ``__main__.py`` substitutes ``NullCore`` for
-``TensixCore``/``DramCore`` registration — useful for diffing against the
-phase-1 zero-stub behaviour without rebuilding the simulator.
+``TensixCore``/``DramCore`` registration — a device that remembers but does not
+execute, for wire-level debugging without building the simulator. (It was the
+phase-1 zero stub before the shadow; a mock read now returns the host's own
+bytes rather than zeros.)
 """
 
 
-class NullCore:
-    """Accepts all writes silently, returns zeros for all reads.
+class _WriteShadow:
+    """The bytes a stand-in core has been told, so it can be asked back.
+
+    A core the simulator has not built a tile for still has to answer host
+    reads, and the answer used to be an unconditional zero-fill. That is wrong
+    for any address the host **wrote itself and then reads back**, and tt-metal
+    has exactly such a handshake: ``DPrintServer`` writes a magic word into
+    every core's ``dprint_buf`` and spins 100000 times waiting to read it back
+    (``dprint_server.cpp:WriteInitMagic``). Against a zero-filling stand-in
+    that spin can never succeed, so *any* run with DPRINT enabled aborted with
+    ``TT_THROW: Timed out writing init magic`` — DPRINT, and everything built on
+    it (the LLK sanitizer, watcher-style debugging), was unusable on tt-sim.
+
+    So writes are shadowed, sparsely, in 4 KB pages — only the pages actually
+    written cost anything — and reads are served out of the shadow, zero-filled
+    where nothing has been written. That is what real L1 would do.
+
+    **The one address that must not echo is the go message.** tt-metal writes a
+    launch run-state (``go=INIT`` and friends) and then polls until the core's
+    firmware writes ``RUN_MSG_DONE`` back. A stand-in has no firmware, so
+    echoing the run-state hangs the host forever; the old zero-fill "worked"
+    only because ``RUN_MSG_DONE`` is 0. :meth:`shadow_write` therefore stores a
+    handshake go-message with its signal byte already set to ``RUN_MSG_DONE``,
+    which says the same thing the zero-fill did but says it deliberately, and
+    keeps saying it once the neighbouring bytes are real. The journal that
+    drives replay is untouched — see :meth:`DeferredTensixCore.replay`, which
+    still has to see the run-state the host actually sent.
+    """
+
+    _PAGE_BITS = 12
+    _PAGE = 1 << _PAGE_BITS
+    #: go_msg_t is a 4-byte union; ``signal`` is the top byte (offset 3).
+    _GO_MSG_SIZE = 4
+    _RUN_MSG_DONE = 0x00
+    #: Run-states the host writes and then polls to ``RUN_MSG_DONE``. Includes
+    #: ``GO`` (0x80) for the benefit of a stand-in that never becomes a real
+    #: core: for those it is not a trigger, just another poll to answer.
+    _POLLED_SIGNALS = frozenset({0x40, 0x80, 0xC0, 0xE0, 0xF0})
+
+    def __init__(self):
+        #: ``page index -> 4 KB bytearray``, allocated on first touch.
+        self._pages: dict[int, bytearray] = {}
+
+    def shadow_write(self, addr, data):
+        if (
+            len(data) == _WriteShadow._GO_MSG_SIZE
+            and data[_WriteShadow._GO_MSG_SIZE - 1] in _WriteShadow._POLLED_SIGNALS
+        ):
+            data = bytes(data[: _WriteShadow._GO_MSG_SIZE - 1]) + bytes(
+                [_WriteShadow._RUN_MSG_DONE]
+            )
+        end, pos = addr + len(data), 0
+        while addr < end:
+            page, off = divmod(addr, _WriteShadow._PAGE)
+            n = min(_WriteShadow._PAGE - off, end - addr)
+            buf = self._pages.get(page)
+            if buf is None:
+                buf = self._pages[page] = bytearray(_WriteShadow._PAGE)
+            buf[off : off + n] = data[pos : pos + n]
+            addr += n
+            pos += n
+
+    def shadow_read(self, addr, size):
+        if not self._pages:
+            return b"\x00" * size
+        out, end, pos = bytearray(size), addr + size, 0
+        while addr < end:
+            page, off = divmod(addr, _WriteShadow._PAGE)
+            n = min(_WriteShadow._PAGE - off, end - addr)
+            buf = self._pages.get(page)
+            if buf is not None:
+                out[pos : pos + n] = buf[off : off + n]
+            addr += n
+            pos += n
+        return bytes(out)
+
+
+class NullCore(_WriteShadow):
+    """Accepts all writes silently, answers reads out of its write shadow.
 
     Used both for genuinely unmodelled tiles (eth / pcie / arc /
     router-only) and as the fallback for worker coords the user didn't
-    list in ``TT_SIM_TENSIX_COORDS``. Two optional hooks let
-    ``__main__.py`` surface config bugs:
+    list in ``TT_SIM_TENSIX_COORDS``. Reads used to be an unconditional
+    zero-fill; they are now :class:`_WriteShadow`'s echo of what the host
+    wrote, which is what makes the DPRINT init handshake terminate on a
+    pinned worker set. Untouched addresses still read zero, and the go
+    message still reads ``RUN_MSG_DONE``, so the init handshake this stub
+    was built for is unchanged.
+
+    Two optional hooks let ``__main__.py`` surface config bugs:
 
     - ``on_user_data_write`` fires the first time a write targets L1
       above 0x10000 — past the kernel firmware / init scratch region, so
@@ -39,6 +126,7 @@ class NullCore:
     _RUN_MSG_GO = 0x80
 
     def __init__(self, coord, on_user_data_write=None, on_kernel_launch=None):
+        super().__init__()
         self.coord = coord
         self.in_reset = True
         self._on_user_data_write = on_user_data_write
@@ -60,9 +148,10 @@ class NullCore:
         ):
             self._user_write_seen = True
             self._on_user_data_write(self.coord)
+        self.shadow_write(addr, data)
 
     def read(self, addr, size):
-        return b"\x00" * size
+        return self.shadow_read(addr, size)
 
     def assert_reset(self):
         self.in_reset = True
@@ -71,16 +160,17 @@ class NullCore:
         self.in_reset = False
 
 
-class DeferredTensixCore:
+class DeferredTensixCore(_WriteShadow):
     """A functional worker the simulator has not built a tile for *yet*.
 
-    On the wire it is indistinguishable from :class:`NullCore` — writes are
-    swallowed, reads return zeros — which is exactly what tt-metal's grid-wide
-    init handshake needs: it writes ``go=INIT`` to every declared worker and
-    then polls until the mailbox reads back ``RUN_MSG_DONE`` (0), so a
-    zero-filled read is what lets init complete without a tile existing. Serving
-    reads out of the journal instead would echo ``INIT`` straight back and hang
-    the host.
+    On the wire it is indistinguishable from :class:`NullCore`: writes are
+    swallowed and reads answered out of the :class:`_WriteShadow` — the host's
+    own bytes back, zeros where it has written nothing, and ``RUN_MSG_DONE``
+    for the go message however the host last set it. That last exception is
+    what tt-metal's grid-wide init handshake needs (it writes ``go=INIT`` to
+    every declared worker and then polls the mailbox to ``RUN_MSG_DONE``), and
+    it is the *only* address that must not echo — echoing the rest is what lets
+    DPRINT's ``WriteInitMagic`` readback terminate.
 
     What it adds is the *journal*: every write and every reset transition it
     sees **while the core is still held in reset**, in arrival order, so when
@@ -119,6 +209,7 @@ class DeferredTensixCore:
     _HANDSHAKE_SIGNALS = frozenset({0x40, 0xC0, 0xE0, 0xF0})
 
     def __init__(self, coord, materialise):
+        super().__init__()
         self.coord = coord
         self.in_reset = True
         self._materialise = materialise
@@ -132,7 +223,11 @@ class DeferredTensixCore:
             and data[DeferredTensixCore._GO_MSG_SIZE - 1]
             == DeferredTensixCore._RUN_MSG_GO
         ):
+            # The journal keeps the host's bytes verbatim — ``replay`` has to
+            # see the run-state actually sent. The shadow is what the host is
+            # answered from, and it substitutes ``RUN_MSG_DONE``.
             self.journal.append(("w", addr, bytes(data)))
+            self.shadow_write(addr, data)
             return
         # Either a kernel launch or the host talking to a core it has already
         # released — both say "this worker is used". Build it, give it the
@@ -141,7 +236,7 @@ class DeferredTensixCore:
         self._materialise(self.coord).write(addr, data)
 
     def read(self, addr, size):
-        return b"\x00" * size
+        return self.shadow_read(addr, size)
 
     def assert_reset(self):
         self.in_reset = True

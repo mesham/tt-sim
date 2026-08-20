@@ -517,6 +517,7 @@ All are read from the environment and work in this tt-metal-driven flow.
 | `TT_SIM_COST_MODEL=1` | charge each op the cycle cost the ISA-doc tables give it (off by default) — see below |
 | `TT_SIM_DISABLE_ALIGNMENT_CHECKS=1` | accept NoC transfers whose source and destination addresses are not congruent, which hardware treats as undefined behaviour |
 | `TT_SIM_DISABLE_MULTICAST_ORDER_CHECKS=1` | accept multicast rectangles whose corners are ordered against the direction of data flow of the NoC they are issued on, which hardware resolves as a torus wrap-around and which hangs `noc_async_write_barrier` |
+| `TT_SIM_DISABLE_SEMAPHORE_CHECKS=1` | accept a Tensix `SEMPOST` that carries a semaphore past the `Max` its own `SEMINIT` declared (a producer that has issued past its own `SEMWAIT` back-pressure), and one at 15 / a `SEMGET` at 0 where the operation is discarded |
 | `TT_SIM_NOC1_SHADOW=warn\|error\|off` | what to do when a live Tensix worker is unreachable on NoC 1 because a mirror registration took its canonical coord (default `warn`, one line per coordinate on stderr) — see below |
 | `TT_SIM_NUMBA=0` / `=1` | never / always use the optional compiled FPU kernel, overriding the call threshold — see below |
 | `TT_SIM_NUMBA_THRESHOLD=N` | MVMULs to run before compiling the FPU kernel (default 512) |
@@ -994,6 +995,97 @@ and always have. Every Blackhole example and replay guard passes regardless,
 which is what makes it safe for Wormhole's canonical NoC 1 keys to go under
 translation while its mirrors — the ones this register actually names — stay.
 
+
+### 4.7 `DPRINT` — kernel `printf`, and the LLK sanitizer
+
+**It works.** `TT_METAL_DPRINT_CORES` behaves as it does on silicon: kernel
+prints come back over the wire and land on the host's stdout.
+
+```bash
+TT_METAL_DPRINT_CORES=0,0 ./metal_example_hello_world_datamovement_kernel
+```
+
+```
+0:0-0:BR: My logical coordinates are 0,0
+0:0-0:NC: My logical coordinates are 0,0
+0:0-0:BR: Hello, host, I am running a void data movement kernel on Data Movement core 0.
+0:0-0:NC: Hello, host, I am running a void data movement kernel on Data Movement core 1.
+```
+
+**The LLK sanitizer rides on the same channel and now runs too** — it was the
+report that surfaced this. Set *both* variables: `TT_METAL_LLK_SANITIZER=1` on
+its own fails in the **kernel build**, on hardware as much as here, with
+
+```
+sanitizer/output.h:33: error: #error "llk::san | fault | LLK_SAN_ENABLE is set
+but neither ENABLE_LLK_ASSERT nor DEBUG_PRINT_ENABLED is defined"
+```
+
+```bash
+TT_METAL_LLK_SANITIZER=1 TT_METAL_DPRINT_CORES=0,0 TT_SIM_TENSIX_COORDS=1-1 \
+    ./metal_example_add_2_integers_in_compute      # -> Success, 16 s
+```
+
+**Before 2026-08-20 it did not work at all, on any program.** Anything with
+DPRINT enabled died in
+
+```
+TT_THROW: Timed out writing init magic          # dprint_server.cpp:147
+```
+
+after two to three minutes of apparent hang (184 s for
+`hello_world_datamovement_kernel`, measured against the pre-fix tree), inside
+`MetalContext::initialize` — i.e. before the program's first kernel.
+
+The mechanism, recorded so nobody has to find it twice. `DPrintServer` writes a
+magic word into the `dprint_buf` field of `mailboxes_t` — plain L1, inside the
+low mailbox region — on **every** core of the device, and then spins up to
+100000 times reading the first word back (`WriteInitMagic`). It is a pure
+host-side write-then-read of L1: no core has to be running, and the timeout is
+a try count, not a clock, so this was never a "the simulator is too slow" bug.
+It failed because tt-sim's stand-in cores — `NullCore`, and the
+`DeferredTensixCore` that fronts a worker until something proves the program
+uses it (§1.3) — **zero-filled every read**. The host could not read its own
+magic back, ever, and 100000 wire round-trips later it threw. Note that
+`init_device` disables prints on every core before attaching any, so narrowing
+`TT_METAL_DPRINT_CORES` to a single core did not help.
+
+The fix is in `tt_sim/bridge/cores.py`: a stand-in now keeps a sparse shadow of
+what the host wrote and answers reads out of it, zero-filling only what was
+never written — which is what L1 does. The one address that still must not echo
+is the go message, whose signal byte is stored as `RUN_MSG_DONE`: a stand-in has
+no firmware to flip it, and the grid-wide init handshake polls it.
+
+**What DPRINT costs: the whole declared worker grid materialises.** tt-metal
+writes the disable-magic to every core *after* releasing the workers from
+reset, and a host write to a released core is exactly tt-sim's "this worker is
+used" signal (§1.3, trigger 1). So a one-core program becomes an 80-worker one.
+Measured on `hello_world_datamovement_kernel`, this box:
+
+| run | workers built | wall (two passes) |
+| --- | --- | --- |
+| no DPRINT | 1 | 8 s, 8 s |
+| `TT_METAL_DPRINT_CORES=0,0` | 80 | 45 s, 45 s |
+| `TT_METAL_DPRINT_CORES=0,0` + `TT_SIM_TENSIX_COORDS=1-1` | 1 | 8 s, 8 s |
+| `TT_METAL_DPRINT_CORES=0,0` + `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE=3,4` | 80 | 47 s, 37 s |
+
+**Pin the worker set** (`TT_SIM_TENSIX_COORDS`, §1.3) and the tax goes away
+entirely — pinned-out workers are `NullCore`-backed, they answer the DPRINT
+handshake out of the same shadow, and nothing materialises. Do that whenever
+the program's core set is known.
+
+**Shrinking the compute grid does not help**, which is worth knowing before you
+try it: `TT_METAL_CORE_GRID_OVERRIDE_TODEPRECATE` moves the *compute* grid, but
+`DPrintServer` iterates `GetAllCores`, which is every worker the SoC descriptor
+declares. The last row above ran with `compute_grid=4x5` and still built all 80.
+
+The tax is a property of tt-metal's init order, not of the print path, so it is
+the same whether one core prints or all of them do.
+
+**Blackhole is the same code path and the same story** — `tt_sim/bridge` is
+arch-agnostic. `examples/one` under `TT_METAL_DPRINT_CORES=0,0` passes, in
+144 s with all 140 declared workers built.
+
 ---
 
 ## 5. Limitations to expect
@@ -1114,6 +1206,7 @@ python3 -m tt_sim.behaviour --verbose     # ...with the full guarantee text
 | `noc-transfer-alignment` | A NoC transfer whose source and destination are not congruent in the low bits the path requires raises, instead of producing the skewed data hardware would. |
 | `dram-interleaved-bank-distinctness` | Every DRAM bank an interleaved buffer can land in is separate storage at its own NoC coordinate — 12 on Wormhole, 8 on Blackhole — so a page-size or bank-count disagreement corrupts, instead of aliasing onto one flat store and coming back right. |
 | `tensix-latched-wait-survives-stallwait` | A Tensix `STALLWAIT` waits at the Wait Gate behind an unsatisfied `SEMWAIT` instead of overwriting it, so a compute kernel's Dst handshake holds however its LLK init calls are ordered around `tile_regs_wait()` — a `pack_untilize_dest_init` called after it no longer drops the packer's wait on `MATH_PACK`. |
+| `tensix-semaphore-bounds` | A Tensix `SEMPOST` that carries a semaphore to or past the `Max` its own `SEMINIT` declared raises, instead of returning values that depend on thread timing — the shape a `tile_regs_acquire()` hoisted out of an output-tile loop produces once the packer falls behind. A `SEMPOST` at 15 and a `SEMGET` at 0, where the hardware discards the operation, raise too. |
 
 `python3 -m tt_sim.behaviour --verbose` is the authoritative version of this
 table; the guarantees there say exactly what a run will observably do, including

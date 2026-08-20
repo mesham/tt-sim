@@ -12,8 +12,8 @@ and 28.9 s with 72.
 
 :class:`LazyTensixPool` gets both: no environment variable, and no tax. A
 functional worker starts as a :class:`~tt_sim.bridge.cores.DeferredTensixCore`
-— wire-identical to the old ``NullCore`` fallback, but journalling what the
-host says to it while it is held in reset — and becomes a real tile at the
+— wire-identical to the ``NullCore`` fallback, but journalling what the host
+says to it while it is held in reset — and becomes a real tile at the
 first of three triggers.
 
 **Trigger 1, a host write to a core that is out of reset.** This is the
@@ -21,8 +21,20 @@ ordinary one and it fires first in practice: tt-metal releases every declared
 worker during device init, then writes kernel binaries only to the cores its
 program runs on. So the first write that arrives after the DEASSERT is both the
 signal and the deadline — the journal must stop there, because the host has by
-then already polled the (zero-filled) go-message to ``DONE`` and believes the
-firmware has run its init state.
+then already polled the go-message to ``DONE`` (the stand-in answers it so, out
+of its write shadow) and believes the firmware has run its init state.
+
+Trigger 1 is also why **DPRINT materialises the whole declared grid**:
+``DPrintServer::init_device`` writes the print-disabled magic to every core on
+the device, and it does so after the workers have been released, so every one
+of them looks used. That is a wall-time tax (measured on
+``hello_world_datamovement_kernel``: 8 s with DPRINT off and one worker, 45 s
+with it on and eighty), not a wrong answer, and the cheap mitigations are to
+shrink the declared grid or pin the worker set — see
+``docs/running-tt-metal-on-the-simulator.md`` §4.7. Removing it would mean
+replaying the journal in two phases either side of the go-message settle so
+that post-release writes stop being a trigger, which is a change to the part of
+this design with the least slack in it; not worth it for a debugging mode.
 
 **Trigger 2, the host's ``go=GO``.** A kernel launch names a core the program
 runs on and nothing else (the grid-wide ``go=INIT`` handshake is not a launch).

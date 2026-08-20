@@ -137,3 +137,33 @@ def test_a_kernel_launch_on_a_non_worker_is_reported_but_not_fatal(capsys):
     assert "0-11" in err
     assert "not a functional worker" in err
     assert calls == []
+
+
+def test_the_dprint_init_handshake_completes_through_the_fabric():
+    """``WriteInitMagic``, end to end on the wire path, for an unbuilt worker.
+
+    The unit-level version of this lives in ``cores_test``; this one pins the
+    route, because the failure it guards against ("DPRINT will not start
+    against tt-sim") was only ever visible as a host that spun 100000 times on
+    a fabric read and then threw. ``(2, 1)`` is deliberately *not* in ``POOL``,
+    so the fabric lazily allocates a stand-in for it exactly as a live server
+    does for a worker nothing has claimed yet.
+    """
+    fabric = _guarded()
+    starting_magic = bytes([0x98, 0x98, 0x98, 0x98])
+    # ``mailboxes_t.dprint_buf``: the host writes the whole struct, reads word 0.
+    fabric.write((2, 1), 0x1B00, starting_magic + bytes(1020 - 4))
+
+    assert bytes(fabric.read((2, 1), 0x1B00, 4)) == starting_magic
+
+
+def test_an_unmaterialised_workers_go_message_still_reads_done():
+    """The exception the DPRINT fix must not break: no firmware, no run-state.
+
+    ``wait_until_cores_done`` polls this after writing ``go=INIT`` to every
+    declared worker. Echo it back and device init never finishes.
+    """
+    fabric = _guarded()
+    fabric.write((2, 1), 0x4A0, b"\x00\x00\x00\x40")
+
+    assert bytes(fabric.read((2, 1), 0x4A0, 4))[3] == 0x00
