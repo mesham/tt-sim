@@ -35,6 +35,25 @@ sets:
 
 If you are not using the venv, export those four yourself.
 
+**Point them at the right tt-metal, and check which one you have.** More than one
+checkout may exist on a development box, and a stale one fails in ways that look
+like a tt-sim bug rather than a configuration mistake:
+
+- A **stale checkout** aborts in `std::bad_alloc` when an op test or example runs
+  against it. On this machine `~/projects/riscv/tt-metal` is such a checkout; the
+  live one is the `tt-metal-0.74` tree the venv sets as `TT_METAL_RUNTIME_ROOT`.
+- **`TT_METAL_HOME` alone is not enough.** A host binary reads
+  `TT_METAL_RUNTIME_ROOT` and, failing that, refuses to start with
+  *"Failed to determine TT-Metal root directory"* — not an obviously
+  environment-shaped error. Set both, or activate the venv.
+- **A build tree remembers the checkout it was configured against**, in
+  `src/build/CMakeCache.txt`. Repointing the environment without deleting the
+  build tree yields a binary compiled against one tt-metal's headers and run
+  against another's library, which surfaces as an undefined-symbol `rc=127` at
+  launch. `perfbench/build_provenance.sh` exists to catch exactly this; see
+  `perfbench/README.md`.
+
+
 ### 1.2 Compute-grid override (optional)
 
 **Nothing extra is required on 0.74** — it works out of the box.
