@@ -257,8 +257,15 @@ identical result hex. The `DST_ACCESS_STRIDED_MODE` Dst read that
 `pack_untilize_dest` needs is modelled (`tt_sim/pe/tensix/backends/packer.py`,
 pinned by `tt_sim/pe/tensix/pack_strided_test.py`).
 
-**What does not run is the late-init form, and it does not run on hardware's
-terms either.** On Blackhole — and only on Blackhole — `pack_untilize_dest_init`
+**What does not run is the late-init form — in simulation. On hardware it
+appears to work.** Measured by the compiler team on a real Blackhole p150b, all
+four affected configurations pass **before** their fix (`gemm_single_tile_check`
+@1 and `gemm_128_check` @16/@8/@4, `errors=0` throughout). So B0 does something
+with this encoding that happens to produce correct results, and the accurate
+claim is **"unrunnable in simulation, and unspecified on hardware"** — not "your
+card is producing wrong numbers". Depending on it is still unwise, for the reason
+the rest of this section gives, but a reader should not conclude their silicon
+results are suspect. On Blackhole — and only on Blackhole — `pack_untilize_dest_init`
 expands to a MATH-thread arm that Wormhole does not have
 (`tt_metal/hw/inc/api/compute/pack_untilize.h`, `#ifdef ARCH_BLACKHOLE`):
 `llk_math_reconfig_remap(true)`, which sets `DEST_ACCESS_CFG_remap_addrs` and
@@ -297,22 +304,29 @@ neither specified nor referenced anywhere, and tt-sim refuses rather than invent
 one — an invented address sequence would return plausible, silently wrong data,
 which is the one outcome worse than stopping.
 
-**What to do about it, measured.** Put `pack_untilize_dest_init` before the
-math, which is where tt-metal's own API contract puts every `*_init`. If a
-generator must emit it late, tt-metal ships the escape hatch: configure the
-remap once up front, then spell the late call
+**What to do about it: hoist the init. There is no second option** —
+corrected 2026-08-20 after the compiler team went to implement one.
 
-```c
-pack_untilize_dest_init<1, 1, false /*narrow_row*/, TILE_C_DIM,
-                        false /*dense*/, false /*configure_remap*/>(cb_out);
-```
+Put `pack_untilize_dest_init` before the math, which is where tt-metal's own API
+contract puts every `*_init`.
 
-— that last template parameter exists for exactly this ("Pass
-`configure_remap = false` only when the caller has already configured BH DEST
-remap"). Both are verified rather than suggested:
-`optests/packuntilizeinit remapearly` keeps the reported late-init shape,
-hoisting only the MATH arm, and returns `errors=0 of 1024` with the same result
-hex as `early` on tt-sim *and* on ttsim, on Blackhole.
+This page previously offered `configure_remap = false` as a narrower alternative
+for a generator that must emit the init late. **That was wrong, and the reason
+is worth recording**: `llk_math_reconfig_remap` has exactly two call sites in the
+whole public compute API, `pack_untilize.h:38` and `:72`, and *both are inside
+`pack_untilize_dest_init_impl`*. There is no standalone remap call, so
+"configure the remap once up front" **is** an early `pack_untilize_dest_init`.
+The `configure_remap = false` spelling is the hoist plus a redundant late init,
+and reaching that sixth template argument means pinning three defaults
+(`<1, 1, false, TILE_C_DIM, false, false>`) a caller otherwise never touches.
+
+`optests/packuntilizeinit`'s `REMAP_EARLY=1` mode demonstrates exactly that: it
+emits **both** an early full init *and* the late `configure_remap = false` one.
+It is kept as evidence for this paragraph, not as a recommended shape.
+
+Note also that the `uninit` must stay where it is: hoisting
+`pack_untilize_uninit` out of an output-tile loop would leave later iterations
+packing with the config already reset.
 
 **This is not a cost-model caveat and not a cycle-count risk**; it is listed here
 because it is the shape a consumer meets first: a GEMM that passes on Wormhole

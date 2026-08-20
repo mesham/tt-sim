@@ -21,7 +21,13 @@
 //       control: it must stay green, or the test is measuring something else.
 //   KT -- the number of `matmul_tiles` accumulated into DEST tile 0. KT=1 is
 //       the co-factor control.
-//   REMAP_EARLY=1 -- Blackhole only: keep the init late but hoist its MATH arm
+//   REMAP_EARLY=1 -- Blackhole only. NOT a narrower fix, and kept as evidence
+//                   of that: it emits an early FULL init *and* a late
+//                   `configure_remap=false` one, because
+//                   `llk_math_reconfig_remap` has no standalone public call
+//                   (its only two call sites are inside
+//                   `pack_untilize_dest_init_impl`). So this is the hoist
+//                   plus a redundant late init. Hoist instead.
 //       (see the `#define` below). The only form in which the late init runs
 //       on Blackhole; on Wormhole the arm does not exist and this is a no-op.
 //
