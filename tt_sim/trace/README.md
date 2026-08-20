@@ -322,6 +322,13 @@ Three design points that matter to anyone extending this:
   candidate ELF. An index built from the wrong ELF would otherwise
   answer every query and report ~100 % coverage of a kernel that never
   ran.
+- **The artefacts are versioned, and it is not the event version.**
+  `report.json`, `hotspots.json` and `profile.json` each carry
+  `schema_version` from `report.SCHEMA_VERSION` (currently 1). Change a
+  field in any of them — add, rename, remove, or redefine — and bump it,
+  then say which kind of change it was in `docs/trace-schema.md` §9.
+  `observability_test.py` parses those tables and compares them against a
+  generated report, so the document cannot drift from the writer.
 
 The user-facing walkthrough is
 [`driver/wormhole/docs/profiling.md` §0](../../driver/wormhole/docs/profiling.md).

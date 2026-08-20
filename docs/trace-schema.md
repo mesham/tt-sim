@@ -1,8 +1,11 @@
 # The tt-sim trace schema
 
-**Status: stable as of `SCHEMA_VERSION` 4.** From this document onward,
-a change to any field name or meaning described here is a breaking
-change and comes with a version bump.
+**Status: stable.** The event stream and the datasets derived from it
+are at `SCHEMA_VERSION` 4; the profile artefacts of §9 (`report.json`,
+`hotspots.json`, `profile.json`) carry their own `schema_version`,
+currently **1**. From this document onward, a change to any field name or
+meaning described here is a breaking change and comes with a bump of
+whichever of the two covers it — see §2.
 
 Its companion is
 [`cost-model-caveats-for-consumers.md`](cost-model-caveats-for-consumers.md):
@@ -103,8 +106,10 @@ attribution; it is the recommended entry point and produces
   `tt_sim.trace.STALL_REASONS` — switch on it exhaustively.
 - **Counter-name *patterns*** (§4.2). Not the enumeration — see below.
 
-Renaming or removing any of these bumps `SCHEMA_VERSION` and is
-announced as breaking.
+Renaming or removing any of these bumps the version that covers it —
+`SCHEMA_VERSION` for events and the datasets derived from them,
+`schema_version` for the §9 profile artefacts — and is announced as
+breaking.
 
 ### Not frozen — do not assert on these
 
@@ -139,6 +144,17 @@ a version they do not recognise rather than silently mis-rendering.
 Pin the version you were built against and warn on a mismatch; do not
 hard-fail on a bump you have not read yet, because most will be
 additive.
+
+**Two counters, two scopes.** `SCHEMA_VERSION` above is carried on every
+event and covers the event stream and the datasets derived from it. The
+profile artefacts of §9 — `report.json`, `hotspots.json` and
+`profile.json` — are written once at process exit rather than emitted per
+event, and carry their own integer,
+`tt_sim.trace.report.SCHEMA_VERSION`, written into each file as
+`schema_version` and currently **1**. The additive/breaking rule above
+applies to it unchanged. The two move independently on purpose: a new
+event field says nothing about the report's shape, and a renamed report
+field says nothing about the events.
 
 ---
 
@@ -800,7 +816,7 @@ Canned SQL for Perfetto's **Query (SQL)** tab:
 | `report.md` | Human-readable ranked bottleneck report. **Layout not frozen** — do not parse. |
 | `report.json` | The same data, machine-readable. |
 | `hotspots.json` | Per-PC and per-function attribution, plus its own provenance. |
-| `profile.json` | Run metadata: cost-model regime, ELF choices with `how` and `bias`, counter directory. |
+| `profile.json` | Run metadata: `schema_version`, cost-model regime, ELF choices with `how` and `bias`, counter directory. |
 | `counters/` | The Parquet dataset of §4. |
 
 Re-render at any time without re-running the simulator:
@@ -813,6 +829,7 @@ python3 -m tt_sim.trace.report <profile-dir> --stdout
 
 | Field | Type | Meaning |
 |---|---|---|
+| `schema_version` | `int` | Version of this file's schema. Currently **1**. See *Versioning* below. |
 | `span` | `int` | Highest cycle observed. The denominator for every share. |
 | `cost_model` | `bool \| null` | Regime; `null` if unknown. |
 | `contributions[]` | list | `{unit, counter, cycles, described, discovered}` — cycle-bearing counters, ranked. `unit` is `"<core_y>,<core_x> <UNIT>"`. |
@@ -827,10 +844,54 @@ python3 -m tt_sim.trace.report <profile-dir> --stdout
 counter, not that anything is wrong — it is how a counter added
 yesterday still gets ranked.
 
+### Versioning the profile artefacts
+
+`report.json`, `hotspots.json` and `profile.json` each carry a
+`schema_version`: one integer, from `tt_sim.trace.report.SCHEMA_VERSION`,
+currently **1**, and the *same* number across all three — they are
+written by one run and read together, so versioning them apart would only
+ask a consumer to track three numbers that always move as one. It is not
+the event `SCHEMA_VERSION` of §2, which is scoped to event shape and moves
+independently.
+
+`report.json`'s embedded `hotspots{}` is governed by that same version and
+carries it too, so a hotspot block means the same thing whichever file you
+read it from.
+
+The fields in the tables here are frozen in the sense of §2, and the same
+additive/breaking rule applies:
+
+- **Additive** — a new field, or a new key inside `contributions[]`,
+  `functions[]` or `pcs[]`. Bumps `schema_version`; a consumer that
+  ignores keys it does not know is unaffected.
+- **Breaking** — renaming a field, removing one, or changing its meaning,
+  unit or type. That includes changing *what* a field sums without
+  renaming it: which counters `shared_resource_cycles{}` covers, or what
+  `attributed_cycles` is a sum over, are part of the meaning.
+
+Not covered, as everywhere else: cycle **values** (§2 — every cost-model
+instalment moves them by design), row counts, and row order. `report.md`
+is not covered at all — it is for humans, its layout is not frozen, and it
+carries no version.
+
+Check it the way you check the event version: read `schema_version`, warn
+when it is higher than the one you were built against, and do not
+hard-fail on a bump you have not read yet, because most will be additive.
+
+| Version | Change |
+|---|---|
+| 1 | First versioned release. The field set is the one documented here; before this, the files carried no version. |
+
+`tt_sim/trace/observability_test.py` enforces this: the field tables in
+this section are **parsed out of this document** and compared against
+artefacts generated from the code, so a field added in code without a row
+here — or a row here without the field — fails the suite.
+
 ### `hotspots.json`
 
 | Field | Meaning |
 |---|---|
+| `schema_version` | Version of this file's schema — the same number as `report.json`'s. |
 | `total_cycles` | Sum over all PCs of `retired + stall_cycles`. |
 | `resolved_cycles` | The share of that with a source location. |
 | `unattributed_units[]` | Units that executed code but had no ELF loaded. |

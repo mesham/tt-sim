@@ -10,10 +10,14 @@ something plausible instead.
 """
 
 import json
+import re
+from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
 
+from tt_sim.trace import hotspots as hotspotsmod
+from tt_sim.trace import report as reportmod
 from tt_sim.trace.bus import EventBus
 from tt_sim.trace.counters import CounterAggregator
 from tt_sim.trace.events import (
@@ -873,3 +877,148 @@ def test_the_three_unit_vocabularies_stay_in_sync():
         assert ex_resource in resources, (
             f"{unit} -> ex_resource {ex_resource!r} is not in tensix_instructions.yaml"
         )
+
+
+# ---------------------------------------------------------------------------
+# The profile artefacts' schema contract (docs/trace-schema.md §9)
+# ---------------------------------------------------------------------------
+#
+# ``report.json``, ``hotspots.json`` and ``profile.json`` are documented field
+# by field in §9 and carry their own version, ``tt_sim.trace.report.
+# SCHEMA_VERSION`` — deliberately not the event ``SCHEMA_VERSION`` above,
+# which is scoped to event shape and would move for reasons a report consumer
+# cannot act on.
+#
+# The field sets are **parsed out of the document** rather than copied here.
+# The failure this contract exists to prevent is the document and the artefact
+# drifting apart, and a list duplicated into this file drifts with them: it
+# would still pass while §9 described a field nothing writes.
+
+_SCHEMA_DOC = Path(__file__).resolve().parents[2] / "docs" / "trace-schema.md"
+
+
+def _documented_fields(heading: str) -> set[str]:
+    """Field names in the first Markdown table under ``heading`` in §9.
+
+    Reads the left-hand column, takes every backticked token in it (one row
+    documents two fields), and strips the ``[]`` / ``{}`` shape suffix the
+    document uses to hint at a list or a map.
+    """
+    lines = _SCHEMA_DOC.read_text().splitlines()
+    assert heading in lines, f"{heading} is gone from {_SCHEMA_DOC.name}"
+    fields: set[str] = set()
+    in_table = False
+    for line in lines[lines.index(heading) + 1 :]:
+        if not line.startswith("|"):
+            if in_table:
+                break  # first blank line after the table ends it
+            if line.startswith("#"):
+                break  # next section, and no table found
+            continue
+        in_table = True
+        for name in re.findall(r"`([^`]+)`", line.split("|")[1]):
+            fields.add(name.rstrip("[]{}"))
+    # A silently-empty parse would make every assertion below vacuous, so the
+    # table's shape is itself asserted.
+    assert len(fields) >= 5, f"parsed only {sorted(fields)} from {heading}"
+    return fields
+
+
+def _report_with_everything() -> "reportmod.Report":
+    table = hotspotsmod.HotspotTable(
+        rows=[
+            hotspotsmod.Hotspot(
+                unit="TRISC0",
+                pc=0x100,
+                retired=3,
+                stall_cycles=2,
+                by_reason={"load_use": 2},
+                function="mm",
+            )
+        ],
+        unattributed_units=["NCRISC"],
+    )
+    return reportmod.build(
+        None,
+        hotspots=reportmod.hotspots_to_dict(table),
+        elfs=[{"unit": "TRISC0", "role": "kernel", "path": "/k.elf", "how": "recent"}],
+        cost_model=True,
+        label="doc-contract",
+        notes=["a note"],
+    )
+
+
+def test_the_report_carries_its_own_version_not_the_event_one(tmp_path):
+    """The version a report consumer reads has to move when a *report* field
+    moves, and stay put when an event field does. Sharing the event counter
+    gets both wrong, which is why this is a constant of its own."""
+    reportmod.write(_report_with_everything(), tmp_path)
+    payload = json.loads((tmp_path / "report.json").read_text())
+    assert payload["schema_version"] == reportmod.SCHEMA_VERSION
+    assert isinstance(reportmod.SCHEMA_VERSION, int)
+    # The embedded hotspot block is governed by the same number and says so,
+    # so a consumer never has to ask which file it came from.
+    assert payload["hotspots"]["schema_version"] == reportmod.SCHEMA_VERSION
+
+
+def test_report_json_is_exactly_the_field_set_section_9_documents(tmp_path):
+    """Documentation and artefact, compared directly. A field written but not
+    documented is an undocumented promise; a field documented but not written
+    reads as a null to every consumer that trusts the table."""
+    reportmod.write(_report_with_everything(), tmp_path)
+    payload = json.loads((tmp_path / "report.json").read_text())
+    documented = _documented_fields("### `report.json`")
+    assert set(payload) == documented, (
+        f"report.json has {sorted(set(payload) - documented)} undocumented and "
+        f"is missing {sorted(documented - set(payload))}. Adding a field is "
+        "additive, renaming or removing one is breaking: either way bump "
+        "tt_sim.trace.report.SCHEMA_VERSION and update docs/trace-schema.md §9."
+    )
+
+
+def test_each_contribution_row_is_the_documented_shape():
+    """``contributions[]`` is the list every consumer iterates, and §9 spells
+    its keys inline. Parsed from that same cell."""
+    import dataclasses
+
+    line = next(
+        line
+        for line in _SCHEMA_DOC.read_text().splitlines()
+        if line.startswith("| `contributions[]`")
+    )
+    documented = {
+        name.strip() for name in re.search(r"\{([^}]*)\}", line)[1].split(",")
+    }
+    actual = {f.name for f in dataclasses.fields(reportmod.Contribution)}
+    assert actual == documented, (
+        f"contributions[] rows are {sorted(actual)}, §9 documents {sorted(documented)}"
+    )
+
+
+def test_hotspots_json_is_exactly_the_field_set_section_9_documents():
+    """The same check for the sibling artefact, which is also the block
+    embedded in ``report.json`` — one structure, one contract."""
+    table = hotspotsmod.HotspotTable(rows=[], unattributed_units=[])
+    produced = set(reportmod.hotspots_to_dict(table))
+    # ``elfs`` and ``cost_model`` are attached by the profile writer rather
+    # than the serialiser (auto.py), because provenance is a property of the
+    # run, not of the table.
+    produced |= {"elfs", "cost_model"}
+    documented = _documented_fields("### `hotspots.json`")
+    assert produced == documented, (
+        f"hotspots.json has {sorted(produced - documented)} undocumented and "
+        f"is missing {sorted(documented - produced)}."
+    )
+
+
+def test_profile_json_carries_the_same_version(tmp_path, monkeypatch):
+    """One number across the three artefacts of §9: they are written by one
+    run and read together."""
+    from tt_sim.trace import auto, elfdisc
+
+    # ELF discovery walks the real tt-metal cache; the version is what is
+    # under test, not what is on this machine's disk.
+    monkeypatch.setattr(auto, "discover", lambda **kwargs: elfdisc.Discovery())
+    auto.write_profile_report({"dir": str(tmp_path)}, None)
+    meta = json.loads((tmp_path / "profile.json").read_text())
+    assert meta["schema_version"] == reportmod.SCHEMA_VERSION

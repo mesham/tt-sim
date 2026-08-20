@@ -4,7 +4,8 @@ cycles went, and how much of the run the model could not name.
 This is the consumer end of ``TT_SIM_PROFILE`` (see
 :mod:`tt_sim.trace.auto`). It reads two artefacts a profiled run leaves
 behind — the Parquet counter dataset and the per-PC hotspot table — and
-writes ``report.md`` plus a machine-readable ``report.json``.
+writes ``report.md`` plus a machine-readable ``report.json`` (versioned
+by :data:`SCHEMA_VERSION`, see ``docs/trace-schema.md`` §9).
 Regenerate at any time without re-running the simulator::
 
     python3 -m tt_sim.trace.report <profile-dir>
@@ -39,6 +40,23 @@ import json
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+#: Version of the **profile artefact** schema — ``report.json``,
+#: ``hotspots.json`` (including the copy embedded in ``report.json`` as
+#: ``hotspots``) and ``profile.json``. Written into each of them as
+#: ``schema_version`` and documented in ``docs/trace-schema.md`` §9.
+#:
+#: Deliberately **not** ``Event.SCHEMA_VERSION``: that one is scoped to
+#: event shape, so reusing it would bump this contract whenever an event
+#: changed and leave it still when a report field changed — precisely the
+#: wrong signal in both directions. Same style as
+#: :data:`tt_sim.trace.state_dump.SCHEMA_VERSION`, which versions its own
+#: artefact the same way.
+#:
+#: Bump on **any** change to a documented field: additively for a new
+#: field, breaking for a rename, a removal, or a change of meaning or
+#: unit. Either way, say which in ``docs/trace-schema.md`` §9.
+SCHEMA_VERSION = 1
 
 #: Counters that are cycle-bearing but not named ``*_cycles``.
 _EXTRA_CYCLE_COUNTERS = {"instr_retired"}
@@ -547,6 +565,10 @@ def render(report: Report, top: int = 25) -> str:
 def hotspots_to_dict(table, top: int = 200) -> dict:
     """Serialise a :class:`~tt_sim.trace.hotspots.HotspotTable`."""
     return {
+        # Same contract as report.json: this dict is written to
+        # ``hotspots.json`` *and* embedded in ``report.json``, so it carries
+        # the version rather than depending on which file it was read from.
+        "schema_version": SCHEMA_VERSION,
         "total_cycles": table.total_cycles(),
         "resolved_cycles": table.resolved_cycles(),
         "unattributed_units": table.unattributed_units,
@@ -584,6 +606,7 @@ def write(report: Report, directory: Path | str, top: int = 25) -> Path:
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     payload = asdict(report)
+    payload["schema_version"] = SCHEMA_VERSION
     payload["attributed_cycles"] = report.attributed()
     payload["shared_resource_cycles"] = report.shared_resource_cycles()
     # report.json carries every row; report.md is truncated to ``top`` so it

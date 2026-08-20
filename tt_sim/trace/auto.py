@@ -365,6 +365,10 @@ def write_profile_report(profile: dict, hotspots) -> None:
 
         notes = [found.note] if found.note else []
         meta = {
+            # One version across the profile artefact set (report.json,
+            # hotspots.json, profile.json) — they are written by one run and
+            # read together. See docs/trace-schema.md §9.
+            "schema_version": report_mod.SCHEMA_VERSION,
             "label": profile.get("label") or directory.name,
             # Ask the model itself rather than re-parsing the variable, so
             # `TT_SIM_COST_MODEL=0` is reported as off, not as truthy.
