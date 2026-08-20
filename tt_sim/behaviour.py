@@ -179,6 +179,36 @@ _BEHAVIOURS = (
         ),
     ),
     Behaviour(
+        name="tensix-latched-wait-survives-stallwait",
+        guarantee=(
+            "A Tensix STALLWAIT issued while an earlier SEMWAIT or STALLWAIT "
+            "is latched and unsatisfied waits at its thread's Wait Gate "
+            "instead of replacing it, so a compute kernel's Dst handshake "
+            "holds however the LLK init calls are ordered around "
+            "tile_regs_wait(). STALLWAIT.md's block-mask table ticks "
+            "STALLWAIT in all nine columns, on both architectures, and it is "
+            "the only instruction whose row is; tt-sim used to catch it by "
+            "its execution unit (Sync Unit, block bit B1) alone, so a "
+            "STALLWAIT behind a SEMWAIT whose block mask named the TDMA units "
+            "walked past and that semaphore wait was silently forgotten. "
+            "Concretely: pack_untilize_dest_init called after "
+            "tile_regs_wait() rather than before matmul_init dropped the "
+            "packer's wait on MATH_PACK, so a K >= 2 matmul packed a Dst that "
+            "was still mid-accumulation -- wrong values, no fault, and "
+            "correct on silicon and on ttsim. Like "
+            "dram-interleaved-bank-distinctness and unlike the raising "
+            "entries here, nothing throws and no environment variable "
+            "disables it: this is a modelling property, so it says the "
+            "ordering your kernel depends on is honoured, not that you will "
+            "be told when your kernel is wrong."
+        ),
+        since="2026-08-20",
+        pinned_by=(
+            "tt_sim.pe.tensix.waitgate_stallwait_blocked_test:"
+            "test_a_stallwait_does_not_forget_an_unsatisfied_semwait"
+        ),
+    ),
+    Behaviour(
         name="noc-transfer-alignment",
         guarantee=(
             "A NoC transfer whose source and destination addresses are not "

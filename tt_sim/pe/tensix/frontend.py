@@ -242,6 +242,45 @@ class WaitGate(TensixFrontendUnit):
             self.semaphore_mask = semaphore_mask
 
         def doesInstructionMatchBlockMask(self, instruction_info):
+            if instruction_info["name"] == "STALLWAIT":
+                # ``STALLWAIT`` is the one instruction *every* block bit
+                # catches: its row in ``STALLWAIT.md``'s "exact set of
+                # instructions blocked from starting by each bit" table is
+                # ticked in all nine columns, on both architectures. It is
+                # therefore held at the Wait Gate by any latched wait, however
+                # narrow that wait's block mask, and cannot overwrite the
+                # latch until the latch has been forgotten. The block mask is
+                # never empty by the time it is latched -- both handlers
+                # substitute ``1 << 6`` for a zero one, per the functional
+                # models -- so any live latch blocks it.
+                #
+                # Modelling it is what keeps the *previous* wait honoured.
+                # ``SEMWAIT.md`` warns that "a ``SEMWAIT`` instruction can
+                # execute whilst there is still a latched wait instruction in
+                # place, and latching of the new ``SEMWAIT`` will cause the
+                # previous wait to be forgotten" -- true, and modelled, but it
+                # is a warning *about* ``SEMWAIT`` (block bit B1 only)
+                # precisely because ``STALLWAIT`` is immune to it.
+                #
+                # Reaching it through the per-unit table below instead is what
+                # went wrong: ``STALLWAIT``'s ``ex_resource`` is ``SYNC``, so
+                # only B1 caught it, and a ``STALLWAIT`` issued behind an
+                # unsatisfied ``SEMWAIT`` whose block mask was B0 sailed
+                # through and dropped that ``SEMWAIT``. That is exactly the
+                # shape tt-metal's ``pack_untilize_dest_init`` has when it is
+                # called *after* ``tile_regs_wait()``: the ``SEMWAIT`` on
+                # ``MATH_PACK`` (B0) is still unsatisfied when
+                # ``_llk_init_packer_dest_offset_registers_``'s
+                # ``STALLWAIT(STALL_TDMA | STALL_THCON, PACK)`` arrives, so the
+                # packer stopped waiting for the math and packed a Dst that was
+                # still mid-accumulation.
+                #
+                # ``NOP`` is the table's other row that the per-unit walk
+                # cannot express ("❌ if all bits of the block mask are set").
+                # It is deliberately left alone: a ``NOP`` has no effect, and
+                # an all-bits block mask blocks whatever follows it anyway, so
+                # holding one changes cycle counts and nothing else.
+                return True
             tgt_backend_unit = instruction_info["ex_resource"]
             for bit_idx in range(9):
                 do_check = get_nth_bit(self.block_mask, bit_idx)

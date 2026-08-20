@@ -1113,18 +1113,25 @@ python3 -m tt_sim.behaviour --verbose     # ...with the full guarantee text
 | `riscv-ebreak-halts` | `ebreak` — what a kernel `ASSERT()`, an `LLK_ASSERT` and `__builtin_trap()` all lower to — stops the core and raises, instead of being decoded as a no-op. |
 | `noc-transfer-alignment` | A NoC transfer whose source and destination are not congruent in the low bits the path requires raises, instead of producing the skewed data hardware would. |
 | `dram-interleaved-bank-distinctness` | Every DRAM bank an interleaved buffer can land in is separate storage at its own NoC coordinate — 12 on Wormhole, 8 on Blackhole — so a page-size or bank-count disagreement corrupts, instead of aliasing onto one flat store and coming back right. |
+| `tensix-latched-wait-survives-stallwait` | A Tensix `STALLWAIT` waits at the Wait Gate behind an unsatisfied `SEMWAIT` instead of overwriting it, so a compute kernel's Dst handshake holds however its LLK init calls are ordered around `tile_regs_wait()` — a `pack_untilize_dest_init` called after it no longer drops the packer's wait on `MATH_PACK`. |
 
 `python3 -m tt_sim.behaviour --verbose` is the authoritative version of this
 table; the guarantees there say exactly what a run will observably do, including
 the environment variable that switches each check back off.
 
-The last of those is a different shape from the other three, and worth reading
-in full (`--verbose`) before you pin a gate to it. The first three are guards:
-tt-sim used to be silently wrong, and now raises. `dram-interleaved-bank-distinctness`
-is a **modelling property** — nothing raises, and nothing switches it off. It is
-published because it is the fact an interleaved-DRAM gate has to establish
-before its results mean anything, and the alternative was every consumer
-deriving it by hand from our internals. What it does **not** cover is the
+Two of those are a different shape from the other three, and worth reading
+in full (`--verbose`) before you pin a gate to either. The first three are
+guards: tt-sim used to be silently wrong, and now raises.
+`dram-interleaved-bank-distinctness` and
+`tensix-latched-wait-survives-stallwait` are **modelling properties** — nothing
+raises, and nothing switches them off. Each is published because it is a fact a
+gate has to establish before its results mean anything, and the alternative was
+every consumer deriving it by hand from our internals: that the DRAM banks an
+interleaved buffer lands in are genuinely apart, and that the Tensix Dst
+handshake a compute kernel writes is honoured whatever order its LLK init calls
+arrive in. Neither tells you when *your* kernel is wrong.
+
+What the DRAM one does **not** cover is the
 page → bank distribution itself: that arithmetic is tt-metal's on both sides
 (`WriteToDeviceInterleavedContiguous` on the host, `InterleavedAddrGen` in the
 kernel), so tt-sim guarantees only that the banks those two land pages in are
