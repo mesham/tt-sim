@@ -59,10 +59,19 @@
 //     goes wrong, and takes the *previous* loop's last tile with it: with no
 //     acquire to stall on, math wraps onto a DEST bank the packer has not
 //     drained. The threshold is the same in both simulators (both clean at
-//     `stall 20`, both changed at `stall 50`); what differs is the reaction.
-//     tt-sim carries on and returns the corruption. ttsim stops with
+//     `stall 20`, both changed at `stall 50`); what differed was the reaction.
+//     tt-sim carried on and returned the corruption; ttsim stopped with
 //     `NonContractualBehavior: tensix_sempost: sem=2 sem_max=2`, because the
 //     math thread has posted MATH_PACK past the max its SEMINIT declared.
+//     **They now agree.** Since 2026-08-20 tt-sim raises
+//     `SemaphoreContractError` on the same instruction with the same two
+//     numbers (`tt_sim/pe/tensix/semaphore_contract.py`, behaviour
+//     `tensix-semaphore-bounds`), on Wormhole as well as Blackhole -- the
+//     stalled Wormhole run corrupts identically, which this op test had not
+//     previously recorded. `stall 20` and the default run stay silent, so the
+//     check discriminates the shape rather than the program. To see the old
+//     behaviour -- and the corruption report the checks now pre-empt -- run it
+//     with `TT_SIM_DISABLE_SEMAPHORE_CHECKS=1`.
 //
 //   * Under `TT_SIM_COST_MODEL=1` the default run goes wrong on its own, with
 //     no artificial stall: the model's timing is enough to let math wrap. That
@@ -75,7 +84,10 @@
 // max), and hoisting it out is safe exactly while the packer keeps up. The ISA
 // documentation's functional model for SEMPOST saturates at 15 and never
 // stalls, so hardware has no back-pressure to fall back on either -- a card
-// that passes this shape is passing it on timing.
+// that passes this shape is passing it on timing. That is precisely why tt-sim
+// stops rather than answering: which way a race falls is a timing property of
+// the part it runs on, and tt-sim is not cycle-accurate, so its answer would
+// be an artefact of its own scheduling wearing the clothes of a result.
 
 #include <bit>
 #include <cmath>

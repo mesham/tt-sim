@@ -1,4 +1,5 @@
 from tt_sim.memory.mem_mapable import MemMapable
+from tt_sim.pe.tensix import semaphore_contract
 from tt_sim.pe.tensix.backends.backend_base import TensixBackendUnit
 from tt_sim.pe.tensix.util import TensixInstructionDecoder
 from tt_sim.perf.model import unit_cost_model
@@ -17,9 +18,22 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
     """
 
     class TTSemaphore:
+        """One of the eight counters described in ``SyncUnit.md``.
+
+        ``max`` powers on at zero and only a ``SEMINIT`` gives it a meaning, so
+        ``initialised`` records whether one has run. Without that flag "Value >=
+        Max" is true for every post to a semaphore nobody configured, which is
+        most of them: see :mod:`tt_sim.pe.tensix.semaphore_contract`.
+        """
+
         def __init__(self):
             self.value = 0
             self.max = 0
+            self.initialised = False
+
+        def declared_max(self):
+            """This semaphore's ``Max`` if a ``SEMINIT`` set one, else ``None``."""
+            return self.max if self.initialised else None
 
     class TTMutex:
         def __init__(self):
@@ -225,7 +239,24 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             self.backend.getFrontendThread(issue_thread).wait_gate.informMutexAcquired()
 
     def handle_sempost(self, instruction_info, issue_thread, instr_args):
+        """``SEMPOST.md``: increment, saturating at 15.
+
+        The saturation is the documented behaviour and is left exactly as it
+        was; :mod:`tt_sim.pe.tensix.semaphore_contract` only refuses to carry
+        on past the two states in which the counter has stopped meaning what
+        the program thinks it means. The check runs before any semaphore in the
+        mask is touched, so the raise leaves the atomic block's state
+        untouched, as the doc's ``atomic { ... }`` implies.
+        """
         sem_sel = instr_args["sem_sel"]
+        for i in range(8):
+            if get_nth_bit(sem_sel, i):
+                semaphore_contract.check_post(
+                    i,
+                    self.semaphores[i].value,
+                    issuer=f"Tensix thread {issue_thread}",
+                    declared_max=self.semaphores[i].declared_max(),
+                )
         for i in range(8):
             if get_nth_bit(sem_sel, i) and self.semaphores[i].value < 15:
                 self.semaphores[i].value += 1
@@ -239,9 +270,18 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
             if get_nth_bit(sem_sel, i):
                 self.semaphores[i].value = new_value
                 self.semaphores[i].max = max_value
+                self.semaphores[i].initialised = True
 
     def handle_semget(self, instruction_info, issue_thread, instr_args):
+        """``SEMGET.md``: decrement, saturating at zero. See ``handle_sempost``."""
         sem_sel = instr_args["sem_sel"]
+        for i in range(8):
+            if get_nth_bit(sem_sel, i):
+                semaphore_contract.check_get(
+                    i,
+                    self.semaphores[i].value,
+                    issuer=f"Tensix thread {issue_thread}",
+                )
         for i in range(8):
             if get_nth_bit(sem_sel, i) and self.semaphores[i].value > 0:
                 self.semaphores[i].value -= 1
@@ -357,15 +397,27 @@ class TensixSyncUnit(TensixBackendUnit, MemMapable):
         """
         This is taken from the functional model code at
         https://github.com/tenstorrent/tt-isa-documentation/blob/main/WormholeB0/TensixTile/TensixCoprocessor/SyncUnit.md#semaphores
+
+        Saturation is checked here as it is for the Tensix instructions, but
+        the ``Max`` bound deliberately is not: a baby RISC-V has no ``SEMWAIT``
+        and polls with ``lw`` instead, so ``Max`` -- whose only consumer is
+        ``SEMWAIT``'s C1 -- is not this core's back-pressure and passing it
+        says nothing about its discipline. ttsim's memory-mapped path draws the
+        same line. See :mod:`tt_sim.pe.tensix.semaphore_contract`.
         """
         idx = int(addr / 4)
         assert idx < 8
+        issuer = "a baby RISC-V (PC-buffer semaphore write)"
         if conv_to_uint32(value) & 1:
             # This is like a SEMGET instruction
+            semaphore_contract.check_get(idx, self.semaphores[idx].value, issuer=issuer)
             if self.semaphores[idx].value > 0:
                 self.semaphores[idx].value -= 1
         else:
             # This is like a SEMPOST instruction
+            semaphore_contract.check_post(
+                idx, self.semaphores[idx].value, issuer=issuer
+            )
             if self.semaphores[idx].value < 15:
                 self.semaphores[idx].value += 1
 

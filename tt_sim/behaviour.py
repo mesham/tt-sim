@@ -209,6 +209,36 @@ _BEHAVIOURS = (
         ),
     ),
     Behaviour(
+        name="tensix-semaphore-bounds",
+        guarantee=(
+            "A Tensix SEMPOST that carries a semaphore to or past the Max its "
+            "own SEMINIT declared raises "
+            "tt_sim.pe.tensix.semaphore_contract.SemaphoreContractError, "
+            "naming the semaphore, its value, that Max and the issuing thread; "
+            "so does a SEMPOST at 15 or a SEMGET at 0, on the Tensix "
+            "instructions and on the memory-mapped RISC-V path alike. Max is a "
+            "SEMWAIT C1 threshold and per SEMINIT.md 'has no effect on "
+            "SEMPOST', so hardware increments regardless and tt-sim still "
+            "models that arithmetic — what the raise says is that the producer "
+            "issued past its own back-pressure, after which the computed "
+            "values depend on thread timing, which tt-sim does not model. "
+            "Concretely: a compute kernel that hoists tile_regs_acquire() out "
+            "of its output-tile loop over-posts MATH_PACK the moment the "
+            "packer falls behind and wraps onto a Dst bank that has not been "
+            "drained; tt-sim used to return the corrupted tiles while the "
+            "vendor simulator ttsim stopped. NOT covered: a post above Max on "
+            "a semaphore no SEMINIT configured, or through the memory-mapped "
+            "write, both of which working tt-metal kernels do and neither of "
+            "which raises. Set TT_SIM_DISABLE_SEMAPHORE_CHECKS=1 to restore "
+            "the old silence."
+        ),
+        since="2026-08-20",
+        pinned_by=(
+            "tt_sim.pe.tensix.semaphore_contract_test:"
+            "test_a_sempost_past_a_declared_max_stops_and_names_everything"
+        ),
+    ),
+    Behaviour(
         name="noc-transfer-alignment",
         guarantee=(
             "A NoC transfer whose source and destination addresses are not "
