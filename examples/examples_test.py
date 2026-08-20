@@ -57,7 +57,7 @@ RUN_TIMEOUT = int(os.environ.get("TT_SIM_EXAMPLE_TIMEOUT", "260"))
 # the ``nine-on-demand`` case exists to exercise.
 #
 # The label is normally the directory name; it differs only where one example is
-# run in more than one configuration, which so far is just ``pipestall``.
+# run in more than one configuration (``six``, ``pipestall``).
 EXAMPLES = [
     ("one", "one", "1-1", {}),
     ("two", "two", "1-1", {}),
@@ -67,6 +67,17 @@ EXAMPLES = [
     ("five", "five", "1-1", {}),
     ("five-fp", "five-fp", "1-1", {}),
     ("six", "six", "1-1", {}),
+    # The same matmul with `fp32_dest_acc_en` over its Float16_b circular
+    # buffers -- bf16 storage, 32-bit DEST. That cross is the configuration the
+    # tt-xftn compiler team's failing GEMM runs in, and the one the packer's
+    # DEST-width defect broke: it took the DEST read width from the pack source
+    # format instead of `PCK_DEST_RD_CTRL_Read_32b_data`, so a 32-bit DEST was
+    # read 16 bits at a time. Against the unfixed packer this case scores PCC
+    # 0.015 (0.99997 fixed, versus 0.998 for the 16-bit-DEST arm above, which is
+    # the right direction -- fp32 accumulation is *more* accurate). The op tests
+    # that cover the same path have no matrix unit in them; this is the only
+    # whole-program guard on it.
+    ("six-fp32", "six", "1-1", {"SIX_FP32": "1"}),
     ("eight", "eight", "1-1", {}),
     ("nine", "nine", "1-1,2-1", {}),
     # The same two-tile example with *nothing* pinned: the second worker has to

@@ -69,18 +69,29 @@ declare -A COORDS=(
   [one]="1-2"   [two]="1-2"     [three]="1-2"  [four]="1-2"  [four-fp]="1-2"
   [five]="1-2"  [five-fp]="1-2" [six]="1-2"    [eight]="1-2" [loopback]="1-2"
   [banks]="1-2"
+  [six-fp32]="1-2"
   [nine]="1-2,2-2" [pipestall]="1-2,2-2" [pipestall-2page]="1-2,2-2"
 )
 # A case whose name is not an example directory: which directory it runs, and
-# the environment that configures it. Only `pipestall-2page` so far — a
-# regression run of `pipestall` with a *multi-page* output CB and the producer
-# exactly one chunk ahead, the shape that returned chunk 1 as 64 zeroes until
-# the example's CB pages were sized to a tile (see examples/pipestall/src and
-# optests/packspill). Extra cases are never trace-recorded: they have no replay
-# guard of their own and would clobber the canonical example's trace.
-declare -A DIRS=([pipestall-2page]="pipestall")
-declare -A ENVS=([pipestall-2page]="PIPESTALL_OUT_DEPTH=2 PIPESTALL_CREDITS=1 PIPESTALL_DELAY=1000")
-ORDER=(one two three four four-fp five five-fp six eight nine pipestall pipestall-2page loopback banks)
+# the environment that configures it. Two so far.
+#
+# `pipestall-2page` — a regression run of `pipestall` with a *multi-page* output
+# CB and the producer exactly one chunk ahead, the shape that returned chunk 1 as
+# 64 zeroes until the example's CB pages were sized to a tile (see
+# examples/pipestall/src and optests/packspill).
+#
+# `six-fp32` — `six`'s matmul with `fp32_dest_acc_en` over its Float16_b circular
+# buffers: bf16 storage, 32-bit DEST. That is the configuration the tt-xftn
+# compiler team's failing GEMM runs in, and the one the packer's DEST-width
+# defect broke (`PCK_DEST_RD_CTRL_Read_32b_data`, fixed in 5a4ffaf). Against the
+# unfixed packer this case scores PCC 0.015; it is the only whole-program guard
+# on that path with a matrix unit in it.
+#
+# Extra cases are never trace-recorded: they have no replay guard of their own
+# and would clobber the canonical example's trace.
+declare -A DIRS=([pipestall-2page]="pipestall" [six-fp32]="six")
+declare -A ENVS=([pipestall-2page]="PIPESTALL_OUT_DEPTH=2 PIPESTALL_CREDITS=1 PIPESTALL_DELAY=1000" [six-fp32]="SIX_FP32=1")
+ORDER=(one two three four four-fp five five-fp six six-fp32 eight nine pipestall pipestall-2page loopback banks)
 [ "${#SELECT[@]}" -gt 0 ] && ORDER=("${SELECT[@]}")
 [ "$RECORD" -eq 1 ] && mkdir -p "$TRACES"
 

@@ -2,7 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <random>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
@@ -69,6 +73,23 @@ void golden_matmul(
 }
 
 int main(int argc, char** argv) {
+    // `fp32` (argument) or `SIX_FP32=1` (environment) selects a 32-bit DEST
+    // (`fp32_dest_acc_en`) while leaving every circular buffer Float16_b. That is
+    // the configuration the tt-xftn compiler team's failing GEMM runs in: bf16
+    // operands, bf16 output, but the matrix unit accumulating in fp32 and the
+    // packer reading DEST at full 32-bit width. It should make the result *more*
+    // accurate, not less, so the PCC must hold or improve against the default arm.
+    //
+    // Kept as an arm of this example rather than a second example so the default
+    // path -- the one in the gate, the traces and the replay guards -- is
+    // byte-for-byte what it always was. Following optests/untilize's
+    // `UNTILIZE_FP32=1`, the env var exists because the harnesses run
+    // `./build/six` with no arguments.
+    const char* fp32_env = std::getenv("SIX_FP32");
+    const bool fp32_dest = (argc > 1 && std::strcmp(argv[1], "fp32") == 0) ||
+                           (fp32_env != nullptr && fp32_env[0] != '\0' && std::strcmp(fp32_env, "0") != 0);
+    printf("dest accumulate: %s\n", fp32_dest ? "fp32 (32-bit DEST, Float16_b CBs)" : "fp16 (default)");
+
     // Create device handle
     IDevice* device = CreateDevice(0);
 
@@ -192,7 +213,10 @@ int main(int argc, char** argv) {
         program,
         "kernels/compute/mm.cpp",
         core,
-        ComputeConfig{.math_fidelity = MathFidelity::HiFi4, .compile_args = compute_compile_time_args});
+        ComputeConfig{
+            .math_fidelity = MathFidelity::HiFi4,
+            .fp32_dest_acc_en = fp32_dest,
+            .compile_args = compute_compile_time_args});
 
     // Configure runtime kernel arguments
     SetRuntimeArgs(
@@ -224,6 +248,39 @@ int main(int argc, char** argv) {
     // Compare with golden using Pearson correlation; bfloat16 + HiFi4 won't be bit-exact
     float pearson = pearson_correlation(golden_vec, result_vec);
     printf("Device vs golden PCC = %f\n", pearson);
+
+    // A correlation says nothing about a *small* systematic fault: a wrong last
+    // mantissa bit on every element moves the PCC by less than the 0.97 gate can
+    // see. So also report the exact-mismatch count and the worst error in bf16
+    // ULPs, which is what an exact checker (the tt-xftn corpus's
+    // `errors=N of M`) would report. Diagnostic only -- the gate stays the PCC,
+    // because the default 16-bit-DEST arm legitimately accumulates in bf16 and
+    // cannot be bit-exact. Under `fp32_dest_acc_en` it very nearly is, and the
+    // gap between the two arms is the point of the number: measured against
+    // tt-sim, the 16-bit-DEST arm misses on ~57% of elements by up to 4 bf16
+    // ULPs, the 32-bit-DEST arm on ~1.2% by exactly 1 -- residue of the order
+    // the 32 products inside a tile are summed in (the host sums them
+    // sequentially) and of the narrowing rounding modes (tt-metal's bfloat16
+    // ctor is tie-to-even, the packer's Dst narrowing half-up). Anything
+    // *structured* -- a run of elements, a power-of-two stride, an error
+    // bigger than an ULP or two -- would be a real fault the PCC gate is too
+    // coarse to catch, and is worth chasing.
+    size_t mismatches = 0;
+    int worst_ulps = 0;
+    for (size_t i = 0; i < golden_vec.size(); i++) {
+        const uint16_t g = std::bit_cast<uint16_t>(golden_vec[i]);
+        const uint16_t r = std::bit_cast<uint16_t>(result_vec[i]);
+        if (g != r) {
+            mismatches++;
+            const int ulps = std::abs(static_cast<int>(g) - static_cast<int>(r));
+            worst_ulps = std::max(worst_ulps, ulps);
+        }
+    }
+    printf(
+        "Device vs golden exact: errors=%zu of %zu, worst |delta| = %d bf16 ULP\n",
+        mismatches,
+        golden_vec.size(),
+        worst_ulps);
 
     CloseDevice(device);
 

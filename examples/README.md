@@ -155,7 +155,7 @@ Each `<name>/src/` is a host program (`<name>.cpp`), a `CMakeLists.txt`, and a
 * **four-fp** — like four, but Float32 in/out.
 * **five** — like four, but the vector unit (SFPU) performs the add (Int32).
 * **five-fp** — floating-point variant of five.
-* **six** — single-core 128³ bf16 matmul on the matrix unit, validated against a CPU golden by Pearson correlation (bf16 + HiFi4 isn't bit-exact).
+* **six** — single-core 128³ bf16 matmul on the matrix unit, validated against a CPU golden by Pearson correlation (bf16 + HiFi4 isn't bit-exact). `SIX_FP32=1` (the `six-fp32` case) reruns it with `fp32_dest_acc_en` over the same Float16_b buffers — bf16 storage, 32-bit DEST, the cross that broke the packer's DEST read width; it is the only whole-program cover on that path with a matrix unit in it.
 * **eight** — elementwise add on BRISC only, issuing its two DRAM reads with distinct NoC transaction IDs and barriering on them out of order.
 * **nine** — two-tile: a producer tile runs reader+compute+sender, a consumer tile runs the writer, with a CB bridged across tiles over the NoC (needs the two-tile coords above).
 * **pipestall** — two-tile, and the only example whose *point* is timing: `nine` plus a reverse credit semaphore, so the producer's Tensix backs up behind the consumer core. Three environment knobs (`PIPESTALL_DELAY`, `PIPESTALL_CREDITS`, `PIPESTALL_OUT_DEPTH`) set how long the producer's unpacker legitimately blocks. It is the workload the per-unit stall detector's threshold is calibrated against — see `tt_sim/device/deadlock.py`.

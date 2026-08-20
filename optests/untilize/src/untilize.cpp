@@ -60,7 +60,11 @@
 //                  optests/sfpumath, examples/five-fp) makes its CBs Float32, so
 //                  DEST and the output format are both 32-bit and the
 //                  conversion this exercises never happens. The unit-level
-//                  pin is tt_sim/pe/tensix/pack_dest_rd_ctrl_test.py.
+//                  pin is tt_sim/pe/tensix/pack_dest_rd_ctrl_test.py, and the
+//                  whole-program pin *with a matrix unit in it* is the
+//                  `six-fp32` case (examples/six under `SIX_FP32=1`) -- nothing
+//                  here issues a matmul, so this op test alone could not tell a
+//                  pack-width fault from a DEST-accumulate one.
 
 #include <bit>
 #include <cmath>
