@@ -575,6 +575,94 @@ def test_a_tile_sleeps_through_a_packets_flight_rather_than_spinning():
     assert dram.next_wake_cycle(1) == arrival
 
 
+def _read_n_tiles(device, tile, dram, n, nbytes, batched):
+    """N DRAM reads into distinct L1 slots, either all-then-wait or one at a
+    time. Mirrors a kernel's ``noc_async_read`` x N + one barrier against
+    ``read``/``barrier`` per transfer."""
+    unified = tile.get_coord_pair()
+    dst = dram.noc0_router.id_pair
+    payloads = []
+    for i in range(n):
+        payload = bytes([(i + 1) & 0xFF]) * nbytes
+        device.write(dram.get_coord_pair(), 0x1000 + i * nbytes, payload)
+        payloads.append(payload)
+
+    def arm(i):
+        initiator = _read_from_dram(
+            device, tile, dst, noc=0, dram_address=0x1000 + i * nbytes
+        )
+        initiator.ret_addr_low = _L1_DST + i * nbytes
+        initiator.at_len_be = nbytes
+        initiator.cmd_ctrl = 1
+        initiator.initiate()
+
+    def landed(i):
+        got = device.read(unified, _L1_DST + i * nbytes, nbytes)
+        return bytes(got) == payloads[i]
+
+    if batched:
+        for i in range(n):
+            arm(i)
+        for cycle in range(1, 20000):
+            device.run(1)
+            if all(landed(i) for i in range(n)):
+                return cycle
+        return None
+    total = 0
+    for i in range(n):
+        arm(i)
+        for cycle in range(1, 20000):
+            device.run(1)
+            if landed(i):
+                total += cycle
+                break
+        else:
+            return None
+    return total
+
+
+def test_an_extra_batched_read_costs_bandwidth_and_nothing_else():
+    """**This pins a known gap, not a validated result.**
+
+    Batching reads behind one barrier is the standard dataflow optimisation,
+    and here the first transfer pays the full round trip while every
+    subsequent one pays *only* its DRAM channel time. Queueing at the DRAM
+    endpoint, outstanding-transaction limits, per-command issue cost at the
+    NIU and response reordering are all charged at zero, so a batch gets the
+    theoretical maximum benefit that latency-hiding can ever deliver.
+
+    That makes tt-sim **systematically optimistic about batched dataflow**,
+    which is a floor violation in spirit even though every term charged is
+    itself a floor: the *comparison* between two dataflows is not bounded the
+    way a single total is. The nekbone team measured the consequence on
+    silicon (2026-08-21) — tt-sim predicts a batched-read/write variant wins
+    pass 1 by 1.05-1.12x; an n300 has it losing or tying at 0.93-1.00x.
+
+    The test exists so the gap is visible in the suite and so closing it is a
+    deliberate change with a source behind it, not a silent drift. It asserts
+    the marginal cost *is* the channel rate; if a queueing term ever lands,
+    this test should fail and be rewritten.
+    """
+    with _env("1"):
+        device, tile, dram = _wormhole_worker_and_dram()
+        model = dram_cost_model("wormhole")
+    nbytes = 2048
+    one = _read_n_tiles(device, tile, dram, 1, nbytes, batched=False)
+
+    with _env("1"):
+        device, tile, dram = _wormhole_worker_and_dram()
+    two = _read_n_tiles(device, tile, dram, 2, nbytes, batched=True)
+
+    marginal = two - one
+    # The second read adds its channel occupancy and not one cycle more.
+    assert marginal == model.channel_excess_cycles(nbytes, nbytes // 32) + (
+        nbytes // 32
+    ), f"marginal batched read cost {marginal}, expected pure channel time"
+    # And that is far cheaper than paying the round trip again: the discount
+    # is the whole of the flight latency, which is what silicon disputes.
+    assert marginal * 4 < one
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

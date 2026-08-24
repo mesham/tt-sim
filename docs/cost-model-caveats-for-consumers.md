@@ -336,6 +336,66 @@ a genuine tt-sim defect and was fixed (`optests/packuntilizeinit`, the Wait Gate
 `STALLWAIT`/`SEMWAIT` fix); the Blackhole side is not the same bug wearing a
 different hat.
 
+## Batched NoC transfers get the best case that latency-hiding can give
+
+**If you are comparing two dataflows, read this one.** It is the only caveat
+here that biases a *comparison* rather than a total.
+
+Issuing several NoC transfers and waiting on one barrier — instead of
+transfer/barrier per item — is the standard dataflow optimisation. tt-sim
+prices it as follows: **the first transfer pays the full round trip; every
+subsequent one pays only its bandwidth.** Measured directly, one Tensix reading
+2 KB tiles from one DRAM tile on Wormhole:
+
+| | cost |
+|---|---|
+| one read, serialised | **403 cycles** |
+| each extra read, batched behind one barrier | **86 cycles** |
+
+86 cycles for 2048 bytes is 23.8 B/cycle — exactly the link occupancy plus the
+DRAM channel term, and **nothing else**. Queueing at the DRAM endpoint,
+outstanding-transaction credits and response reordering are all charged at
+zero. So the marginal transfer in a batch is 4.7× cheaper than the same
+transfer standing alone, and the discount grows with batch depth (3.2× total
+speedup at eight reads).
+
+**This is regime-specific, and the other regime is validated.** The cost of
+issuing a transfer is *not* part of the gap: the issuing core's command-buffer
+loop is simulated instruction by instruction, and for small L1 reads — where
+that loop dominates — tt-sim's marginal per-transaction cost has been checked
+against silicon and is right. On Wormhole, 44.00/29.00 predicted against a
+card's 45.03/28.96 (−2.3 %/+0.1 %); on Blackhole an *absolute* prediction of
+47.00/29.00/18.00 landed on 47.00/29.00/18.00. Verdict: neither part has a
+per-read floor, and the marginal cost there is the instruction stream.
+
+The gap is therefore specific to **large, DRAM-side batched transfers** — which
+is exactly what a tiled kernel does, and exactly what no data covers. Every
+DRAM row in tt-metal's `tm_noc_latencies` is one transaction per barrier, so a
+lone request never finds the channel busy and **the vendor's own campaign
+cannot see this axis at all**, in either direction. Nobody has measured it.
+
+Every term charged there is a genuine published floor. The problem is that a
+floor bounds a *total*, and says nothing about the gap between two totals — so
+tt-sim is **systematically optimistic about batching**, and the error runs the
+same direction every time.
+
+**This is measured against silicon, not theorised.** The nekbone team ported
+six variants and ran them on both (2026-08-21). tt-sim predicts the batched
+variant wins pass 1 by 1.05–1.12×; an n300 has it **losing or tying** at
+0.93–1.00×, reproducible across runs and batches. Their loosest floor points
+across all 18 measurements are exactly the batched ones.
+
+**What to do about it:** treat a predicted win from batching as an upper bound
+on the real win, and confirm it on a card before building on it. Predicted
+*losses* from batching, and orderings that do not involve a change in batching
+depth, are unaffected — those held on silicon in all three pairs measured.
+
+The behaviour is pinned by
+`tt_sim/network/noc_cost_model_test.py::test_an_extra_batched_read_costs_bandwidth_and_nothing_else`,
+which exists to make the gap visible rather than to bless it. Closing it needs
+a published queueing bound we do not have; an invented one would be `estimated`
+provenance, which this cost model forbids.
+
 ## What is *not* on this page
 
 Known-unreached functional edges — conditions the simulator does not model
