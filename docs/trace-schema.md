@@ -475,7 +475,7 @@ journey, in the order a packet travels them:
 
 | Leg | Counter | What it is | How much of it is modelled |
 |---|---|---|---|
-| issue → injection | `noc_issue_to_injection_cycles` | Waiting for the sending NIU's outbound port, which is held for the whole packet — so a big transfer's real cost to its neighbours is here, not in its own latency. | Modelled. |
+| issue → injection | `noc_issue_to_injection_cycles` | Waiting for the sending NIU's outbound port, which is held for the whole packet — so a big transfer's real cost to its neighbours is here, not in its own latency. **Attributed to the OBSERVING (destination) NIU, not the sender** — see the warning below. | Modelled. |
 | injection → arrival | `noc_injection_to_arrival_cycles` | Transit: per-hop latency, the packet's own tail (one flit per cycle), and waiting for a router-to-router link another tile's traffic is crossing. | Modelled. |
 | arrival → service | `noc_arrival_to_service_cycles` | Time at the destination once the packet is there. | **A DRAM channel's service time, and otherwise zero.** |
 
@@ -509,6 +509,21 @@ timestamp at all, only a barrier's start/end pair.
 
 The same split is per-transaction in the NoC dataset (§5) and rolled up
 in `report.json` as `noc_latency_split` (§9).
+
+> **Leg 1 is not attributed to the NIU that queued.** Every row in this dataset
+> is stamped with the **observing** NIU — the destination — because that is
+> where the packet is seen. `issue → injection` describes congestion at the
+> *sending* NIU's outbound port, so it is reported against the wrong end of the
+> transfer for the question people actually ask. A worker batching writes to
+> DRAM has its injection queueing appear **on the DRAM NIUs**; measured, 896
+> cycles of a real workload's leg-1 total sat on DRAM rows when the contention
+> was entirely at the worker's outbound port.
+>
+> So **do not read leg 1 as "this NIU is my injection bottleneck"** — it names
+> where the packet landed, not where it waited. To attribute it to the sender,
+> join on the transaction's `src_x`/`src_y` (which are **x-then-y**, the
+> opposite order to `core_y`/`core_x`). Reported by the nekbone team,
+> 2026-08-24; the leg itself is correct, only its tile label is misleading.
 
 Canned queries that get all of this right live in
 [`tt_sim/trace/queries/counters.sql`](../tt_sim/trace/queries/counters.sql).

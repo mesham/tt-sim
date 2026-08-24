@@ -27,6 +27,15 @@ WORMHOLE_PROFILE = ArchProfile(
     baby_core_reset_pc_debug_regs=False,
     # Unified coords assigned to each of the 6 physical DRAM channels. Picked
     # from the (16-17, 16-18) band so they stay clear of the Tensix at (18, 18).
+    #
+    # **These are ``(x, y)``.** The trace dataset's tile columns are
+    # ``(core_y, core_x)`` -- y first -- so anything classifying a NIU as DRAM
+    # or worker by comparing against this tuple must swap. Getting it wrong is
+    # not a near miss: the nekbone team measured 72 of 293 DRAM requests
+    # relabelling as worker traffic, which makes the endpoint-service leg look
+    # nonzero at a worker NIU and inverts the guarantee ``docs/trace-schema.md``
+    # section 4.4a makes. Several of these coords are symmetric ((16, 16),
+    # (17, 17)), so a swap survives a spot check -- ours did.
     dram_channel_unified_coords=(
         (16, 16),  # channel 0
         (17, 16),  # channel 1
