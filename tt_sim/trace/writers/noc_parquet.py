@@ -32,12 +32,33 @@ zeroes.
 
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-
 from tt_sim.perf.model import cost_model_enabled
 from tt_sim.trace.bus import EventBus, get_bus
 from tt_sim.trace.events import EventCategory, NoCEvent
+
+
+def _pyarrow():
+    """Import pyarrow on demand, with an error that says what to do.
+
+    Deliberately **not** a module-level import: ``tt_sim.trace.auto`` imports
+    every writer unconditionally, and ``TT_Device.__init__`` imports that, so a
+    module-level ``import pyarrow`` makes an optional output format a hard
+    dependency of constructing a device at all. When that import failed the
+    wire-bridge server died before its socket existed and the tt-metal host
+    blocked forever in "Waiting for ack msg from remote..." with no error —
+    four people hit that independently before it was traced back to here.
+    """
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise ImportError(
+            "Parquet output needs pyarrow, which is not installed in the "
+            "interpreter running the simulator. Install it (`pip install "
+            "pyarrow`), or unset the trace variable that asked for Parquet. "
+            "Every other tt-sim output works without it."
+        ) from exc
+    return pa, pq
 
 
 class NoCParquetWriter:
@@ -47,6 +68,7 @@ class NoCParquetWriter:
         buffer_size: int = 1000,
         bus: EventBus | None = None,
     ):
+        _pyarrow()  # fail here, where the user asked for Parquet
         self._dir = Path(directory)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._buffer: list[dict] = []
@@ -88,6 +110,7 @@ class NoCParquetWriter:
     def _flush(self):
         if not self._buffer:
             return
+        pa, pq = _pyarrow()
         table = pa.Table.from_pylist(self._buffer)
         pq.write_to_dataset(
             table,
