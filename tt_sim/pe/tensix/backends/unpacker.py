@@ -1107,7 +1107,38 @@ class UnPackerUnit(TensixBackendUnit):
         # that, are still rejected by ``check_modelled_settings``.
         start_row = int(outAddr / 16)
         if self.unpacker_id == 0:
-            assert start_row >= 4
+            if start_row < 4:
+                raise NotImplementedError(
+                    f"Unpacker 0 (SrcA) reached an output address of {outAddr} "
+                    f"(row {start_row}), and this model only knows how to place "
+                    f"SrcA rows from 4 upwards.\n"
+                    "\n"
+                    "THIS IS A tt-sim LIMIT, NOT A VERDICT ON YOUR KERNEL. "
+                    "Silicon is known to accept this configuration.\n"
+                    "\n"
+                    "Every SrcA unpack tt-sim has been run against arrives at "
+                    "outAddr 64 (row 4, becoming row 0 here) while SrcB arrives "
+                    "at 0 -- an asymmetry seen across matmul, matmul_block, "
+                    "reduce and SFPU kernels, in both Float16_b and Float32, so "
+                    "it is neither format-specific nor matmul-specific. The "
+                    "constant 4 was fitted to that observation and carries no "
+                    "citation; a lower row is outside everything it was fitted "
+                    "to.\n"
+                    "\n"
+                    "Two things could be happening and they need different "
+                    "fixes, which is why this refuses rather than guessing a "
+                    "row and handing you a wrong number:\n"
+                    "  (a) your kernel legitimately programs a zero base, and "
+                    "this subtraction is simply wrong for it; or\n"
+                    "  (b) tt-sim is not seeing the base register write at all "
+                    "-- wrong config context, wrong state ID, or read before "
+                    "the write lands -- in which case 0 is a symptom and the "
+                    "defect is upstream of here.\n"
+                    "\n"
+                    "Distinguishing them needs the failing kernel. Please send "
+                    "it: a reproducer settles this quickly, and a guess here "
+                    "would replace a loud stop with a silently wrong tile."
+                )
             start_row -= 4
 
         if self.getDiagnosticSettings().reportUnpacking():
