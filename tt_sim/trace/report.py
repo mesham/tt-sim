@@ -57,10 +57,24 @@ from pathlib import Path
 #: Bump on **any** change to a documented field: additively for a new
 #: field, breaking for a rename, a removal, or a change of meaning or
 #: unit. Either way, say which in ``docs/trace-schema.md`` §9.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Counters that are cycle-bearing but not named ``*_cycles``.
 _EXTRA_CYCLE_COUNTERS = {"instr_retired"}
+
+#: The per-transaction NoC latency split: ``{leg: counter}``, in the order
+#: a packet travels. The three **partition** ``noc_flight_cycles`` — the
+#: aggregator charges them off the same two cycles, via
+#: :func:`tt_sim.trace.events.noc_flight_split`, so they telescope to it by
+#: construction — which makes each of them redundant with the total in the
+#: sense :func:`is_redundant` means. They are ranked nowhere; they are
+#: reported as their own block (:meth:`Report.noc_latency_split`) because
+#: their value is the *shape* of the flight rather than its size.
+NOC_SPLIT_COUNTERS = {
+    "issue_to_injection": "noc_issue_to_injection_cycles",
+    "injection_to_arrival": "noc_injection_to_arrival_cycles",
+    "arrival_to_service": "noc_arrival_to_service_cycles",
+}
 #: Totals that restate cycles a per-reason partition already carries.
 #: ``stall_cycles`` is the sum of the ``stall_<reason>`` rows and
 #: ``tensix_stall_cycles`` the sum of the ``tensix_stall_<reason>`` rows, so
@@ -70,7 +84,12 @@ _EXTRA_CYCLE_COUNTERS = {"instr_retired"}
 #: data -- so ranking it beside ``busy_cycles`` double-counts every cycle it
 #: names. It is published for the energy activity vector, which asks about
 #: work rather than occupancy; query it directly.
-_REDUNDANT = {"stall_cycles", "tensix_stall_cycles", "bookkeeping_cycles"}
+_REDUNDANT = {
+    "stall_cycles",
+    "tensix_stall_cycles",
+    "bookkeeping_cycles",
+    *NOC_SPLIT_COUNTERS.values(),
+}
 #: Counts, not cycles, despite sitting under a stall prefix.
 _STALL_VOLUMES = {"tensix_stall_episodes"}
 
@@ -160,6 +179,17 @@ class Contribution:
         return "occupancy"
 
 
+def empty_noc_latency_split() -> dict[str, int]:
+    """The split's shape, all zero — what a run with no NoC traffic reports.
+
+    Always the full set of keys, never a partial dict: a missing key reads as
+    a null to a consumer, and "we did not measure this" and "we measured this
+    and it was zero" are the two things this whole block exists to keep apart.
+    ``transactions`` is what tells them apart.
+    """
+    return {leg: 0 for leg in NOC_SPLIT_COUNTERS} | {"total": 0, "transactions": 0}
+
+
 @dataclass
 class Report:
     span: int = 0
@@ -170,6 +200,9 @@ class Report:
     elfs: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     label: str = ""
+    #: Per-transaction NoC latency, split into the three legs of a packet's
+    #: journey and summed over every NIU. See :func:`noc_latency_split`.
+    noc_latency_split: dict[str, int] = field(default_factory=empty_noc_latency_split)
 
     def per_unit(self) -> dict[str, int]:
         out: dict[str, int] = defaultdict(int)
@@ -286,6 +319,41 @@ def classify(
     return contributions, dict(volumes)
 
 
+def noc_latency_split(totals: dict[tuple[str, str], int]) -> dict[str, int]:
+    """The three legs of NoC flight, summed over every NIU in the dataset.
+
+    ``issue -> injection`` is queueing for the sending NIU's injection port,
+    ``injection -> arrival`` is transit (hops, the packet's tail, and waiting
+    for a router link another tile is using), and ``arrival -> service`` is
+    time at the destination once the packet is there. ``total`` is
+    ``noc_flight_cycles`` over the same units, so a consumer can check the
+    three telescope to it; ``transactions`` is ``noc_txns_timed``, the
+    denominator for a per-transaction mean.
+
+    **``arrival_to_service`` is zero except at a DRAM tile, and that zero is
+    the point.** tt-sim charges endpoint time only for a DRAM channel; arrival
+    buffering, outstanding-transaction credit limits and response reordering
+    are not modelled anywhere, so a hardware residual in this leg is entirely
+    unattributed. The bucket is reported rather than omitted so that fact is
+    legible instead of being something a reader has to know.
+
+    Like every other total in this file this is an **occupancy** sum across
+    units, counting a transfer at both of its endpoints — see §4.3a. It is a
+    decomposition of `noc_flight_cycles`, so it inherits every caveat that
+    number carries, including that dividing it by the span means nothing.
+    """
+    out = empty_noc_latency_split()
+    for (_unit, counter), value in totals.items():
+        for leg, name in NOC_SPLIT_COUNTERS.items():
+            if counter == name:
+                out[leg] += value
+        if counter == "noc_flight_cycles":
+            out["total"] += value
+        elif counter == "noc_txns_timed":
+            out["transactions"] += value
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Building
 # ---------------------------------------------------------------------------
@@ -304,6 +372,7 @@ def build(
         totals, span = load_counters(counters_dir)
         report.span = span
         report.contributions, report.volumes = classify(totals)
+        report.noc_latency_split = noc_latency_split(totals)
     report.hotspots = hotspots or {}
     report.elfs = elfs or []
     return report
@@ -326,6 +395,81 @@ def _table(header: list[str], rows: list[list[str]]) -> list[str]:
     for row in rows:
         out.append("| " + " | ".join(row) + " |")
     return out
+
+
+#: What each leg of the NoC flight split is, and how much of it is modelled.
+#: The third row is the one worth reading twice.
+_SPLIT_PROSE = {
+    "issue_to_injection": "Queued for the sending NIU's injection port. Modelled.",
+    "injection_to_arrival": (
+        "Transit: hops, the packet's own tail, and waiting for a router link "
+        "another tile is using. Modelled."
+    ),
+    "arrival_to_service": (
+        "At the destination once it arrived. **Modelled only as a DRAM "
+        "channel's time — zero at every other endpoint.**"
+    ),
+}
+
+
+def _render_noc_latency_split(report: Report) -> list[str]:
+    """The per-transaction flight split, or nothing if no packet was timed."""
+    split = report.noc_latency_split or {}
+    txns = split.get("transactions", 0)
+    if not txns:
+        return []
+    total = split.get("total", 0)
+    lines = ["**Per-transaction NoC latency, split by leg.**", ""]
+    lines += _table(
+        ["leg", "cycles", "per txn", "share", "what it is"],
+        [
+            [
+                leg.replace("_", " ").replace(" to ", " → "),
+                f"{split.get(leg, 0):,}",
+                f"{split.get(leg, 0) / txns:.1f}",
+                _pct(split.get(leg, 0), total),
+                _SPLIT_PROSE[leg],
+            ]
+            for leg in NOC_SPLIT_COUNTERS
+        ]
+        + [
+            [
+                "**total** (`noc_flight_cycles`)",
+                f"**{total:,}**",
+                f"**{total / txns:.1f}**",
+                "100.0 %",
+                f"Over {txns:,} timed transactions.",
+            ]
+        ],
+    )
+    lines.append("")
+    lines.append(
+        "The three legs **telescope** to the total — they are charged off the "
+        "same two cycles, so they partition it by construction rather than by "
+        "three accumulations agreeing. This is the same occupancy sum as the "
+        "table above, counted at both endpoints of every transfer, so read the "
+        "*shape* rather than the size."
+    )
+    lines.append("")
+    lines.append(
+        "**A `0.0` in `arrival → service` is a finding, not a measurement.** "
+        "tt-sim charges endpoint time only for a DRAM channel; arrival "
+        "buffering, outstanding-transaction credit limits and response "
+        "reordering are not modelled anywhere. So the simulator claims zero "
+        "endpoint queueing, and any residual hardware shows in this leg is "
+        "entirely unmodelled — which is exactly why the row is printed rather "
+        "than omitted. Silicon cannot answer this at all: a card has no "
+        "per-transaction completion timestamp, only a barrier's start/end pair."
+    )
+    lines.append("")
+    lines.append(
+        "This row is summed over **every** NIU, so a run that touches DRAM "
+        "mixes the one endpoint that charges with the many that do not. For "
+        "the split by endpoint, read `noc_arrival_to_service_cycles` per unit "
+        "in the counter dataset: it is zero on every worker NIU."
+    )
+    lines.append("")
+    return lines
 
 
 def render(report: Report, top: int = 25) -> str:
@@ -431,6 +575,8 @@ def render(report: Report, top: int = 25) -> str:
             "other, not by a sum of charges."
         )
         lines.append("")
+
+    lines += _render_noc_latency_split(report)
 
     if not report.contributions:
         lines.append("_No cycle-bearing counters in this run._")

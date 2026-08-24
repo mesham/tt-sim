@@ -28,7 +28,19 @@ cost model supplies the state, cycle-attributing ones:
   and an energy model needs the second. ``busy_cycles -
   bookkeeping_cycles`` is the Matrix Unit's datapath occupancy.
 - ``noc_flight_cycles`` and ``noc_txns_timed`` per NIU, from
-  ``NoCEvent.issue_cycle`` against the event's own cycle.
+  ``NoCEvent.issue_cycle`` against the event's own cycle, plus the
+  three legs that flight is made of —
+  ``noc_issue_to_injection_cycles`` (queueing for the sending NIU's
+  injection port), ``noc_injection_to_arrival_cycles`` (hops, tail and
+  router-link contention) and ``noc_arrival_to_service_cycles``
+  (endpoint time). The three **telescope** to ``noc_flight_cycles``, so
+  they are redundant with it and must never be summed alongside it;
+  ``tt_sim.trace.report.is_redundant`` says so. The last of them is
+  **zero everywhere except a DRAM tile's channel time**, and that zero
+  is published rather than omitted because it is the finding: tt-sim
+  models no arrival buffering, no outstanding-transaction credit limit
+  and no response reordering, so a hardware residual there is entirely
+  unattributed. See ``tt_sim.trace.events.noc_flight_split``.
 - ``tensix_stall_cycles`` per Tensix thread, split by
   ``tensix_stall_<reason>`` and ``tensix_stall_on_<unit>``, from
   ``StallEvent`` — where a thread's *lost* time went, against
@@ -59,6 +71,7 @@ from tt_sim.trace.events import (
     NoCEvent,
     StallEvent,
     SyncEvent,
+    noc_flight_split,
 )
 
 DEFAULT_FLUSH_INTERVAL_CYCLES = 100
@@ -118,6 +131,13 @@ class CounterAggregator:
                 0, e.cycle - e.issue_cycle
             )
             self._counters[(e.unit_id, "noc_txns_timed")] += 1
+            # Charged off the same two cycles as the total above, via a split
+            # that telescopes by construction, so the parts can never drift
+            # from the whole the way two independent accumulations would.
+            queue, transit, endpoint = noc_flight_split(e)
+            self._counters[(e.unit_id, "noc_issue_to_injection_cycles")] += queue
+            self._counters[(e.unit_id, "noc_injection_to_arrival_cycles")] += transit
+            self._counters[(e.unit_id, "noc_arrival_to_service_cycles")] += endpoint
         self._maybe_flush(e.cycle)
 
     def _on_mem(self, e: MemEvent):

@@ -663,6 +663,183 @@ def test_an_extra_batched_read_costs_bandwidth_and_nothing_else():
     assert marginal * 4 < one
 
 
+# ---------------------------------------------------------------------------
+# 7. The flight split: which leg of the journey each cycle went to.
+# ---------------------------------------------------------------------------
+
+
+class _NoCCapture:
+    """A NoC subscriber that is inert unless a capture block is running.
+
+    The event bus is a process-wide singleton with no unsubscribe, so a test
+    that subscribed per-call would leak a subscriber into every later test in
+    the session, and one that called ``reset()`` to clean up would silently
+    drop a subscriber some other module installed at import time. One
+    permanently-subscribed instance with an on/off flag does neither.
+    """
+
+    def __init__(self):
+        self.events = []
+        self.on = False
+
+    def __call__(self, event):
+        if self.on:
+            self.events.append(event)
+
+
+_CAPTURE = None
+
+
+@contextmanager
+def _captured_noc_events():
+    from tt_sim.trace.bus import get_bus
+    from tt_sim.trace.events import EventCategory
+
+    global _CAPTURE
+    bus = get_bus()
+    if _CAPTURE is None:
+        _CAPTURE = _NoCCapture()
+        bus.subscribe(EventCategory.NOC, _CAPTURE)
+    was_enabled = bus.enabled
+    bus.enabled = True
+    _CAPTURE.events = []
+    _CAPTURE.on = True
+    try:
+        yield _CAPTURE.events
+    finally:
+        _CAPTURE.on = False
+        bus.enabled = was_enabled
+
+
+def _dram_write(device, tile, dram, index, nbytes):
+    """One marked NoC write of ``nbytes`` from L1 into DRAM."""
+    initiator = tile.noc0_router.request_initiators[0]
+    _set_coord(initiator, "ret", dram.noc0_router.id_pair)
+    initiator.target_addr_low = _L1_SRC
+    initiator.ret_addr_low = 0x4000 + index * nbytes
+    initiator.at_len_be = nbytes
+    initiator.ctrl = 2
+    initiator.cmd_ctrl = 1
+    initiator.initiate()
+
+
+def test_the_three_legs_of_a_flight_telescope_to_the_flight_total():
+    """The property that makes the split checkable rather than believable.
+
+    ``noc_flight_cycles`` is ``service - issue`` and the split is three
+    interior stamps on the same packet, so the legs must partition the total
+    exactly — no rounding, no remainder, on every transaction of both phases.
+    A consumer can therefore validate the decomposition against the number it
+    already had instead of trusting this file.
+    """
+    from tt_sim.trace.events import noc_flight_split
+
+    with _env("1"), _captured_noc_events() as events:
+        device, tile, dram = _wormhole_worker_and_dram()
+        assert _read_n_tiles(device, tile, dram, 2, 2048, batched=True)
+
+    timed = [e for e in events if e.issue_cycle >= 0]
+    assert {e.phase for e in timed} == {"request", "response"}
+    for event in timed:
+        queue, transit, endpoint = noc_flight_split(event)
+        assert queue + transit + endpoint == event.cycle - event.issue_cycle
+        assert min(queue, transit, endpoint) >= 0
+
+
+def test_endpoint_queueing_is_modelled_at_zero_away_from_a_dram_channel():
+    """**This pins what is *not* modelled, and the zero is the deliverable.**
+
+    ``arrival -> service`` is the time a packet spends at its destination after
+    it has arrived. tt-sim charges it in exactly one place — a DRAM tile's
+    channel, where it is the documented service time plus whatever the channel
+    is still streaming for someone else. Everywhere else it is **zero**, and
+    that is a statement about coverage rather than about hardware: arrival
+    buffering, outstanding-transaction credit limits and response reordering
+    are not modelled at all, so a hardware residual in this leg is entirely
+    unattributed.
+
+    Silicon cannot check it either way — a card has no per-transaction
+    completion timestamp, only a barrier's start/end pair — which is why the
+    bucket is published as a visible zero rather than omitted. If a queueing
+    term ever lands, this test should fail and be rewritten deliberately, the
+    same contract as ``test_an_extra_batched_read_costs_bandwidth_and_nothing_else``.
+    """
+    from tt_sim.trace.events import noc_flight_split
+
+    with _env("1"):
+        model = dram_cost_model("wormhole")
+    nbytes = 2048
+    with _env("1"), _captured_noc_events() as events:
+        device, tile, dram = _wormhole_worker_and_dram()
+        assert _read_n_tiles(device, tile, dram, 1, nbytes, batched=False)
+
+    at_dram = [e for e in events if e.phase == "request"]
+    at_worker = [e for e in events if e.phase == "response"]
+    assert at_dram
+    assert at_worker
+
+    # The requester's end: the response is serviced on the cycle it lands.
+    for event in at_worker:
+        assert noc_flight_split(event)[2] == 0, (
+            "something now charges endpoint time at a worker NIU — the split's "
+            "arrival-to-service leg is documented as zero there"
+        )
+    # The one endpoint that does charge, and it charges its published number.
+    for event in at_dram:
+        assert noc_flight_split(event)[2] == model.service_cycles + (
+            model.channel_excess_cycles(nbytes, nbytes // 32)
+        )
+
+
+def test_the_first_leg_is_the_time_the_injection_port_was_still_busy():
+    """``issue -> injection`` is the port occupancy of the packet in front.
+
+    The same mechanism as
+    ``test_the_injection_port_is_held_for_the_whole_packet``, seen from the
+    trace rather than from ``_bandwidth_delay``: two back-to-back writes leave
+    one NIU, and the second cannot start until the first has finished being
+    pushed onto the wire. The first waits for nothing, so its own first leg is
+    zero — which is what stops this reading as a per-packet latency.
+    """
+    from tt_sim.trace.events import noc_flight_split
+
+    nbytes = 2048
+    with _env("1"), _captured_noc_events() as events:
+        device, tile, dram = _wormhole_worker_and_dram()
+        device.write(tile.get_coord_pair(), _L1_SRC, bytes(nbytes))
+        for i in range(2):
+            _dram_write(device, tile, dram, i, nbytes)
+        device.run(1200)
+        occupancy = tile.noc0_router.noc_latency.serialisation_cycles(nbytes)
+
+    writes = [e for e in events if e.phase == "request" and e.txn_type == "write"]
+    assert len(writes) == 2
+    assert noc_flight_split(writes[0])[0] == 0
+    assert noc_flight_split(writes[1])[0] == occupancy
+
+
+def test_an_unmodelled_flight_is_reported_whole_rather_than_split_three_ways():
+    """With the cost model off a packet is delivered on the next cycle however
+    far it travelled, and that one cycle is the simulator's own delivery
+    pipeline. There is no injection, no wire and no endpoint in it to
+    apportion, so it is reported entirely as transit — the alternative would be
+    to invent a shape for a flight nothing modelled."""
+    from tt_sim.trace.events import noc_flight_split
+
+    with _env(None), _captured_noc_events() as events:
+        device, tile, dram = _wormhole_worker_and_dram()
+        assert _read_n_tiles(device, tile, dram, 1, 64, batched=False)
+
+    timed = [e for e in events if e.issue_cycle >= 0]
+    assert timed
+    for event in timed:
+        assert event.injection_cycle == -1
+        assert event.endpoint_arrival_cycle == -1
+        queue, transit, endpoint = noc_flight_split(event)
+        assert (queue, endpoint) == (0, 0)
+        assert transit == event.cycle - event.issue_cycle
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

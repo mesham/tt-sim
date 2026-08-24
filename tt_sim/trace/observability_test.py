@@ -295,6 +295,48 @@ def test_noc_parquet_carries_the_flight_columns(tmp_path, monkeypatch, cost_mode
     assert row["cost_model"] is cost_model
 
 
+def test_the_noc_rows_carry_the_flight_split(tmp_path, monkeypatch):
+    """One row per transaction is the only place the split is *per
+    transaction*, which is the thing a card cannot give at all — silicon has
+    no completion timestamp per transfer, only a barrier's start/end pair. The
+    three legs telescope to ``flight_cycles`` on every row so a query can
+    check them against the total it already had."""
+    monkeypatch.setenv("TT_SIM_COST_MODEL", "1")
+    bus = EventBus()
+    bus.enabled = True
+    writer = NoCParquetWriter(tmp_path / "noc", bus=bus)
+    bus.publish(
+        NoCEvent(
+            cycle=300,
+            unit_id=NIU,
+            phase="request",
+            txn_type="read",
+            src=(1, 1),
+            dst=(18, 18),
+            size_bytes=2048,
+            txn_id=1,
+            issue_cycle=65,
+            injection_cycle=129,
+            endpoint_arrival_cycle=250,
+        )
+    )
+    writer.close()
+    (row,) = pq.read_table(tmp_path / "noc").to_pylist()
+    assert row["issue_to_injection_cycles"] == 64
+    assert row["injection_to_arrival_cycles"] == 121
+    assert row["arrival_to_service_cycles"] == 50
+    assert (
+        row["issue_to_injection_cycles"]
+        + row["injection_to_arrival_cycles"]
+        + row["arrival_to_service_cycles"]
+        == row["flight_cycles"]
+    )
+    # ``arrival_cycle`` is the *service* cycle, a legacy alias for ``cycle`` —
+    # deliberately not the split's arrival, which is 50 cycles earlier. The
+    # wart is frozen; this pins it so nobody "fixes" it into a rename.
+    assert row["arrival_cycle"] == 300
+
+
 def test_an_untimed_flight_is_zero_not_one(tmp_path, monkeypatch):
     """``issue_cycle == -1`` must not be arithmetic'd into a plausible flight.
     Zero here means "no measurement", and the ``issue_cycle`` column keeps the
@@ -497,6 +539,98 @@ def test_noc_flight_cycles_are_counted_when_timed():
     )
     assert counters[(NIU, "noc_flight_cycles")] == 235
     assert counters[(NIU, "noc_txns_timed")] == 1
+
+
+def test_the_flight_split_counters_telescope_to_the_flight_total():
+    """Three legs, one total, per NIU. The identity §4.4a publishes is what a
+    consumer checks the decomposition against, so it is asserted here rather
+    than described — and the numbers are chosen so a leg swapped with another
+    would still fail."""
+    counters = _counters(
+        [
+            NoCEvent(
+                cycle=300,
+                unit_id=NIU,
+                phase="request",
+                txn_type="read",
+                src=(1, 1),
+                dst=(2, 2),
+                issue_cycle=65,
+                injection_cycle=85,
+                endpoint_arrival_cycle=250,
+            )
+        ]
+    )
+    assert counters[(NIU, "noc_issue_to_injection_cycles")] == 20
+    assert counters[(NIU, "noc_injection_to_arrival_cycles")] == 165
+    assert counters[(NIU, "noc_arrival_to_service_cycles")] == 50
+    assert (
+        counters[(NIU, "noc_issue_to_injection_cycles")]
+        + counters[(NIU, "noc_injection_to_arrival_cycles")]
+        + counters[(NIU, "noc_arrival_to_service_cycles")]
+        == counters[(NIU, "noc_flight_cycles")]
+    )
+
+
+def test_a_zero_endpoint_leg_is_emitted_rather_than_left_out():
+    """**The zero is the deliverable**, so it must survive to the dataset.
+
+    Everywhere else in this tree absent means "not modelled" and a counter
+    only appears once something increments it (§3.5). This one is the
+    exception on purpose: tt-sim models no endpoint queueing away from a DRAM
+    channel, and a consumer needs to be able to read that as a measured zero
+    rather than infer it from a missing row.
+    """
+    counters = _counters(
+        [
+            NoCEvent(
+                cycle=300,
+                unit_id=NIU,
+                phase="response",
+                txn_type="read",
+                src=(1, 1),
+                dst=(2, 2),
+                issue_cycle=200,
+                injection_cycle=200,
+                endpoint_arrival_cycle=300,
+            )
+        ]
+    )
+    assert (NIU, "noc_arrival_to_service_cycles") in counters
+    assert counters[(NIU, "noc_arrival_to_service_cycles")] == 0
+    assert counters[(NIU, "noc_injection_to_arrival_cycles")] == 100
+
+
+def test_an_undecomposed_flight_is_all_transit_and_no_invented_shape():
+    """With the cost model off there is one delivery cycle and nothing in it
+    to apportion. Reporting it as transit is a choice; splitting it would be a
+    fabrication, and reporting nothing would lose the flight total."""
+    counters = _counters(
+        [
+            NoCEvent(
+                cycle=301,
+                unit_id=NIU,
+                phase="request",
+                txn_type="read",
+                src=(1, 1),
+                dst=(2, 2),
+                issue_cycle=300,
+            )
+        ]
+    )
+    assert counters[(NIU, "noc_issue_to_injection_cycles")] == 0
+    assert counters[(NIU, "noc_injection_to_arrival_cycles")] == 1
+    assert counters[(NIU, "noc_arrival_to_service_cycles")] == 0
+
+
+def test_the_split_counters_are_redundant_with_the_flight_total():
+    """They partition ``noc_flight_cycles``, so ranking them beside it would
+    double every NoC cycle in the report. The rule lives in ``is_redundant``
+    because every consumer of the dataset needs it, not just this report."""
+    for counter in reportmod.NOC_SPLIT_COUNTERS.values():
+        assert reportmod.is_redundant(counter)
+        assert reportmod.is_cycle_bearing(counter)
+    assert not reportmod.is_redundant("noc_flight_cycles")
 
 
 def test_counter_snapshots_are_still_the_documented_shape():
@@ -726,6 +860,8 @@ DOCUMENTED_FIELDS = {
         "size_bytes",
         "txn_id",
         "issue_cycle",
+        "injection_cycle",
+        "endpoint_arrival_cycle",
     },
     "LifecycleEvent": {"cycle", "unit_id", "kind", "detail"},
     "MemEvent": {"cycle", "unit_id", "op", "address", "size", "region", "pc"},
@@ -946,6 +1082,70 @@ def _report_with_everything() -> "reportmod.Report":
         label="doc-contract",
         notes=["a note"],
     )
+
+
+def test_the_report_rolls_the_flight_split_up_and_it_still_telescopes():
+    """``report.json``'s ``noc_latency_split`` is the whole-run view of §4.4a.
+    The legs are summed over every NIU, exactly as ``shared_resource_cycles``
+    is, so ``total`` is ``noc_flight_cycles`` over the same units and the three
+    legs still add up to it."""
+    totals = {
+        ("2,1 NOC0", "noc_flight_cycles"): 300,
+        ("2,1 NOC0", "noc_txns_timed"): 2,
+        ("2,1 NOC0", "noc_issue_to_injection_cycles"): 40,
+        ("2,1 NOC0", "noc_injection_to_arrival_cycles"): 260,
+        ("2,1 NOC0", "noc_arrival_to_service_cycles"): 0,
+        ("0,0 NOC1", "noc_flight_cycles"): 121,
+        ("0,0 NOC1", "noc_txns_timed"): 1,
+        ("0,0 NOC1", "noc_issue_to_injection_cycles"): 0,
+        ("0,0 NOC1", "noc_injection_to_arrival_cycles"): 21,
+        ("0,0 NOC1", "noc_arrival_to_service_cycles"): 100,
+    }
+    split = reportmod.noc_latency_split(totals)
+    assert split["issue_to_injection"] == 40
+    assert split["injection_to_arrival"] == 281
+    assert split["arrival_to_service"] == 100
+    assert split["total"] == 421
+    assert split["transactions"] == 3
+    assert (
+        split["issue_to_injection"]
+        + split["injection_to_arrival"]
+        + split["arrival_to_service"]
+        == split["total"]
+    )
+    # And the legs stay out of the ranked table, which already carries the
+    # total they partition.
+    contributions, _volumes = reportmod.classify(totals)
+    assert {c.counter for c in contributions} == {"noc_flight_cycles"}
+
+
+def test_an_empty_split_says_zero_transactions_rather_than_going_missing():
+    """ "No NoC traffic" and "measured, and zero" are different answers, and a
+    consumer reading a missing key gets a null for both. Every key is always
+    present; ``transactions`` is what separates them."""
+    split = reportmod.noc_latency_split({})
+    assert set(split) == set(reportmod.NOC_SPLIT_COUNTERS) | {"total", "transactions"}
+    assert set(split.values()) == {0}
+    assert reportmod.Report().noc_latency_split == split
+
+
+def test_the_report_prints_the_zero_endpoint_leg_rather_than_hiding_it():
+    """``report.md`` is for humans, and the human-facing half of this
+    deliverable is a visible ``0.0`` next to a sentence saying what it means.
+    A row silently dropped for being zero would be the one failure mode that
+    matters here."""
+    report = reportmod.Report(span=1000)
+    report.noc_latency_split = {
+        "issue_to_injection": 40,
+        "injection_to_arrival": 260,
+        "arrival_to_service": 0,
+        "total": 300,
+        "transactions": 2,
+    }
+    body = reportmod.render(report)
+    assert "arrival → service" in body
+    assert "| 0 | 0.0 |" in body
+    assert "not a measurement" in body
 
 
 def test_the_report_carries_its_own_version_not_the_event_one(tmp_path):

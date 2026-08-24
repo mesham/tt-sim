@@ -5,7 +5,9 @@ flat columnar form suitable for SQL analysis of data movement:
 
     cycle, chip, core_y, core_x, unit, phase, txn_type,
     src_y, src_x, dst_y, dst_x, size_bytes, txn_id,
-    issue_cycle, arrival_cycle, flight_cycles, cost_model
+    issue_cycle, arrival_cycle, flight_cycles,
+    issue_to_injection_cycles, injection_to_arrival_cycles,
+    arrival_to_service_cycles, cost_model
 
 Partitioned by ``chip`` to keep multi-chip runs separable; not
 partitioned by kernel_id because NoC transactions aren't naturally
@@ -25,6 +27,21 @@ per-hop latency (plus any DRAM service time the destination charges).
 ``issue_cycle`` is ``-1``, and ``flight_cycles`` ``0``, for the one case
 neither regime can time: a NIU with no owning tile clock.
 
+The last three cycle columns **split** ``flight_cycles`` into the legs
+it is made of — port queueing at the sender, transit, and time at the
+destination endpoint — and telescope to it exactly, so a query can
+check the decomposition against the total it already had. They come
+from ``tt_sim.trace.events.noc_flight_split``, whose docstring says how
+much of each leg is modelled; the short version is that
+``arrival_to_service_cycles`` is **zero everywhere except a DRAM
+tile**, and is written out as a zero rather than left out, because
+that zero is the finding.
+
+**``arrival_cycle`` is not the split's "arrival".** It is a frozen
+legacy alias for ``cycle``, the *service* cycle; the split's arrival is
+the earlier moment the packet reached the destination NIU, and is
+``cycle - arrival_to_service_cycles``.
+
 Still not populated, and still gated on §I: ``vc``. Nothing in tt-sim
 models virtual channels, so there is no column rather than a column of
 zeroes.
@@ -34,7 +51,7 @@ from pathlib import Path
 
 from tt_sim.perf.model import cost_model_enabled
 from tt_sim.trace.bus import EventBus, get_bus
-from tt_sim.trace.events import EventCategory, NoCEvent
+from tt_sim.trace.events import EventCategory, NoCEvent, noc_flight_split
 
 
 def _pyarrow():
@@ -83,6 +100,7 @@ class NoCParquetWriter:
         dst = event.dst if len(event.dst) >= 2 else (0, 0)
         issue = int(event.issue_cycle)
         flight = max(0, int(event.cycle) - issue) if issue >= 0 else 0
+        queue, transit, endpoint = noc_flight_split(event)
         self._buffer.append(
             {
                 "cycle": int(event.cycle),
@@ -101,6 +119,9 @@ class NoCParquetWriter:
                 "issue_cycle": issue,
                 "arrival_cycle": int(event.cycle),
                 "flight_cycles": flight,
+                "issue_to_injection_cycles": queue,
+                "injection_to_arrival_cycles": transit,
+                "arrival_to_service_cycles": endpoint,
                 "cost_model": self._cost_model,
             }
         )

@@ -674,6 +674,19 @@ workers materialising on demand with no environment variable.
    and `NUI.transmit` stamps `issue_cycle` *after* `send_to` has
    charged flight + injection-port queueing + link wait +
    serialisation.
+   **That collapsed total is now published as a split, 2026-08-24**,
+   on the nekbone team's ask: `issue -> injection` (port queueing),
+   `injection -> arrival` (transit) and `arrival -> service` (endpoint
+   time), telescoping to `noc_flight_cycles` by construction — per
+   transaction in the NoC Parquet dataset, per NIU in the counter
+   dataset, and rolled up in `report.json` as `noc_latency_split`
+   (schema 3; `docs/trace-schema.md` §4.4a). **The third leg reports
+   zero at every endpoint but a DRAM channel, and the zero is the
+   deliverable**: nothing models arrival buffering,
+   outstanding-transaction credits or response reordering, so a
+   hardware residual there is entirely ours and unmodelled. It is also
+   the one thing a card structurally cannot report, per the paragraph
+   above.
    The partition (`prologue`, `issue`, `read_wait`, `write_wait`,
    `other_wait`, `local`) telescopes to the zone span by construction,
    so `partition_closes` is really a monotonicity test on a 44-bit

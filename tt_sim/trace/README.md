@@ -202,6 +202,7 @@ attribution — same long format, no consumer changes:
 | `busy_cycles` | per Tensix backend unit, the occupancy the cost tables charged |
 | `bookkeeping_cycles` | a **subset** of the same cycles: Matrix Unit opcodes that move no operand data (RWC counters, dvalid flags, SrcB operand cache). `busy_cycles - bookkeeping_cycles` is datapath work, which is what an energy model wants and an occupancy reader does not |
 | `noc_flight_cycles`, `noc_txns_timed` | per NIU, issue→arrival summed over timed transactions |
+| `noc_issue_to_injection_cycles`, `noc_injection_to_arrival_cycles`, `noc_arrival_to_service_cycles` | per NIU, the three legs `noc_flight_cycles` is made of — port queueing, transit, endpoint time. They **telescope** to it, so never sum a leg alongside the total. The last is **zero except at a DRAM tile**, and is published as a zero on purpose: nothing models endpoint queueing at a worker NIU. See `docs/trace-schema.md` §4.4a |
 
 The stall and busy counters are **absent, not zero**, with
 `TT_SIM_COST_MODEL` unset: a counter row only exists once something
@@ -231,7 +232,8 @@ bank conflicts (tt-sim models no banks).
 (`chip=N/*.parquet`) — one row per `NoCEvent` emission with columns
 `cycle, chip, core_y, core_x, unit, phase, txn_type, src_x, src_y,
 dst_x, dst_y, size_bytes, txn_id, issue_cycle, arrival_cycle,
-flight_cycles, cost_model`. Suitable for SQL queries about data
+flight_cycles, issue_to_injection_cycles, injection_to_arrival_cycles,
+arrival_to_service_cycles, cost_model`. Suitable for SQL queries about data
 movement:
 
 ```bash
@@ -253,6 +255,18 @@ delivered on the next cycle however far it travelled. `issue_cycle` is
 `-1` (and `flight_cycles` `0`) for the one case neither regime can
 time — a NIU with no owning tile clock, i.e. the unit tests and
 `driver/simple`.
+
+The last three `*_cycles` columns **split** `flight_cycles` per
+transaction — port queueing at the sender, transit, then time at the
+destination endpoint — and telescope to it on every row. Note that
+`arrival_cycle` is a frozen legacy alias for the *service* cycle and is
+not the split's arrival; that one is
+`cycle - arrival_to_service_cycles`. `arrival_to_service_cycles` is
+**zero except at a DRAM tile**, and the zero is the finding rather than
+an omission: tt-sim models no arrival buffering, no
+outstanding-transaction credit limit and no response reordering, so a
+hardware residual there is entirely unattributed. Full account in
+`docs/trace-schema.md` §4.4a.
 
 ```bash
 duckdb -c "
@@ -551,10 +565,19 @@ Emitted at the four `NUI.clock_tick` snoop sites.
 | `size_bytes` | `int`   | Transfer size.                                    |
 | `txn_id`     | `int`   | NoC transaction ID (reused on issue + response).  |
 | `issue_cycle`| `int`   | Cycle the sending NIU put the packet on the wire; `-1` if untimed. |
+| `injection_cycle` | `int` | Cycle its head left the sending NIU's injection port; `-1` if the flight was not decomposed. |
+| `endpoint_arrival_cycle` | `int` | Cycle it reached the destination NIU, before that endpoint charged for servicing it; `-1` as above. |
 
-`cycle` is the *arrival* — this NIU servicing the packet — so
+`cycle` is the *service* — this NIU handling the packet — so
 `cycle - issue_cycle` is the flight time. Pair a `request` with its
 `response` on `(txn_id, src, dst, txn_type)` for the round trip.
+
+The two interior stamps split that flight three ways;
+`tt_sim.trace.noc_flight_split(event)` returns
+`(issue→injection, injection→arrival, arrival→service)` and is exported
+so nobody re-derives the clamping. `docs/trace-schema.md` §4.4a says how
+much of each leg is modelled — the short version being that the third is
+zero away from a DRAM channel.
 
 ### `LifecycleEvent` (category `lifecycle`)
 

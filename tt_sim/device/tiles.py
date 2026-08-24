@@ -400,7 +400,15 @@ class DRAMEndpointNUI(NUI):
             is_write,
         )
 
-    def transmit(self, data_request, delay=None):
+    def transmit(self, data_request, delay=None, *, queued=0, endpoint_delay=0):
+        """Land a packet here, charging the channel time this controller adds.
+
+        ``endpoint_delay`` is passed on so the trace can tell the two apart:
+        everything up to ``delay`` is time the packet spent getting here, and
+        the ``service`` added below is time it spends *at* this endpoint — the
+        one place in tt-sim where the arrival-to-service leg of the flight
+        split is anything but zero.
+        """
         service = self.service_cycles
         if service is not None and data_request.action in self._SERVICED_ACTIONS:
             if self._is_write(data_request):
@@ -408,7 +416,10 @@ class DRAMEndpointNUI(NUI):
             service += self._channel_excess(data_request)
             service += self._channel_wait(data_request, delay)
             delay = service if delay is None else delay + service
-        NUI.transmit(self, data_request, delay)
+            endpoint_delay += service
+        NUI.transmit(
+            self, data_request, delay, queued=queued, endpoint_delay=endpoint_delay
+        )
 
 
 class DRAMTile(TTDeviceTile):

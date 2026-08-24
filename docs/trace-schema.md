@@ -3,7 +3,7 @@
 **Status: stable.** The event stream and the datasets derived from it
 are at `SCHEMA_VERSION` 4; the profile artefacts of §9 (`report.json`,
 `hotspots.json`, `profile.json`) carry their own `schema_version`,
-currently **1**. From this document onward, a change to any field name or
+currently **3**. From this document onward, a change to any field name or
 meaning described here is a breaking change and comes with a bump of
 whichever of the two covers it — see §2.
 
@@ -352,6 +352,9 @@ one you wanted.
 | `tensix_stall_episodes` | count | Tensix thread | Number of stall episodes. A count, despite the prefix. |
 | `noc_flight_cycles` | cycles | NIU | Issue→arrival summed over timed transactions. Both regimes. |
 | `noc_txns_timed` | count | NIU | Transactions contributing to the above. |
+| `noc_issue_to_injection_cycles` | cycles | NIU | **Redundant leg** of `noc_flight_cycles`: queueing for the sending NIU's injection port, which is held for the whole packet. See §4.4a. |
+| `noc_injection_to_arrival_cycles` | cycles | NIU | **Redundant leg**: transit — hops, the packet's own tail, and waiting for a router link another tile is using. |
+| `noc_arrival_to_service_cycles` | cycles | NIU | **Redundant leg**: time at the destination once the packet is there. **Zero except at a DRAM tile** — read §4.4a before using it. |
 | `noc_bytes_total` | bytes | NIU | Bytes in `response`-phase transactions. |
 | `noc_<phase>_<txn_type>` | count | NIU | e.g. `noc_request_read`, `noc_response_write`. |
 | `mem_<op>_<region>` | count | accessing unit, or `UNKNOWN` | e.g. `mem_read_L1`, `mem_write_MMIO`. |
@@ -383,6 +386,7 @@ other half it is nonsense. This column is the difference:
 |---|---|---|
 | `noc_flight_cycles` | **Yes** | Shared-resource occupancy. Two NIUs servicing packets at once really are two occupied links. |
 | `busy_cycles` | **Yes** | Shared-resource occupancy. Two backends busy at once really are two occupied pipes. |
+| the three `noc_*_cycles` legs | **Yes, but never alongside `noc_flight_cycles`** | Same occupancy, cut three ways. Summing a leg with the total double-counts it — see §4.4. |
 | `noc_bytes_total`, `mem_bytes_*` | **Yes** | Byte volumes are additive. |
 | all `count` families | **Yes** | Event counts are additive. |
 | `instr_retired` | **No, not as time** | Per core. Five cores retiring concurrently sum to five times the wall clock. Safe as a *volume* ("instructions executed"), never as a share of the run. |
@@ -438,7 +442,7 @@ number back to this row.
 
 ### 4.4 Do not sum a total with its parts
 
-Four counters restate cycles that another row already carries. Ranking
+Seven counters restate cycles that another row already carries. Ranking
 or summing them alongside the partition they restate double-counts:
 
 | Counter | Restates | Verified |
@@ -447,6 +451,7 @@ or summing them alongside the partition they restate double-counts:
 | `tensix_stall_cycles` | `Σ tensix_stall_<reason>` | 10,793 = 6,072 + 3,913 + 703 + 84 + 16 + 3 + 2 — exact |
 | `tensix_stall_on_<unit>` | the same cycles, re-cut by blame | 4,721 ≤ 10,793 — **partial** |
 | `bookkeeping_cycles` | part of the same unit's `busy_cycles` | energybench `mm` at inner 6: 13 ≤ 401 — **subset** |
+| the three `noc_*_cycles` legs | `noc_flight_cycles`, partitioned | charged off the same two stamps — **exact by construction**, see §4.4a |
 
 `bookkeeping_cycles` is the other shape of the same trap: a *subset* rather
 than a total, charged off the same `ComputeEvent.duration` as the
@@ -460,6 +465,50 @@ is *partial*: a semaphore or mutex wait blames no unit, so these rows
 sum to **less** than `tensix_stall_cycles` rather than equalling it. Do
 not treat the shortfall as missing data, and do not add it to the
 per-reason rows.
+
+### 4.4a The NoC flight split, and the bucket that reports zero
+
+`noc_flight_cycles` is one collapsed number: the cycle a destination
+NIU serviced a packet, minus the cycle the sending NIU put it on the
+wire. Three counters cut that same interval into the legs of the
+journey, in the order a packet travels them:
+
+| Leg | Counter | What it is | How much of it is modelled |
+|---|---|---|---|
+| issue → injection | `noc_issue_to_injection_cycles` | Waiting for the sending NIU's outbound port, which is held for the whole packet — so a big transfer's real cost to its neighbours is here, not in its own latency. | Modelled. |
+| injection → arrival | `noc_injection_to_arrival_cycles` | Transit: per-hop latency, the packet's own tail (one flit per cycle), and waiting for a router-to-router link another tile's traffic is crossing. | Modelled. |
+| arrival → service | `noc_arrival_to_service_cycles` | Time at the destination once the packet is there. | **A DRAM channel's service time, and otherwise zero.** |
+
+They **telescope exactly**. All three are charged off the same two
+stamps (`tt_sim.trace.events.noc_flight_split`), so per NIU:
+
+```
+noc_issue_to_injection_cycles
+  + noc_injection_to_arrival_cycles
+  + noc_arrival_to_service_cycles
+  == noc_flight_cycles
+```
+
+That is an identity, not a coincidence, and it is the intended way to
+check the decomposition: validate it against the total you already had,
+then read the legs. For the same reason each leg is **redundant** with
+the total (§4.4) — sum the legs or sum `noc_flight_cycles`, never both.
+
+**`arrival → service` reads zero at every endpoint but DRAM, and that
+zero is the finding.** tt-sim charges endpoint time in exactly one
+place: a DRAM tile's channel, where it is the published service time
+plus whatever that channel is still streaming for someone else. Nothing
+models arrival buffering, outstanding-transaction credit limits or
+response reordering, so **the simulator claims zero endpoint queueing
+at a worker NIU, and any hardware residual there is entirely
+unmodelled**. The bucket is published as a visible `0` rather than
+omitted so that sentence is available to a reader instead of being
+something they have to already know. It is also the one question a card
+structurally cannot answer: silicon has no per-transaction completion
+timestamp at all, only a barrier's start/end pair.
+
+The same split is per-transaction in the NoC dataset (§5) and rolled up
+in `report.json` as `noc_latency_split` (§9).
 
 Canned queries that get all of this right live in
 [`tt_sim/trace/queries/counters.sql`](../tt_sim/trace/queries/counters.sql).
@@ -487,6 +536,9 @@ One row per NoC event emission.
 | `issue_cycle` | `int64` | cycles | When the *sending* NIU put the packet on the wire. `-1` when untimed. | Frozen. |
 | `arrival_cycle` | `int64` | cycles | `== cycle`; duplicated for readability at the query site. | Frozen. |
 | `flight_cycles` | `int64` | cycles | `arrival_cycle - issue_cycle`, floored at 0. `0` when `issue_cycle` is `-1`. | Frozen name; values move with the model. |
+| `issue_to_injection_cycles` | `int64` | cycles | Leg 1 of the flight split (§4.4a): queueing for the sending NIU's injection port. | Frozen name; values move with the model. |
+| `injection_to_arrival_cycles` | `int64` | cycles | Leg 2: transit — hops, tail, router-link contention. | Frozen name; values move with the model. |
+| `arrival_to_service_cycles` | `int64` | cycles | Leg 3: time at the destination endpoint. **Zero except at a DRAM tile** — §4.4a says why that zero is deliberate. | Frozen name; values move with the model. |
 | `cost_model` | `bool` | — | Which regime produced this row (§3.4). | Frozen. |
 
 **Coordinate ordering differs between the two coordinate pairs in this
@@ -508,6 +560,23 @@ with no owning tile clock, which happens only in unit tests and the
 what `cost_model` is for. With the model off, a packet is delivered on
 the next cycle however far it travelled — a real observation about an
 un-modelled NoC, not an estimate of a hop count.
+
+The three `*_cycles` legs sum to `flight_cycles` on **every row**
+(§4.4a), so a query can check the split against the total rather than
+trusting it.
+
+**`arrival_cycle` is not the split's "arrival".** It is a frozen legacy
+alias for `cycle`, the *service* cycle. The split's arrival is the
+earlier moment the packet reached the destination NIU, before that
+endpoint charged anything for handling it: `cycle -
+arrival_to_service_cycles`. Renaming the older column would break
+existing queries, so the wart stays and is written down here.
+
+On an un-modelled row (`cost_model = false`) the legs are `0`,
+`flight_cycles`, `0`. A packet delivered on the next cycle however far
+it travelled has no injection, wire or endpoint in it to apportion, so
+the whole of it is reported as transit rather than given an invented
+shape.
 
 **No virtual-channel column exists.** tt-sim models no VCs, so there is
 no `vc` column rather than a column of zeroes. Same for VC occupancy.
@@ -605,7 +674,19 @@ Emitted as a backend unit completes an instruction.
 #### `noc` — `NoCEvent`
 
 Fields as in §5, before the writer's flattening: `phase`, `txn_type`,
-`src` (2-tuple, x-then-y), `dst`, `size_bytes`, `txn_id`, `issue_cycle`.
+`src` (2-tuple, x-then-y), `dst`, `size_bytes`, `txn_id`, `issue_cycle`,
+`injection_cycle`, `endpoint_arrival_cycle`.
+
+The last two are the interior stamps the flight split of §4.4a is
+derived from: when the packet's head left the sending NIU's injection
+port, and when it reached the destination NIU *before* that endpoint
+charged anything for servicing it. `-1` on both means the flight was
+never decomposed — an un-modelled run. `tt_sim.trace.noc_flight_split`
+turns an event into the three legs and is exported for exactly this;
+do not re-derive the clamping.
+
+`endpoint_arrival_cycle` is **not** the `arrival_cycle` column of §5,
+which is a legacy alias for the service cycle.
 
 #### `mem` — `MemEvent`
 
@@ -863,7 +944,7 @@ python3 -m tt_sim.trace.report <profile-dir> --stdout
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | `int` | Version of this file's schema. Currently **2**. See *Versioning* below. |
+| `schema_version` | `int` | Version of this file's schema. Currently **3**. See *Versioning* below. |
 | `span` | `int` | Highest cycle observed. The denominator for every share. |
 | `cost_model` | `bool \| null` | Regime; `null` if unknown. |
 | `contributions[]` | list | `{unit, counter, cycles, described, discovered}` — cycle-bearing counters, ranked. `unit` is `"<core_y>,<core_x> <UNIT>"`. |
@@ -871,6 +952,7 @@ python3 -m tt_sim.trace.report <profile-dir> --stdout
 | `attributed_cycles` | `int` | Sum of `contributions` — **not** a partition of the run (§4.3). |
 | `shared_resource_cycles{}` | map | Per-family **occupancy** totals, summed over every unit carrying the counter: `noc_flight_cycles` and `busy_cycles` only. **Not a fraction of the run** — divide by `span × shared_resource_units[family]`, never by `span` alone. See §4.3a. |
 | `shared_resource_units{}` | map | How many distinct units contributed to each `shared_resource_cycles` family. The denominator that makes it a real fraction. |
+| `noc_latency_split{}` | map | The flight split of §4.4a, summed over every NIU: `issue_to_injection`, `injection_to_arrival`, `arrival_to_service`, `total` (`noc_flight_cycles` over the same units, which the three sum to) and `transactions` (`noc_txns_timed`, the denominator for a per-transaction mean). All five keys are always present; **`arrival_to_service` is `0` except at a DRAM tile, and that zero is deliberate** — §4.4a. `transactions: 0` is how "no NoC traffic" is told apart from "measured, and zero". |
 | `hotspots{}` | map | Embedded copy of `hotspots.json`. |
 | `elfs[]` | list | Provenance (§7.1). |
 | `notes[]`, `label` | | Free-form. |
@@ -883,7 +965,7 @@ yesterday still gets ranked.
 
 `report.json`, `hotspots.json` and `profile.json` each carry a
 `schema_version`: one integer, from `tt_sim.trace.report.SCHEMA_VERSION`,
-currently **1**, and the *same* number across all three — they are
+currently **3**, and the *same* number across all three — they are
 written by one run and read together, so versioning them apart would only
 ask a consumer to track three numbers that always move as one. It is not
 the event `SCHEMA_VERSION` of §2, which is scoped to event shape and moves
@@ -916,6 +998,8 @@ hard-fail on a bump you have not read yet, because most will be additive.
 | Version | Change |
 |---|---|
 | 1 | First versioned release. The field set is the one documented here; before this, the files carried no version. |
+| 2 | **Additive.** `shared_resource_units{}`, the unit count that turns `shared_resource_cycles{}` into a bounded fraction (§4.3a). |
+| 3 | **Additive.** `noc_latency_split{}`, the per-transaction NoC flight split (§4.4a). |
 
 `tt_sim/trace/observability_test.py` enforces this: the field tables in
 this section are **parsed out of this document** and compared against

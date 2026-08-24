@@ -271,6 +271,61 @@ class NoCEvent(Event):
     #: swap in ``NUI.clock_tick`` costs. ``-1`` means the flight could not be
     #: timed: a NIU with no owning tile clock (unit tests, ``driver/simple``).
     issue_cycle: int = -1
+    #: Cycle this packet's head left the *sending* NIU's injection port, so
+    #: ``injection_cycle - issue_cycle`` is how long it queued behind the
+    #: packet in front of it. See :func:`noc_flight_split`.
+    injection_cycle: int = -1
+    #: Cycle the packet reached the destination NIU, before that endpoint
+    #: charged anything for servicing it, so ``cycle - endpoint_arrival_cycle``
+    #: is endpoint time. **Not** the NoC Parquet writer's ``arrival_cycle``
+    #: column, which is a frozen legacy alias for the service cycle.
+    #: See :func:`noc_flight_split`.
+    endpoint_arrival_cycle: int = -1
+
+
+def noc_flight_split(event: NoCEvent) -> tuple[int, int, int]:
+    """One NoC transaction's flight, split into the three legs it is made of.
+
+    Returns ``(issue -> injection, injection -> arrival, arrival -> service)``
+    in cycles. **The three telescope exactly**: they sum to
+    ``max(0, cycle - issue_cycle)``, which is the same total
+    ``noc_flight_cycles`` carries, so a consumer can check the decomposition
+    against the number it already had rather than taking it on trust.
+
+    What each leg is, and how much of it tt-sim actually models:
+
+    * **issue -> injection** — queueing for the sending NIU's outbound port,
+      which is held for the whole packet. Modelled.
+    * **injection -> arrival** — hops, the packet's own tail, and waiting for a
+      router-to-router link another tile's traffic is using. Modelled.
+    * **arrival -> service** — time at the destination once the packet is
+      there. tt-sim charges this **only** at a DRAM tile, where it is the
+      channel time ``DRAMEndpointNUI.transmit`` adds. At every other endpoint
+      it is **exactly zero**, and that zero is a finding rather than a
+      measurement: arrival buffering, outstanding-transaction credit limits and
+      response reordering are not modelled at all, so any hardware residual
+      here is entirely unattributed. Reported rather than omitted precisely so
+      the zero is visible.
+
+    A pair of ``-1`` stamps means the flight was never decomposed — an
+    un-modelled run, where a packet is delivered on the next cycle however far
+    it travelled. That single cycle is the simulator's own delivery pipeline,
+    and it is reported wholly as transit rather than apportioned three ways.
+    """
+    issue = event.issue_cycle
+    service = event.cycle
+    if issue < 0 or service <= issue:
+        return (0, 0, 0)
+    injection = event.injection_cycle
+    arrival = event.endpoint_arrival_cycle
+    if injection < 0 or arrival < 0:
+        return (0, service - issue, 0)
+    # Clamped into ``issue <= injection <= arrival <= service`` so the three
+    # legs are a partition of the total whatever the stamps say. Nothing
+    # downstream has to defend against a negative leg or a sum that misses.
+    injection = min(max(injection, issue), service)
+    arrival = min(max(arrival, injection), service)
+    return (injection - issue, arrival - injection, service - arrival)
 
 
 @dataclass(frozen=True, slots=True)

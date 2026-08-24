@@ -396,6 +396,24 @@ which exists to make the gap visible rather than to bless it. Closing it needs
 a published queueing bound we do not have; an invented one would be `estimated`
 provenance, which this cost model forbids.
 
+**You can now see this gap in your own run rather than taking it from this
+page.** Every NoC flight is reported split three ways — `issue → injection`
+(queueing for the sender's injection port), `injection → arrival` (transit) and
+`arrival → service` (time at the destination once the packet is there). It is
+per transaction in the NoC Parquet dataset, and rolled up per run as
+`report.json`'s `noc_latency_split`; `docs/trace-schema.md` §4.4a is the
+reference.
+
+The third bucket is the one to read. **It is zero at every endpoint except a
+DRAM tile's channel**, and it is published as a visible `0` rather than left
+out. That is a statement about coverage, not about hardware: nothing in tt-sim
+models arrival buffering, outstanding-transaction credit limits or response
+reordering, so a hardware residual in that leg is **entirely unmodelled** and
+you should treat the whole of any measured discrepancy there as ours. It is
+also the one question a card cannot answer for itself — silicon has no
+per-transaction completion timestamp, only a barrier's start/end pair — which
+is why the simulator's zero is worth having even though it is a zero.
+
 ## What is *not* on this page
 
 Known-unreached functional edges — conditions the simulator does not model

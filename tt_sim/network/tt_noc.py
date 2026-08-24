@@ -339,9 +339,9 @@ class AliasedEndpoint:
         #: one attribute read for every endpoint that has a position of its own.
         self.grid_cell = coord
 
-    def transmit(self, request, delay=None):
+    def transmit(self, request, delay=None, **timing):
         request.arrived_at = self.coord
-        self.endpoint.transmit(request, delay)
+        self.endpoint.transmit(request, delay, **timing)
 
     def __getattr__(self, name):
         return getattr(self.endpoint, name)
@@ -395,7 +395,11 @@ class NullEndpoint:
         self.coord = coord
         self.grid_cell = coord if grid_cell is None else grid_cell
 
-    def transmit(self, request, delay=None):
+    def transmit(self, request, delay=None, **timing):
+        # ``timing`` (the trace-only flight split) is accepted and dropped: an
+        # unmodelled tile never publishes a NoC event of its own, so there is
+        # nothing here to decompose. The response it sends back *is* stamped,
+        # by the requester's own ``NUI.transmit`` in ``_respond``.
         if request.action == NUI.NoCDataRequest.DataRequestAction.READ:
             self._respond(
                 request,
@@ -550,6 +554,22 @@ class NUI(MemMapable, Clockable):
             # routes or schedules on it. -1 until transmitted, and for a NIU
             # with no owning tile clock, which cannot know the absolute cycle.
             self.issue_cycle = -1
+            # The two interior stamps that turn the flight time into a split
+            # rather than one collapsed number, both from ``NUI.transmit`` and
+            # both trace-only:
+            #
+            # * ``injection_cycle`` -- when this packet's head actually left
+            #   the sending NIU's injection port, so ``- issue_cycle`` is how
+            #   long it queued behind the packet in front of it.
+            # * ``endpoint_arrival_cycle`` -- when it reached the destination
+            #   NIU, *before* anything that endpoint charges for servicing it.
+            #   The gap from here to the cycle the destination publishes its
+            #   event is endpoint time. See ``noc_flight_split``.
+            #
+            # -1 on both means "not decomposed": no modelled flight, so there
+            # is nothing to split and the whole of it is reported as transit.
+            self.injection_cycle = -1
+            self.endpoint_arrival_cycle = -1
             # The NoC cell this request entered its destination tile at, in
             # that NoC's own space — set only when the tile answers to more
             # than one cell (see ``AliasedEndpoint``), so that its response
@@ -1585,7 +1605,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
-                    issue_cycle=noc_request.issue_cycle,
+                    timing=noc_request,
                 )
                 self.nui_counters.increment(
                     [
@@ -1634,7 +1654,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
-                    issue_cycle=noc_request.issue_cycle,
+                    timing=noc_request,
                 )
                 if noc_request.noc_cmd_resp_marked:
                     self.nui_counters.increment(
@@ -1688,7 +1708,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
-                    issue_cycle=noc_request.issue_cycle,
+                    timing=noc_request,
                 )
 
                 self.nui_counters.increment(
@@ -1725,7 +1745,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
-                    issue_cycle=noc_request.issue_cycle,
+                    timing=noc_request,
                 )
                 if noc_request.noc_cmd_resp_marked:
                     self.nui_counters.increment(
@@ -1780,7 +1800,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
-                    issue_cycle=noc_request.issue_cycle,
+                    timing=noc_request,
                 )
                 self.nui_counters.increment(
                     NUI.NUICounters.CounterNames.NIU_MST_ATOMIC_RESP_RECEIVED
@@ -1804,7 +1824,7 @@ class NUI(MemMapable, Clockable):
                     dst=self.id_pair,
                     size_bytes=noc_request.data_length_bytes,
                     txn_id=noc_request.request_id,
-                    issue_cycle=noc_request.issue_cycle,
+                    timing=noc_request,
                 )
 
                 # NB: no NIU_MST_WRITE_REQS_OUTGOING decrement here. That
@@ -1837,7 +1857,7 @@ class NUI(MemMapable, Clockable):
             self.noc_new_requests_to_handle = []
 
     def _publish_noc_event(
-        self, cycle_num, phase, txn_type, src, dst, size_bytes, txn_id, issue_cycle=-1
+        self, cycle_num, phase, txn_type, src, dst, size_bytes, txn_id, timing=None
     ):
         if self.unit_id is None:
             return
@@ -1854,14 +1874,21 @@ class NUI(MemMapable, Clockable):
                 dst=tuple(dst) if not isinstance(dst, tuple) else dst,
                 size_bytes=int(size_bytes),
                 txn_id=int(txn_id),
-                # ``cycle_num`` is the arrival — this NIU servicing the packet
-                # — so pairing the two gives the flight time. See
-                # ``NUI.transmit``, which stamps it.
-                issue_cycle=int(issue_cycle),
+                # ``cycle_num`` is the service cycle — this NIU handling the
+                # packet — so pairing it with the three stamps ``NUI.transmit``
+                # left on the request gives both the flight time and its split.
+                # ``timing`` is the request itself rather than three arguments
+                # because all six call sites want all three, and a call site
+                # that passed two of them would be a silent gap in the split.
+                issue_cycle=int(getattr(timing, "issue_cycle", -1)),
+                injection_cycle=int(getattr(timing, "injection_cycle", -1)),
+                endpoint_arrival_cycle=int(
+                    getattr(timing, "endpoint_arrival_cycle", -1)
+                ),
             )
         )
 
-    def transmit(self, data_request, delay=None):
+    def transmit(self, data_request, delay=None, *, queued=0, endpoint_delay=0):
         """Accept a packet addressed to this NIU, arriving ``delay`` cycles hence.
 
         ``delay=None`` (and any delay of one cycle or less) keeps the original
@@ -1875,6 +1902,16 @@ class NUI(MemMapable, Clockable):
         latency model. A NIU built without an architecture has no model and
         every caller passes ``None``, so the whole path collapses back to the
         original two lines.
+
+        ``queued`` and ``endpoint_delay`` are **trace-only** and change no
+        schedule: they say how the one ``delay`` number was arrived at, so the
+        flight can be reported as a split rather than a total. ``queued`` is
+        the leading part the packet spent waiting for the sender's injection
+        port (:meth:`claim_injection_port`); ``endpoint_delay`` is the trailing
+        part *this* endpoint added for servicing it rather than for carrying it
+        — on a DRAM tile, its channel time (see
+        ``DRAMEndpointNUI.transmit``). Both default to zero, which is the
+        truthful answer for every endpoint that charges neither.
         """
         cycle = self._current_cycle()
         if cycle is not None:
@@ -1884,6 +1921,22 @@ class NUI(MemMapable, Clockable):
             data_request.issue_cycle = cycle
         if delay is not None and delay > 1:
             if cycle is not None:
+                # Only a modelled flight is decomposed. Below, the packet is
+                # delivered on the next cycle however far it travelled, and
+                # that one cycle is the simulator's own delivery pipeline —
+                # there is no injection, no wire and no endpoint in it to
+                # apportion, so the stamps stay at -1 and the whole of it is
+                # reported as transit rather than invented into three parts.
+                wire = delay - endpoint_delay
+                if wire < 0:
+                    wire = 0
+                # ``queued`` is part of ``delay`` by construction
+                # (:meth:`_bandwidth_delay` adds it), but an endpoint that
+                # charges no occupancy at all returns the flight unchanged and
+                # would leave it outside. Clamping keeps the three legs a
+                # partition of the total in every case.
+                data_request.injection_cycle = cycle + min(queued, wire)
+                data_request.endpoint_arrival_cycle = cycle + wire
                 arrival = cycle + delay
                 with self._inbox_lock:
                     self.delayed_arrivals.setdefault(arrival, []).append(data_request)
@@ -1966,6 +2019,11 @@ class NUI(MemMapable, Clockable):
                 queued,
                 link_wait,
             ),
+            # Trace-only, and the reason ``queued`` is computed here rather
+            # than inside ``_bandwidth_delay``: the port wait is the one leg of
+            # the flight the *sender* owns, and nothing downstream could
+            # recover it from the total.
+            queued=queued,
         )
 
     def route_links_to(self, destination, *, sent_from=None):

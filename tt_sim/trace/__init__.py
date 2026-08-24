@@ -19,6 +19,7 @@ from tt_sim.trace.events import (
     StallEvent,
     SyncEvent,
     Unit,
+    noc_flight_split,
 )
 from tt_sim.trace.hotspots import Hotspot, HotspotAggregator, HotspotTable
 from tt_sim.trace.ids import IDRegistry, UnitID, get_registry
@@ -87,4 +88,5 @@ __all__ = [
     "enable_from_env",
     "get_bus",
     "get_registry",
+    "noc_flight_split",
 ]
