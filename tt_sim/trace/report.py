@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import glob
 import json
+import sys
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -56,7 +57,7 @@ from pathlib import Path
 #: Bump on **any** change to a documented field: additively for a new
 #: field, breaking for a rename, a removal, or a change of meaning or
 #: unit. Either way, say which in ``docs/trace-schema.md`` §9.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Counters that are cycle-bearing but not named ``*_cycles``.
 _EXTRA_CYCLE_COUNTERS = {"instr_retired"}
@@ -179,6 +180,12 @@ class Report:
     def attributed(self) -> int:
         return sum(c.cycles for c in self.contributions)
 
+    #: Which counter rolls up into which shared-resource family.
+    _SHARED_FAMILIES = {
+        "noc_flight_cycles": "NoC flight and bandwidth",
+        "busy_cycles": "Tensix backend occupancy",
+    }
+
     def shared_resource_cycles(self) -> dict[str, int]:
         """Cycles charged against a resource the whole device shares, by
         family.
@@ -190,14 +197,38 @@ class Report:
         occupied links, and two Tensix backends really are two occupied
         pipes. Per-core stall cycles are not in here — see the note the
         report prints beside the table.
+
+        **This is an occupancy total, not a fraction of the run.** It sums
+        one counter over every unit that carries it — on Wormhole that is
+        14 NIUs (each worker's NOC0 and NOC1, plus two per DRAM tile), and
+        a transfer is counted at both of its endpoints. Divided by the
+        span it routinely exceeds 100 %, which is the tell: a fraction of
+        runtime cannot. Use :meth:`shared_resource_units` to normalise, and
+        see the note the report prints beside the table for what to use
+        instead when the question really is "how much of the span went to
+        the NoC".
         """
         out: dict[str, int] = defaultdict(int)
         for c in self.contributions:
-            if c.counter == "noc_flight_cycles":
-                out["NoC flight and bandwidth"] += c.cycles
-            elif c.counter == "busy_cycles":
-                out["Tensix backend occupancy"] += c.cycles
+            family = self._SHARED_FAMILIES.get(c.counter)
+            if family is not None:
+                out[family] += c.cycles
         return dict(out)
+
+    def shared_resource_units(self) -> dict[str, int]:
+        """How many distinct units contributed to each shared-resource family.
+
+        The denominator that turns :meth:`shared_resource_cycles` into a
+        real fraction: ``cycles / (span * units)`` is bounded by 1, because
+        it asks what share of the available link-cycles were occupied
+        rather than what share of the run they represent.
+        """
+        seen: dict[str, set[str]] = defaultdict(set)
+        for c in self.contributions:
+            family = self._SHARED_FAMILIES.get(c.counter)
+            if family is not None:
+                seen[family].add(c.unit)
+        return {k: len(v) for k, v in seen.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +342,27 @@ def render(report: Report, top: int = 25) -> str:
     lines.append("")
 
     # -- run ---------------------------------------------------------------
-    regime = {True: "on", False: "off", None: "unknown"}[report.cost_model]
+    regime = {
+        True: "on",
+        False: "off",
+        None: "unknown (no profile.json alongside the counters)",
+    }[report.cost_model]
+    if report.cost_model is not True:
+        # A functional-only run produces spans that look entirely plausible and
+        # are the wrong regime -- measured 51,699 against 75,499 cycles on the
+        # same nekbone program. Nothing downstream can tell the difference, so
+        # the report says it where a reader cannot skip past it.
+        lines.append(
+            "> [!WARNING]\n"
+            f"> **Cost model {regime.split(' ')[0]} — these cycle counts are "
+            "not the modelled ones.** Without `TT_SIM_COST_MODEL=1` the run "
+            "charges no modelled occupancy, so every span here is a functional "
+            "lower bound *below* the documented floor, not the floor itself. "
+            "The numbers look reasonable and rank plausibly; they are simply a "
+            "different quantity. Re-run with `TT_SIM_COST_MODEL=1` before "
+            "comparing anything against hardware."
+        )
+        lines.append("")
     lines.append("## Run")
     lines.append("")
     lines += _table(
@@ -340,31 +391,44 @@ def render(report: Report, top: int = 25) -> str:
 
     shared = report.shared_resource_cycles()
     if shared:
+        units = report.shared_resource_units()
         total = sum(shared.values())
         lines.append("**Headline — the shared resources the model can price.**")
         lines.append("")
         lines += _table(
-            ["resource", "cycles", "of span"],
+            ["resource", "cycles", "units", "occupancy"],
             [
-                [k, f"{v:,}", _pct(v, span)]
+                [k, f"{v:,}", str(units.get(k, 0)), _pct(v, span * units.get(k, 0))]
                 for k, v in sorted(shared.items(), key=lambda kv: -kv[1])
             ]
-            + [
-                [
-                    "**total against a published number**",
-                    f"**{total:,}**",
-                    f"**{_pct(total, span)}**",
-                ]
-            ],
+            + [["**total against a published number**", f"**{total:,}**", "", ""]],
         )
         lines.append("")
         lines.append(
-            "These are the two families that occupy a resource the whole device "
-            "shares, so their sum against the span is meaningful in a way the "
-            "per-core rows below are not. **RV stall cycles are deliberately "
-            "excluded**: a core can be charged far more stall than the run is "
-            "long, and charged is not delivered — the run's length is set by when "
-            "cores meet each other, not by a sum of charges."
+            "**`occupancy` is not the fraction of the run spent on this "
+            "resource.** Each row sums one counter over every unit that carries "
+            "it — the `units` column says how many — so the raw `cycles` figure "
+            "counts a NoC transfer at both of its endpoints and can exceed the "
+            "span several times over. `occupancy` divides by `span × units` to "
+            "ask the answerable question instead: **what share of the available "
+            'link-cycles were busy**. Do not quote either column as "this run '
+            'was N % NoC-bound".'
+        )
+        lines.append("")
+        lines.append(
+            "For that question — **how much of a kernel's span went to the NoC** "
+            "— use the NoC event decomposition (the `noc_events` tool; runbook "
+            "\u00a74.3a), which buckets a core's own span into `issue` / "
+            "`read_wait` / `write_wait` and is validated against silicon. It is a "
+            "per-core partition of elapsed time; this table is an aggregate "
+            "occupancy across links."
+        )
+        lines.append("")
+        lines.append(
+            "**RV stall cycles are deliberately excluded** from both columns: a "
+            "core can be charged far more stall than the run is long, and charged "
+            "is not delivered — the run's length is set by when cores meet each "
+            "other, not by a sum of charges."
         )
         lines.append("")
 
@@ -609,6 +673,7 @@ def write(report: Report, directory: Path | str, top: int = 25) -> Path:
     payload["schema_version"] = SCHEMA_VERSION
     payload["attributed_cycles"] = report.attributed()
     payload["shared_resource_cycles"] = report.shared_resource_cycles()
+    payload["shared_resource_units"] = report.shared_resource_units()
     # report.json carries every row; report.md is truncated to ``top`` so it
     # stays readable. Nothing is lost, only paginated.
     (directory / "report.json").write_text(json.dumps(payload, indent=2))
@@ -634,6 +699,18 @@ def main(argv=None) -> int:
     directory = Path(args.directory)
     meta_path = directory / "profile.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    if not meta_path.exists():
+        # Profile artefacts are written when the *server* shuts down, which can
+        # be seconds after the host exits -- a script that renders at host-exit
+        # can arrive before profile.json does and would otherwise silently get
+        # a report with an "unknown" cost-model regime and no ELF provenance.
+        print(
+            f"warning: no profile.json in {directory} -- rendering without run "
+            "metadata, so the cost-model regime, ELF provenance and label are "
+            "unknown. If the run has only just finished, wait for the simulator "
+            "server to exit and render again.",
+            file=sys.stderr,
+        )
     hotspots_path = directory / "hotspots.json"
     hotspots = json.loads(hotspots_path.read_text()) if hotspots_path.exists() else {}
 

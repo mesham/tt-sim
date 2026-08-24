@@ -686,13 +686,24 @@ workers materialising on demand with no environment variable.
    per-class latencies are **two readings of the same intervals**, not
    independent detectors; addresses and VCs are unreachable in the
    file-dumping path; no distance arm (needs a remote L1 target).
-   **The leg's silicon verification is done; nekbone's own number is
-   not.** The card session above validated the *instrument* — its
-   synthetic arms, on both parts. The bottleneck report's **79.8 % NoC
-   split on nekbone** is a claim about a different workload, so what
-   is left is running this decomposition *on nekbone* rather than
-   building or trusting anything further. The blocker changed shape
-   rather than clearing.
+   **Both are now done.** The card session above validated the
+   *instrument* — its synthetic arms, on both parts — and on
+   2026-08-21 the nekbone team ran the decomposition on nekbone
+   itself, in simulation and on an n300. **The 79.8 % figure is
+   retracted.** The real split is **44.6 % in simulation against
+   43.4 % on silicon** (six variants, 42.3–45.0 % in sim; the most
+   generous reading, charging all `prologue` and `issue` to the NoC,
+   still only reaches 56–66 %). nekbone is roughly half NoC-bound at
+   the core, not four-fifths.
+   *Where 79.8 % came from, and why it was never a NoC split:* it was
+   `report.json`'s `shared_resource_cycles` divided by the span. That
+   total sums `noc_flight_cycles` over all 14 NIUs and counts each
+   transfer at both endpoints, so it is link occupancy, not elapsed
+   time — on the same runs it reads 102.4 %, 113.3 % and 222.9 %, which
+   is the tell we never looked for. Fixed at source: the report now
+   normalises by unit count and names the column `occupancy`, and
+   `docs/trace-schema.md` §4.3a exists so the next consumer cannot
+   make the division we made.
    **And its first real external capture broke it in two places,
    2026-08-19 — both in the reader, not the model.** The single-window
    gate was counting the profiler's own flush zone as a launch and
@@ -1737,9 +1748,13 @@ from the rest, so no cross-core span is admissible.
    diagnostic only, and already contains the queueing.
    **Validated against silicon on both arches 2026-08-17** — six
    Wormhole comparisons at 0.2–9.3 % against a 25 % bar, three on
-   Blackhole. The bottleneck report's **79.8 % NoC split on nekbone**
-   stays unverified all the same: that is this decomposition run on
-   *nekbone*, which has not happened.
+   Blackhole. **Run on nekbone 2026-08-21** by the
+   nekbone team, closing the last gap: 44.6 % NoC in simulation against
+   43.4 % on an n300, bucket structure agreeing at 7.2–8.0 % on passes 1
+   and 3 (pass 2 at 11.6–12.2 %, above our 0.2–9.3 % range but far
+   inside the 25 % bar). The old **79.8 %** claim is **retracted** — it
+   was `shared_resource_cycles` over span, i.e. 14-NIU occupancy misread
+   as a fraction, not this decomposition at all.
    **Two corrections landed 2026-08-19, both from a consumer's own
    capture, and neither moved a modelled cycle.**
    *(a) `gate_single_window` was reading the instrument, not the

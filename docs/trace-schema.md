@@ -151,7 +151,7 @@ profile artefacts of §9 — `report.json`, `hotspots.json` and
 `profile.json` — are written once at process exit rather than emitted per
 event, and carry their own integer,
 `tt_sim.trace.report.SCHEMA_VERSION`, written into each file as
-`schema_version` and currently **1**. The additive/breaking rule above
+`schema_version` and currently **2**. The additive/breaking rule above
 applies to it unchanged. The two move independently on purpose: a new
 event field says nothing about the report's shape, and a renamed report
 field says nothing about the events.
@@ -317,7 +317,7 @@ SELECT * FROM read_parquet('counters/**/*.parquet', hive_partitioning=true);
 |---|---|---|---|---|
 | `cycle` | `int64` | simulated cycles | The **flush boundary** this sample was written at — not the time of any individual event. See §7.5. | Frozen name; values move with the model. |
 | `chip` | `int32` | — | `chip_id`. Hive partition key. | Frozen. |
-| `kernel_id` | `int32` | — | Increments at each `kernel_start`. `0` before the first kernel (firmware setup). Hive partition key. | Frozen. |
+| `kernel_id` | `int32` | — | **Always `0` today — known gap.** Designed to increment at each `kernel_start`, but nothing in tt-sim publishes a `LifecycleEvent`, so the counter never advances and the partition has one member. For per-launch attribution use NoC kernel zones instead (§4.3a). Still a Hive partition key. | Frozen as a column; its *value* is not yet delivered. |
 | `core_y`, `core_x` | `int32` | — | Tile coordinate; arch-specific (§3.2). | Frozen. |
 | `unit` | `string` | — | `Unit` enum value (§3.1). | Frozen. |
 | `counter_name` | `string` | — | See §4.2. **Open set.** | Patterns frozen; the set is not. |
@@ -400,10 +400,41 @@ So:
 - For "what fraction of the machine was busy", sum **only**
   `noc_flight_cycles` and `busy_cycles`, and say that is what you
   summed. `report.json`'s `shared_resource_cycles` is exactly this
-  roll-up.
+  roll-up — but read §4.3a before dividing it by anything.
 - For per-core work, present each core's share of the span **as its own
   bar**, not as a slice of a pie.
 - Never mix the two in one total.
+
+### 4.3a Occupancy is not a span fraction
+
+`shared_resource_cycles` sums one counter across **every unit that
+carries it**. On a Wormhole worker run that is 14 NIUs — each worker's
+NOC0 and NOC1, plus two for each of the six DRAM tiles — and a transfer
+is timed at **both** of its endpoints. So the total is link-cycles
+occupied, not elapsed cycles, and dividing it by `span` produces a
+number that has no upper bound at 100 %.
+
+That is not a hypothetical. Measured on nekbone variants, the same
+ratio reads 77.2 %, 102.4 %, 113.3 % and 222.9 %. The first looks like
+a plausible "77 % NoC-bound" and is exactly as wrong as the last.
+
+Two correct readings:
+
+- **Occupancy** — `cycles / (span × shared_resource_units[family])`.
+  Bounded by 1. Answers "what share of the available link-cycles were
+  busy". This is what `report.md`'s `occupancy` column shows.
+- **Span fraction** — not available from this dataset at all. Use the
+  NoC event decomposition (`tt_sim.perf.noc_events`), which partitions
+  a single core's elapsed span into `issue` / `read_wait` /
+  `write_wait` / `other_wait` / `local` and is validated against
+  silicon. It answers "how much of this kernel's time went to the NoC";
+  `shared_resource_cycles` never did.
+
+We got this wrong ourselves: a "79.8 % NoC split on nekbone" claim
+carried in `ROADMAP.md` came from dividing this total by the span. It
+was retracted on 2026-08-21 when the nekbone team measured the real
+figure — **44.6 % in simulation, 43.4 % on an n300** — and traced our
+number back to this row.
 
 ### 4.4 Do not sum a total with its parts
 
@@ -601,7 +632,10 @@ for that reason. Register-file accesses are deliberately not emitted.
 `kernel_done`) and `detail`. `unit_id` is `(0, 0, 0, HOST)`; `cycle` is
 0 because these come from the host, outside the simulator's clock.
 Treat them as **anchors, not measurements**. They force a counter flush,
-and `kernel_start` increments `kernel_id`.
+and `kernel_start` is *intended* to increment `kernel_id` — but no
+publisher emits `LifecycleEvent` today, so in practice neither fires
+and `kernel_id` stays `0`. `LifecycleOrderInvariant` is vacuous for
+the same reason. Reported by the nekbone team, 2026-08-21.
 
 #### `counter` — `CounterSnapshot`
 
@@ -829,13 +863,14 @@ python3 -m tt_sim.trace.report <profile-dir> --stdout
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | `int` | Version of this file's schema. Currently **1**. See *Versioning* below. |
+| `schema_version` | `int` | Version of this file's schema. Currently **2**. See *Versioning* below. |
 | `span` | `int` | Highest cycle observed. The denominator for every share. |
 | `cost_model` | `bool \| null` | Regime; `null` if unknown. |
 | `contributions[]` | list | `{unit, counter, cycles, described, discovered}` — cycle-bearing counters, ranked. `unit` is `"<core_y>,<core_x> <UNIT>"`. |
 | `volumes{}` | map | Non-cycle counters, totalled. |
 | `attributed_cycles` | `int` | Sum of `contributions` — **not** a partition of the run (§4.3). |
-| `shared_resource_cycles{}` | map | The only sum here meaningful across units: `noc_flight_cycles` and `busy_cycles` only. |
+| `shared_resource_cycles{}` | map | Per-family **occupancy** totals, summed over every unit carrying the counter: `noc_flight_cycles` and `busy_cycles` only. **Not a fraction of the run** — divide by `span × shared_resource_units[family]`, never by `span` alone. See §4.3a. |
+| `shared_resource_units{}` | map | How many distinct units contributed to each `shared_resource_cycles` family. The denominator that makes it a real fraction. |
 | `hotspots{}` | map | Embedded copy of `hotspots.json`. |
 | `elfs[]` | list | Provenance (§7.1). |
 | `notes[]`, `label` | | Free-form. |
