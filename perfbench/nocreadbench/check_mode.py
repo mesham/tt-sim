@@ -544,50 +544,105 @@ def dram_verdict(arch, marg, header):
         if abs(drift) > DRAM_TOLERANCE:
             (missed_dram if kind == "dram" else missed_l1).append((size, got, want))
 
-    # THE SHARPEST FALSIFIER, and it needs no prediction to be right about the
-    # absolute numbers. Below the crossover tt-sim says the issue loop binds
-    # both arms, so DRAM and L1 must be THE SAME NUMBER. A gap there cannot be
-    # absorbed by any bandwidth term, however wrong the bandwidth term is.
+    # THE SHARPEST FALSIFIER -- with the caveat that cost the 2026-08-24 session
+    # its headline. Below the crossover tt-sim says the issue loop binds both
+    # arms, so DRAM and L1 must be the same number, and a gap there looks like a
+    # per-transaction endpoint cost no bandwidth term can absorb.
+    #
+    # That is only true BELOW THE CROSSOVER THE CARD ACTUALLY HAS. The crossover
+    # is `issue_loop * bandwidth`, so an 8 % bandwidth error moves it 8 %, and a
+    # payload sitting between the modelled knee and the real one is
+    # transfer-bound on the card while the model still calls it issue-bound. It
+    # will show a gap, and that gap IS absorbable by a bandwidth term.
+    #
+    # This happened: Wormhole 1024 B, modelled knee 1056 B, implied knee 968 B.
+    # The check called +2.90 cycles a per-transaction endpoint cost; refitting
+    # one constant (24.0 -> 22.0 B/cycle) reproduced every transfer-bound point
+    # to 0.3-0.8 % and explained the gap entirely. The nekbone team caught it.
+    #
+    # So the knee is now derived from the card's own transfer-bound points and
+    # the claim is only made below BOTH knees.
     crossover = DRAM_CROSSOVER.get(arch)
+    issue_floor = SIM_DRAM_PREDICTION.get((arch, "l1", 512))
+    real_gap = []
     print("")
-    if crossover is None:
+    if crossover is None or issue_floor is None:
         print(
             f"   no registered crossover for {arch}; the sub-crossover check is skipped"
         )
     else:
-        gaps = []
-        for size in sorted({size for _, size in marg}):
-            if size >= crossover:
-                continue
-            dram, l1 = marg.get(("dram", size)), marg.get(("l1", size))
-            if dram is None or l1 is None:
-                continue
-            gaps.append((size, dram - l1, dram, l1))
-        if not gaps:
-            print("   SUB-CROSSOVER: no size has both arms; the check cannot run")
-        else:
-            worst = max(gaps, key=lambda g: abs(g[1]))
-            for size, gap, dram, l1 in gaps:
-                print(
-                    f"   SUB-CROSSOVER {size:>5} B: dram {dram:7.2f} - l1 {l1:7.2f} "
-                    f"= {gap:+6.2f}  (tt-sim says 0.00: both arms are issue-loop bound)"
-                )
-            if abs(worst[1]) > 0.05 * worst[3]:
-                print(
-                    f"   -> A REAL GAP. At {worst[0]} B both arms issue the same "
-                    "instructions at the same rate and tt-sim charges the transfer "
-                    f"nothing extra either way, yet DRAM costs {worst[1]:+.2f} cycles "
-                    "more per transaction. No bandwidth term can absorb that: it is a "
-                    "per-transaction cost at the DRAM endpoint, which is the term "
-                    "charged at exactly zero."
-                )
-            else:
-                print(
-                    "   -> No gap. Below the crossover the two endpoints cost the same, "
-                    "as the model says, so any excess above the crossover is a "
-                    "bandwidth question rather than a per-transaction one."
-                )
+        # Effective B/cycle the card actually sustained, taken from the LARGEST
+        # payload only. Deriving it from every point above the issue floor is
+        # circular: a genuine per-transaction endpoint cost inflates the small
+        # marginals, which lowers the implied bandwidth, which lowers the knee,
+        # which reclassifies the very point that carried the evidence. The
+        # largest payload is transfer-bound under any plausible constant, so it
+        # is the one measurement that cannot be moved by an endpoint term.
+        dram_sizes = sorted(size for kind, size in marg if kind == "dram")
+        implied_bw = implied_knee = None
+        if dram_sizes:
+            biggest = dram_sizes[-1]
+            cycles = marg[("dram", biggest)]
+            # Only usable if that point is unambiguously transfer-bound; a per-
+            # transaction cost would have to be enormous to dominate it.
+            if cycles > issue_floor * 1.5:
+                implied_bw = biggest / cycles
+                implied_knee = issue_floor * implied_bw
+        safe_knee = min(crossover, implied_knee) if implied_knee else crossover
 
+        gaps, ambiguous = [], []
+        for size in sorted({size for _, size in marg}):
+            dram, l1 = marg.get(("dram", size)), marg.get(("l1", size))
+            if dram is None or l1 is None or size >= crossover:
+                continue
+            (gaps if size < safe_knee else ambiguous).append(
+                (size, dram - l1, dram, l1)
+            )
+
+        for size, gap, dram, l1 in gaps + ambiguous:
+            band = "" if size < safe_knee else "  [ABOVE THE IMPLIED KNEE]"
+            print(
+                f"   SUB-CROSSOVER {size:>5} B: dram {dram:7.2f} - l1 {l1:7.2f} "
+                f"= {gap:+6.2f}  (tt-sim says 0.00){band}"
+            )
+        if implied_knee:
+            print(
+                f"   modelled knee {crossover:.0f} B; the card's own DRAM points "
+                f"imply {implied_bw:.1f} B/cycle, i.e. a knee at {implied_knee:.0f} B. "
+                f"Only sizes below {safe_knee:.0f} B can separate an endpoint cost "
+                f"from a bandwidth error."
+            )
+
+        real_gap = [g for g in gaps if abs(g[1]) > 0.05 * g[3]]
+        amb_gap = [g for g in ambiguous if abs(g[1]) > 0.05 * g[3]]
+        if real_gap:
+            size, gap, _, _ = max(real_gap, key=lambda g: abs(g[1]))
+            print(
+                f"   -> A REAL GAP. At {size} B both arms issue the same instructions "
+                f"at the same rate, {size} B is below the knee the card itself "
+                f"implies, and DRAM still costs {gap:+.2f} cycles more per "
+                "transaction. No bandwidth term can absorb that: it is a "
+                "per-transaction cost at the DRAM endpoint, the term charged at "
+                "exactly zero."
+            )
+        elif amb_gap:
+            size, gap, _, _ = max(amb_gap, key=lambda g: abs(g[1]))
+            print(
+                f"   -> A BANDWIDTH GAP, NOT AN ENDPOINT ONE. The only gap is at "
+                f"{size} B ({gap:+.2f}), which is above the knee the card's own "
+                "points imply, so on this part that payload is already "
+                "transfer-bound while the model still calls it issue-bound. "
+                "Refit the bandwidth constant before reaching for a "
+                "per-transaction term."
+            )
+        elif gaps or ambiguous:
+            print(
+                "   -> No gap. Below the crossover the two endpoints cost the same, "
+                "as the model says, so any excess above the crossover is a "
+                "bandwidth question rather than a per-transaction one."
+            )
+        else:
+            print("   SUB-CROSSOVER: no size has both arms; the check cannot run")
     print("")
     if missed_l1:
         print(
@@ -597,13 +652,34 @@ def dram_verdict(arch, marg, header):
             "read: report the numbers and do NOT attribute the difference to DRAM."
         )
         return False
+    if real_gap:
+        # The absolute figures can all land inside tolerance while the paired
+        # sub-crossover check still finds a gap no bandwidth term explains --
+        # a percentage band on a ~44-cycle figure is wider than the gap. When
+        # they disagree the paired check wins: it is the one that controls for
+        # the issue loop. Reporting PREDICTION 1 beside "A REAL GAP", as this
+        # did on 2026-08-24, is not a verdict at all.
+        size, gap, _, _ = max(real_gap, key=lambda g: abs(g[1]))
+        print(
+            "   PREDICTION 2 -- THERE IS A DRAM-SIDE COST THE MODEL DOES NOT CHARGE, "
+            f"found by the paired check rather than the absolutes: {gap:+.2f} cycles "
+            f"at {size} B, below the knee the card's own points imply, where the two "
+            "arms run the same instructions at the same rate."
+        )
+        if not missed_dram:
+            print(
+                f"   (Every absolute also landed within {DRAM_TOLERANCE * 100:.0f} %. "
+                "That is not a contradiction -- the band is wider than the gap -- but "
+                "the paired result is the finding.)"
+            )
+        return False
     if not missed_dram:
         print(
             "   PREDICTION 1 -- BANDWIDTH AND NOTHING ELSE. Every DRAM marginal landed "
             f"within {DRAM_TOLERANCE * 100:.0f} % of a figure derived from link "
             "occupancy plus the DRAM channel's excess, with endpoint queueing, "
             "outstanding-transaction credits and response reordering all charged zero. "
-            "On this part, at these sizes, charging them zero is not costing anything."
+            "The paired sub-crossover check agrees: no gap below the knee."
         )
         return True
     excess = [(size, got - want) for size, got, want in missed_dram]
