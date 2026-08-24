@@ -934,9 +934,14 @@ def gate_single_window(sim, hw):
                 f"{label} {side.label} has {len(starts)} kernel ZONE_START / "
                 f"{len(ends)} ZONE_END ({', '.join(names)}), expected one of each. "
                 f"Nested profiler flushes are not counted here and are not the "
-                f"cause ({side.profiler_pushes} seen). Each program execution "
-                "writes its own noc_trace_dev*_ID*.json: decompose them one at a "
-                "time. They are separate spans and this leg will not blend them"
+                f"cause ({side.profiler_pushes} seen). They are separate spans "
+                "and this leg will not blend them. NOTE: a program that launches "
+                "more than once does NOT necessarily write one file per launch "
+                "-- on tt-metal 0.74 under slow dispatch all launches land in a "
+                "single noc_trace_dev0_ID0.json sharing run_host_id=0, so there "
+                "is nothing to decompose one at a time. Split the records at "
+                "kernel-zone boundaries (one window per KERNEL ZONE_START/END "
+                "pair) and pass each window separately"
             )
     if problems:
         return GateResult("single_window", False, "; ".join(problems))

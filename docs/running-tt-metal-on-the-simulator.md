@@ -653,6 +653,30 @@ tooling. See **`driver/wormhole/docs/profiling.md`** for the full walkthrough.
 **This is the section to point an outside consumer at.** It needs no tt-sim
 knowledge, no patch to your program, and no card.
 
+**Two costs to budget for before you turn it on**, both measured on nekbone by
+the nekbone team (2026-08-21):
+
+- **On silicon it perturbs what it measures: +10–19 % of span, median ~1.16×.**
+  So never compare an instrumented simulator run against an *uninstrumented*
+  card run — the overhead is larger than the cost model's ~10 % headroom, and
+  the floor will appear violated (measured: 11 of 18 points, down to 0.925×)
+  purely as an artefact. **Instrument both sides or neither.**
+- **In simulation it materialises the whole declared worker grid** — the
+  profiler's readback sweeps every core, and a host read to a released core is
+  tt-sim's "this worker is used" signal. Measured: 80 workers instead of 1,
+  92 s against 27 s. This is the same mechanism as the DPRINT cost documented
+  in §4.7, and the same remedy applies: pin the worker set with
+  `TT_SIM_TENSIX_COORDS` (§1.3) and the tax disappears. Profiler reads to
+  pinned-out cores are answered from the `NullCore` shadow.
+
+**Multi-launch programs share one file.** A program that launches several times
+does *not* get one `noc_trace` file per launch: on tt-metal 0.74 under slow
+dispatch every launch lands in a single `noc_trace_dev0_ID0.json` with
+`run_host_id=0` throughout and one KERNEL zone pair per launch per RISC. The
+decompose tool analyses one span at a time, so split the records at kernel-zone
+boundaries first and pass each window separately. (A supported multi-launch mode
+is not built yet.)
+
 `TT_METAL_DEVICE_PROFILER_NOC_EVENTS=1` is **tt-metal's own** instrumentation,
 not ours. It force-enables the device profiler and injects
 `-DPROFILE_NOC_EVENTS=1` into every kernel compile, and the device side writes
