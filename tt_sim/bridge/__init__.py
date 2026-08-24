@@ -28,6 +28,7 @@ from tt_sim.bridge.cores import (
 from tt_sim.bridge.device import (
     Device,
     diagnostics_from_env,
+    dram_channel_contention_summary,
     enabled_diagnostic_names,
     link_contention_summary,
     profiler_flush_summary,
@@ -56,6 +57,7 @@ __all__ = [
     "Transport",
     "compute_grid",
     "diagnostics_from_env",
+    "dram_channel_contention_summary",
     "enabled_diagnostic_names",
     "fill_order",
     "find_wire_peer",

@@ -1,1 +1,1 @@
-"""Cross-architecture driver test runners (see ``cost_model_gate.py``)."""
+"""Arch-neutral driver tests: things true of every server, not one of them."""
