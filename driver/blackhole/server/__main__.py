@@ -23,6 +23,7 @@ from tt_sim.bridge import (
     Transport,
     compute_grid,
     diagnostics_from_env,
+    dram_channel_contention_summary,
     enabled_diagnostic_names,
     host_not_stranded,
     install_convention_guard,
@@ -202,6 +203,9 @@ def main(argv=None):
     links = link_contention_summary(device)
     if links:
         extra += f", {links}"
+    channels = dram_channel_contention_summary(device)
+    if channels:
+        extra += f", {channels}"
     flush = profiler_flush_summary(device)
     if flush:
         extra += f", {flush}"

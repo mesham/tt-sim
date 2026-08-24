@@ -151,6 +151,45 @@ def link_contention_summary(device):
     )
 
 
+def dram_channel_contention_summary(device):
+    """The DRAM-channel twin of :func:`link_contention_summary`.
+
+    Router links and DRAM channels are the two places a request can wait for a
+    shared resource, and until now only the first said so at shutdown. The
+    second is the one that moves: batching reads at one endpoint makes a
+    request land on a channel still streaming the previous one, which shows up
+    as ``noc_arrival_to_service_cycles`` above the uncontended
+    ``access_latency + channel_excess``. Reading it off that counter meant
+    reconstructing a histogram by hand — the nekbone team did exactly that on
+    2026-08-24 to attribute a batched variant's extra cost, and said so.
+
+    Same contract as the link version: ``""`` when nothing claimed, so a
+    cost-model-off run stays silent.
+    """
+    tt_device = getattr(device, "tt_device", device)
+    channels = [
+        tile.channels
+        for tile in getattr(tt_device, "dram_tiles", None) or []
+        if getattr(tile, "channels", None) is not None
+    ]
+    seen, unique = set(), []
+    for channel in channels:
+        if id(channel) not in seen:
+            seen.add(id(channel))
+            unique.append(channel)
+    if not unique:
+        return ""
+    claims = sum(c.claims for c in unique)
+    if not claims:
+        return ""
+    waits = sum(c.waits for c in unique)
+    waited = sum(c.cycles_waited for c in unique)
+    return (
+        f"dram channel contention: {claims} claims, {waits} waits, "
+        f"{waited} cycles waited"
+    )
+
+
 def profiler_flush_summary(device):
     """One line about the device-profiler readback, or ``""`` when it never ran.
 

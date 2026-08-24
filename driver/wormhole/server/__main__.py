@@ -13,6 +13,7 @@ from tt_sim.bridge import (
     Fabric,
     TraceWriter,
     Transport,
+    dram_channel_contention_summary,
     host_not_stranded,
     link_contention_summary,
     profiler_flush_summary,
@@ -281,6 +282,9 @@ def main(argv=None):
     links = link_contention_summary(device)
     if links:
         extra += f", {links}"
+    channels = dram_channel_contention_summary(device)
+    if channels:
+        extra += f", {channels}"
     flush = profiler_flush_summary(device)
     if flush:
         extra += f", {flush}"
