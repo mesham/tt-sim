@@ -529,7 +529,35 @@ class PackerUnit(TensixBackendUnit):
                 + adc.W
                 * self.getConfigValue(stateID, "PCK0_ADDR_CTRL_ZW_REG_1_Wstride")
             )
-            addr += yzw_addr & ~0xF
+            # The two architectures disagree on the *units* of the channel-1
+            # packer address registers, not merely on how much of the low end
+            # is discarded. Wormhole's OutputAddressGenerator.md folds the sum
+            # in as `YZW_Addr &= ~15`, keeping it in the same domain as `addr`;
+            # Blackhole's branch is `YZW_Addr >>= 4`, because there the
+            # registers hold **bytes** (16-byte aligned, the shift being the
+            # conversion into the 16-byte units `addr` counts in). Applying the
+            # Wormhole mask on Blackhole leaves a nonzero offset 16x too far
+            # out.
+            #
+            # Corroboration, since the ISA docs have no Blackhole Packers
+            # chapter: ttsim's `TENSIX_EXECUTE_PACR` does exactly
+            # `addr += yzw_addr >> 4` under `TT_ARCH_VERSION == 1` (and asserts
+            # the Base / Z / W terms are zero there), and tt-metal's Blackhole
+            # `set_packer_strides` writes one channel-1 stride,
+            # `z_stride_ch1 = FACE_R_DIM * y_stride` -- 512 bytes for bf16,
+            # i.e. precisely one face -- which `>> 4` reproduces and `& ~15`
+            # inflates to 8 KB.
+            #
+            # Nothing in the example set reaches a nonzero `yzw_addr`: outside
+            # `llk_pack_tilize` (Blackhole only) tt-metal leaves the base and
+            # all three channel-1 strides at zero, and the Wormhole LLK never
+            # writes them at all, so every PACR the replays issue computes zero
+            # here on both arches. `pack_yzw_addr_test.py` is the only thing
+            # that exercises this line.
+            if self.backend.blackhole:
+                addr += yzw_addr >> 4
+            else:
+                addr += yzw_addr & ~0xF
             ADCsToAdvance[whichADC] = True
 
             if self.getConfigValue(
