@@ -10,12 +10,19 @@
 #   perfbench/nocreadbench/run_card.sh --preflight        # costs no card time
 #   perfbench/nocreadbench/run_card.sh                    # the E0-E7 sweep, as before
 #   perfbench/nocreadbench/run_card.sh --arms             # THE STATEFUL SESSION (~3 min)
+#   perfbench/nocreadbench/run_card.sh --dram             # THE DRAM BURST SESSION (~3 min)
 #
 # Options:
 #   --arms            run BOTH issue loops, interleaved, and print the paired
 #                     verdict against the predictions registered below. This is
 #                     the session `docs/plans/wormhole-session.md` section 4
 #                     item 3 asks for; everything else here predates it.
+#   --dram            run the DRAM BURST arm: tile-sized payloads out of a DRAM
+#                     tile, swept over transactions-per-barrier, beside the same
+#                     payloads out of a worker's L1. tt-sim's ABSOLUTE
+#                     prediction is printed BEFORE any card time and graded
+#                     afterwards by the same table. Requires PLAIN
+#                     instrumentation and enforces it.
 #   --rounds N        rounds of (stateless, stateful) with --arms (default 2)
 #   --repeats N       repeats inside each run (default 3)
 #   --num-tx N        longest sampled burst (default 64; the `burst` axis always
@@ -34,6 +41,7 @@ SRC="$HERE/src"
 . "$HERE/../build_provenance.sh"
 
 ARMS=0
+DRAM=0
 ROUNDS=2
 REPEATS=3
 NUM_TX=64
@@ -47,6 +55,7 @@ for arg in "$@"; do
   case "$arg" in
     --) seen_sep=1 ;;
     --arms) ARMS=1 ;;
+    --dram) DRAM=1 ;;
     --preflight) PREFLIGHT=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --rounds=*) ROUNDS="${arg#*=}" ;;
@@ -70,6 +79,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Two sessions, two directories. Renamed here rather than at write-out time so
+# that the path printed with the settings, before any card time, is the path the
+# results land in.
+[ "$DRAM" -eq 1 ] && [ "$OUT" = "$PWD/nocread-arms-session" ] && OUT="$PWD/nocread-dram-session"
+
 : "${TT_METAL_HOME:?set TT_METAL_HOME to your built tt-metal checkout}"
 export TT_METAL_RUNTIME_ROOT="${TT_METAL_RUNTIME_ROOT:-$TT_METAL_HOME}"
 
@@ -88,10 +102,32 @@ if [ -n "${TT_METAL_SIMULATOR:-}" ]; then
   exit 2
 fi
 
+# PLAIN INSTRUMENTATION, and it is not negotiable in any mode of this script.
+# tt-metal's NoC-event instrumentation force-enables the device profiler and
+# injects a per-transaction profiler write into the very issue loop this program
+# times: +10-19 % of span, measured on silicon. Worse than the size of it is the
+# SHAPE: it does not tax the arms equally. On the nekbone team's ladder it
+# inflated the unbatched variant more than the batched one, turning a real 7-9 %
+# deficit into 1.00-1.03 and flipping it to 0.969 at the largest size. The
+# --dram arm exists to measure exactly that comparison.
+#
+# The program refuses this too, on its own, because a runner is the thing an
+# operator skips. Both checks are deliberate; neither is redundant.
+case "$(printf '%s' "${TT_METAL_DEVICE_PROFILER_NOC_EVENTS:-}" | tr 'A-Z' 'a-z')" in
+  ''|0|false|no|off) ;;
+  *)
+    echo "TT_METAL_DEVICE_PROFILER_NOC_EVENTS is set ($TT_METAL_DEVICE_PROFILER_NOC_EVENTS)." >&2
+    echo "It puts a profiler write inside the timed loop (+10-19 % of span on silicon)" >&2
+    echo "and taxes the batched and unbatched arms UNEQUALLY, which masks the effect" >&2
+    echo "this program measures. Refusing rather than reporting a number about the" >&2
+    echo "instrument. Fix:  unset TT_METAL_DEVICE_PROFILER_NOC_EVENTS" >&2
+    exit 2 ;;
+esac
+
 # ---------------------------------------------------------------------------
 # The single-run mode: what this script has always done. Unchanged.
 # ---------------------------------------------------------------------------
-if [ "$ARMS" -eq 0 ] && [ "$PREFLIGHT" -eq 0 ]; then
+if [ "$ARMS" -eq 0 ] && [ "$DRAM" -eq 0 ] && [ "$PREFLIGHT" -eq 0 ]; then
   cd "$SRC" || exit 2
   if [ ! -x build/nocreadbench ]; then
     cmake -B build -S . -DCMAKE_BUILD_TYPE=Release >/dev/null || exit 1
@@ -128,14 +164,99 @@ if [ "$ARMS" -eq 0 ] && [ "$PREFLIGHT" -eq 0 ]; then
 fi
 
 # ===========================================================================
-# THE STATEFUL SESSION
+# THE MEASURED SESSIONS
 # ===========================================================================
-n_runs=$((ROUNDS * 2))
+if [ "$ARMS" -eq 1 ] && [ "$DRAM" -eq 1 ]; then
+  echo "--arms and --dram answer different questions and are not run together." >&2
+  echo "The stateful arm varies the ISSUE LOOP at a fixed 64 B L1 source; the DRAM" >&2
+  echo "arm varies the SOURCE and the payload at a fixed issue loop. Run them as two" >&2
+  echo "sessions so each one's control is its own." >&2
+  exit 2
+fi
+# One arm per round for --dram (there is no second issue loop to interleave with),
+# two for --arms.
+if [ "$DRAM" -eq 1 ]; then n_runs=$ROUNDS; else n_runs=$((ROUNDS * 2)); fi
 # ~20 s per run: device open plus 3 x ~35 launches, each of which is microseconds
 # of kernel. The 2026-08-17 Wormhole session's whole 110-row nocread probe took
-# 0.2 s of device time inside a 25 s process.
-est_s=$((n_runs * 25))
+# 0.2 s of device time inside a 25 s process. The DRAM arm adds 32 points, all of
+# them larger transfers, so allow half again.
+if [ "$DRAM" -eq 1 ]; then est_s=$((n_runs * 40)); else est_s=$((n_runs * 25)); fi
 
+if [ "$DRAM" -eq 1 ]; then
+cat <<'DRAMPREDICTIONS'
+nocreadbench DRAM burst session
+===============================
+WHAT THIS SETTLES, AND WHY NOBODY HAS MEASURED IT
+--------------------------------------------------
+Batching. Not "is a DRAM read slow" -- that is measured and published -- but
+"what does ONE MORE DRAM read in the same barrier cost". tt-sim charges that
+marginal PURE BANDWIDTH: link occupancy plus the DRAM channel's excess, and
+nothing else. Endpoint queueing, outstanding-transaction credits and response
+reordering are all charged EXACTLY ZERO, by construction.
+
+Nobody has checked that against silicon, and the vendor's own campaign cannot:
+every DRAM row in tt-metal's `tm_noc_latencies` is ONE TRANSACTION PER BARRIER,
+so the batching axis does not exist in the dataset. This program is that axis.
+
+It matters because a real optimisation turns on it. A consumer's variant batches
+its DRAM reads and writes; tt-sim predicts it WINS its first pass by 1.05-1.12x
+and silicon has it LOSING by 7-9 %. A floor bounds a number, not a comparison,
+and this is where the two dataflows are told apart.
+
+THE ARMS
+--------
+  dramburst  2048 B -- one bfloat16 tile -- out of a DRAM tile, swept over
+             N = 4, 16, 64, 128 transactions per barrier. THE measurement.
+  dramsize   the same at 512, 1024 and 4096 B, so the marginal reads as
+             bytes-per-cycle across an 8x range rather than as one number.
+  bigburst   THE CONTROL: the SAME payload sizes out of a worker's L1. Without
+             it, "the source was DRAM" and "the payload was 32x the 64 B every
+             other arm uses" are perfectly confounded.
+  burst      the 64 B L1 control, unchanged, so this session also reproduces
+             the recorded card control before any of it is believed.
+
+Every marginal is read by DIFFERENCING the burst axis, which removes the loop's
+constant term and leaves the cost of one more transaction in flight.
+DRAMPREDICTIONS
+echo ""
+echo "THE PREDICTION, REGISTERED BEFORE ANY CARD TIME"
+echo "-----------------------------------------------"
+echo "Generated by running THIS PROGRAM against tt-sim with the cost model on and"
+echo "differencing the same burst axis the card run will be differenced along, so"
+echo "the two sides are the same arithmetic on the same experiment. The figures"
+echo "below come out of check_mode.py, which is also what grades the run, so what"
+echo "you read now and what the verdict applies cannot drift apart."
+echo ""
+for a in wormhole blackhole; do
+  python3 "$HERE/check_mode.py" --print-predictions "$a" || exit 3
+  echo ""
+done
+cat <<'DRAMOUTCOMES'
+  IF THE MODEL IS RIGHT  every DRAM marginal lands within 10 % of its figure,
+             and below the crossover the DRAM and L1 arms are the SAME NUMBER.
+             Then charging endpoint queueing zero costs nothing at these sizes.
+  IF IT IS NOT  the L1 arm reproduces and the DRAM arm sits ABOVE its figure.
+             The excess is then sized directly, and its SHAPE says which term is
+             missing: roughly constant in payload = a per-transaction endpoint
+             cost, growing with payload = a bandwidth misestimate.
+  NEITHER    the L1 arm missed its own figure too. Then the instruction-level
+             model both arms rest on is wrong on this part, the pair cannot be
+             read, and the honest report is the two numbers with no mechanism
+             attached.
+
+The consuming team's own prediction, registered as theirs: the card's marginal
+batched 2 KB DRAM read lands MEANINGFULLY ABOVE tt-sim's 86.
+
+WHAT ELSE THE RUN HAS TO SATISFY
+--------------------------------
+  * PLAIN INSTRUMENTATION. Enforced by this script and again by the program.
+  * Every point must PROVE WHICH KIND OF TILE it read, from the signature word
+    its own timed burst landed rather than from the --dram flag. A stale binary
+    reading L1 under a DRAM label reproduces the prediction perfectly, which is
+    the worst possible failure: it looks like agreement.
+  * The 64 B `burst` control must still reproduce the recorded card session.
+DRAMOUTCOMES
+else
 cat <<'PREDICTIONS'
 nocreadbench stateful session
 =============================
@@ -182,13 +303,23 @@ WHAT ELSE THE RUN HAS TO SATISFY
     stateful call does not and a witness core answers. `--stateful` on a stale
     binary looks exactly like a real stateful run until that column is read.
 PREDICTIONS
+fi
 
 echo ""
-echo "  rounds    : $ROUNDS  (each round runs stateless then stateful)"
+if [ "$DRAM" -eq 1 ]; then
+  echo "  rounds    : $ROUNDS  (each round runs the whole DRAM plan once)"
+else
+  echo "  rounds    : $ROUNDS  (each round runs stateless then stateful)"
+fi
 echo "  repeats   : $REPEATS inside each run"
 echo "  num_tx    : $NUM_TX  (the burst axis is always N = 4, 16, 64, 128)"
-echo "  runs      : $n_runs, INTERLEAVED -- a blocked schedule turns drift into"
-echo "              a fake difference between the arms"
+if [ "$DRAM" -eq 1 ]; then
+  echo "  runs      : $n_runs, each one the same plan -- rounds are repeats, so a"
+  echo "              spread between them is the card and not the arms"
+else
+  echo "  runs      : $n_runs, INTERLEAVED -- a blocked schedule turns drift into"
+  echo "              a fake difference between the arms"
+fi
 echo "  wall      : ~$((est_s / 60)) min $((est_s % 60)) s, plus the first build (~2 min)"
 echo "  out       : $OUT"
 
@@ -291,7 +422,32 @@ if ! grep -q 'MODE CONFIRMED' "$smoke"; then
 fi
 echo "   ok   the mode witness works on this part (MODE CONFIRMED in the smoke run)"
 echo "   part : ${ARCH_NAME:-unknown}"
-if [ "${ARCH_NAME:-}" = "blackhole" ]; then
+if [ "$DRAM" -eq 1 ]; then
+  # The DRAM arm's own smoke: one short DRAM burst, so a part where the bank
+  # cannot be resolved or the congruence pad cannot be met fails HERE rather
+  # than after the session's first round. It also puts SOURCE CONFIRMED on the
+  # record before any measurement.
+  echo ""
+  echo "== pre-flight, the DRAM source (--dram --only dramburst --num-tx 4)"
+  dsmoke="$SRC/nocread-dram-smoke.log"
+  ( cd "$SRC" && ./build/nocreadbench --dram --only dramburst --num-tx 4 --repeats 1 \
+                    --no-sample --out "$SRC/nocread-dram-smoke.csv" ) >"$dsmoke" 2>&1
+  drc=$?
+  if [ $drc -ne 0 ] || ! grep -q 'SOURCE CONFIRMED' "$dsmoke"; then
+    echo "   FAIL the DRAM arm did not take on this part (rc=$drc). Either the bank"
+    echo "        could not be resolved, the DRAM source could not be made congruent"
+    echo "        with the L1 arena, or the timed burst did not land a DRAM tile's"
+    echo "        signature. Send $dsmoke."
+    sed -n '$p' "$dsmoke" | sed 's/^/        /'
+    exit 3
+  fi
+  echo "   ok   $(grep -m1 'DRAM source bank' "$dsmoke" | sed 's/^nocreadbench: //')"
+  echo "   ok   the timed burst landed a DRAM tile's signature (SOURCE CONFIRMED)"
+  if [ "${ARCH_NAME:-}" != "wormhole" ] && [ "${ARCH_NAME:-}" != "blackhole" ]; then
+    echo "   NOTE no registered prediction for '${ARCH_NAME:-unknown}'; the session will"
+    echo "        report its marginals and grade nothing."
+  fi
+elif [ "${ARCH_NAME:-}" = "blackhole" ]; then
   echo ""
   echo "   THE BLACKHOLE PREDICTIONS, AND THEY ARE ABSOLUTE"
   echo "   --------------------------------------------------------------"
@@ -335,7 +491,8 @@ mkdir -p "$OUT"
 SUMMARY="$OUT/summary.txt"
 : >"$SUMMARY"
 {
-  echo "nocreadbench stateful session"
+  if [ "$DRAM" -eq 1 ]; then echo "nocreadbench DRAM burst session"; else
+  echo "nocreadbench stateful session"; fi
   echo "date        : $(date -Is)"
   echo "host        : $(hostname)"
   echo "tt-metal    : $TT_METAL_HOME"
@@ -348,13 +505,23 @@ SUMMARY="$OUT/summary.txt"
 
 status=0
 CSVS=()
+# The DRAM session has one arm and a fixed point list; the stateful session has
+# two arms and the whole plan. Everything downstream -- the payload arm check,
+# the control check, the summary -- is the same code for both.
+if [ "$DRAM" -eq 1 ]; then ARMLIST="dram"; else ARMLIST="stateless stateful"; fi
 for r in $(seq 1 "$ROUNDS"); do
-  for arm in stateless stateful; do
+  for arm in $ARMLIST; do
     name="$arm-$r"
     csv="$OUT/nocread-$name.csv"
     log="$OUT/nocread-$name.log"
     flag=""
-    [ "$arm" = stateful ] && flag="--stateful"
+    expect="stateless"
+    [ "$arm" = stateful ] && flag="--stateful" && expect="stateful"
+    # The DRAM arm is the stateless issue loop with a different source, and the
+    # point list is pinned here rather than left to the default plan so that the
+    # session's card time is spent on the axis it is asking about -- plus the
+    # 64 B control it has to reproduce first.
+    [ "$arm" = dram ] && flag="--dram --only burst,bigburst,dramburst,dramsize"
     echo ""
     echo "== $name"
     # shellcheck disable=SC2086
@@ -370,7 +537,7 @@ for r in $(seq 1 "$ROUNDS"); do
     # THE ARM CHECK. Read out of the returned payload, not taken on trust from
     # the flag, and it also prints this run's marginals so the control can be
     # judged HERE rather than only after the session is sent home.
-    if ! chk=$(python3 "$HERE/check_mode.py" --expect "$arm" --stdout "$log" "$csv" 2>&1); then
+    if ! chk=$(python3 "$HERE/check_mode.py" --expect "$expect" --stdout "$log" "$csv" 2>&1); then
       printf 'FAIL  %-14s the arm did not take:\n%s\n' "$name" "$chk" | tee -a "$SUMMARY"
       status=1
       continue
@@ -382,8 +549,19 @@ for r in $(seq 1 "$ROUNDS"); do
 done
 
 echo ""
-echo "== the paired verdict, against the predictions printed before the run"
-if [ ${#CSVS[@]} -ge 2 ]; then
+echo "== the verdict, against the predictions printed before the run"
+if [ "$DRAM" -eq 1 ]; then
+  if [ ${#CSVS[@]} -ge 1 ]; then
+    # Pooled over the rounds: they are repeats of one plan, so the marginal
+    # wanted is the one over all of them. A non-zero exit here means the
+    # registered prediction did not hold, which is a RESULT and not a broken
+    # run -- the summary says which of the three outcomes it landed on.
+    python3 "$HERE/check_mode.py" --quiet --dram "${CSVS[@]}" | tee -a "$SUMMARY"
+  else
+    echo "  no good run to grade" | tee -a "$SUMMARY"
+    status=1
+  fi
+elif [ ${#CSVS[@]} -ge 2 ]; then
   python3 "$HERE/check_mode.py" --quiet "${CSVS[@]}" | tee -a "$SUMMARY"
 else
   echo "  not enough good runs to pair" | tee -a "$SUMMARY"
@@ -393,8 +571,19 @@ fi
 {
   echo ""
   echo "Before sending this home, check by eye:"
-  echo "  * every line above says PASS. 'arm=X confirmed from payload' means the"
-  echo "    issue loop was read back out of the data, not out of the flag."
+  if [ "$DRAM" -eq 1 ]; then
+    echo "  * every line above says PASS, and every run printed SOURCE CONFIRMED."
+    echo "    That means each point proved which KIND of tile its own timed burst"
+    echo "    read, from the signature that burst landed -- NOT from the --dram flag."
+    echo "    A stale binary reading L1 under a DRAM label reproduces the prediction"
+    echo "    exactly, so this is the one check that cannot be skipped."
+    echo "  * the verdict names ONE of the three registered outcomes. All three are"
+    echo "    results, including the one where the model is wrong. Do not re-run to"
+    echo "    get a different one."
+  else
+    echo "  * every line above says PASS. 'arm=X confirmed from payload' means the"
+    echo "    issue loop was read back out of the data, not out of the flag."
+  fi
   if [ "${ARCH_NAME:-}" = "wormhole" ]; then
     echo "  * the stateless rounds each printed 'the control reproduces' for all"
     echo "    three burst intervals. If any says CTRL MOVED, SAY SO and send the"

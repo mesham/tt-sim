@@ -54,6 +54,59 @@ WORMHOLE_CONTROL = {(4, 16): 44.08, (16, 64): 44.00, (64, 128): 43.97}
 #: instruction different (1 cycle, 2.3 %) is visible as a WARN.
 CONTROL_TOLERANCE = 0.03
 
+#: tt-sim's ABSOLUTE prediction for the ``--dram`` arm, registered here **before
+#: any card ran it**, keyed ``(arch, source, tx_bytes) -> marginal cycles per
+#: transaction``. Produced by running *this program* against tt-sim with the
+#: cost model on (``TT_SIM_COST_MODEL=1``) and differencing the same burst axis
+#: the card run is differenced along, so the two sides are the same arithmetic
+#: on the same experiment and not a model quantity compared to a measurement.
+#:
+#: The structure is the prediction, not just the numbers. Two terms compete and
+#: the larger wins:
+#:
+#: * the **issue loop** — 44 cycles/transaction on Wormhole, 47 on Blackhole,
+#:   independent of payload size. Both are already validated against silicon
+#:   (Wormhole 44.00 predicted vs 45.03 measured; Blackhole 47.00 predicted and
+#:   measured exactly), so they are the part of this table least at risk.
+#: * the **transfer** — payload over the sustained rate. tt-sim charges an L1
+#:   read the NoC link (32 B/cycle Wormhole, 64 Blackhole) and a DRAM read the
+#:   link plus the DRAM channel's excess, and **nothing else**: no endpoint
+#:   queueing, no outstanding-transaction credit, no response reordering.
+#:
+#: So the model says DRAM and L1 are *identical* below the crossover and differ
+#: by pure bandwidth above it. Wormhole crosses at 2048 B, Blackhole at 4096 B
+#: — that difference is itself a registered claim.
+SIM_DRAM_PREDICTION = {
+    ("wormhole", "dram", 512): 44.00,
+    ("wormhole", "dram", 1024): 44.00,
+    ("wormhole", "dram", 2048): 86.00,
+    ("wormhole", "dram", 4096): 171.00,
+    ("wormhole", "l1", 512): 44.00,
+    ("wormhole", "l1", 1024): 44.00,
+    ("wormhole", "l1", 2048): 64.00,
+    ("wormhole", "l1", 4096): 128.00,
+    ("blackhole", "dram", 512): 47.00,
+    ("blackhole", "dram", 1024): 47.00,
+    ("blackhole", "dram", 2048): 47.00,
+    ("blackhole", "dram", 4096): 87.00,
+    ("blackhole", "l1", 512): 47.00,
+    ("blackhole", "l1", 1024): 47.00,
+    ("blackhole", "l1", 2048): 47.00,
+    ("blackhole", "l1", 4096): 64.00,
+}
+
+#: The smallest payload at which the TRANSFER, rather than the issue loop, sets
+#: each architecture's DRAM marginal, per the table above. STRICTLY BELOW this
+#: size tt-sim predicts the DRAM and L1 arms are the SAME NUMBER, which is the
+#: sharpest falsifier in the arm: a bandwidth term cannot explain a gap there.
+DRAM_CROSSOVER = {"wormhole": 2048, "blackhole": 4096}
+
+#: How far a DRAM marginal may sit from its registered figure and still count as
+#: reproducing it. Looser than the control's 3 % because this is an absolute
+#: cross-architecture prediction rather than a re-run of a recorded session, and
+#: because the Wormhole issue loop's own residual against silicon was 2.3 %.
+DRAM_TOLERANCE = 0.10
+
 #: The band the shipped dataset's Wormhole rows occupy, stateful and stateless
 #: (17.33 and 25.00 cycles/transaction). Used only to say which pre-registered
 #: prediction a stateful marginal landed on. It is the vendor's dataset from a
@@ -167,7 +220,72 @@ def check_rows(rows, expect=None):
             f"all {checked} row(s) proved mode={mode} from the tile that answered "
             "their probe, not from the flag"
         )
+    problems.extend(check_source_arm(rows, notes))
     return problems, notes
+
+
+def check_source_arm(rows, notes):
+    """The SOURCE arm, re-derived from the CSV alone.
+
+    The mode witness above says which issue loop ran. This says which kind of
+    tile the timed burst actually read, and it is a separate question with the
+    same failure mode: ``--dram`` on a stale binary, on a JIT cache that kept the
+    old kernel, or in a shell that dropped the argument produces a well-formed
+    file whose rates are an L1 read wearing a DRAM label -- and *that* reading is
+    what "the card agrees with tt-sim" looks like, so it would be believed.
+
+    ``landed`` is the first word the TIMED burst put at its landing address. The
+    host stamps worker source regions ``0x5A5A....`` and DRAM tiles
+    ``0xD4A5....``, so the word names the endpoint's kind as well as its
+    coordinate, and the two halves of that space never overlap.
+    """
+    problems = []
+    if not rows or "landed" not in rows[0]:
+        if any(row.get("src_kind") == "dram" for row in rows):
+            problems.append(
+                "rows claim src_kind=dram but the file has no `landed` column, so no "
+                "row can prove it read DRAM. This CSV predates the source witness"
+            )
+        return problems
+    bad, checked, dram = [], 0, 0
+    for row in rows:
+        kind = row.get("src_kind", "?")
+        sig = row.get("sig_src", "")
+        # The signature half IS the arm. A `dram` row whose source is stamped
+        # with a worker's signature was never aimed at a DRAM tile at all,
+        # whatever landed.
+        want_half = "0xd4a5" if kind == "dram" else "0x5a5a"
+        if not sig.lower().startswith(want_half):
+            bad.append(
+                f"{row['experiment']}#{row['point']}: src_kind={kind} but its source is "
+                f"stamped {sig}, which is the other arm's half of the signature space"
+            )
+            continue
+        if kind == "dram":
+            dram += 1
+        # -1 means the landing address is walked or the sources cycled, so the
+        # word names no single tile. Not looked at, which is not the same as
+        # verified, and saying so is the point.
+        if row.get("landed_ok", "-1") == "-1":
+            continue
+        checked += 1
+        if row["landed"].lower() != sig.lower() or row["landed_ok"] != "1":
+            bad.append(
+                f"{row['experiment']}#{row['point']}: src_kind={kind} landed "
+                f"{row['landed']}, but its source is stamped {sig}"
+            )
+    if bad:
+        problems.append(
+            f"{len(bad)} row(s) did not prove which KIND of tile their timed burst "
+            "read; THE SOURCE ARM DID NOT TAKE. First few:"
+        )
+        problems.extend("    " + line for line in bad[:5])
+    elif checked:
+        notes.append(
+            f"{checked} row(s) ({dram} of them DRAM) proved their source from the "
+            "signature their own timed burst landed, not from the --dram flag"
+        )
+    return problems
 
 
 def marginals(rows):
@@ -190,6 +308,48 @@ def marginals(rows):
     return out, means
 
 
+def dram_marginals(rows):
+    """``{(src_kind, tx_bytes): marginal cycles/transaction}`` for the DRAM arm.
+
+    Exactly the arithmetic :func:`marginals` does on the ``burst`` axis, applied
+    per (source kind, payload size) to the ``bigburst`` / ``dramburst`` /
+    ``dramsize`` experiments. Differencing consecutive burst lengths removes the
+    loop's constant term -- its prologue, the closing barrier, the launch -- so
+    what is left is the cost of one more transaction in flight, which is the
+    quantity tt-sim charges as pure bandwidth and the only one the registered
+    prediction is about.
+
+    The marginal reported per key is the mean over the intervals that exclude
+    N = 4: the shortest burst carries a launch-warmth term that the longer ones
+    have amortised, and it is the one interval where the simulator itself shows
+    a fractional wobble.
+    """
+    per_key = {}
+    for row in rows:
+        if row.get("experiment") not in ("bigburst", "dramburst", "dramsize"):
+            continue
+        key = (row.get("src_kind", "?"), int(row["tx_bytes"]))
+        per_key.setdefault(key, {}).setdefault(int(row["num_tx"]), []).append(
+            int(row["cycles"])
+        )
+    out = {}
+    for key, per_n in per_key.items():
+        means = {n: sum(v) / len(v) for n, v in per_n.items()}
+        order = sorted(means)
+        steps = [
+            (means[hi] - means[lo]) / (hi - lo) for lo, hi in zip(order, order[1:])
+        ]
+        long_steps = [
+            (means[hi] - means[lo]) / (hi - lo)
+            for lo, hi in zip(order, order[1:])
+            if lo >= 16
+        ]
+        chosen = long_steps or steps
+        if chosen:
+            out[key] = sum(chosen) / len(chosen)
+    return out
+
+
 def average_per_tx(rows):
     """Mean ``cycles_per_tx`` over the whole file, for the record only."""
     values = [float(row["cycles_per_tx"]) for row in rows if row.get("cycles_per_tx")]
@@ -204,6 +364,20 @@ def report_one(path, expect, quiet):
     average = average_per_tx(rows)
     arch = header.get("arch", "unknown")
     mode = rows[0].get("mode", header.get("mode", "unknown")) if rows else "unknown"
+
+    # PLAIN INSTRUMENTATION, checked from the artefact rather than remembered.
+    # tt-metal's NoC-event instrumentation injects a per-transaction profiler
+    # write into the timed loop (+10-19 % of span on silicon) and does not tax
+    # the arms equally -- it inflated an unbatched variant more than a batched
+    # one and turned a real 7-9 % deficit into 1.00-1.03, sign-flipped at the
+    # largest size. The program refuses to run with it set, so a file that
+    # exists carries `noc_events=0`; a file without the field came from a binary
+    # that predates the gate and cannot say either way.
+    if header.get("noc_events") not in (None, "0"):
+        problems.append(
+            f"the header says noc_events={header['noc_events']} -- this run was "
+            "instrumented, and the instrumentation masks the effect being measured"
+        )
 
     if problems:
         print(f"check_mode: {path}: THE ARM DID NOT TAKE", file=sys.stderr)
@@ -332,6 +506,167 @@ def paired_verdict(runs):
             )
 
 
+def dram_verdict(arch, marg, header):
+    """The pre-registered read of the DRAM arm. Returns True when it holds.
+
+    Every figure it compares against was written down in
+    :data:`SIM_DRAM_PREDICTION` before any card ran the arm, and this function
+    does nothing but say which of three outcomes the numbers landed on. As with
+    the stateful arm, it deliberately cannot express "somewhere in between" as a
+    pass, and one of the three is a loss for the simulator.
+    """
+    print("")
+    tag = "  -- SIMULATOR, NOT A MEASUREMENT" if header.get("sim") == "1" else ""
+    print(f"== the DRAM burst arm, {arch}{tag}")
+    if header.get("noc_events") is None:
+        print(
+            "   REFUSED: this CSV has no noc_events field, so it cannot show it was "
+            "taken without tt-metal's NoC instrumentation. Rebuild and retake."
+        )
+        return False
+    if not marg:
+        print("   no bigburst/dramburst/dramsize rows; was --dram passed?")
+        return False
+
+    rows, missed_dram, missed_l1 = [], [], []
+    for (kind, size), got in sorted(marg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        want = SIM_DRAM_PREDICTION.get((arch, kind, size))
+        if want is None:
+            print(f"   {kind:>4} {size:>5} B: {got:7.2f}  (no registered prediction)")
+            continue
+        drift = (got - want) / want
+        flag = "reproduces" if abs(drift) <= DRAM_TOLERANCE else "MISSED"
+        print(
+            f"   {kind:>4} {size:>5} B: measured {got:7.2f}  predicted {want:7.2f}  "
+            f"{drift * 100:+6.1f} %  {flag}"
+        )
+        rows.append((kind, size, got, want, drift))
+        if abs(drift) > DRAM_TOLERANCE:
+            (missed_dram if kind == "dram" else missed_l1).append((size, got, want))
+
+    # THE SHARPEST FALSIFIER, and it needs no prediction to be right about the
+    # absolute numbers. Below the crossover tt-sim says the issue loop binds
+    # both arms, so DRAM and L1 must be THE SAME NUMBER. A gap there cannot be
+    # absorbed by any bandwidth term, however wrong the bandwidth term is.
+    crossover = DRAM_CROSSOVER.get(arch)
+    print("")
+    if crossover is None:
+        print(
+            f"   no registered crossover for {arch}; the sub-crossover check is skipped"
+        )
+    else:
+        gaps = []
+        for size in sorted({size for _, size in marg}):
+            if size >= crossover:
+                continue
+            dram, l1 = marg.get(("dram", size)), marg.get(("l1", size))
+            if dram is None or l1 is None:
+                continue
+            gaps.append((size, dram - l1, dram, l1))
+        if not gaps:
+            print("   SUB-CROSSOVER: no size has both arms; the check cannot run")
+        else:
+            worst = max(gaps, key=lambda g: abs(g[1]))
+            for size, gap, dram, l1 in gaps:
+                print(
+                    f"   SUB-CROSSOVER {size:>5} B: dram {dram:7.2f} - l1 {l1:7.2f} "
+                    f"= {gap:+6.2f}  (tt-sim says 0.00: both arms are issue-loop bound)"
+                )
+            if abs(worst[1]) > 0.05 * worst[3]:
+                print(
+                    f"   -> A REAL GAP. At {worst[0]} B both arms issue the same "
+                    "instructions at the same rate and tt-sim charges the transfer "
+                    f"nothing extra either way, yet DRAM costs {worst[1]:+.2f} cycles "
+                    "more per transaction. No bandwidth term can absorb that: it is a "
+                    "per-transaction cost at the DRAM endpoint, which is the term "
+                    "charged at exactly zero."
+                )
+            else:
+                print(
+                    "   -> No gap. Below the crossover the two endpoints cost the same, "
+                    "as the model says, so any excess above the crossover is a "
+                    "bandwidth question rather than a per-transaction one."
+                )
+
+    print("")
+    if missed_l1:
+        print(
+            "   CONTROL MOVED -- the L1 arm missed its own registered figure at "
+            f"{', '.join(str(s) for s, _, _ in missed_l1)} B. The instruction-level "
+            "model of the issue loop is what both arms rest on, so the pair cannot be "
+            "read: report the numbers and do NOT attribute the difference to DRAM."
+        )
+        return False
+    if not missed_dram:
+        print(
+            "   PREDICTION 1 -- BANDWIDTH AND NOTHING ELSE. Every DRAM marginal landed "
+            f"within {DRAM_TOLERANCE * 100:.0f} % of a figure derived from link "
+            "occupancy plus the DRAM channel's excess, with endpoint queueing, "
+            "outstanding-transaction credits and response reordering all charged zero. "
+            "On this part, at these sizes, charging them zero is not costing anything."
+        )
+        return True
+    excess = [(size, got - want) for size, got, want in missed_dram]
+    over = [e for _, e in excess if e > 0]
+    print(
+        "   PREDICTION 2 -- THERE IS A DRAM-SIDE COST THE MODEL DOES NOT CHARGE. The "
+        f"L1 arm reproduced its figures and the DRAM arm did not, at "
+        f"{', '.join(f'{s} B ({e:+.2f} cycles)' for s, e in excess)}."
+    )
+    if len(over) > 1:
+        flat = max(over) - min(over) <= 0.25 * max(over)
+        print(
+            "   The excess is roughly CONSTANT in payload size, so it is a "
+            "per-transaction endpoint cost -- exactly the term charged at zero."
+            if flat
+            else "   The excess GROWS with payload size, so it is a bandwidth "
+            "misestimate rather than a per-transaction cost. Different fix."
+        )
+    return False
+
+
+def print_predictions(arch):
+    """The registered table, for the runner to print BEFORE any card time.
+
+    It lives here rather than in the shell script so that the figures the
+    operator reads before the run and the figures the verdict is graded against
+    are the same object. A prediction the runner prints and the checker does not
+    apply is not a pre-registration.
+    """
+    sizes = sorted({size for a, _, size in SIM_DRAM_PREDICTION if a == arch})
+    if not sizes:
+        print(f"  no registered DRAM prediction for {arch!r}")
+        return 1
+    crossover = DRAM_CROSSOVER.get(arch)
+    print(
+        f"  tt-sim's ABSOLUTE prediction for {arch}, marginal cycles per transaction:"
+    )
+    print("")
+    print("     payload    DRAM source    L1 source    what the model says binds")
+    for size in sizes:
+        dram = SIM_DRAM_PREDICTION.get((arch, "dram", size))
+        l1 = SIM_DRAM_PREDICTION.get((arch, "l1", size))
+        binds = (
+            "the issue loop, both arms"
+            if crossover is not None and size < crossover
+            else "the transfer: link, plus the DRAM channel's excess"
+        )
+        print(f"     {size:>5} B    {dram:>11.2f}    {l1:>9.2f}    {binds}")
+    print("")
+    if crossover is not None:
+        print(
+            f"  Below {crossover} B the two arms are predicted to be THE SAME NUMBER: the"
+        )
+        print(
+            "  issue loop is slower than either transfer, so the endpoint costs nothing"
+        )
+        print(
+            "  extra. That is the sharpest thing to falsify here -- a gap there cannot be"
+        )
+        print("  explained by any bandwidth term, however wrong the bandwidth term is.")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
@@ -342,7 +677,15 @@ def main(argv=None):
         )
     )
     parser.add_argument(
-        "csv", nargs="+", help="nocreadbench-<arch>.csv from the run(s)"
+        "csv", nargs="*", help="nocreadbench-<arch>.csv from the run(s)"
+    )
+    parser.add_argument(
+        "--print-predictions",
+        metavar="ARCH",
+        help=(
+            "print the registered DRAM predictions for ARCH and exit, so the runner "
+            "shows the operator the same figures the verdict will be graded against"
+        ),
     )
     parser.add_argument(
         "--expect",
@@ -357,10 +700,26 @@ def main(argv=None):
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="print only on failure")
+    parser.add_argument(
+        "--dram",
+        action="store_true",
+        help=(
+            "print the DRAM burst arm's verdict against the predictions registered "
+            "in SIM_DRAM_PREDICTION, which were written down before any card ran it"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.print_predictions:
+        return print_predictions(args.print_predictions)
+    if not args.csv:
+        parser.error("at least one CSV is required")
 
     status = 0
     runs = []
+    # Pooled across the CSVs of one session, because a `--dram` session runs the
+    # same plan several times and the marginal wanted is the one over all of
+    # them: rounds of an identical program are repeats, not separate results.
+    dram_rows, dram_header = [], {}
     for path in args.csv:
         ok, header, marg, _ = report_one(path, args.expect, args.quiet)
         if not ok:
@@ -368,6 +727,9 @@ def main(argv=None):
         _, rows = read_csv(path)
         mode = rows[0]["mode"] if rows and "mode" in rows[0] else "unknown"
         runs.append((header, mode, marg))
+        if args.dram and mode == "stateless":
+            dram_rows.extend(rows)
+            dram_header = dram_header or header
 
     if args.stdout:
         with open(args.stdout) as handle:
@@ -397,6 +759,10 @@ def main(argv=None):
                     )
                     status = 1
 
+    if args.dram:
+        arch = dram_header.get("arch", "unknown")
+        if not dram_verdict(arch, dram_marginals(dram_rows), dram_header):
+            status = 1
     if len(runs) > 1:
         paired_verdict(runs)
     return status

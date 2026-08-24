@@ -7,7 +7,7 @@
 // `tt_sim/perf/noc_dataset_sweep.py` can only difference it along one axis.
 #pragma once
 
-#define NOCREADBENCH_MAGIC 0x4E524233u  // "NRB3"; bump on any layout change
+#define NOCREADBENCH_MAGIC 0x4E524234u  // "NRB4"; bump on any layout change
 
 // ---------------------------------------------------------------------------
 // Result word indices, per participating core.
@@ -72,7 +72,23 @@
 // API call the timed loop issued, and it is the reason a stateful run cannot be
 // forged by passing a flag -- see the probe in reader.cpp.
 #define NOCREADBENCH_R_PROBE 23
-#define NOCREADBENCH_R_WORDS 28
+// --- added with NRB4: the source arm, and the witness that proves it ---------
+// `_SRC_KIND` is what the kernel was told the source was; `_SRC_BASE` and
+// `_DST_BASE` are the addresses it ACTUALLY issued against, so the host can
+// re-derive the DRAM->L1 congruence rule `(src % n) == (dst % n)` from returned
+// payload rather than from its own arithmetic.
+#define NOCREADBENCH_R_SRC_KIND 24
+#define NOCREADBENCH_R_SRC_BASE 25
+#define NOCREADBENCH_R_DST_BASE 26
+// THE SOURCE WITNESS, and it is a word the TIMED LOOP ITSELF landed. Read out
+// of the landing address immediately after burst 1's barrier, with a plain L1
+// load and no NoC transaction of its own, so it cannot be produced by anything
+// except the burst that was measured. The host stamps a per-tile signature into
+// every source region and DRAM tiles get a signature with a DIFFERENT high half
+// (NOCREADBENCH_SIG_DRAM), so an L1-source row and a DRAM-source row cannot be
+// mistaken for each other whatever flag was passed.
+#define NOCREADBENCH_R_LANDED 27
+#define NOCREADBENCH_R_WORDS 32
 
 // ---------------------------------------------------------------------------
 // Runtime argument indices for kernels/dataflow/reader.cpp.
@@ -106,7 +122,29 @@
 // arm's own API call; which tile answers is the mode. See reader.cpp.
 #define NOCREADBENCH_A_WITNESS_X 12
 #define NOCREADBENCH_A_WITNESS_Y 13
-#define NOCREADBENCH_A_SRC 14       // 2 * num_src words follow, (x, y) pairs
+// --- the source arm (NRB4) --------------------------------------------------
+// Where the reads come FROM at the remote tile. Zero means "the local arena's
+// source half", which is every L1 point and is what NRB3 hardcoded; a DRAM
+// point passes the DRAM tile's own address, `dram_base + bank_offset` (+ the
+// congruence pad below), exactly as tt-metal's `get_noc_addr_from_bank_id`
+// composes it.
+#define NOCREADBENCH_A_SRC_BASE 14
+// How far the kernel may stride inside that source region. Zero means "derive
+// it from the arena", which is the L1 behaviour.
+#define NOCREADBENCH_A_SRC_SPAN 15
+// Bytes added to the LANDING base, and to the probe's landing address with it.
+// A DRAM->L1 read must satisfy `(src % n) == (dst % n)` with n = 32 on Wormhole
+// and 64 on Blackhole (WormholeB0/NoC/Alignment.md; violations are
+// UndefinedBehavior -- skewed or dropped bytes, no fault). The DRAM buffer and
+// the L1 arena come from two different allocators with two different
+// alignments, so the host computes the shortfall and shifts the L1 side, which
+// leaves every DRAM address allocator-aligned for the host's own writes. It is
+// NOT an absolute-alignment rule and no absolute check is made anywhere.
+#define NOCREADBENCH_A_DST_PAD 16
+// Which kind of tile the source is. Recorded, never trusted: the arm is proved
+// from NOCREADBENCH_R_LANDED.
+#define NOCREADBENCH_A_SRC_KIND 17
+#define NOCREADBENCH_A_SRC 18       // 2 * num_src words follow, (x, y) pairs
 
 // ---------------------------------------------------------------------------
 // Issue-loop variants.
@@ -114,6 +152,12 @@
 #define NOCREADBENCH_MODE_STATELESS 0u
 #define NOCREADBENCH_MODE_STATEFUL 1u
 #define NOCREADBENCH_MODE_REFUSED 0xFFFFFFFFu
+
+// ---------------------------------------------------------------------------
+// Source arms.
+// ---------------------------------------------------------------------------
+#define NOCREADBENCH_SRC_KIND_L1 0u
+#define NOCREADBENCH_SRC_KIND_DRAM 1u
 
 // ---------------------------------------------------------------------------
 // The mode witness.
@@ -129,6 +173,15 @@
 // asked for it, and it is the discipline `perfbench/nocevbench/check_arm.py`
 // applies to the NoC ids in a trace.
 #define NOCREADBENCH_SIG(x, y) (0x5A5A0000u | (((x) & 0xFFu) << 8) | ((y) & 0xFFu))
+// The DRAM tiles' signature, with a DIFFERENT high half on purpose. The source
+// arm is read off the LANDED word, and the two halves of the signature space
+// never overlap, so a DRAM row that in fact read a worker's L1 -- a stale
+// binary, a dropped `--dram`, a plan whose DRAM address never made it into the
+// runtime arguments -- lands 0x5A5A.... and is refused. A same-tile-coordinate
+// coincidence cannot forge it either: a DRAM tile and a worker tile never share
+// a physical NoC coordinate, and the host checks the two signatures differ per
+// point regardless.
+#define NOCREADBENCH_SIG_DRAM(x, y) (0xD4A50000u | (((x) & 0xFFu) << 8) | ((y) & 0xFFu))
 #define NOCREADBENCH_SIG_WORDS 4  // how many words of it the host stamps
 #define NOCREADBENCH_PROBE_FILL 0xEEEEEEEEu  // pre-fill, so "nothing landed" shows
 // Where the probe's payload lands: this many bytes below the top of the arena's

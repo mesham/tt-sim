@@ -18,7 +18,9 @@ perfbench/
 │                       the number of links two concurrent flows share
 ├── nocreadbench/       what caps the sustained NoC *read* rate: the initiator's
 │                       outstanding-request counter, read directly, plus the
-│                       source-fan-out axis tt-metal's dataset cannot express
+│                       source-fan-out axis tt-metal's dataset cannot express,
+│                       plus (--dram) the batched tile-sized DRAM read, an axis
+│                       the vendor's dataset holds at one transaction throughout
 ├── dramratebench/      does a DRAM channel's aggregate read rate grow with the
 │                       number of tiles reading it? The only probe that can
 │                       reach the endpoint-occupancy term at all
@@ -289,7 +291,10 @@ a measurement. None of these programs does:
 - **`nocreadbench`** chooses every core in **logical** space
   (`compute_with_storage_grid_size`, `worker_core_from_logical_core`), so a
   harvested column simply is not addressable. Its hop-distance, fan-out and
-  stride sweeps are all safe.
+  stride sweeps are all safe. Its `--dram` arm names its endpoint the same way —
+  `logical_core_from_dram_channel` then `virtual_core_from_logical_core`, with
+  the bank offset from the allocator — so nothing there is derived arithmetically
+  from a grid dimension either.
 - **`nocbench`** dumps the grid by running a probe kernel that reads
   `NOC_NODE_ID` on each core, and `noc_congestion_plan` **refuses** a dump that
   is short of an unharvested part's worker count and carries no `phys_x/phys_y`

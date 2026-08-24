@@ -94,6 +94,32 @@
 // word that lands is `NOCREADBENCH_R_PROBE`, and the host refuses any row whose
 // probe disagrees with the mode it asked for.
 //
+// THE SOURCE ARM (NRB4)
+// ---------------------
+// The source of a burst is a runtime argument, not a compile-time shape, so the
+// same loop reads a worker's L1 or a DRAM tile depending only on the address and
+// coordinate it is handed. That is what makes the DRAM arm a *row in the same
+// experiment* rather than a second program: the issue loop, the barrier, the
+// stride bookkeeping and the sampling are bit-for-bit the ones the L1 arms use,
+// so differencing the burst axis leaves the endpoint and nothing else.
+//
+// Two things that arm needs, and both are handled by the host:
+//
+//   * A DRAM->L1 read must satisfy `(src % n) == (dst % n)` with n = 32 on
+//     Wormhole and 64 on Blackhole. It is a CONGRUENCE rule, not an absolute
+//     alignment: `WormholeB0/NoC/Alignment.md` carries only congruence codes for
+//     this path, violations are UndefinedBehavior (skewed or dropped bytes, no
+//     fault raised), and an absolute rule would refuse correct kernels. The DRAM
+//     buffer and the L1 arena come from different allocators, so the host
+//     computes the shortfall and passes it as NOCREADBENCH_A_DST_PAD, shifting
+//     the LANDING side and leaving DRAM addresses allocator-aligned.
+//
+//   * The arm has to be provable from payload. NOCREADBENCH_R_LANDED is the
+//     first word the TIMED burst landed, read with a plain L1 load; the host
+//     stamps DRAM tiles with NOCREADBENCH_SIG_DRAM and workers with
+//     NOCREADBENCH_SIG, whose high halves differ, so a `--dram` run that in fact
+//     read a worker's L1 is caught by the data rather than trusted from a flag.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 #include "../nocreadbench_layout.h"
@@ -143,6 +169,11 @@ struct Plan {
     uint64_t src_noc[8];
     uint64_t witness_noc;
     uint32_t src_base;
+    // The initiator's own arena base. Identical to `src_base` for an L1 point
+    // and NOT for a DRAM one, which is why the two exist separately: every
+    // worker in this program has an arena here, and no worker has anything at
+    // a DRAM tile's address.
+    uint32_t local_base;
     uint32_t dst_base;
     uint32_t probe_dst;
     uint32_t point;
@@ -155,6 +186,7 @@ struct Plan {
     uint32_t num_src;
     uint32_t trid;
     uint32_t sample;
+    uint32_t src_kind;
 };
 
 template <bool STATEFUL>
@@ -226,6 +258,25 @@ void run_bursts(const Plan& p, volatile tt_l1_ptr uint32_t* out) {
     }
     noc_async_read_barrier();
     const uint32_t t1 = wall_clock_lo();
+
+    // --- the source witness -------------------------------------------------
+    // A plain L1 load of the first word the TIMED burst landed. No transaction
+    // of its own, nothing on the NoC, and it is taken here -- before the
+    // sampled bursts and before the mode probe -- so that the only thing that
+    // can have put a value at this address is burst 1.
+    //
+    // The host stamps every source region with a signature naming its tile, and
+    // a DRAM tile's signature has a different high half from a worker's
+    // (NOCREADBENCH_SIG_DRAM vs NOCREADBENCH_SIG), so this word says which KIND
+    // of endpoint answered the burst as well as which tile. That is the source
+    // arm proved from returned payload rather than from the `--dram` flag, and
+    // it is the same discipline the mode probe applies to the issue loop.
+    //
+    // It is only DETERMINISTIC where one source is read at one offset into one
+    // landing address -- src_stride == 0, dst_stride == 0, num_src == 1. The
+    // host applies the check on exactly that condition and records the word
+    // without judging it elsewhere; a gate that cannot fail is worse than none.
+    const uint32_t landed = *reinterpret_cast<volatile tt_l1_ptr uint32_t*>(dst_base);
 
     // --- the rest samples ---------------------------------------------------
     // Taken here, immediately after burst 1's barrier and immediately before
@@ -350,7 +401,13 @@ void run_bursts(const Plan& p, volatile tt_l1_ptr uint32_t* out) {
     probe[0] = NOCREADBENCH_PROBE_FILL;
     noc_async_read_set_state(p.witness_noc, noc_index);
     if constexpr (STATEFUL) {
-        noc_async_read_with_state(src_base, p.probe_dst, tx_bytes, noc_index);
+        // `p.local_base`, not `src_base`: the state names the WITNESS, a worker
+        // core, and a worker has nothing mapped at a DRAM tile's address. The
+        // discriminator is which command-buffer register the call writes, not
+        // which address it carries, so using the arena base here costs the
+        // probe nothing and is the only address valid at the tile that is about
+        // to answer.
+        noc_async_read_with_state(p.local_base, p.probe_dst, tx_bytes, noc_index);
     } else {
         noc_async_read(src_noc[0], p.probe_dst, tx_bytes);
     }
@@ -382,6 +439,13 @@ void run_bursts(const Plan& p, volatile tt_l1_ptr uint32_t* out) {
     out[NOCREADBENCH_R_TRID] = trid;
     out[NOCREADBENCH_R_MODE] = STATEFUL ? NOCREADBENCH_MODE_STATEFUL : NOCREADBENCH_MODE_STATELESS;
     out[NOCREADBENCH_R_PROBE] = probe_word;
+    out[NOCREADBENCH_R_SRC_KIND] = p.src_kind;
+    // The addresses the burst ACTUALLY issued against, so the host re-derives
+    // the DRAM->L1 congruence rule from what ran rather than from what it
+    // computed. A pad that failed to reach the kernel shows up here.
+    out[NOCREADBENCH_R_SRC_BASE] = src_base;
+    out[NOCREADBENCH_R_DST_BASE] = dst_base;
+    out[NOCREADBENCH_R_LANDED] = landed;
     out[NOCREADBENCH_R_MAGIC] = NOCREADBENCH_MAGIC;  // last, so a partial write shows
 }
 
@@ -419,23 +483,46 @@ void kernel_main() {
     p.sample = get_arg_val<uint32_t>(NOCREADBENCH_A_SAMPLE);
     // Clamped for the same reason `num_src` is: it indexes a register file.
     p.trid = get_arg_val<uint32_t>(NOCREADBENCH_A_TRID) & 0xFu;
+    p.src_kind = get_arg_val<uint32_t>(NOCREADBENCH_A_SRC_KIND);
 
     // The arena is split in half: reads land in the top half, sources sit in
     // the bottom half of the *remote* core's identically-addressed arena. The
     // halves never overlap, so a landing never clobbers a source even in the
     // loopback case.
+    //
+    // A DRAM source is not in that arena at all: it is the DRAM tile's own
+    // address, which the host passes explicitly. `dst_pad` shifts the LANDING
+    // side by up to n-1 bytes so that `(src % n) == (dst % n)` holds with
+    // n = 32 (Wormhole) / 64 (Blackhole); shifting the landing rather than the
+    // source is what keeps every DRAM address allocator-aligned for the host's
+    // own writes. Congruence, not absolute alignment -- the ISA docs' table
+    // carries only congruence codes and an absolute rule would refuse correct
+    // kernels.
     const uint32_t half = data_bytes / 2;
-    p.dst_base = data_addr + half;
-    p.src_base = data_addr;
+    const uint32_t src_base_arg = get_arg_val<uint32_t>(NOCREADBENCH_A_SRC_BASE);
+    const uint32_t src_span_arg = get_arg_val<uint32_t>(NOCREADBENCH_A_SRC_SPAN);
+    // Clamped, not trusted: the pad only ever needs to be under the largest
+    // congruence modulus, and a pad that walked the landing base out of the
+    // arena would corrupt whatever sits above it.
+    const uint32_t dst_pad = get_arg_val<uint32_t>(NOCREADBENCH_A_DST_PAD) & 0x3Fu;
+    p.dst_base = data_addr + half + dst_pad;
+    p.src_base = (src_base_arg == 0) ? data_addr : src_base_arg;
+    p.local_base = data_addr;
     // The strides wrap by compare-and-reset, never by `%`: a `remu` in the
     // issue loop would cost several cycles of the very quantity being
     // measured. Compare-and-reset is one branch, and the same one in every
     // experiment, so it cancels between points.
-    p.dst_span = (half > p.tx_bytes) ? (half - p.tx_bytes) : 0;
-    p.src_span = (half > p.tx_bytes) ? (half - p.tx_bytes) : 0;
+    const uint32_t land_room = (half > dst_pad) ? (half - dst_pad) : 0;
+    p.dst_span = (land_room > p.tx_bytes) ? (land_room - p.tx_bytes) : 0;
+    if (src_span_arg != 0) {
+        p.src_span = (src_span_arg > p.tx_bytes) ? (src_span_arg - p.tx_bytes) : 0;
+    } else {
+        p.src_span = (half > p.tx_bytes) ? (half - p.tx_bytes) : 0;
+    }
     // The witness payload lands in the initiator's own SOURCE half, which it
-    // never reads into and never reads from -- this core is never a source.
-    p.probe_dst = data_addr + half - NOCREADBENCH_PROBE_BACKOFF;
+    // never reads into and never reads from -- this core is never a source. It
+    // carries the same pad, so it stays congruent with whatever the burst read.
+    p.probe_dst = data_addr + half - NOCREADBENCH_PROBE_BACKOFF + dst_pad;
 
     // Pin the transaction id before anything is issued, so both bursts carry
     // the same one and `outstanding(trid)` is known to be the right counter
@@ -454,7 +541,7 @@ void kernel_main() {
     p.witness_noc = get_noc_addr(
         get_arg_val<uint32_t>(NOCREADBENCH_A_WITNESS_X),
         get_arg_val<uint32_t>(NOCREADBENCH_A_WITNESS_Y),
-        p.src_base);
+        p.local_base);
 
     if (mode == NOCREADBENCH_MODE_STATEFUL) {
         run_bursts<true>(p, out);

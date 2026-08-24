@@ -15,10 +15,21 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ../run_card.sh --preflight        # costs no card time
 ../run_card.sh --arms             # the STATEFUL comparison, ~3 minutes
 # -> nocread-arms-session/     <- send the whole directory back
+
+../run_card.sh --dram             # the DRAM BURST arm, ~3 minutes
+# -> nocread-dram-session/     <- send the whole directory back
 ```
 
-The `--arms` session is the newer question and the one with pre-registered
-predictions: see [The stateful variant](#the-stateful-variant-and-the-two-predictions).
+The `--arms` session has pre-registered predictions: see
+[The stateful variant](#the-stateful-variant-and-the-two-predictions). The
+`--dram` session is the newest question, has **absolute** pre-registered
+predictions on both architectures, and is the one an outside team asked for:
+see [The DRAM burst arm](#the-dram-burst-arm-what-does-one-more-batched-dram-read-cost).
+
+**Both sessions refuse to run with `TT_METAL_DEVICE_PROFILER_NOC_EVENTS` set**,
+in the runner and again in the program. That switch puts a profiler write inside
+the timed loop — +10–19 % of span on silicon — and it does not tax the arms
+equally, which is the one failure mode these measurements cannot survive.
 
 Run it on **both** a Wormhole part and a Blackhole part if you have both. The
 whole reason this exists is a per-architecture difference, and one part cannot
@@ -146,10 +157,15 @@ marginals against that session's 44.08 / 44.00 / 43.97 with a 3 % tolerance and
 instead of inventing a comparison, and on a simulator run (`sim=1` in the CSV
 header) it applies no card control at all.
 
-One honest caveat: the shared kernel body moved the stateless loop's **constant**
-term by a few cycles against NRB2 — measured on tt-sim as **+4 cycles on Wormhole
-and +1 on Blackhole**, while the *per-transaction* cost is bit-identical (38.00
-and 41.00 before and after, at all three burst intervals). That is register
+One honest caveat, and NRB4 repeated it: the shared kernel body moved the
+stateless loop's **constant** term by a few cycles against NRB2 — measured on
+tt-sim as **+4 cycles on Wormhole and +1 on Blackhole** — and NRB4's source
+witness moved it again, by **−5 on Wormhole and +2 on Blackhole**. The
+*per-transaction* cost is bit-identical across all three layouts: **38.00
+(Wormhole) and 41.00 (Blackhole) stateless, 23.00 stateful on both**, at all
+three burst intervals, cost model off. That is the control check the card cannot
+do at home, and it is why the source witness is an L1 load outside the timed
+region rather than a probe transaction inside it. That is register
 allocation around a shared loop body, not a change in the loop. The marginal is
 what the arms are compared on and what the control is checked on, precisely
 because differencing the burst axis removes that constant; the whole-file
@@ -190,6 +206,179 @@ source tile *is* the state. The host refuses any point whose probe disagrees
 with the mode requested, exits non-zero, and prints `MODE NOT CONFIRMED`;
 `check_mode.py` re-derives the same thing from the CSV alone, on the card, with
 nothing but the standard library.
+
+## The DRAM burst arm: what does one more batched DRAM read cost?
+
+Everything above reads **64 B out of another worker's L1**, where the issue loop
+dominates and the endpoint is idle. That is where this program has been
+validated — on Wormhole 44.00/29.00 predicted against 45.03/28.96 measured, on
+Blackhole 47.00/29.00/18.00 predicted and measured exactly — and it is not the
+cell anyone is now stuck on.
+
+The empty cell is **tile-sized payloads out of DRAM, batched**: several
+transactions issued back to back before one barrier. tt-sim charges the marginal
+of that batch **pure bandwidth** — link occupancy plus the DRAM channel's excess,
+and nothing else. Endpoint queueing, outstanding-transaction credits and response
+reordering are charged **exactly zero, by construction**, which is pinned in the
+simulator's own suite as
+`tt_sim/network/noc_cost_model_test.py::test_an_extra_batched_read_costs_bandwidth_and_nothing_else`.
+
+Nobody has checked that against silicon, and **the vendor campaign structurally
+cannot**: every DRAM row in tt-metal's `tm_noc_latencies` is one transaction per
+barrier, so the batching axis does not exist in the dataset at any size.
+
+It is not an idle question. A consuming team's optimised variant batches its DRAM
+reads and writes; tt-sim predicts it **wins** its first pass by 1.05–1.12×, and
+silicon has it **losing** by 7–9 %. Every term tt-sim charges is a real published
+floor, so no single total there is wrong — but a floor bounds a number, not a
+comparison, and this is the axis on which the two dataflows are told apart.
+
+### What `--dram` adds, and what it deliberately leaves alone
+
+Three experiments, and the default plan is otherwise **byte-for-byte** the one the
+2026-08-17 session ran, so its control still reproduces:
+
+| experiment | source | payload | N |
+| --- | --- | --- | --- |
+| `dramburst` | a DRAM tile | 2048 B — one bfloat16 tile | 4, 16, 64, 128 |
+| `dramsize` | a DRAM tile | 512, 1024, 4096 B | 4, 16, 64, 128 |
+| `bigburst` | a worker's L1 | 512, 1024, 2048, 4096 B | 4, 16, 64, 128 |
+
+`bigburst` is not padding. Without it, *"the source was DRAM"* and *"the payload
+was 32× the 64 B every other arm uses"* are perfectly confounded — the same
+mistake E2 exists to fix on the responder axis, applied to the endpoint one.
+
+The issue loop, the barrier, the stride bookkeeping and the sampling are the ones
+every other arm uses; only the address and the coordinate change. And the marginal
+is read by **differencing the same burst axis**, which removes the loop's constant
+term and leaves the cost of one more transaction in flight.
+
+### The predictions — absolute, and written here before any card ran the arm
+
+Generated by running **this program** against tt-sim with the cost model on
+(`TT_SIM_COST_MODEL=1`) and differencing the same burst axis the card run is
+differenced along, so the two sides are the same arithmetic on the same
+experiment rather than a model quantity compared against a measurement. They live
+in `check_mode.py`'s `SIM_DRAM_PREDICTION`, which is both what the runner prints
+**before** the card and what grades the run afterwards — so the two cannot drift
+apart. The checked-in artefacts are `src/nocreadbench-wormhole-sim-dram.csv` and
+`src/nocreadbench-blackhole-sim-dram.csv`.
+
+Marginal cycles per transaction:
+
+| payload | WH DRAM | WH L1 | BH DRAM | BH L1 | what binds |
+| --- | --- | --- | --- | --- | --- |
+| 512 B | **44.00** | 44.00 | **47.00** | 47.00 | the issue loop, both arms |
+| 1024 B | **44.00** | 44.00 | **47.00** | 47.00 | the issue loop, both arms |
+| 2048 B | **86.00** | 64.00 | **47.00** | 47.00 | WH: the transfer. BH: still the loop |
+| 4096 B | **171.00** | 128.00 | **87.00** | 64.00 | the transfer |
+
+Read the structure, not just the numbers. Two terms compete and the larger wins:
+
+- the **issue loop** — 44 cycles/transaction on Wormhole, 47 on Blackhole,
+  independent of payload size. Both are already validated against silicon, so
+  they are the part of this table least at risk.
+- the **transfer** — payload over the sustained rate. An L1 read is charged the
+  NoC link (32 B/cycle Wormhole, 64 Blackhole): 2048/32 = 64, 4096/64 = 64. A
+  DRAM read is charged that plus the channel's excess: 86 − 64 = **22** cycles at
+  2 KB on Wormhole, 171 − 128 = **43** at 4 KB, 87 − 64 = **23** at 4 KB on
+  Blackhole. Across four sizes that is 23.3–24.0 B/cycle on Wormhole and
+  47.1 on Blackhole.
+
+So **the crossover sits at a different payload on each architecture** — 2048 B on
+Wormhole, 4096 B on Blackhole — and that is itself a registered claim.
+
+### The three outcomes, and one of them is a loss
+
+`check_mode.py --dram` prints which one the numbers landed on. It cannot express
+"somewhere in between" as a pass.
+
+| | what it means |
+| --- | --- |
+| **PREDICTION 1 — bandwidth and nothing else** | every DRAM marginal within 10 % of its figure. Charging endpoint queueing zero is costing nothing at these sizes on this part. |
+| **PREDICTION 2 — a DRAM-side cost the model does not charge** | the L1 arm reproduces and the DRAM arm sits above. The excess is then *sized*; its shape says which term is missing — roughly constant in payload is a per-transaction endpoint cost, growing with payload is a bandwidth misestimate. |
+| **CONTROL MOVED** | the L1 arm missed its own figure too. The instruction-level model both arms rest on is wrong on this part, the pair is unreadable, and the honest report is two numbers with no mechanism attached. |
+
+**The consuming team's own prediction, registered as theirs:** the card's
+marginal batched 2 KB DRAM read lands *meaningfully above* 86.
+
+### The sharpest falsifier needs none of the absolute numbers
+
+**Below the crossover, tt-sim says the two arms are the same number.** At 512 B
+and 1024 B on Wormhole — and at 2048 B as well on Blackhole — the issue loop is
+slower than either transfer, so the endpoint costs nothing extra either way and
+the model predicts DRAM − L1 = **0.00**.
+
+A gap there cannot be absorbed by any bandwidth term, however wrong the bandwidth
+term is. It would be a per-transaction cost at the DRAM endpoint: precisely the
+term charged at zero. `check_mode.py` prints that difference per size and calls it
+out separately from the totals, so it survives a run where both absolute figures
+happen to land inside tolerance.
+
+### Plain instrumentation, enforced twice
+
+`TT_METAL_DEVICE_PROFILER_NOC_EVENTS` force-enables the device profiler and
+injects `-DPROFILE_NOC_EVENTS=1` into every kernel compile, so the issuing core
+writes an 8-byte record per transaction **inside the loop this program times**.
+Measured on silicon that tax runs +10–19 % of span, and the size of it is not the
+problem: it does not fall evenly. It inflated an unbatched variant more than a
+batched one, turning a real 7–9 % deficit into 1.00–1.03 and flipping it to 0.969
+at the largest size. The effect the DRAM arm measures is the one it masks.
+
+So the program **refuses to run** with it set — no override flag — and
+`run_card.sh` refuses before that, in every mode. Every CSV carries
+`noc_events=0` in its header, and `check_mode.py` refuses a file that lacks the
+field, so a file from a binary predating the gate cannot be quietly graded.
+
+### How a DRAM run proves it read DRAM
+
+Not from the flag, and for a sharper reason than the mode arm has: **a `--dram`
+run that in fact read a worker's L1 reproduces the prediction perfectly**, because
+below the crossover the prediction for the two arms is the same number. "The card
+agrees with tt-sim" is exactly what the broken run prints.
+
+So the arm is read out of returned payload. The host stamps every source region
+with a signature naming its tile, and DRAM tiles get one whose **high half
+differs** — `0xD4A5....` against a worker's `0x5A5A....`. The kernel then reads
+back, with a plain L1 load and no transaction of its own, the first word its
+**timed burst** landed:
+
+- a row is a **DRAM read** iff `landed == sig_src` and `sig_src` is in the
+  `0xD4A5` half;
+- a row is an **L1 read** iff the same holds in the `0x5A5A` half.
+
+That word can only have been put there by the burst that was measured, which is
+stronger than a separate probe. `landed_ok` is **−1** where the landing address is
+walked (`dstspread`, `srcspread`) or the sources cycled (`srcfan`) and the word
+therefore names no single tile — that is *not looked at*, not *verified zero*, and
+the checker declines to speak rather than inventing a gate that cannot fail. The
+host refuses any attributable point that fails, exits non-zero, prints
+`SOURCE NOT CONFIRMED`, and `check_mode.py` re-derives the whole thing from the
+CSV alone.
+
+### Congruence, and why the pad is on the L1 side
+
+A DRAM→L1 read must satisfy `(src % n) == (dst % n)` with **n = 32 on Wormhole
+and 64 on Blackhole**. It is a **congruence** rule, not an absolute alignment:
+`WormholeB0/NoC/Alignment.md`'s table for this path carries only congruence codes
+and no absolute source or destination alignment, so an absolute check would be
+stricter than the hardware and would refuse correct kernels. Violations are
+`UndefinedBehavior` — bytes skewed or dropped, **nothing faults** — which here
+would present as a *rate* rather than as an error.
+
+The DRAM buffer and the L1 arena come from two different allocators with two
+different alignments, so congruence is not automatic. The host computes the
+shortfall and shifts the **landing** side by up to n−1 bytes
+(`NOCREADBENCH_A_DST_PAD`), which leaves every DRAM address exactly where its
+allocator put it — keeping the host's own `WriteToDeviceDRAMChannel` aligned — and
+costs a few dozen bytes of an arena with kibibytes of headroom. The kernel reports
+the addresses it *actually* issued against (`src_base`, `dst_base`), and the host
+re-derives the congruence from those rather than from its own arithmetic, so a pad
+that never reached the kernel is caught.
+
+On both parts as measured here the shortfall came out **0** and the pad was
+unused. It exists so that a part where it is not zero produces a measurement
+instead of silently skewed bytes.
 
 ## The hypotheses, and what each predicts — written before anything was run
 
@@ -372,8 +561,25 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./build/nocreadbench --repeats 5           # more repeats; default 3
 ./build/nocreadbench --no-sample           # skip E0's untimed second burst
 ./build/nocreadbench --stateful            # the SHORTER issue loop (see above)
+./build/nocreadbench --dram                # ADD the DRAM burst arm (see above)
+./build/nocreadbench --dram-bank 3         # ... out of a different DRAM bank
 ./build/nocreadbench --only burst          # just one axis, for the simulator
 ```
+
+For the DRAM arm, use the session runner rather than the flag: it prints the
+absolute prediction **before** any card time, smoke-tests the DRAM source on the
+part, refuses instrumented runs, and grades the result against the same table it
+printed.
+
+```bash
+perfbench/nocreadbench/run_card.sh --dram --preflight   # costs no card time
+perfbench/nocreadbench/run_card.sh --dram               # ~3 minutes of card
+```
+
+`--dram` and `--arms` are two sessions, not one: the stateful arm varies the
+issue loop at a fixed 64 B L1 source, the DRAM arm varies the source and the
+payload at a fixed issue loop. Running them together is refused so that each
+one's control is its own.
 
 For the stateful comparison, do not run the two arms by hand — the protocol
 interleaves them, checks each one's mode against its own payload, checks the
@@ -428,6 +634,14 @@ The program prints a verdict. These mean *do not read the rate columns*:
   file means anything.
 - `CMD_BUF_AVAIL: DEGENERATE` — rest, last in-loop sample and peak all agree, so
   the register reported nothing. **This is not a depth of zero.**
+- `SOURCE NOT CONFIRMED` — one or more points could not prove which **kind** of
+  tile their own timed burst read. On a `--dram` run this is the worst possible
+  failure to ignore, because an L1 read wearing a DRAM label **reproduces the
+  registered prediction exactly** below the crossover: it looks like agreement.
+  `check_mode.py` re-derives it from the CSV alone.
+- `nocreadbench: REFUSING TO RUN` — `TT_METAL_DEVICE_PROFILER_NOC_EVENTS` is set.
+  Not a warning and not overridable: unset it and re-run. If you want NoC event
+  traces, take them in a separate run and do not report them beside these rows.
 - `MODE NOT CONFIRMED` — one or more points could not prove which issue loop they
   ran from the tile that answered their own probe. Every rate in the file is then
   unattributable, and a stateful number produced by the stateless loop is
@@ -443,7 +657,7 @@ The program prints a verdict. These mean *do not read the rate columns*:
   at `--num-tx 128` Wormhole is *above* the dataset's N = 16 → 64 regime change
   and Blackhole is not in a regime at all.
 - Any row with `cycles == 0` or a missing result stamp — the kernel did not run.
-  After a layout change the magic moves (`NRB2` → `NRB3`), and a host binary built
+  After a layout change the magic moves (`NRB3` → `NRB4`), and a host binary built
   before it reads the new kernel's stamp as garbage: **rebuild the host program
   whenever the kernel changes**, which `run_card.sh` does by default.
 
@@ -475,8 +689,21 @@ exactly those two runs, cost model **off**, at the session's smoke settings
 (`--num-tx 8 --repeats 1`); `src/nocreadbench-wormhole-sim-stateful.csv` and
 `src/nocreadbench-blackhole-sim-stateful.csv` are the same two with
 `--stateful`. They are checked in as shape references for the columns, not as
-measurements of anything, and they are what proves the NRB3 layout — both arms,
-and the mode witness — builds and runs on both parts.
+measurements of anything, and they are what proves the NRB4 layout — both issue
+loops, the mode witness and the source witness — builds and runs on both parts.
+
+`src/nocreadbench-wormhole-sim-dram.csv` and `src/nocreadbench-blackhole-sim-dram.csv`
+are the DRAM arm's, and they are a different kind of artefact: they are taken with
+the **cost model ON**, and they *are* the registered prediction rather than a
+shape reference. Reproduce them with
+
+```bash
+TT_SIM_COST_MODEL=1 TT_SIM_ARCH=wormhole perfbench/run.sh nocreadbench -- \
+    --dram --only burst,bigburst,dramburst,dramsize --num-tx 4 --repeats 1 --no-sample
+```
+
+`check_mode_test.py` asserts they still agree with `SIM_DRAM_PREDICTION` to 0.01
+cycles, so the table and the artefact cannot drift apart without a test failing.
 
 ### What tt-sim says about the two arms, and why it is not an answer
 
