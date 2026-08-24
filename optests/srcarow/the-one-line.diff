@@ -1,0 +1,10 @@
+--- /mnt/ramdisk/nekbone-team/evidence/nekbone-fp32-sfpu-reproducer/control_prefix/kernels/compute_xy.cpp	2026-08-24 17:02:06.000000000 +0100
++++ /mnt/ramdisk/nekbone-team/evidence/nekbone-fp32-sfpu-reproducer/tree/kernels/compute_xy.cpp	2026-08-21 18:34:43.000000000 +0100
+@@ -83,6 +83,7 @@
+     // never programmed and every packed tile reads back as 1.0f on silicon.
+     // All CBs here are Float32 with identical tile geometry, so this single call
+     // covers the accum/tmp/output CBs too.
++    binary_op_init_common(cb_D_col, cb_u_row, cb_ur);
+ 
+     cb_wait_front(cb_D_col, 16);
+     cb_wait_front(cb_Dt_row, 16);
