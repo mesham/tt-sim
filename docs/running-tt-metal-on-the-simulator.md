@@ -518,6 +518,22 @@ Do **not** put that `pkill` in a script that may run beside a live one — that 
 exactly the mistake the run tags exist to prevent. The scripted opt-in for "kill
 every simulator on the machine" is `TT_SIM_KILL_ALL_SERVERS=1`.
 
+**Know the victim-side symptom, because it looks exactly like a simulator
+crash.** A pattern `pkill` kills every session's server on the box, not just
+your own orphans. The session you shot sees: its Python child go **defunct
+mid-program with no traceback and no shutdown line**, and its tt-metal host
+**hang forever** in UMD `recv`. There is no message connecting that to the
+neighbouring terminal that fired the cleanup. The nekbone team hit this three
+times in one day running seven concurrent sessions, reported it to us as a
+simulator defect, and found the correlation themselves — a sibling's batch
+cleanup firing at the exact moment their server died, matched in both logs.
+
+If you run several sessions concurrently — which agent-driven work makes easy —
+reap by **process group**, not by pattern: `setsid` each run and kill by pgid,
+or use the tagging in `driver/sim_procs.sh`, which already refuses to touch a
+server whose owner is still alive. A watchdog re-run with per-process-group
+cleanup never saw the failure again.
+
 ---
 
 ## 4. Diagnostics & tracing (opt-in)
