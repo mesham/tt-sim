@@ -1428,6 +1428,78 @@ class MatrixUnit(TensixBackendUnit):
         )
 
     @staticmethod
+    def _fpu_product_batch(srcAVals, srcBVals, fidelityPhase, expProdAdj):
+        """One fidelity-sliced product per element, as ELWMUL forms it.
+
+        The single-lane counterpart of :meth:`_fpu_group_sums_batch`, for the
+        element-wise multiply: ``srcAVals`` and ``srcBVals`` are broadcastable
+        arrays of FP32 bit patterns with no lane axis, and each product stands
+        alone -- there is nothing to align it against, so it is neither
+        rounded nor summed. Returns the same ``(signs, exps, mans)`` triple
+        with a leading group axis of two, the second group empty, which is
+        exactly how ttsim's ``elwmul`` hands its lone term to the shared
+        accumulate (``sop1 = 0``). ``elementwise_datapath_test.py`` holds this equal
+        to the group sums of a lane vector carrying the product in lane 0 and
+        zeros elsewhere.
+        """
+        nonZero = ((srcAVals & 0x7F800000) != 0) & ((srcBVals & 0x7F800000) != 0)
+
+        manA = ((srcAVals >> 13) & 0x3FF) | 0x400
+        manB = ((srcBVals >> 13) & 0x3FF) | 0x400
+        manA = ((manA >> 1) & 0x1F) if fidelityPhase & 1 else manA >> 6
+        manB = ((manB & 0xF) << 3) if fidelityPhase & 2 else manB >> 4
+
+        exps = ((srcAVals >> 23) & 0xFF) + ((srcBVals >> 23) & 0xFF) + expProdAdj
+        live = nonZero & (exps > 0)
+        mans = np.where(live, (manA * manB) << 13, 0)
+        # An odd phase whose mantissa slice is all zeros is a zero term, and a
+        # zero term carries no sign -- as a group sum that came to nothing.
+        signs = np.where(mans != 0, (srcAVals >> 31) ^ (srcBVals >> 31), 0)
+        exps = np.where(live, exps, 0)
+        empty = np.zeros_like(signs)
+        return (
+            np.stack([signs, empty]),
+            np.stack([exps, empty]),
+            np.stack([mans, empty]),
+        )
+
+    @staticmethod
+    def _fpu_sum_batch(srcAVals, srcBVals):
+        """One 11-bit-mantissa sum per element, as ELWADD/ELWSUB form it.
+
+        A port of ttsim's ``elwadd``, in the group-sum form
+        :meth:`_fpu_accumulate_batch` takes (the sum as the first group, the
+        second empty). The operands are ordered by magnitude, the smaller
+        one's 11-bit mantissa is aligned to the larger's exponent with a
+        round-half-up (and dropped entirely past a shift of eleven), and the
+        two are added or subtracted as integers; the term carries the larger
+        operand's sign and exponent, so it is never negative. An exponent of
+        zero is a zero operand. ``srcAVals`` / ``srcBVals`` are broadcastable
+        arrays of FP32 bit patterns, as the 8-bit-exponent Src formats widen to.
+        """
+        a = np.where((srcAVals & 0x7F800000) != 0, srcAVals, 0)
+        b = np.where((srcBVals & 0x7F800000) != 0, srcBVals, 0)
+        swap = (a & 0x7FFFFFFF) < (b & 0x7FFFFFFF)
+        a, b = np.where(swap, b, a), np.where(swap, a, b)
+
+        manA = np.where(a != 0, ((a >> 13) & 0x3FF) | 0x400, 0)
+        manB = np.where(b != 0, ((b >> 13) & 0x3FF) | 0x400, 0)
+        expA = (a >> 23) & 0xFF
+        # Never negative (|a| >= |b|), and a shift of twelve or more leaves
+        # nothing of an 11-bit mantissa -- with the half-ULP added, the clamp
+        # at twelve shifts it out too.
+        shift = np.minimum(expA - ((b >> 23) & 0xFF), 12)
+        manB = (manB + MatrixUnit._HALF[shift]) >> shift
+        signA = a >> 31
+        man = np.where(signA == (b >> 31), manA + manB, manA - manB) << 13
+        empty = np.zeros_like(man)
+        return (
+            np.stack([signA, empty]),
+            np.stack([expA, empty]),
+            np.stack([man, empty]),
+        )
+
+    @staticmethod
     def _fpu_accumulate_batch(groupSums, dstVals, useDst32b, negOneRenormBug=False):
         """Batched :meth:`_fpu_accumulate`, one call per MVMUL.
 
@@ -1961,6 +2033,22 @@ class MatrixUnit(TensixBackendUnit):
         flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
         flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
 
+        srcAStyle, useDst32b = self.get_dataformat_and_useDst(issue_thread, stateID)
+        if srcAStyle in (DataFormat.BF16, DataFormat.TF32):
+            self.perform_elwmul_exact(
+                issue_thread,
+                stateID,
+                rwc,
+                broadcastSrcBCol0,
+                broadcastSrcBRow,
+                dstRow,
+                srcAStyle,
+                useDst32b,
+            )
+            self.optionally_flip_src_banks(issue_thread, flipsrca, flipsrcb, "ELWMUL")
+            rwc.applyAddrMod(issue_thread, addrMode)
+            return
+
         def mul_handler(srcAValFP32, srcBValFP32, fidelityPhase):
             return self.srcAFidelityBits(
                 srcAValFP32, fidelityPhase
@@ -1983,7 +2071,143 @@ class MatrixUnit(TensixBackendUnit):
             "ELWMUL",
         )
 
-    def handle_elwadd(self, instruction_info, issue_thread, instr_args):
+    def perform_elementwise_exact(
+        self,
+        issue_thread,
+        stateID,
+        rwc,
+        broadcastSrcBCol0,
+        broadcastSrcBRow,
+        dstRow,
+        srcAStyle,
+        useDst32b,
+        addDst,
+        term,
+    ):
+        """ELWMUL / ELWADD / ELWSUB on the 8-bit-exponent FPU datapath.
+
+        ttsim evaluates its element-wise ops on the same fixed-point datapath
+        as ``mvmul``: each op forms one term per element -- ``elwmul`` the
+        fidelity-sliced product, ``elwadd`` the 11-bit-mantissa sum -- and
+        hands it to ``fpu_accum_normalize_encode`` as a lone first term with
+        an empty second, rounding into Dst on every instruction. So this is
+        :meth:`perform_mvmul_exact` over the instruction's 8x16 block, with
+        ``term(srcAVals, srcBVals)`` -- :meth:`_fpu_product_batch` or
+        :meth:`_fpu_sum_batch` -- in place of the group sums. As there, only
+        BF16/TF32 take this path; FP16 keeps the real-number model in
+        :meth:`handle_elementwise_op`.
+        """
+        srcARow, srcBRow, baseDstRow = self.get_base_row_ranges(
+            issue_thread, stateID, rwc, broadcastSrcBRow
+        )
+        dstRow = (dstRow + baseDstRow) & 0x3F8
+
+        if self.getDiagnosticSettings().reportFPUCalculations():
+            print(
+                f"FPU: perform element wise op, dst starts at {dstRow}, "
+                f"srcA starts at {srcARow} and srcB at {srcBRow} by thread {issue_thread}"
+            )
+
+        toFP32 = (
+            DataFormatConversions.blockTF32InSrcToFP32
+            if srcAStyle == DataFormat.TF32
+            else DataFormatConversions.blockBF16InSrcToFP32
+        )
+        srcAMat = toFP32(self.backend.getSrcA(self.srcABank).readRows(srcARow, 8))
+        srcBMat = toFP32(
+            self.backend.getSrcB(self.srcBBank).readRows(
+                srcBRow, 1 if broadcastSrcBRow else 8
+            )
+        )
+        if broadcastSrcBCol0:
+            srcBMat = srcBMat[:, :1]
+        srcBMat = np.broadcast_to(srcBMat, (8, 16))
+
+        dst = self.backend.getDst()
+        dstRows = np.arange(dstRow, dstRow + 8)
+        if not addDst:
+            dstVals = np.zeros((8, 16), dtype=np.int64)
+        elif useDst32b:
+            dstVals = DataFormatConversions.blockFP32InDstToFP32(
+                dst.getDst32bRows(dstRows)
+            )
+        else:
+            dstVals = DataFormatConversions.blockBF16InDstToFP32(
+                dst.getDst16bRows(dstRows)
+            )
+
+        results = self._fpu_accumulate_batch(
+            term(srcAMat, srcBMat), dstVals, useDst32b, not self.backend.blackhole
+        )
+
+        if useDst32b:
+            dst.setDst32bRows(
+                dstRows, DataFormatConversions.blockFP32ToDstFormatFP32(results)
+            )
+        else:
+            dst.setDst16bRows(
+                dstRows, DataFormatConversions.blockFP32ToDstFormatBF16(results)
+            )
+
+    def perform_elwmul_exact(
+        self,
+        issue_thread,
+        stateID,
+        rwc,
+        broadcastSrcBCol0,
+        broadcastSrcBRow,
+        dstRow,
+        srcAStyle,
+        useDst32b,
+    ):
+        fidelityPhase = self.determine_fidelity_phase(issue_thread, rwc)
+        expProdAdj = -127
+        if fidelityPhase & 1:
+            expProdAdj -= 5
+        if fidelityPhase & 2:
+            expProdAdj -= 7
+        self.perform_elementwise_exact(
+            issue_thread,
+            stateID,
+            rwc,
+            broadcastSrcBCol0,
+            broadcastSrcBRow,
+            dstRow,
+            srcAStyle,
+            useDst32b,
+            True,  # ELWMUL always accumulates onto Dst
+            lambda a, b: self._fpu_product_batch(a, b, fidelityPhase, expProdAdj),
+        )
+
+    def perform_elwaddsub_exact(
+        self,
+        issue_thread,
+        stateID,
+        rwc,
+        broadcastSrcBCol0,
+        broadcastSrcBRow,
+        dstRow,
+        srcAStyle,
+        useDst32b,
+        addDst,
+        subtract,
+    ):
+        # ELWSUB is ELWADD with SrcB's sign flipped, as ttsim's elw_op_sub does.
+        negate = 0x80000000 if subtract else 0
+        self.perform_elementwise_exact(
+            issue_thread,
+            stateID,
+            rwc,
+            broadcastSrcBCol0,
+            broadcastSrcBRow,
+            dstRow,
+            srcAStyle,
+            useDst32b,
+            addDst,
+            lambda a, b: self._fpu_sum_batch(a, b ^ negate),
+        )
+
+    def _handle_elwaddsub(self, instruction_info, issue_thread, instr_args, subtract):
         stateID = self.backend.getThreadConfigValue(
             issue_thread, "CFG_STATE_ID_StateID"
         )
@@ -1997,9 +2221,28 @@ class MatrixUnit(TensixBackendUnit):
 
         flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
         flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
+        opcode = "ELWSUB" if subtract else "ELWADD"
 
-        def add_handler(srcAVal, srcBVal, fidelityPhase=None):
-            result = srcAVal + srcBVal
+        srcAStyle, useDst32b = self.get_dataformat_and_useDst(issue_thread, stateID)
+        if srcAStyle in (DataFormat.BF16, DataFormat.TF32):
+            self.perform_elwaddsub_exact(
+                issue_thread,
+                stateID,
+                rwc,
+                broadcastSrcBCol0,
+                broadcastSrcBRow,
+                dstRow,
+                srcAStyle,
+                useDst32b,
+                addDst,
+                subtract,
+            )
+            self.optionally_flip_src_banks(issue_thread, flipsrca, flipsrcb, opcode)
+            rwc.applyAddrMod(issue_thread, addrMode)
+            return
+
+        def addsub_handler(srcAVal, srcBVal, fidelityPhase=None):
+            result = srcAVal - srcBVal if subtract else srcAVal + srcBVal
 
             if fidelityPhase is not None:
                 # These divisions are rarely desirable, so software
@@ -2022,56 +2265,17 @@ class MatrixUnit(TensixBackendUnit):
             flipsrca,
             flipsrcb,
             addrMode,
-            add_handler,
+            addsub_handler,
             self.elementwise_addsub_int8,
             self.elementwise_fp_other,
-            "ELWADD",
+            opcode,
         )
+
+    def handle_elwadd(self, instruction_info, issue_thread, instr_args):
+        self._handle_elwaddsub(instruction_info, issue_thread, instr_args, False)
 
     def handle_elwsub(self, instruction_info, issue_thread, instr_args):
-        stateID = self.backend.getThreadConfigValue(
-            issue_thread, "CFG_STATE_ID_StateID"
-        )
-
-        rwc = self.getRWC(issue_thread)
-        broadcastSrcBCol0 = get_nth_bit(instr_args["instr_mod19"], 0)
-        broadcastSrcBRow = get_nth_bit(instr_args["instr_mod19"], 1)
-        dstRow = self._read_dst_field(instruction_info, instr_args)
-        addDst = instr_args["dest_accum_en"]
-        addrMode = self._read_addr_mode(instruction_info, instr_args)
-
-        flipsrca = get_nth_bit(instr_args["clear_dvalid"], 0)
-        flipsrcb = get_nth_bit(instr_args["clear_dvalid"], 1)
-
-        def sub_handler(srcAVal, srcBVal, fidelityPhase=None):
-            result = srcAVal - srcBVal
-
-            if fidelityPhase is not None:
-                # These divisions are rarely desirable, so software
-                # is encouraged to ensure that FidelityPhase == 0
-                if fidelityPhase & 1:
-                    result /= 32.0
-                elif fidelityPhase & 2:
-                    result /= 128.0
-
-            return result
-
-        self.handle_elementwise_op(
-            stateID,
-            issue_thread,
-            rwc,
-            broadcastSrcBCol0,
-            broadcastSrcBRow,
-            dstRow,
-            addDst,
-            flipsrca,
-            flipsrcb,
-            addrMode,
-            sub_handler,
-            self.elementwise_addsub_int8,
-            self.elementwise_fp_other,
-            "ELWSUB",
-        )
+        self._handle_elwaddsub(instruction_info, issue_thread, instr_args, True)
 
     def handle_setrwc(self, instruction_info, issue_thread, instr_args):
         rwc = self.getRWC(issue_thread)
@@ -2253,20 +2457,29 @@ class MatrixUnit(TensixBackendUnit):
         if mode == ZEROACC_MODE_ONE_ROW or mode == ZEROACC_MODE_16_ROWS:
             self.getRWC(issue_thread).applyAddrMod(issue_thread, addr_mod)
 
-    def srcAFidelityBits(self, x, fidelityPhase):
-        x = conv_to_uint32(x)
+    # The odd fidelity phases isolate the mantissa bits the even ones consumed
+    # by subtracting the even phase's *value* from the operand -- a float
+    # subtraction, as the ISA's SrcAFidelityBits/SrcBFidelityBits write it.
+    # Subtracting the two bit patterns instead leaves the residue as an
+    # integer of a few thousand, which reinterpreted as FP32 is a denormal:
+    # phases 1-3 then contribute nothing and every fidelity level collapses to
+    # phase 0 (5 SrcA and 7 SrcB significand bits). That is how the
+    # compiler team's Gauss-Seidel lost the low bit of every 8-bit operand it
+    # scaled by 0.25 (129 * 0.25 -> 32.0, not 32.25) on a HiFi4 mul_tiles.
+    @staticmethod
+    def srcAFidelityBits(x, fidelityPhase):
+        bits = conv_to_uint32(x)
         if fidelityPhase & 1 == 0:
             # Sign, Exp, implicit 1 of Man, next four Man bits
-            return conv_to_float(x & 0xFFF80000)
-        else:
-            # Isolate the next five Man bits not consumed by prior branch
-            return conv_to_float(x - (x & 0xFFF83FFF))
+            return conv_to_float(bits & 0xFFF80000)
+        # The next five Man bits not consumed by the branch above
+        return x - conv_to_float(bits & 0xFFF83FFF)
 
-    def srcBFidelityBits(self, x, fidelityPhase):
-        x = conv_to_uint32(x)
+    @staticmethod
+    def srcBFidelityBits(x, fidelityPhase):
+        bits = conv_to_uint32(x)
         if fidelityPhase & 2 == 0:
             # Sign, Exp, implicit 1 of Man, next six Man bits
-            return conv_to_float(x & 0xFFFE0000)
-        else:
-            # Isolate the next four Man bits not consumed by prior branch
-            return conv_to_float(x - (x & 0xFFFE1FFF))
+            return conv_to_float(bits & 0xFFFE0000)
+        # The next four Man bits not consumed by the branch above
+        return x - conv_to_float(bits & 0xFFFE1FFF)

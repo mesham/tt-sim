@@ -199,7 +199,11 @@ not be re-attempted.
   phases and Dst formats on a path with **no differential oracle
   coverage** (no optest issues a plain `add_tiles`), the risk/reward
   is negative. Revisit only if a workload puts `handle_elwadd` above
-  ~15 % of pump.
+  ~15 % of pump. *(2026-09-13: the oracle gap closed the other way
+  round — the compiler team's stencil found the path wrong, and the
+  BF16/TF32 element-wise ops now run batched on the exact datapath,
+  under `optests/elwmul`; see consumer finding 7. The FP16 path keeps
+  the per-element real-number model.)*
 - **Searching the docs for an outstanding-request bound** — **search
   closed 2026-08-09, do not repeat.** All 319 ISA-doc markdown files
   were swept, both NoC subtrees read in full (note Blackhole's is
@@ -1257,6 +1261,50 @@ this landed; what follows is what happened, not what was planned.
    that arch takes the `llk_math_reconfig_remap` path in the same init,
    which ttsim calls `UnimplementedFunctionality` and tt-sim does not
    finish.
+
+7. **The element-wise FPU ops rounded coarser than silicon — closed
+   2026-09-13.** Reported (hand-off of 2026-09-11) as every
+   Gauss-Seidel stencil failing its *equality* gate on tt-sim — 530 of
+   1024 points on the one-tile reproducer, all low, by multiples of
+   1/16 — while the same binaries were bit-exact on n300 and p150b. The
+   data had been sized to the hardware's exactness budget (11
+   significand bits for the fp32 element-wise path), so the reporter's
+   reading was right in kind and one op out: not `ELWADD` but
+   **`ELWMUL`**, which bisecting the packed intermediates against an
+   exact host model put at the first `mul_tiles` — `129 * 0.25 = 32.0`.
+   Every operand needing its seventh mantissa bit lost it, i.e. only
+   fidelity phase 0 (implicit one plus six SrcB mantissa bits) ever
+   contributed at HiFi4. **The mechanism** was a port slip in
+   `srcAFidelityBits` / `srcBFidelityBits`: the odd phases isolate the
+   remaining mantissa bits as `x - (x & mask)`, a *float* subtraction
+   in the ISA's helper, and tt-sim did it on the bit patterns — an
+   integer of a few thousand that, reinterpreted as FP32, is a
+   denormal. Phases 1–3 multiplied by ~0, so every fidelity level was
+   LoFi, and the compiler's `matmul_tiles` never noticed because
+   `MVMUL` had already been moved onto the exact ported datapath
+   (`perform_mvmul_exact`) and `ELWMUL` had not.
+   **The fix goes further than the slip**: ttsim's `elwmul` and
+   `elwadd` are one-term cases of its `mvmul` datapath — the
+   fidelity-sliced product, or the 11-bit-mantissa sum, fed to
+   `fpu_accum_normalize_encode` as a lone first term — so `ELWMUL`,
+   `ELWADD` and `ELWSUB` now share `_fpu_accumulate_batch` with `MVMUL`
+   through `_fpu_product_batch` / `_fpu_sum_batch`, on both
+   architectures. That mattered: on random operands the real-number
+   `add` disagreed with ttsim on **701 of 1024** fp32 elements and 408
+   of 1024 bf16 — the hand-off's data fit in 11 bits, so only the
+   multiply showed there. The parenthetical in §8's declined
+   vectorisation item ("no optest issues a plain `add_tiles`") is
+   retired by `optests/elwmul`: `mul_tiles` at all four fidelities plus
+   `add_tiles` / `sub_tiles`, fp32-CB/fp32-Dst and bf16-CB/16-bit-Dst
+   arms, 18432 elements **bit-exact against ttsim on Wormhole and on
+   Blackhole**; `tt_sim/pe/tensix/elementwise_datapath_test.py` pins
+   vectors from that dump without the oracle to hand. The hand-off's
+   three programs — the 32×32 reproducer and the 256×256
+   control/DST-chain pair at two cores — are `errors=0` on both drivers,
+   and the two 256×256 dumps are bit-identical to the p150b's.
+   **Recorded because it is the sixth confident-plausible-wrong**: a
+   stencil whose shape was right everywhere and whose every value was
+   within 0.6 of correct.
 
 The other three landed elsewhere in this file: DRAM page-to-bank
 distribution, and the host-DMA rate refused alongside it, are in §1;

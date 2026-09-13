@@ -150,10 +150,14 @@ fi
 echo "FAIL  $NAME: tt-sim differs from ttsim"
 echo "  oracle: ${ora:0:64}..."
 echo "  ours:   ${our:0:64}..."
-# first differing element
-python3 - "$ora" "$our" <<'PY'
+# first differing element. The dumps go in through files, not argv or the
+# environment: a multi-launch program's dump (optests/elwmul is 147 KB) is
+# over the kernel's single-string limit for either.
+printf '%s' "$ora" >"$ora_log.hex"
+printf '%s' "$our" >"$our_log.hex"
+python3 - "$ora_log.hex" "$our_log.hex" <<'PY'
 import sys
-a, b = sys.argv[1], sys.argv[2]
+a, b = (open(p).read() for p in sys.argv[1:])
 for i in range(0, min(len(a), len(b)), 8):
     if a[i:i+8] != b[i:i+8]:
         print(f"  first diff at element {i//8}: oracle={a[i:i+8]} ours={b[i:i+8]}")
