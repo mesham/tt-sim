@@ -463,6 +463,64 @@ def test_sfpsetcc_gte0_reads_the_fp32_sign_bit():
     assert vu.laneFlags[1] is True
 
 
+# --------------------------------------------------------------------------
+# SFPLOADI SHORT, and Integer "32" sharing the FP32 Dst layout (both arches)
+# --------------------------------------------------------------------------
+
+
+def _op_sfploadi(lreg_ind, instr_mod0, imm16):
+    return (0x71 << 24) | (lreg_ind << 20) | (instr_mod0 << 16) | (imm16 & 0xFFFF)
+
+
+def _op_sfpload(lreg_ind, instr_mod0, dest_reg_addr):
+    return (0x70 << 24) | (lreg_ind << 20) | (instr_mod0 << 16) | dest_reg_addr
+
+
+def _op_sfpstore(lreg_ind, instr_mod0, dest_reg_addr):
+    return (0x72 << 24) | (lreg_ind << 20) | (instr_mod0 << 16) | dest_reg_addr
+
+
+_LOADI_USHORT = 2
+_LOADI_SHORT = 4
+_LOAD_FP32 = 3
+_LOAD_INT32 = 4
+
+
+def test_sfploadi_short_sign_extends():
+    # SFPLOADI.md: SHORT is SignExtend(Imm16), USHORT ZeroExtend. sfpi reaches
+    # for SHORT for any int32 constant that fits int16 -- the compiler's
+    # `bitwise_and_tile<Int32>(dst, 0xFFFFC000)` mask is one, and zero-extended
+    # it masked only the low half (Divergence 1 of the 2026-09-18 hand-off).
+    for blackhole in (False, True):
+        vu = _vector_unit(blackhole)
+        _run(vu, _op_sfploadi(0, _LOADI_SHORT, 0xC000))
+        _run(vu, _op_sfploadi(1, _LOADI_USHORT, 0xC000))
+        _run(vu, _op_sfploadi(2, _LOADI_SHORT, 0x7FFF))
+        assert conv_to_uint32(vu.lregs[0][0]) == 0xFFFFC000
+        assert conv_to_uint32(vu.lregs[1][0]) == 0x0000C000
+        assert conv_to_uint32(vu.lregs[2][0]) == 0x00007FFF
+
+
+def test_int32_and_fp32_sfpu_loads_see_the_same_dst_datum():
+    # Dst.md: "the FP32 encoding is also used for INT32", so an fp32 datum
+    # stored through the FP32 path reads back bit-identical through the INT32
+    # path (SFPLOAD.md: both are DstDecodeFP32), and an int32 stored through
+    # the INT32 path reads back as itself through FP32. The two views must
+    # agree for an fp32 tile to be masked in place as an int32.
+    pattern = 0x40B2DF1A  # 5.5897: high half not invariant under the shuffle
+    for blackhole in (False, True):
+        vu = _vector_unit(blackhole)
+        _run(vu, _op_sfploadi(0, 8, pattern >> 16))  # UPPER
+        _run(vu, _op_sfploadi(0, 10, pattern & 0xFFFF))  # LOWER
+        assert conv_to_uint32(vu.lregs[0][0]) == pattern
+        _run(vu, _op_sfpstore(0, _LOAD_FP32, 0))
+        _run(vu, _op_sfpload(1, _LOAD_INT32, 0))
+        assert conv_to_uint32(vu.lregs[1][0]) == pattern
+        _run(vu, _op_sfpstore(1, _LOAD_INT32, 4))
+        _run(vu, _op_sfpload(2, _LOAD_FP32, 4))
+        assert conv_to_uint32(vu.lregs[2][0]) == pattern
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

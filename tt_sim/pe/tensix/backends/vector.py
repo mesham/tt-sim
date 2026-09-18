@@ -2091,9 +2091,16 @@ class VectorUnit(TensixBackendUnit):
                                 ),
                             )
                         case VectorUnit.MOD0_FMT_INT32 | VectorUnit.MOD0_FMT_INT32_ALL:
-                            # INT32 stored verbatim (mirrors the SFPLOAD case) —
-                            # no float-format rearrangement for integers.
-                            self.getDst().setDst32b(row, column, conv_to_uint32(datum))
+                            # Integer "32" uses the FP32 Dst layout (SFPSTORE.md /
+                            # Dst.md), so the store rearranges exactly as FP32
+                            # does, minus the denormal flush.
+                            self.getDst().setDst32b(
+                                row,
+                                column,
+                                DataFormatConversions.FP32ToDstFormatFP32(
+                                    conv_to_uint32(datum)
+                                ),
+                            )
                         case VectorUnit.MOD0_FMT_INT32_SM:
                             write_val = DataFormatConversions.FP32ToDstFormatFP32(
                                 DataFormatConversions.toSignMag(datum)
@@ -2176,12 +2183,13 @@ class VectorUnit(TensixBackendUnit):
                             rd = self.getDst().getDst32b(row, column)
                             datum = DataFormatConversions.FP32InDstToFP32(rd)
                         case VectorUnit.MOD0_FMT_INT32 | VectorUnit.MOD0_FMT_INT32_ALL:
-                            # INT32 is stored verbatim in Dst, so load it raw. The
-                            # FP32InDstToFP32 rearrangement is only for actual
-                            # floats — applying it to an integer permutes its bits
-                            # and corrupts every non-bit-symmetric op (add, sub,
-                            # and, or), while XOR-with-a-halfword-mask survives.
-                            datum = self.getDst().getDst32b(row, column)
+                            # Same decode as FP32: Integer "32" shares its Dst
+                            # layout (SFPLOAD.md `MOD0_FMT_INT32: DstDecodeFP32`).
+                            # That is what lets an fp32 datum be masked as an
+                            # int32 in place -- bitwise_and_tile<Int32> on an
+                            # fp32 tile must see the datum's own bit pattern.
+                            rd = self.getDst().getDst32b(row, column)
+                            datum = DataFormatConversions.FP32InDstToFP32(rd)
                         case VectorUnit.MOD0_FMT_INT32_SM:
                             rd = self.getDst().getDst32b(row, column)
                             datum = DataFormatConversions.signMagToTwosComp(
@@ -2241,7 +2249,11 @@ class VectorUnit(TensixBackendUnit):
                     case VectorUnit.SFPLOADI_MOD0_USHORT:
                         self.lregs[vd][lane] = imm16
                     case VectorUnit.SFPLOADI_MOD0_SHORT:
-                        self.lregs[vd][lane] = imm16
+                        # SignExtend(Imm16): sfpi reaches for this mode for
+                        # any int32 constant that fits int16, e.g. the
+                        # 0xFFFFC000 mask of bitwise_and_tile<Int32>, which
+                        # zero-extended loses its whole high half.
+                        self.lregs[vd][lane] = (imm16 ^ 0x8000) - 0x8000
                     case VectorUnit.SFPLOADI_MOD0_UPPER:
                         self.lregs[vd][lane] = (imm16 << 16) | (
                             conv_to_uint32(self.lregs[vd][lane]) & 0x0000FFFF

@@ -903,7 +903,10 @@ class PackerUnit(TensixBackendUnit):
                         raise NotImplementedError()
             case DataFormat.INT32:
                 assert outDataFormat == DataFormat.INT32
-                return raw_datum
+                # Integer "32" shares the FP32 Dst layout; undo it as the FP32
+                # case does (ttsim's 32-bit pack read is `dst_decode_fp32` for
+                # every non-uint16 intermediate format).
+                return DataFormatConversions.FP32InDstToFP32(raw_datum)
             case DataFormat.INT16:
                 assert outDataFormat == DataFormat.INT16
                 return raw_datum

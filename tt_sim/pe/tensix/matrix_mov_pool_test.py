@@ -323,6 +323,81 @@ def test_movd2a_undefined_16_bit_modes_raise():
             _issue(backend, _movd2a())
 
 
+MOVD2B = 0x0A
+
+
+def _movd2b(dst=0, instr_mod=MOVD2A_1_ROW, addr_mode=0, src=0, dest_32b_lo=0, bh=True):
+    return (
+        (MOVD2B << 24)
+        | (dest_32b_lo << 23)
+        | (src << 17)
+        | (addr_mode << (14 if bh else 15))
+        | (instr_mod << 12)
+        | dst
+    )
+
+
+# An fp32 datum whose mantissa bits 22..13 are not all in the top 7: bf16 keeps
+# 0x3FB2_0000 of it, TF32 keeps 0x3FB2_C000.
+_FP32_DATUM = 0x3FB2C123
+
+
+def _src_tf32(bits):
+    # Src holds TF32 as Sign,Man(10b),Exp(8b).
+    return ((bits >> 31) << 18) | (((bits >> 13) & 0x3FF) << 8) | ((bits >> 23) & 0xFF)
+
+
+def _fp32_in_dst(bits):
+    return (_dst_bf16(bits) << 16) | (bits & 0xFFFF)
+
+
+@pytest.mark.parametrize(
+    "mov, get_bank",
+    [
+        (_movd2a, lambda b: b.getSrcA(b.matrix_unit.srcABank)),
+        (_movd2b, lambda b: b.getSrcB(b.matrix_unit.srcBBank)),
+    ],
+    ids=["MOVD2A", "MOVD2B"],
+)
+def test_dst_to_src_move_uses_the_implied_src_format_on_blackhole(mov, get_bank):
+    # tt-metal's fp32 kernels leave ALU_FORMAT_SPEC_REG0_SrcA at FP32 (which
+    # selects the bf16 move style) while the unpacker hands the banks over as
+    # TF32. Blackhole implies the style from the bank's latched format, so the
+    # DST operand of a dest-reuse op reaches Src at TF32's 10 mantissa bits, as
+    # measured on a p150b (the compiler team's Divergence 2 of 2026-09-18 was
+    # MOVD2B taking the configured FP32 and narrowing to bf16).
+    with _backend(True) as backend:
+        _set_config(backend, "ALU_ACC_CTRL_Fp32_enabled", 1)
+        _set_config(backend, "ALU_FORMAT_SPEC_REG0_SrcA", DataFormat.FP32)
+        get_bank(backend).setDataFormat(DataFormat.TF32)
+        backend.getDst().setDst32b(0, 0, _fp32_in_dst(_FP32_DATUM))
+        _issue(backend, mov())
+        assert get_bank(backend)[0, 0] == _src_tf32(_FP32_DATUM)
+        assert get_bank(backend)[0, 0] != _src_bf16(_FP32_DATUM)
+
+
+@pytest.mark.parametrize(
+    "mov, get_bank",
+    [
+        (_movd2a, lambda b: b.getSrcA(b.matrix_unit.srcABank)),
+        (_movd2b, lambda b: b.getSrcB(b.matrix_unit.srcBBank)),
+    ],
+    ids=["MOVD2A", "MOVD2B"],
+)
+def test_dst_to_src_move_honours_the_disable_implied_bit(mov, get_bank):
+    # Both moves gate their implied select on DISABLE_IMPLIED_SRCA_FMT_Base
+    # (MOVD2B's "SrcAFmt" select reads ImpliedSrcBFmt, as MOVB2D's does): with
+    # it set the configured FP32 wins and the datum is narrowed to bf16.
+    with _backend(True) as backend:
+        _set_config(backend, "ALU_ACC_CTRL_Fp32_enabled", 1)
+        _set_config(backend, "ALU_FORMAT_SPEC_REG0_SrcA", DataFormat.FP32)
+        _set_thread_config(backend, "DISABLE_IMPLIED_SRCA_FMT_Base", 1)
+        get_bank(backend).setDataFormat(DataFormat.TF32)
+        backend.getDst().setDst32b(0, 0, _fp32_in_dst(_FP32_DATUM))
+        _issue(backend, mov())
+        assert get_bank(backend)[0, 0] == _src_bf16(_FP32_DATUM)
+
+
 def _dst_rwc_after(backend, instruction):
     _set_thread_config(backend, "ADDR_MOD_DST_SEC2_DestIncr", 7)
     _set_thread_config(backend, "ADDR_MOD_DST_SEC5_DestIncr", 3)

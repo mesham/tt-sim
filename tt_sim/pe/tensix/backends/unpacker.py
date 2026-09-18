@@ -1548,14 +1548,15 @@ class UnPackerUnit(TensixBackendUnit):
                     return raw_datum & 0xFF
             case DataFormat.INT32 | DataFormat.FP32:
                 if unpackToDst:
-                    # INT32 is stored verbatim in Dst — getDst32b/setDst32b split
-                    # it across the hi/lo 16-bit planes and the packer reads it
-                    # back unchanged (packer.py's INT32 case returns raw_datum).
-                    # Only FP32 gets rearranged into the Dst float storage format;
-                    # applying that rearrangement to an integer scrambles its high
-                    # 16 bits (low 16 survive), corrupting every 32-bit int datum.
-                    if inDataFormat == DataFormat.INT32:
-                        return raw_datum
+                    # Integer "32" shares the FP32 Dst storage layout (Dst.md:
+                    # "the FP32 encoding is also used for INT32"), so both
+                    # formats take the same rearrangement here and every Dst
+                    # reader -- SFPLOAD, the packer, MOVD2A/B -- undoes the one
+                    # layout. Keeping INT32 verbatim instead was self-consistent
+                    # for a pure-int32 tile, but an fp32 tile read back through
+                    # an Int32 SFPU op (the compiler's `u & 0xFFFFC000` split)
+                    # then saw a shuffled high half where silicon sees the
+                    # datum's own bits.
                     return DataFormatConversions.FP32ToDstFormatFP32(raw_datum)
                 # Unpacking a 32-bit datum to the 19-bit SrcA/SrcB registers
                 # narrows it to the Src TF32 storage format (the widest Src

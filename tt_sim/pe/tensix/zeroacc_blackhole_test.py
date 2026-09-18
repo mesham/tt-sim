@@ -232,6 +232,53 @@ def test_16_row_bank_offset_not_applied_on_wormhole():
         assert (dst.dstBits[528:544, :] == 0xFFFF).all()
 
 
+def _clear_32b_face(matrix, math_offset, where=0, absolute=0):
+    """Run a 32-bit 16-row ZEROACC at ``where`` under the given math offset and
+    return the set of 32-bit Dst rows it cleared (fp32 Dst, all rows non-zero
+    beforehand)."""
+    backend = matrix.backend
+    _set_config(backend, 0, "ALU_ACC_CTRL_Fp32_enabled", 1)
+    _set_config(backend, 0, "DEST_ACCESS_CFG_zeroacc_absolute_tile_mode", absolute)
+    _set_thread_config(backend, 0, "DEST_TARGET_REG_CFG_MATH_Offset", math_offset)
+    dst = backend.getDst()
+    for row in range(512):
+        for col in range(16):
+            dst.setDst32b(row, col, 0x3F800000)
+    info, args = _decode(
+        _zeroacc_bh(where=where, clear_mode=ZEROACC_MODE_16_ROWS, use_32_bit=1)
+    )
+    matrix.handle_zeroacc(info, 0, args)
+    return {row for row in range(512) if dst.getDst32b(row, 0) == 0}
+
+
+def test_32b_16_row_clear_follows_the_math_bank_on_blackhole():
+    # ttsim case 5: with fp32 Dst a math offset into the high half moves the
+    # cleared face up by 16 tiles of 16 rows (256 32-bit rows). This is what
+    # tt-llk's dest-reuse ELWMUL relies on -- it names the face by its index
+    # within the bank -- and without it the odd (high-half) tiles of an fp32
+    # kernel were never cleared, so the multiply accumulated onto the operand
+    # the MOVD2A/B had just copied out of Dst (result = a*b + a; the compiler
+    # team's Divergences 3 and 4 of 2026-09-18).
+    with _blackhole_matrix() as matrix:
+        assert _clear_32b_face(matrix, 0, where=1) == set(range(16, 32))
+    with _blackhole_matrix() as matrix:
+        assert _clear_32b_face(matrix, 512, where=1) == set(range(272, 288))
+
+
+def test_32b_bank_offset_keys_on_bits_8_and_9_of_the_offset():
+    # `dst_offset & 768`: bit 8 selects the bank too in 32-bit mode, unlike the
+    # 16-bit clear which keys on bit 9 alone.
+    with _blackhole_matrix() as matrix:
+        assert _clear_32b_face(matrix, 256, where=0) == set(range(256, 272))
+    with _blackhole_matrix() as matrix:
+        assert _clear_32b_face(matrix, 128, where=0) == set(range(0, 16))
+
+
+def test_32b_bank_offset_suppressed_by_absolute_tile_mode():
+    with _blackhole_matrix() as matrix:
+        assert _clear_32b_face(matrix, 512, where=1, absolute=1) == set(range(16, 32))
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

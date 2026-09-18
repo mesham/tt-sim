@@ -683,6 +683,15 @@ class MatrixUnit(TensixBackendUnit):
                 srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG_SrcA_val")
             else:
                 srcAFmt = self.getConfigValue(stateID, "ALU_FORMAT_SPEC_REG0_SrcA")
+            # On Blackhole the select is implied from the format SrcB was last
+            # written in, behind the *SrcA* disable bit (MOVD2B.md; the same
+            # cross-wiring as MOVB2D). tt-metal's fp32 kernels leave the
+            # configured register at FP32 while the unpacker hands SrcB over as
+            # TF32, so the configured value would narrow a dest-reuse operand
+            # to bf16's 7 mantissa bits where silicon keeps TF32's 10.
+            srcAFmt = self.implied_srcB_format(
+                issue_thread, srcAFmt, "DISABLE_IMPLIED_SRCA_FMT_Base"
+            )
 
             useDst32b = self.getConfigValue(
                 stateID, "ALU_ACC_CTRL_Fp32_enabled"
@@ -1915,7 +1924,11 @@ class MatrixUnit(TensixBackendUnit):
         srcBInt = DataFormatConversions.Int8InSrcToInt8(srcB)
         result = op_handler(srcAInt, srcBInt, None)
         if addDst:
-            result += self.backend.getDst().getDst32b(dstRow + i, j)
+            # Integer "32" shares the FP32 Dst layout, so the accumulate reads
+            # back through the same decode the store below encodes with.
+            result += DataFormatConversions.FP32InDstToFP32(
+                self.backend.getDst().getDst32b(dstRow + i, j)
+            )
 
         self.backend.getDst().setDst32b(
             dstRow + i, j, DataFormatConversions.FP32ToDstFormatFP32(result)
@@ -2409,15 +2422,19 @@ class MatrixUnit(TensixBackendUnit):
         else:
             if mode == ZEROACC_MODE_16_ROWS:
                 imm10 &= 0xFF
-                if self.backend.blackhole and not useDst32b:
+                if self.backend.blackhole:
                     # On Blackhole the 16-row clear is relative to the math
                     # bank unless DEST_ACCESS_CFG_zeroacc_absolute_tile_mode is
-                    # set: a math offset into the high half of DEST moves the
-                    # cleared block up by 32 (i.e. 512 rows). ttsim
-                    # TENSIX_EXECUTE_ZEROACC case 1. (Its 32-bit sibling, case
-                    # 5, shifts by 16 on `dst_offset & 768`; not modelled here
-                    # because the useDst32b row mapping below already differs
-                    # from ttsim's swizzle, so half of that fix would mislead.)
+                    # set (tt-llk clears it: "auto-detect destination bank"):
+                    # a math offset into the high half of DEST moves the
+                    # cleared block up by a half-bank -- 32 tiles of 16-bit
+                    # rows on `dst_offset & 512`, 16 tiles of 32-bit rows on
+                    # `dst_offset & 768`. ttsim TENSIX_EXECUTE_ZEROACC cases 1
+                    # and 5. tt-llk's dest-reuse ELWMUL relies on this: it
+                    # names the face by its index within the bank, and without
+                    # the shift an fp32 kernel's odd (high-half) tiles are never
+                    # cleared, so the multiply accumulates onto the operand the
+                    # move just copied out of DEST (result = a*b + a).
                     dst_offset = (
                         self.getThreadConfigValue(
                             issue_thread, "DEST_TARGET_REG_CFG_MATH_Offset"
@@ -2428,8 +2445,11 @@ class MatrixUnit(TensixBackendUnit):
                         self.getThreadConfigValue(issue_thread, "CFG_STATE_ID_StateID"),
                         "DEST_ACCESS_CFG_zeroacc_absolute_tile_mode",
                     )
-                    if not absolute_tile_mode and (dst_offset & 512):
-                        imm10 += 32
+                    if not absolute_tile_mode:
+                        if useDst32b and (dst_offset & 768):
+                            imm10 += 16
+                        elif not useDst32b and (dst_offset & 512):
+                            imm10 += 32
                 if useDst32b:
                     if imm10 < 32:
                         for i in range(16):
